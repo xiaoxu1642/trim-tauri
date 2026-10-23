@@ -49,13 +49,6 @@
    "parentTarget": "$env:WINDIR + '\\Performance\\WinSAT'",
    "childTarget": "%WINDIR%\\Performance\\WinSAT",
    "sameDir": true
-  },
-  {
-   "parentId": "winSxsTempFile",
-   "childId": "winSxsTempFile2",
-   "parentTarget": "$env:WINDIR + '\\WinSxS\\Temp'",
-   "childTarget": "$env:WINDIR + '\\WinSxS\\Temp\\PendingRename'",
-   "sameDir": false
   }
  ],
  "unresolved": [

@@ -1,5 +1,5 @@
 {
-  "rulesVersion": 20261016,
+  "rulesVersion": 20261023,
   "covered": [
     "cleanup:360SecureBrowserAutoplayPreferences",
     "cleanup:360SecureBrowserBookmarkFavicons",
@@ -168,8 +168,6 @@
     "cleanup:wegameRedistCache",
     "cleanup:werReportQueue",
     "cleanup:winINetCache",
-    "cleanup:winSxsTempFile",
-    "cleanup:winSxsTempFile2",
     "cleanup:windows7Manager",
     "cleanup:windowsCdBurningQueue",
     "cleanup:windowsCryptographicServices",

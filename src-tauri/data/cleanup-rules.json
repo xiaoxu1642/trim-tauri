@@ -1398,78 +1398,6 @@
           "icon": "🧹",
           "items": [
             {
-              "id": "winSxsTempFile",
-              "name": "WinSxS临时文件",
-              "risk": "medium",
-              "ifDeleted": "组件服务（CBS）的中转临时目录。已安装组件与系统功能不受影响；但若此刻正好有更新或功能安装在跑，那次 servicing 可能失败并要求重来。只处理超过 24 小时的旧内容。",
-              "pathPs": "$env:WINDIR + '\\WinSxS\\Temp'",
-              "evidence": "组件服务临时",
-              "recommended": false,
-              "domain": "system",
-              "group": "temps",
-              "nature": "temp",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "dismpp-clue",
-                "ref": "dismpp/WinSxS临时文件",
-                "importedAt": "2026-09-14",
-                "reviewedAt": "2026-10-23"
-              },
-              "minAgeHours": 24,
-              "ver": 20261023,
-              "evidenceItems": [
-                {
-                  "text": "组件服务临时",
-                  "weight": 2
-                },
-                {
-                  "text": "内容可按需重建（临时文件），删除后系统或应用会再生成",
-                  "weight": 1
-                },
-                {
-                  "text": "只处理超过 24 小时的旧内容（时效护栏）",
-                  "weight": 1
-                }
-              ]
-            },
-            {
-              "id": "winSxsTempFile2",
-              "name": "WinSxS临时文件",
-              "risk": "medium",
-              "ifDeleted": "删的是 WinSxS 挂起重命名的中间副本，通常是某次更新没走完留下的改名残留。当前系统照用，代价是那次的回滚依据没了，只能重新发起同一次更新。",
-              "pathPs": "$env:WINDIR + '\\WinSxS\\Temp\\PendingRename'",
-              "evidence": "挂起重命名临时",
-              "recommended": false,
-              "domain": "system",
-              "group": "temps",
-              "nature": "temp",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "dismpp-clue",
-                "ref": "dismpp/WinSxS临时文件",
-                "importedAt": "2026-09-14",
-                "reviewedAt": "2026-10-23"
-              },
-              "minAgeHours": 24,
-              "ver": 20261023,
-              "evidenceItems": [
-                {
-                  "text": "挂起重命名临时",
-                  "weight": 2
-                },
-                {
-                  "text": "内容可按需重建（临时文件），删除后系统或应用会再生成",
-                  "weight": 1
-                },
-                {
-                  "text": "只处理超过 24 小时的旧内容（时效护栏）",
-                  "weight": 1
-                }
-              ]
-            },
-            {
               "id": "tempFiles",
               "name": "临时文件",
               "risk": "low",
@@ -8271,6 +8199,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "/m/ehznjHHs/kWtcx0nPtBV675iaksyEojZRtpKeJC4VTbkEtfnZNrlB7D9y1xF0Kcg+FCzpTmRZ7ZqUw1DnBw=="
+    "sig": "m8WMg7F5kZegmCyT2brbBz23FAF9Ernorl2tHrB+UeCsreZamUB21IC3fjN9OZRzb+dW/+ytWjJYQlhKQAjvBg=="
   }
 }

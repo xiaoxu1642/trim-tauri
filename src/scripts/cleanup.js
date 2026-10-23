@@ -129,8 +129,6 @@
      userCrashDumps: 76 * 1024 * 1024,
     packageCache: 567 * 1024 * 1024,
     defenderHistoryRecords: 89 * 1024 * 1024,
-    winSxsTempFile: 345 * 1024 * 1024,
-    winSxsTempFile2: 128 * 1024 * 1024,
     windowsLogs: 89 * 1024 * 1024,
     tempFiles: 567 * 1024 * 1024,
     driverTempExtract: 123 * 1024 * 1024,
