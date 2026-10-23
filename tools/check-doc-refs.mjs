@@ -29,8 +29,9 @@ const check = (ok, label, detail = '') => {
 
 // docs/ 下的真实文件集合（相对小写路径，供快速命中）
 //
-// `docs/` 与 `AGENTS.md` 都是**未跟踪**的本机资料区（.gitignore 第 8/10 行），干净克隆里
-// 根本不存在。必做门禁读它们之前必须先问在不在：
+// `docs/` 是**未跟踪**的本机资料区（.gitignore 的 docs/ 规则），干净克隆里根本不存在；
+// AGENTS.md 自 2026-10-24 起已入库，但仍按「可能在」的姿势问在不在。必做门禁读它们之前
+// 必须先问在不在：
 // - 直接 readdirSync 会 ENOENT 崩（2026-10-04 实测）；
 // - 把「对照集为空」当成判定基础更糟 —— 空集会让每一条 docs/ 引用都判「不存在」，
 //   于是缺文件被渲染成满屏假红。两种都改成显式 SKIP 并声明未校验。
@@ -50,7 +51,7 @@ if (!docsPresent) {
 }
 if (!agentsPresent) {
   skipped++;
-  console.log('⚠ AGENTS.md 不在本机（未跟踪）：1b 未执行');
+  console.log('⚠ AGENTS.md 缺席：1b 未执行');
 }
 
 // 引用形态：`docs/xxx.md` / `docs\xxx.md`（词边界内，排除 https:// 等 URL）
@@ -159,7 +160,7 @@ check(
 );
 
 // ---- 2c. 本机资料区路径零暴露（T1a-K01 / F1a-M07，v7.2 C09） ----
-// AGENTS §2：本机资料区（docs/、AGENTS.md）一律**不写进任何跟踪文件**，连注释也不写；
+// AGENTS §2：本机资料区（docs/）一律**不写进任何跟踪文件**，连注释也不写；
 // 判据是「换一台机器、做一次干净克隆，这句话还成立吗」。第 2 组只认私钥四词，
 // 认不出「本机资料区被违反」的两种写法：① 历史目录名 `docs规范`（干净克隆里不存在）；
 // ② `docs/`+扩展名的真实路径形态。本组补这两类令牌。
@@ -232,7 +233,7 @@ check(
 // AGENTS.md 反引号点名的**仓内具体坐标**（tools//src//src-tauri//native-scanner//vendor/
 // 开头的路径）必须落盘 —— 已删的双跑工具 `tools/dual-run-batchA.mjs` 此前仍被白名单
 // 点名，就是这条缺口的实例（v4 §1.3）。带 * ? { } | 的 glob/占位形态不判。
-// AGENTS.md 缺席（干净克隆）⇒ 显式 SKIP，声明本节未校验。
+// AGENTS.md 缺席 ⇒ 显式 SKIP，声明本节未校验。
 if (agentsPresent) {
   const CODE_REF_RE = /`((?:tools|src|src-tauri|native-scanner|vendor)\/[\w./\u4e00-\u9fa5-]+)`/g;
   const named = [];
@@ -255,7 +256,7 @@ if (agentsPresent) {
   );
 } else {
   skipped++;
-  console.log('⚠ AGENTS.md 不在本机（未跟踪）：3 白名单坐标存在性**未校验**（SKIP，不是通过）');
+  console.log('⚠ AGENTS.md 缺席：3 白名单坐标存在性**未校验**（SKIP，不是通过）');
 }
 
 // ---- 4. U8（v5 批次 9 门禁候选 9）：本机审查文档的表值必须带可重跑取数命令 ----

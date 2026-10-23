@@ -24,8 +24,8 @@
 //     会误报，只做模糊匹配又会放过真腐烂，故采用「先严格、失败后限深搜索」两段式。
 //
 // 纪律：
-//   - AGENTS.md 是未跟踪的本机约束（.gitignore 第 10 行），干净克隆里没有。
-//     缺文件时 R2 **显式 SKIP 并声明未校验**，不 ENOENT 崩、也不打 ✓ 冒充通过。
+//   - AGENTS.md 自 2026-10-24 起入库；万一缺席时 R2 **显式 SKIP 并声明未校验**，
+//     不 ENOENT 崩、也不打 ✓ 冒充通过。
 //   - 只判存在性，不判文风 —— 误报洪水会把真信号淹掉，这条不能破。
 //   - 每条断言自带 POSITIVE_CONTROLS 合成样本自检（正反向都要：能判红 + 真样本不假红）。
 //
@@ -313,7 +313,7 @@ let bareSectionRefs = 0;
 let checkedSectionRefs = 0;
 
 if (!agentsPresent) {
-  console.log('⚠ AGENTS.md 不在本机（未跟踪文件）：R2 章节号腐烂**未校验**');
+  console.log('⚠ AGENTS.md 缺席（未随仓库分发）：R2 章节号腐烂**未校验**');
 } else {
   const agentsText = readFileSync(AGENTS_MD, 'utf8');
   const agentsLines = agentsText.split(/\r?\n/);
@@ -373,7 +373,7 @@ check(
   !agentsPresent || rotSections.length === 0,
   agentsPresent
     ? `R2. 注释引用的 AGENTS 章节号全部存在（判 ${checkedSectionRefs} 处；另有 ${bareSectionRefs} 处裸 § 编号只统计）`
-    : 'R2. AGENTS 章节号检查 SKIP（AGENTS.md 不在本机）',
+    : 'R2. AGENTS 章节号检查 SKIP（AGENTS.md 缺席）',
   agentsPresent
     ? (rotSections.length ? rotSections.slice(0, 10).join('；') + (rotSections.length > 10 ? ` …共 ${rotSections.length} 处` : '') : '无腐烂')
     : '本节未校验',

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // check-tools-doc-paths.mjs —— tools/ 不许把 `docs/`（本机未跟踪资料区）当数据源（v6-K23）
 //
-// 为什么要有它：`docs/` 与 `AGENTS.md` 一样是 .gitignore 排除的本机资料区，**干净克隆里
+// 为什么要有它：`docs/` 是 .gitignore 排除的本机资料区，**干净克隆里
 // 根本不存在**。工具的默认入参一旦指向 docs/，别人 clone 下来第一跑就是 ENOENT 堆栈，
 // 要么以为是仓库坏了，要么（更糟）照着自己的机器补一份"差不多"的路径把口径改歪。
 // import-winapp2.mjs 的 `--src` 缺省兜底就是这么长出来的（v6-K23 点名）。

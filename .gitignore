@@ -1,4 +1,8 @@
 # ==================== 绝不入库：本机密钥与本地资料区 ====================
+# 五个本机目录一律不入远端（2026-10-24 用户裁定，只在本机、不随仓库分发）：
+#   docs/（本机资料区）、.qoder/（本会话智能体工作区）、
+#   .srclight/（代码索引快照）、.workbuddy/（另一智能体工作区）、
+#   build-release/（本机打包产物目录）
 # docs/ 按 2026-09-24 用户裁定**整体不入库、不上传、不参与索引**：
 #   - docs/simi/ 是仓库 deploy key 私钥明文，入库等于把写权限钥匙挂进同一仓库；
 #   - docs/*.md（迁移方案/交接/剩余清单）含本机绝对路径与智能体工作姿势，
@@ -6,8 +10,9 @@
 #     `update history/` 与 AGENTS.md 口径）。
 # 注意：.gitignore 只拦未跟踪文件，历史上已提交过的必须另做剔除（见推送前门禁）。
 docs/
-# AGENTS.md：本机智能体协作约束，含绝对路径倾向与操作姿势，不随仓库分发
-AGENTS.md
+# build-release/：本机打包产物（同属不入库五目录之一）
+build-release/
+# AGENTS.md：智能体协作约束，2026-10-24 起入库（此前为本机私有，不随仓库分发）
 # assets-src/：图标/壁纸设计源文件（PSD/PNG 源稿），构建产物已在 src/assets/，源稿不入库
 assets-src/
 *.pem
@@ -24,7 +29,7 @@ native-scanner/target/
 src-tauri/gen/
 node_modules/
 dist/
-build-release/
+# build-release/（本机打包产物）的规则见文件头部「不入库五目录」段。
 # 桌面稳定运行入口 = build-release\Trim.exe（固定名，符号链接指它）。2026-10-02 用户裁定
 # dist-app 并入 build-release，两者不再分家；发版清理旧产物时这个文件名属「永不删」位，
 # 由 tools/check-desktop-entry.mjs 守着（链接断掉/文件被裁掉都会红）。
@@ -38,7 +43,9 @@ ehthumbs.db
 
 # ==================== 本机智能体工作区 ====================
 # 环境强绑定信息（绝对路径、本机操作姿势），随仓库分发会误导其他机器
+# 本机不入库五目录中的三个智能体工作区（另两个是 docs/ 与 build-release/）
 .qoder/
+.srclight/
 .workbuddy/
 .opencode/
 # zcode CLI 生成的本机忽略规则（含本机资料区路径），非交付物

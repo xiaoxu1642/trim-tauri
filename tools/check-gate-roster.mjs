@@ -163,10 +163,10 @@ for (const { name, reason } of [...OPTIONAL, ...RETIRED]) {
 }
 
 // ── 3. AGENTS.md 只做轻量引用校验（必跑清单已不在这里，不再解析 §4 全表）──
-// AGENTS.md 是未跟踪的本机协作约束，干净克隆里没有；缺文件时显式 SKIP，不崩也不打 ✓ 冒充通过。
+// AGENTS.md 自 2026-10-24 起入库；万一缺席时显式 SKIP，不崩也不打 ✓ 冒充通过。
 const agentsPresent = existsSync(AGENTS);
 if (!agentsPresent) {
-  console.log('⚠ AGENTS.md 不在本机（未跟踪文件）：AGENTS 引用校验**未执行**');
+  console.log('⚠ AGENTS.md 缺席（未随仓库分发）：AGENTS 引用校验**未执行**');
 } else {
   const agentsText = readFileSync(AGENTS, 'utf8');
   const refs = [...agentsText.matchAll(/tools\/([A-Za-z0-9_-]+\.mjs)/g)].map((m) => m[1]);
