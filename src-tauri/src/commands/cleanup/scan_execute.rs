@@ -168,14 +168,23 @@ pub(super) fn cap_backfill_files(files: &[(String, u64)], cap: usize) -> (Vec<Va
 /// 每个无序对只挂在数组里**后到**的那一条上（`overlapsWith`），渲染层按「两端都在勾选
 /// 集合内」扣一次，所以「只勾父条」时父条照样报满、不虚低。
 fn attach_cross_item_pairs(data: &mut [Value]) -> u64 {
+    // 单条扫描没有跨条目配对可做（partial 扫描的常见形状）：不建认领表。
+    if data.len() < 2 {
+        return 0;
+    }
     let mut first_claim: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut pairs: std::collections::HashMap<(usize, usize), (u64, u64)> = std::collections::HashMap::new();
 
     for (idx, item) in data.iter().enumerate() {
-        let files = item.get("files").and_then(Value::as_array).cloned().unwrap_or_default();
+        // 1B：files 只读，借用即可——旧形态 `.cloned()` 把整份数组复制进临时 Vec，
+        // 十万级文件时是无谓的大块分配。判定与输出不变（golden 用例钉住）。
+        let Some(files) = item.get("files").and_then(Value::as_array) else {
+            continue;
+        };
         // 条目内先按归一键去重：同一文件在同一条目里出现两次不算「跨条目重叠」，
         // 而且认领表只认一次，否则后一条会被同一文件扣两遍
-        let mut seen_in_item: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen_in_item: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(files.len());
         for f in files {
             let Some(p) = f.get("path").and_then(Value::as_str) else { continue };
             let size = f.get("size").and_then(Value::as_u64).unwrap_or(0);
@@ -1592,5 +1601,69 @@ mod tests {
         assert_eq!(attach_cross_item_pairs(&mut data), 42, "同条目内重复不得计成跨条目重叠");
         assert_eq!(data[1]["overlapsWith"][0]["with"], "a");
         assert_eq!(data[1]["overlapsWith"][0]["files"], 1, "b 里两条指向同一文件，只算一次重叠");
+    }
+
+    /// 1B：配对实现只许减少分配，不许改输出。固定输入的完整序列化结果逐字节钉住
+    /// （golden 取自 1B 前的实现；改法若动了 pair 顺序/字段就红）。
+    #[test]
+    fn 配对输出逐字节不变() {
+        let mut data = vec![
+            json!({"id":"a","files":[{"path":"C:\\x\\share.log","size":42},{"path":"C:\\x\\own.log","size":8}]}),
+            json!({"id":"b","files":[{"path":"c:\\X\\SHARE.LOG","size":42},{"path":"C:\\x\\share.log","size":42}]}),
+            json!({"id":"c","files":[{"path":"C:\\x\\other.log","size":7}]}),
+        ];
+        let inflated = attach_cross_item_pairs(&mut data);
+        assert_eq!(inflated, 42, "配对字节数不得变");
+        assert_eq!(
+            serde_json::to_string(&data).unwrap(),
+            r#"[{"id":"a","files":[{"path":"C:\\x\\share.log","size":42},{"path":"C:\\x\\own.log","size":8}]},{"id":"b","files":[{"path":"c:\\X\\SHARE.LOG","size":42},{"path":"C:\\x\\share.log","size":42}],"overlapsWith":[{"with":"a","bytes":42,"files":1}]},{"id":"c","files":[{"path":"C:\\x\\other.log","size":7}]}]"#,
+            "1B 只许减少分配，配对输出必须逐字节不变"
+        );
+    }
+
+    /// 1B：单条/空输入没有跨条目配对可做，返回 0 且不得改动 data。
+    #[test]
+    fn 单条扫描不做配对() {
+        let mut data = vec![json!({"id":"only","files":[{"path":"C:\\x\\a","size":1}]})];
+        let before = serde_json::to_string(&data).unwrap();
+        assert_eq!(attach_cross_item_pairs(&mut data), 0);
+        assert_eq!(serde_json::to_string(&data).unwrap(), before, "单条扫描不得改 data");
+        assert_eq!(attach_cross_item_pairs(&mut []), 0, "空输入必须返回 0");
+    }
+
+    /// 1B 分配成本实测（`#[ignore]`）：拿真实大树扫出的 data，分别计时
+    /// ① 旧实现的「克隆整份 files 数组」；② 新实现（借用 + 单条短路）的配对本体。
+    /// 只出数，不改判据；取数：`cargo test --lib 配对分配成本实测 -- --ignored --nocapture`。
+    #[test]
+    #[ignore = "真机实测：扫 windowsDownloadCache（5 万级文件）后计时，非回归判据"]
+    fn 配对分配成本实测() {
+        use std::time::Instant;
+        let v = cleanup_scan_headless(vec!["windowsDownloadCache".to_string()]);
+        let Some(data) = v.get("data").and_then(Value::as_array) else {
+            println!("SKIP：无数据（success={:?}）", v.get("success"));
+            return;
+        };
+        let mut data = data.clone();
+        let files: usize = data
+            .iter()
+            .map(|it| it.get("files").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0))
+            .sum();
+        if files == 0 {
+            println!("SKIP：本机 windowsDownloadCache 无文件（files=0）");
+            return;
+        }
+        let t0 = Instant::now();
+        let clones: Vec<Vec<Value>> = data
+            .iter()
+            .filter_map(|it| it.get("files").and_then(Value::as_array).cloned())
+            .collect();
+        let clone_ms = t0.elapsed().as_secs_f64() * 1e3;
+        drop(clones);
+        let t1 = Instant::now();
+        let inflated = attach_cross_item_pairs(&mut data);
+        let pair_ms = t1.elapsed().as_secs_f64() * 1e3;
+        println!(
+            "PAIRING_COST files={files} clone_ms={clone_ms:.1} pair_ms={pair_ms:.1} inflated={inflated}"
+        );
     }
 }
