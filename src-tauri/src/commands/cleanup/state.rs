@@ -584,4 +584,64 @@ let many: Vec<String> = (0..600).map(|i| format!("i{i}")).collect();
             "无头入口不得搬移 files"
         );
     }
+
+    /// P2-1 执行前快照相位探针（`#[ignore]`）：构造 20 条 × 5,000 文件 = 10 万文件快照，
+    /// 分别计时 ① `validate_snapshot_items` 深克隆 ② `cleanup:check-locked` 的整表 clone
+    /// ③ 候选装配（受 `PLAN_LOCK_CAP` 截断）。只出数，不改判据。
+    /// 取数：`cargo test --lib 执行前快照相位探针 -- --ignored --nocapture`。
+    #[test]
+    #[ignore = "真机相位探针：构造 10 万文件快照计时，非回归判据"]
+    fn 执行前快照相位探针() {
+        use std::time::Instant;
+        const ITEMS: usize = 20;
+        const FILES: usize = 5_000;
+        // 接近真机路径量级（P1 实测平均 206 字符）；克隆成本对路径长度敏感。
+        let prefix = "C:\\Users\\probe\\AppData\\Local\\Packages\\Microsoft.SomeVeryLongPackageName_8wekyb3d8bbwe\\LocalCache\\Roaming\\Deep\\";
+        let mut snapshot: HashMap<String, Value> = HashMap::with_capacity(ITEMS);
+        let mut input: Vec<Value> = Vec::with_capacity(ITEMS);
+        for i in 0..ITEMS {
+            let id = format!("item{i:02}");
+            let files: Vec<Value> = (0..FILES)
+                .map(|j| {
+                    json!({
+                        "path": format!("{prefix}{id}\\file-{j:05}.tmp"),
+                        "size": 1024,
+                        "birthtimeNs": 1_700_000_000_000_000_000u64,
+                    })
+                })
+                .collect();
+            snapshot.insert(
+                id.clone(),
+                json!({
+                    "id": id,
+                    "path": prefix,
+                    "size": (FILES * 1024) as u64,
+                    "files": files,
+                }),
+            );
+            input.push(json!({ "id": id, "path": prefix }));
+        }
+        let input_json = Value::Array(input);
+        let ids_json = json!((0..ITEMS).map(|i| format!("item{i:02}")).collect::<Vec<_>>());
+        for round in 0..5 {
+            let t0 = Instant::now();
+            let valid = validate_snapshot_items(Some(&input_json), &snapshot);
+            let validate_ms = t0.elapsed().as_secs_f64() * 1e3;
+            assert_eq!(valid.map(|v| v.len()), Some(ITEMS), "validate 必须返回全部条目");
+            let t1 = Instant::now();
+            let cloned = snapshot.clone();
+            let clone_ms = t1.elapsed().as_secs_f64() * 1e3;
+            assert_eq!(cloned.len(), ITEMS);
+            let t2 = Instant::now();
+            let (cands, truncated) =
+                collect_lock_candidates(Some(&ids_json), &snapshot, PLAN_LOCK_CAP);
+            let lock_ms = t2.elapsed().as_secs_f64() * 1e3;
+            assert!(truncated, "10 万文件超过 PLAN_LOCK_CAP=2 万，必须截断");
+            assert_eq!(cands.len(), PLAN_LOCK_CAP, "候选应停在 PLAN_LOCK_CAP");
+            println!(
+                "PHASE_STATE round={round} files={} validate_ms={validate_ms:.1} snapshot_clone_ms={clone_ms:.1} lock_candidates_ms={lock_ms:.1}",
+                ITEMS * FILES
+            );
+        }
+    }
 }

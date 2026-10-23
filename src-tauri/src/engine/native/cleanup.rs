@@ -3378,3 +3378,202 @@ mod file_backup_retention_tests {
         assert_eq!(super::dism_failure_hint(87), "", "未知退出码不许编原因");
     }
 }
+
+#[cfg(test)]
+mod phase_probe_tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// P2-1 执行链相位探针（`#[ignore]`）：落 2 万个小文件，分别计时
+    /// ① 身份证表（`path_key`）② `collect_files` 重新枚举 ③ 备份复制 ④ 逐文件删除。
+    /// 只出数，不改判据；取数：`cargo test --lib 执行链相位探针 -- --ignored --nocapture`。
+    #[test]
+    #[ignore = "真机相位探针：落 2 万文件并删除，非回归判据"]
+    fn 执行链相位探针() {
+        const DIRS: usize = 20;
+        const PER_DIR: usize = 1_000;
+        let root = std::env::temp_dir().join(format!("trim-phase-probe-{}", std::process::id()));
+        let backup = root.join("__backup");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&backup).unwrap();
+        let mut items: Vec<Value> = Vec::with_capacity(DIRS);
+        for d in 0..DIRS {
+            let dir = root.join(format!("d{d:02}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut files = Vec::with_capacity(PER_DIR);
+            for f in 0..PER_DIR {
+                let p = dir.join(format!("f{f:04}.tmp"));
+                std::fs::write(&p, vec![b'x'; 1024]).unwrap();
+                let md = std::fs::metadata(&p).unwrap();
+                let bt = md
+                    .created()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+                    .unwrap_or(0);
+                files.push(json!({
+                    "path": p.to_string_lossy().to_string(),
+                    "size": 1024,
+                    "birthtimeNs": bt,
+                }));
+            }
+            items.push(json!({
+                "id": format!("d{d:02}"),
+                "path": dir.to_string_lossy().to_string(),
+                "files": files,
+            }));
+        }
+
+        // ① 身份证表：与生产同形的 path_key + 首次写入（重复不覆盖）
+        let t0 = Instant::now();
+        let mut identity: std::collections::HashMap<String, (u64, u64)> =
+            std::collections::HashMap::new();
+        for it in &items {
+            if let Some(files) = it.get("files").and_then(Value::as_array) {
+                for f in files {
+                    let (Some(p), Some(sz), Some(bt)) = (
+                        f.get("path").and_then(Value::as_str),
+                        f.get("size").and_then(Value::as_i64),
+                        f.get("birthtimeNs").and_then(Value::as_i64),
+                    ) else {
+                        continue;
+                    };
+                    identity
+                        .entry(crate::engine::paths::path_key(p))
+                        .or_insert((sz.max(0) as u64, bt as u64));
+                }
+            }
+        }
+        let identity_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+        // ② collect_files 重新枚举（read_dir + metadata；与执行侧同一函数）
+        let t1 = Instant::now();
+        let mut files: Vec<(String, u64)> = Vec::new();
+        let mut too_new = 0i64;
+        let mut lossy = 0i64;
+        collect_files(
+            &root.to_string_lossy(),
+            "*",
+            true,
+            trim_finder::cleanup_scan::AgeGuard::Off,
+            &mut files,
+            &mut too_new,
+            &mut lossy,
+        );
+        let enum_ms = t1.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(files.len(), DIRS * PER_DIR, "枚举必须全量");
+
+        // ③ 备份复制（逐文件 copy；2 万个小文件，总量远低于 256MB 批次上限）
+        let t2 = Instant::now();
+        let mut copied = 0usize;
+        for (i, (p, _)) in files.iter().enumerate() {
+            let dst = backup.join(format!("{i:05}.bin"));
+            if std::fs::copy(p, &dst).is_ok() {
+                copied += 1;
+            }
+        }
+        let backup_ms = t2.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(copied, files.len(), "备份复制必须全量");
+
+        // ③b 并行备份探针：同批文件分别用 1/2/4/8 线程复制到独立目录。
+        // 注意：这是**暖缓存/已扫描**下的数字；生产冷路径实测（见 生产路径相位实测）
+        // 没有收益，生产备份链已保持串行。保留此组数字作为「为何不做」的证据。
+        for threads in [1usize, 2, 4, 8] {
+            let dst = root.join(format!("__backup_p{threads}"));
+            std::fs::create_dir_all(&dst).unwrap();
+            let t = Instant::now();
+            let chunk = (files.len() + threads - 1) / threads;
+            std::thread::scope(|s| {
+                for (ti, part) in files.chunks(chunk.max(1)).enumerate() {
+                    let dst = dst.clone();
+                    s.spawn(move || {
+                        for (i, (p, _)) in part.iter().enumerate() {
+                            let _ = std::fs::copy(p, dst.join(format!("t{ti}-{i:05}.bin")));
+                        }
+                    });
+                }
+            });
+            println!(
+                "PHASE_BACKUP_PAR threads={threads} ms={:.1}",
+                t.elapsed().as_secs_f64() * 1e3
+            );
+        }
+
+        // ④ 逐文件删除（与执行侧永久删同原语）
+        let t3 = Instant::now();
+        let mut deleted = 0usize;
+        for (p, _) in &files {
+            if std::fs::remove_file(p).is_ok() {
+                deleted += 1;
+            }
+        }
+        let delete_ms = t3.elapsed().as_secs_f64() * 1e3;
+        assert_eq!(deleted, files.len(), "删除必须全量");
+        assert_eq!(identity.len(), DIRS * PER_DIR, "身份证表必须覆盖全量");
+
+        println!(
+            "PHASE_ENGINE files={} identity_ms={identity_ms:.1} enum_ms={enum_ms:.1} backup_ms={backup_ms:.1} delete_ms={delete_ms:.1}",
+            files.len()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// P2-1b 生产路径探针（并行备份实验已回滚）：2 万小文件走完整
+    /// `cleanup_execute_with_backup_root`，量串行执行链总耗时，作为后续基线。
+    #[test]
+    #[ignore = "真机相位探针：2 万文件走完整清理执行链，非回归判据"]
+    fn 生产路径相位实测() {
+        use std::time::Instant;
+        const FILES: usize = 20_000;
+        const PER_DIR: usize = 1_000;
+        let root = std::env::temp_dir().join(format!("trim-prod-probe-{}", std::process::id()));
+        let backup = std::env::temp_dir().join(format!("trim-prod-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&backup);
+        std::fs::create_dir_all(&backup).unwrap();
+        for d in 0..(FILES / PER_DIR) {
+            let dir = root.join(format!("d{d:02}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            for f in 0..PER_DIR {
+                std::fs::write(dir.join(format!("f{f:04}.tmp")), vec![b'x'; 1024]).unwrap();
+            }
+        }
+        let rules = json!({"groups":[{"items":[
+            {"id":"phaseProd","name":"生产相位","fileKeys":[
+                {"path": root.to_string_lossy(), "pattern":"*", "recurse":true}]}
+        ]}]});
+        let items = vec![json!({"id":"phaseProd","name":"生产相位","path":""})];
+        let t0 = Instant::now();
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(&backup), None)
+            .expect("执行链不应 Err");
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1e3;
+        let file_count = res
+            .details
+            .first()
+            .and_then(|d| d.get("fileCount"))
+            .and_then(Value::as_i64)
+            .unwrap_or(-1);
+        let manifests = std::fs::read_dir(&backup)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with("manifest-"))
+                    .count()
+            })
+            .unwrap_or(0);
+        let temps = std::fs::read_dir(&backup)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp-"))
+                    .count()
+            })
+            .unwrap_or(0);
+        println!(
+            "PHASE_PROD files={FILES} fileCount={file_count} elapsed_ms={elapsed_ms:.1} manifests={manifests} temp_dirs={temps}"
+        );
+        assert_eq!(file_count, FILES as i64, "生产路径必须删到全部文件");
+        assert!(manifests > 0, "必须落备份清单");
+        assert_eq!(temps, 0, "临时备份目录必须被清掉");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&backup);
+    }
+}
