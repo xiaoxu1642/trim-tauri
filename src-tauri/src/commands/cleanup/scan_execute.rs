@@ -403,7 +403,9 @@ pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, labe
         Err(msg) => return json!({ "success": false, "message": msg, "data": [] }),
     };
     {
-        let fresh = snapshot_by_id(&data);
+        // v2 §3.1/§4.2：剥离动作只放在窗口适配层。共享核心与无头入口仍返回完整 files，
+        // 这里把进入本槽的条目清单搬进快照，窗口回执从此不再携带逐文件清单。
+        let fresh = snapshot_by_id_taking(&mut data);
         let mut guard = snapshots().lock().unwrap_or_else(|e| e.into_inner());
         if partial {
             // partial：只覆盖本次命中的 id，其余条目的旧快照保留——否则「只刷新回收站」

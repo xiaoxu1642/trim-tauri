@@ -112,16 +112,41 @@ pub(super) fn store_lock_whitelist(label: &str, whitelist: Vec<Value>) {
         .insert(label.to_string(), whitelist);
 }
 
-/// 对照 `snapshotById`
-pub(super) fn snapshot_by_id(items: &[Value]) -> HashMap<String, Value> {
-    let mut map = HashMap::new();
-    for item in items {
+/// 窗口适配层专用：把进入快照条目的 `files` 搬进快照，窗口回执不再携带逐文件清单。
+///
+/// 与旧 `snapshot_by_id` 的“后写覆盖”完全一致：同一 id 出现多次时只有最后一次进快照。
+/// **只对真正进入快照的条目 `remove("files")`**——id 超长或重复落选的条目没有快照副本，
+/// 摘掉就等于把清单静默丢掉（v2 §4.2 第 4 条）。
+///
+/// 为什么先定赢家再搬：单遍遍历时无法知道后面的同 id 会不会覆盖；先记最后出现的下标，
+/// 第二遍只搬赢家，落选项原样保留。搬运用 `remove` + 重新插入快照，文件数组不做深拷贝。
+pub(super) fn snapshot_by_id_taking(items: &mut [Value]) -> HashMap<String, Value> {
+    let mut winner: HashMap<String, usize> = HashMap::new();
+    for (idx, item) in items.iter().enumerate() {
         let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
             continue;
         };
         if id.chars().count() <= 160 {
-            map.insert(id.to_string(), item.clone());
+            winner.insert(id.to_string(), idx);
         }
+    }
+    let mut map = HashMap::with_capacity(winner.len());
+    for (idx, item) in items.iter_mut().enumerate() {
+        let Some(id) = item.get("id").and_then(|v| v.as_str()).map(str::to_string) else {
+            continue;
+        };
+        if winner.get(&id) != Some(&idx) {
+            continue;
+        }
+        // 只有真正进快照的条目才摘 files；快照项随后原样持有这份数组。
+        let files = item.as_object_mut().and_then(|o| o.remove("files"));
+        let mut snap = item.clone();
+        if let Some(files) = files {
+            if let Some(obj) = snap.as_object_mut() {
+                obj.insert("files".to_string(), files);
+            }
+        }
+        map.insert(id, snap);
     }
     map
 }
@@ -486,5 +511,77 @@ let many: Vec<String> = (0..600).map(|i| format!("i{i}")).collect();
             assert_eq!(path_resolve(same), base, "同一路径的不同写法必须得到同一个键: {same}");
         }
         assert_ne!(path_resolve(r"C:\Windows\Temp\x2.log"), base, "不同文件不得被折成同一键");
+    }
+
+    /// v2 §4.4：搬移只对“进入快照”的条目 remove(files)；未入快照的条目必须保留原数据。
+    #[test]
+    fn 快照搬移_只摘入快照条目的files() {
+        let long_id = "x".repeat(161);
+        let mut items = vec![
+            json!({"id":"ok","path":"C:\\Temp","files":[{"path":"C:\\Temp\\a","size":1}]}),
+            json!({"id":long_id,"path":"C:\\Temp","files":[{"path":"C:\\Temp\\b","size":1}]}),
+            json!({"id":"nofiles","path":"C:\\Temp"}),
+        ];
+        let snap = snapshot_by_id_taking(&mut items);
+        assert_eq!(snap.len(), 2, "ok 与 nofiles 入快照，超长 id 不入: {}", snap.len());
+        assert_eq!(snap["ok"]["files"].as_array().map(|a| a.len()), Some(1), "快照必须持有完整清单");
+        assert!(items[0].get("files").is_none(), "入快照条目不得再携带 files");
+        assert_eq!(
+            items[1]["files"].as_array().map(|a| a.len()),
+            Some(1),
+            "未入快照的超长 id 条目必须保留 files（否则搬移即丢数据）"
+        );
+        assert!(!snap.contains_key(&long_id), "超长 id 不得入快照");
+        assert!(items[2].get("files").is_none(), "本来没有 files 的条目不受影响");
+        assert!(
+            !snap["nofiles"].as_object().unwrap().contains_key("files"),
+            "无 files 的快照项不应凭空造字段"
+        );
+    }
+
+    /// v2 §4.2 第 4 条：重复 id 延续“后写覆盖”，但落选的前项不得被摘掉 files。
+    #[test]
+    fn 快照搬移_重复id后写覆盖且落选项不丢数据() {
+        let mut items = vec![
+            json!({"id":"dup","path":"C:\\Temp","files":[{"path":"C:\\Temp\\first"}]}),
+            json!({"id":"dup","path":"C:\\Temp","files":[{"path":"C:\\Temp\\second"}]}),
+        ];
+        let snap = snapshot_by_id_taking(&mut items);
+        assert_eq!(
+            snap["dup"]["files"][0]["path"],
+            json!("C:\\Temp\\second"),
+            "重复 id 必须后写覆盖（与旧 snapshot_by_id 同口径）"
+        );
+        assert_eq!(
+            items[0]["files"][0]["path"],
+            json!("C:\\Temp\\first"),
+            "未进快照的前项必须保留 files（不得静默丢数据）"
+        );
+        assert!(items[1].get("files").is_none(), "进快照的后项应摘掉 files");
+    }
+
+    /// v2 §4.2 第 1/3/5 条：搬移只能发生在窗口适配层；共享核心与无头入口不得调用。
+    #[test]
+    fn 回执剥离_只在窗口适配层接线() {
+        let src = include_str!("scan_execute.rs");
+        let core_start = src.find("fn run_cleanup_scan_core").expect("核心函数必须存在");
+        let win_start = src.find("pub(super) fn do_cleanup_scan").expect("窗口适配层必须存在");
+        let win_end = src.find("fn inject_post_actions").expect("窗口适配层结尾锚点必须存在");
+        let core = &src[core_start..win_start];
+        let win = &src[win_start..win_end];
+        assert!(
+            !core.contains("snapshot_by_id_taking"),
+            "共享核心不得搬移 files（无头契约会破）"
+        );
+        assert!(!core.contains("remove(\"files\")"), "共享核心不得摘 files");
+        assert!(
+            win.contains("snapshot_by_id_taking(&mut data)"),
+            "窗口适配层必须调用搬移"
+        );
+        let headless_start = src.find("pub fn cleanup_scan_headless").expect("无头入口必须存在");
+        assert!(
+            !src[headless_start..].contains("snapshot_by_id_taking"),
+            "无头入口不得搬移 files"
+        );
     }
 }

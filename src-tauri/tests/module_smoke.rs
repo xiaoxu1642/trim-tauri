@@ -18,7 +18,7 @@ use common::{
     assert_guard_rejected, ensure_test_data_root, invoke, invoke_text, main_window,
     skip_and_record, sub_windows, window_with_label, GUARD_REJECT_MARK,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use trim_tauri_lib::engine::guard::APP_WINDOWS;
 
 // ==================== 底座自身的元断言 ====================
@@ -1884,6 +1884,116 @@ fn cleanup_item_detail_path_rejected_without_snapshot() {
         !text2.contains("不是本次扫描结果") && !text2.contains("已拒绝枚举"),
         "空 path 不得被 §5.6 拒绝误伤: {text2}"
     );
+}
+
+/// 性能基线探针（v2 §2/§4.5）：一次全量窗口扫描，打印 L1/L2 同层字节与快照可读性。
+///
+/// 为什么 `#[ignore]`：真实全量扫描（本机约 124k 文件），属触盘重活，只手动取数。
+/// L1 = `cleanup:scan` 回执对象的 `serde_json::to_vec` 字节（**不是** CLI 原始输出）；
+/// L2 = 渲染层会回传的常规 items 同形序列化字节（全选上限，不含 fileclean/recycle）。
+/// 快照仍在的凭据：对 fileKeys 型条目调 `cleanup:item-detail`，必须拿到 `kind:"files"`；
+/// 无头入口另扫一条小规则，`files` 必须仍在。
+#[test]
+#[ignore = "真机性能探针：全量扫描 + 载荷计量，非回归判据"]
+fn cleanup_scan_l1_l2_probe() {
+    use std::time::Instant;
+    // 与渲染层 ALL_IDS 同源：规则库按 groups/subGroups 展开；空数组会被命令自身拒。
+    let rules: Value =
+        serde_json::from_str(include_str!("../data/cleanup-rules.json")).expect("规则库解析失败");
+    let mut ids: Vec<String> = Vec::new();
+    for g in rules.get("groups").and_then(|v| v.as_array()).into_iter().flatten() {
+        if let Some(sgs) = g.get("subGroups").and_then(|v| v.as_array()) {
+            for sg in sgs {
+                for it in sg.get("items").and_then(|v| v.as_array()).into_iter().flatten() {
+                    if let Some(id) = it.get("id").and_then(|v| v.as_str()) {
+                        ids.push(id.to_string());
+                    }
+                }
+            }
+        } else if let Some(items) = g.get("items").and_then(|v| v.as_array()) {
+            for it in items {
+                if let Some(id) = it.get("id").and_then(|v| v.as_str()) {
+                    ids.push(id.to_string());
+                }
+            }
+        }
+    }
+    assert!(!ids.is_empty(), "规则库必须展开出至少一个条目");
+    let w = main_window();
+    let t0 = Instant::now();
+    let resp = invoke(&w, "cleanup_scan", json!({ "categories": ids }));
+    let elapsed_ms = t0.elapsed().as_millis();
+    assert_eq!(
+        resp.get("success").and_then(|v| v.as_bool()),
+        Some(true),
+        "全量扫描失败: {resp}"
+    );
+    let data = resp
+        .get("data")
+        .and_then(|v| v.as_array())
+        .expect("data 必须是数组");
+    let l1_bytes = serde_json::to_vec(&resp).expect("L1 序列化失败").len();
+    let items = data.len();
+    let files_in_receipt: usize = data
+        .iter()
+        .map(|it| {
+            it.get("files")
+                .and_then(|f| f.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0)
+        })
+        .sum();
+    let regular: Vec<Value> = data
+        .iter()
+        .filter(|it| {
+            let id = it.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            !matches!(id, "qqFileClean" | "wechatFileClean" | "recycleBin")
+        })
+        .cloned()
+        .collect();
+    let l2_bytes = serde_json::to_vec(&regular).expect("L2 序列化失败").len();
+
+    // 快照仍在：明细走快照，不读窗口回执。windowsCryptographicServices 是 fileKeys 型
+    // 且本机有 262 条可删文件，适合同时验证「条目进快照」与「明细读快照」。
+    let detail = invoke(
+        &w,
+        "cleanup_item_detail",
+        json!({ "id": "windowsCryptographicServices" }),
+    );
+    let kind = detail
+        .pointer("/data/kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let total = detail
+        .pointer("/data/total")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    // 无头入口保持：同一小规则走 headless，files 必须仍在。
+    let headless = trim_tauri_lib::commands::cleanup::cleanup_scan_headless(vec![
+        "windowsCryptographicServices".to_string(),
+    ]);
+    let headless_files: usize = headless
+        .get("data")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|it| {
+                    it.get("files")
+                        .and_then(|f| f.as_array())
+                        .map(|x| x.len())
+                        .unwrap_or(0)
+                })
+                .sum()
+        })
+        .unwrap_or(0);
+
+    println!(
+        "CLEANUP_PERF_PROBE {{\"elapsed_ms\":{elapsed_ms},\"l1_bytes\":{l1_bytes},\"l2_bytes\":{l2_bytes},\"items\":{items},\"files_in_receipt\":{files_in_receipt},\"detail_kind\":\"{kind}\",\"detail_total\":{total},\"headless_files\":{headless_files}}}"
+    );
+    assert_eq!(kind, "files", "快照必须仍持有可删文件清单（明细读快照）: {detail}");
+    assert!(total > 0, "fileKeys 型条目的快照明细不得为 0: {detail}");
+    assert!(headless_files > 0, "无头入口必须保持 files: {headless}");
 }
 
 /// 2026-10-06 任务三：`optimizer_restore_frequency`（还原点弹窗「恢复默认创建频率」）
