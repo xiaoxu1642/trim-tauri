@@ -112,36 +112,6 @@
               ]
             },
             {
-              "id": "winsatCache",
-              "name": "Windows 系统评估数据",
-              "risk": "low",
-              "pathPs": "$env:WINDIR + '\\Performance\\WinSAT'",
-              "evidence": "WinSAT 磁盘/图形评估缓存（HiBit 逆向新增）",
-              "recommended": false,
-              "domain": "system",
-              "group": "updates",
-              "nature": "updateResidual",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "windows-doc",
-                "ref": "windows/cache",
-                "importedAt": "2026-09-14",
-                "reviewedAt": "2026-09-27"
-              },
-              "ver": 20261023,
-              "evidenceItems": [
-                {
-                  "text": "WinSAT 磁盘/图形评估缓存（HiBit 逆向新增）",
-                  "weight": 2
-                },
-                {
-                  "text": "内容可按需重建（更新残留），删除后系统或应用会再生成",
-                  "weight": 1
-                }
-              ]
-            },
-            {
               "id": "usoLogs",
               "name": "更新会话日志",
               "risk": "low",
@@ -1068,7 +1038,6 @@
               "id": "thumbnailCacheFiles",
               "name": "缩略图缓存",
               "risk": "low",
-              "pathPs": "$env:LOCALAPPDATA + '\\Microsoft\\Windows\\Explorer'",
               "fileKeys": [
                 {
                   "path": "%LOCALAPPDATA%\\Microsoft\\Windows\\Explorer",
@@ -2315,7 +2284,7 @@
                 {
                   "path": "%WINDIR%\\Performance\\WinSAT",
                   "pattern": "*",
-                  "recurse": false
+                  "recurse": true
                 }
               ],
               "detect": [
@@ -7410,37 +7379,6 @@
               ]
             },
             {
-              "id": "nvidiaNvCache",
-              "name": "NVIDIA 全局缓存 (NV_Cache)",
-              "risk": "medium",
-              "ifDeleted": "这是所有用户共享的全局着色器与安装残留缓存（%PROGRAMDATA%\\NVIDIA Corporation\\NV_Cache）。删后每个账户、每个游戏都要重新编译，首次运行掉帧与加载变慢会同时落在多账户机器上。",
-              "pathPs": "$env:PROGRAMDATA + '\\NVIDIA Corporation\\NV_Cache'",
-              "evidence": "NVIDIA 全局安装缓存",
-              "recommended": false,
-              "domain": "gfx",
-              "group": "shader",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "independent",
-                "ref": "gpu",
-                "importedAt": "2026-09-14",
-                "reviewedAt": "2026-10-23"
-              },
-              "ver": 20261023,
-              "evidenceItems": [
-                {
-                  "text": "NVIDIA 全局安装缓存",
-                  "weight": 2
-                },
-                {
-                  "text": "缓存可按需重建；删除后首次启动会重新生成，速度可能暂时变慢",
-                  "weight": 1
-                }
-              ]
-            },
-            {
               "id": "amdCache",
               "name": "AMD 显卡缓存 (DxCache/Cache)",
               "risk": "medium",
@@ -7596,11 +7534,6 @@
                   "recurse": true
                 },
                 {
-                  "path": "%LOCALAPPDATA%\\NVIDIA\\*Cache",
-                  "pattern": "*",
-                  "recurse": true
-                },
-                {
                   "path": "%LOCALAPPDATA%\\Packages\\*\\AC\\*\\NVIDIA Corporation\\NV_Cache",
                   "pattern": "*",
                   "recurse": true
@@ -7691,7 +7624,7 @@
                 {
                   "path": "%LOCALAPPDATA%\\D3DSCache",
                   "pattern": "*",
-                  "recurse": false
+                  "recurse": true
                 },
                 {
                   "path": "%WINDIR%\\System32\\config\\systemprofile\\AppData\\Local\\D3DSCache",
@@ -7703,37 +7636,6 @@
                 {
                   "type": "reg",
                   "path": "HKCU\\Software\\Microsoft\\Windows"
-                }
-              ]
-            },
-            {
-              "id": "directXShaderCache",
-              "name": "DirectX 着色器缓存",
-              "risk": "medium",
-              "ifDeleted": "删的是当前用户的 D3DSCache，与「Microsoft DirectX Shader 着色器」的首落点同路径（重复覆盖已登记在册，汇总体积按去重计）。代价是所有 D3D 应用首次运行重新编译着色器，游戏开场与新场景加载变慢。",
-              "pathPs": "$env:LOCALAPPDATA + '\\D3DSCache'",
-              "evidence": "DX 着色器缓存",
-              "recommended": false,
-              "domain": "gfx",
-              "group": "shader",
-              "nature": "cache",
-              "regenerable": true,
-              "prov": {
-                "source": "builtin",
-                "sourceClass": "independent",
-                "ref": "windows/temp",
-                "importedAt": "2026-09-14",
-                "reviewedAt": "2026-10-23"
-              },
-              "ver": 20261023,
-              "evidenceItems": [
-                {
-                  "text": "DX 着色器缓存",
-                  "weight": 2
-                },
-                {
-                  "text": "缓存可按需重建；删除后首次启动会重新生成，速度可能暂时变慢",
-                  "weight": 1
                 }
               ]
             }
@@ -8199,6 +8101,6 @@
   "winapp2Version": 260730,
   "_sig": {
     "alg": "ed25519",
-    "sig": "m8WMg7F5kZegmCyT2brbBz23FAF9Ernorl2tHrB+UeCsreZamUB21IC3fjN9OZRzb+dW/+ytWjJYQlhKQAjvBg=="
+    "sig": "djmhUfO6BJvMyZU+7DcTN5Iz6srzxc25mvd1flfFhnl2NrFTyj1NNp43cFzoXv2nNbtN62YZ3S5UhwjRwW4ZDw=="
   }
 }

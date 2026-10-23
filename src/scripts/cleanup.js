@@ -137,10 +137,8 @@
     recycleBin: 89 * 1024 * 1024,
     memoryDumpFiles: 345 * 1024 * 1024,
      dismComponentCleanup: 0,
-     directXShaderCache: 112 * 1024 * 1024,
     // 显卡 / 浏览器 / 应用
     nvidiaCache: 345 * 1024 * 1024,
-    nvidiaNvCache: 128 * 1024 * 1024,
     amdCache: 234 * 1024 * 1024,
     intelShaderCache: 67 * 1024 * 1024,
     chromeCache: 567 * 1024 * 1024,
