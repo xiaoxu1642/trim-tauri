@@ -1015,8 +1015,18 @@ pub(super) fn module_lockers(target: &Path) -> Vec<(u32, String, Vec<String>)> {
         let mut more = Process32FirstW(snap, &mut pe).is_ok();
         while more {
             let pid = pe.th32ProcessID;
-            let len = pe.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
-            let exe = String::from_utf16_lossy(&pe.szExeFile[..len]);
+            // P1-6G：`szExeFile` 里找不到 NUL 时，旧写法 `.unwrap_or(0)` 把长度折成 0，
+            // 这条进程于是以「空名字」参与匹配、永远匹配不上 —— 「谁占着这个文件」被静默
+            // 漏报一条。读不到终止符说明这个名字不可信：如实留痕再跳过，不拿空串继续比。
+            let Some(nul) = pe.szExeFile.iter().position(|&c| c == 0) else {
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("进程名未以 NUL 终止（缓冲区 {} 字符内找不到结束符），已跳过该条: pid={pid}", pe.szExeFile.len()),
+                );
+                more = Process32NextW(snap, &mut pe).is_ok();
+                continue;
+            };
+            let exe = String::from_utf16_lossy(&pe.szExeFile[..nul]);
             more = Process32NextW(snap, &mut pe).is_ok();
             if pid == 0 {
                 continue;

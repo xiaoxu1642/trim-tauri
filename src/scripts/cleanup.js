@@ -183,6 +183,8 @@
   let selectedIds = new Set();
   let isScanning = false;
   let isCleaning = false;
+  // P1-7：确认期间的重复点击标志（在任何 await 之前同步置起、在 finally 复位）。
+  let confirmInFlight = false;
   // 2026-10-12：执行期逐项进度的接收器。订阅一次性注册在 init()（onEvent 会累积，
   // 不能放进 clean()）；每次执行时挂上真实处理器、结束置空，见 clean()。
   let execProgressSink = null;
@@ -1416,12 +1418,11 @@
   }
 
   // 清理
-  async function clean() {
-    if (isCleaning || selectedIds.size === 0) return;
-    isCleaning = true;
-    setCleaningBtn(true);
-    updateUI();
-
+  //
+  // P1-7（F4a1-M12）：旧写法在 `isCleaning = true` 之后还连着四个 confirm/预查询 await，
+  // 直到执行段才有 `try` —— 那一段里任何 reject 都跳过 `finally`，清理按钮永久点不动。
+  // 现在拆两段：确认段自带 try/finally 且**不设 busy**，置 busy 后到 `try` 之间 await 数为 0。
+  async function confirmCleanPlan() {
     // D10：risk 分级二次确认——高风险走红色 confirmDanger，中风险走黄色 confirmWarning。
     // 信任源统一为 $rule.risk（PS 侧门禁同源，见 cleanup-scripts.js），渲染层不做二次映射。
     // G-4：回收站**不参与这两档分级**——它是不可逆的批量动作，单独走下面那段
@@ -1454,10 +1455,7 @@
         '删除后可能无法恢复，请确认已了解风险。',
         consequenceItems(highRisk)
       );
-      if (!ok) {
-        finishClean();
-        return;
-      }
+      if (!ok) return null;
     }
 
     // D10：中风险二次确认（黄色），与高风险红色确认分级
@@ -1470,11 +1468,8 @@
         '部分中风险项可能被应用在使用，清理后若个别程序异常，可通过系统自带方式恢复。',
         consequenceItems(mediumRisk)
       );
-      if (!ok) {
-        // F4a1-M02：这一支原先只置 isCleaning=false + updateUI()，漏掉按钮文案与 busy 类
-        finishClean();
-        return;
-      }
+      // F4a1-M02：取消支必须走调用方的收尾，本段不再自己复位 busy（busy 已移到确认之后才置起）
+      if (!ok) return null;
     }
 
     // G-4：回收站的红色高危确认。方案 §2.2 G-4 的三条要求在这里兑现两条：
@@ -1509,10 +1504,7 @@
           '取消',
           '这是不可逆操作：清空回收站不经过 Trim 的删除备份，也没有回收站可再还原。'
         );
-        if (!ok) {
-          finishClean();
-          return;
-        }
+        if (!ok) return null;
       }
     }
 
@@ -1531,10 +1523,7 @@
         '取消',
         '清单截断意味着确认时看到的文件数少于将要清理的文件数；执行后请以日志与实测释放量为准。'
       );
-      if (!ok) {
-        finishClean();
-        return;
-      }
+      if (!ok) return null;
     }
 
     // v3.3.4：清理前占用检测——被占用的文件会清理失败，提前告知并给用户处置选择。
@@ -1546,13 +1535,9 @@
     const lockDecision = await offerCloseLocked(lockIds);
     if (lockDecision === 'aborted') {
       // 确认件缺席（信号与提示都在 offerCloseLocked 内），与用户取消同姿势收尾
-      finishClean();
-      return;
+      return null;
     }
-    if (lockDecision === 'cancel') {
-      finishClean();
-      return;
-    }
+    if (lockDecision === 'cancel') return null;
     if (lockDecision && lockDecision.skipIds) abandonIds = lockDecision.skipIds;
 
     const allItems = Array.from(selectedIds)
@@ -1571,6 +1556,29 @@
     );
     // 回收站是单独的不可逆动作：只要它在场，force 就为真（沿用既有「有确认过就带 force」口径）
     const force = (highRisk.length > 0 || mediumRisk.length > 0 || recycleItems.length > 0);
+    // 确认段到此为止：交出去的就是「用户已经逐档看过并同意的那份计划」。
+    return { allItems, regularItems, fileCleanItems, recycleItems, force, explorerPickIds };
+  }
+
+  async function clean() {
+    if (isCleaning || confirmInFlight || selectedIds.size === 0) return;
+    confirmInFlight = true;
+    let plan = null;
+    try {
+      plan = await confirmCleanPlan();
+    } catch (e) {
+      // 确认件自己挂了（modal IPC reject / 确认件缺失）：如实给一条出口，不再让按钮无声失灵
+      window.app?.toast?.('error', '清理确认流程中断：' + ((e && e.message) || e));
+    } finally {
+      confirmInFlight = false;
+    }
+    if (!plan) return;
+    const { allItems, regularItems, fileCleanItems, recycleItems, force, explorerPickIds } = plan;
+    // P1-7：busy 一经置起，到下面执行段 `try` 之间**一个 await 都不许有**
+    // （`tools/check-async-exits.mjs` 的 busy-window 判据钉的就是这条）。
+    isCleaning = true;
+    setCleaningBtn(true);
+    updateUI();
     // v3.3.0（用户裁定）：执行选项 UI 已移除，固定语义——常规清理**不进回收站、直接永久删**。
     // 审查 v2-M20 订正：后半句原先写「回收站优先删除逻辑仍在主进程 trashOrUnlink 内」，那是
     // Electron 轨的事实；本轨（Tauri/Rust）没有 trashOrUnlink，`toRecycle=false` 使
@@ -1579,7 +1587,6 @@
     // 2026-10-04 审计 §5.5：force 是载荷兼容残留——「PS 闸」已随 S3 纯原生删除，
     // 主进程对 force 无任何判定语义（只进日志对账）。risk 确认弹窗的真实用途是
     // D10 分级告知；值照传只为不破坏 CHANNEL_MAP 载荷键。
-    // （值本身在 :1272 处按「高风险 ∪ 中风险 ∪ 回收站」现算，这里不再重算。）
     const toRecycle = false;
     const autoRebuild = true;
     setProgress(0, '开始清理...');
@@ -2491,23 +2498,27 @@
     });
     ctrl.footer.querySelector('[data-role="close"]').addEventListener('click', () => ctrl.close());
     ctrl.footer.querySelector('[data-role="revoke"]').addEventListener('click', async () => {
-      // 撤回是**安全方向**（阻止删除、文件保留），走黄色确认即可；红色留给登记（永久删）。
-      const ok = await window.app?.confirmWarning(
-        '撤回重启后删除',
-        `将把 ${pendingN} 个仍挂起的登记从系统中摘除：这些文件不会被删除，保持原样。已被重启消费或文件已不在的条目会一并从清单清除。`,
-        '撤回全部',
-        '取消',
-        '撤回需要管理员权限（系统重启队列只允许管理员修改）；未提权时会失败且不动清单。'
-      );
-      if (!ok) return;
+      // P1-7（F4a1 同族）：旧写法只有 IPC 那一步在 try 里，**第一个 await（确认件）在外面** ——
+      // `window.app` 在但 `confirmWarning` 缺失时 `window.app?.confirmWarning(...)` 是直接
+      // 调用 undefined，抛 TypeError 变成 unhandled rejection；用户看到的是「点撤回没反应」，
+      // 而这正是 AGENTS 例外 B「重启前可撤回」的唯一前端出口。整段收进一个 try 才有出口。
       try {
+        // 撤回是**安全方向**（阻止删除、文件保留），走黄色确认即可；红色留给登记（永久删）。
+        const ok = await window.app?.confirmWarning(
+          '撤回重启后删除',
+          `将把 ${pendingN} 个仍挂起的登记从系统中摘除：这些文件不会被删除，保持原样。已被重启消费或文件已不在的条目会一并从清单清除。`,
+          '撤回全部',
+          '取消',
+          '撤回需要管理员权限（系统重启队列只允许管理员修改）；未提权时会失败且不动清单。'
+        );
+        if (!ok) return;
         const rr = await window.api.uninstall.pendingRevoke();
         if (!rr || !rr.success) throw new Error((rr && rr.message) || '撤回失败');
         window.app?.toast('success', `已撤回 ${(rr.data && rr.data.revoked) || 0} 项登记，相关文件不会被删除`);
         ctrl.close();
         refreshPendingBadge();
       } catch (e) {
-        window.app?.toast('error', '撤回失败：' + ((e && e.message) || e));
+        window.app?.toast('error', '撤回未完成：' + ((e && e.message) || e));
       }
     });
   }

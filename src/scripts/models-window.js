@@ -307,17 +307,26 @@
         // 护栏就变成了骚扰（与「不可逆动作才确认」同一条原则）。
         const prevKey = String((models[key] || {}).apiKey || '').trim();
         const newKey = String(cfg.apiKey || '').trim();
+        // P1-7：确认件这一步原先在 try **之外** —— selfConfirm 的 Promise reject 会直接变成
+        // unhandled rejection，用户看到「点保存没反应」。现在确认段自己带出口，拒了就如实
+        // 记一条并停手（不带着一个不确定的 `go` 继续往下写密钥）。
         if (prevKey && newKey && newKey !== prevKey) {
-          const go = await selfConfirm({
-            title: `覆盖「${MODEL_META[key].name}」的密钥`,
-            message: `将用新密钥替换已保存的密钥。\n\n覆盖后，依赖旧密钥的联网功能会立即改用新密钥，旧密钥无法在本应用内找回。`,
-            okText: '覆盖保存',
-            danger: true,
-            // F4b-M06：这里的隐私承诺必须与同页机制一致。旧文案「密钥不会离开本机」与
-            // 本窗第 3 行的「校验会把 Key 发往所填接口地址」直接冲突（同一对话框两半互斥），
-            // 而接口地址允许 http://，链路可明文——不可逆动作的决策点不给错承诺。
-            hint: '密钥只发送给上面填写的接口地址，不写入日志、也不上传到其它地方。接口地址填 http:// 时，密钥会明文经过网络链路。'
-          });
+          let go;
+          try {
+            go = await selfConfirm({
+              title: `覆盖「${MODEL_META[key].name}」的密钥`,
+              message: `将用新密钥替换已保存的密钥。\n\n覆盖后，依赖旧密钥的联网功能会立即改用新密钥，旧密钥无法在本应用内找回。`,
+              okText: '覆盖保存',
+              danger: true,
+              // F4b-M06：这里的隐私承诺必须与同页机制一致。旧文案「密钥不会离开本机」与
+              // 本窗第 3 行的「校验会把 Key 发往所填接口地址」直接冲突（同一对话框两半互斥），
+              // 而接口地址允许 http://，链路可明文——不可逆动作的决策点不给错承诺。
+              hint: '密钥只发送给上面填写的接口地址，不写入日志、也不上传到其它地方。接口地址填 http:// 时，密钥会明文经过网络链路。'
+            });
+          } catch (e) {
+            log(key, '覆盖密钥确认流程中断，未做改动：' + ((e && e.message) || e), 'error');
+            return;
+          }
           if (!go) {
             log(key, '用户取消覆盖密钥，未做改动', 'info');
             return;

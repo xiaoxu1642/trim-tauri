@@ -21,8 +21,40 @@ export function blankNonCode(text, lang = 'rs') {
   const isRs = lang === 'rs';
   let i = 0;
   const n = text.length;
+  // JS 正则字面量的上下文判据：`/` 到底是「新正则开头」还是「除号/注释」。
+  // 没有这一条时，`!/^https?:\/\//i.test(x)` 里的 `//`（其实是转义斜杠的一部分）会被当成
+  // 行注释，把该行后半段（含结尾的 `{`）一起抹掉 ⇒ 后面的 `}` 变成「多出来的闭合括号」，
+  // skipBraces 提前收口，函数体被切短 —— 真实存在的 `try` 就此看不见（B3 在
+  // `check-async-exits` 上实测到，models-window.js 的保存 handler 被误报成无出口）。
+  const REGEX_PREV = '(,=:[!&|?{;+-*/%^~<>';
+  const KEYWORD_BEFORE = /(?:^|[^\w$])(return|typeof|case|in|of|new|delete|void|instanceof|do|else|yield|await)\s*$/;
+  // 前一个「有意义字符」：随扫描推进，不回头找 —— 回头扫会被抹白的字符串/注释骗过
+  // （`x = "abc" / 2` 的 `/` 前面会被看成 `=`，于是把除号当正则起点，抹掉一片真代码）。
+  let prev = '';
+  const regexCouldStart = () => {
+    if (!prev) return true;
+    if (/[0-9a-zA-Z_$]/.test(prev)) return KEYWORD_BEFORE.test(text.slice(0, i));
+    if (prev === ')' || prev === ']' || prev === '}') return false; // 值结尾，这是除号
+    return REGEX_PREV.includes(prev);
+  };
   while (i < n) {
     const c = text[i], d = text[i + 1];
+    if (!isRs && c === '/' && d !== '/' && d !== '*' && regexCouldStart()) {
+      let j = i + 1, inClass = false, closed = false;
+      while (j < n) {
+        const e = text[j];
+        if (e === '\\') { j += 2; continue; }
+        if (e === '\n') break; // 正则字面量不跨行
+        if (inClass) { if (e === ']') inClass = false; j++; continue; }
+        if (e === '[') { inClass = true; j++; continue; }
+        if (e === '/') { j++; closed = true; break; }
+        j++;
+      }
+      if (closed) {
+        while (j < n && /[dgimsuyv]/.test(text[j])) j++; // 标志位
+        blank(i, j); i = j; prev = '/'; continue;
+      }
+    }
     if (c === '/' && d === '/') {
       let j = i; while (j < n && text[j] !== '\n') j++;
       blank(i, j); i = j; continue;
@@ -44,13 +76,13 @@ export function blankNonCode(text, lang = 'rs') {
         const close = '"' + '#'.repeat(hashes);
         const at = text.indexOf(close, k + 1);
         const end = at < 0 ? n : at + close.length;
-        blank(i, end); i = end; continue;
+        blank(i, end); i = end; prev = '"'; continue;
       }
     }
     if (c === '"') {
       let j = i + 1;
       while (j < n) { if (text[j] === '\\') { j += 2; continue; } if (text[j] === '"') { j++; break; } if (text[j] === '\n' && !isRs) break; j++; }
-      blank(i, j); i = j; continue;
+      blank(i, j); i = j; prev = '"'; continue;
     }
     if (!isRs && c === '`') {
       let j = i + 1;
@@ -60,12 +92,13 @@ export function blankNonCode(text, lang = 'rs') {
         if (text[j] === '`') { j++; break; }
         j++;
       }
-      blank(i, j); i = j; continue;
+      blank(i, j); i = j; prev = '`'; continue;
     }
     if (isRs && c === "'") {
       const m = /^'(?:\\.|[^'\\\n]){1,2}'/.exec(text.slice(i, i + 8));
-      if (m) { blank(i, i + m[0].length); i += m[0].length; continue; }
+      if (m) { blank(i, i + m[0].length); i += m[0].length; prev = "'"; continue; }
     }
+    if (!/\s/.test(c)) prev = c;
     i++;
   }
   return out.join('');

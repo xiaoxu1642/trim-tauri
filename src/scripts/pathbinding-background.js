@@ -152,33 +152,47 @@
       bodyEl.querySelectorAll('.bg-list-del').forEach(btn => {
         btn.addEventListener('click', async (e) => {
           e.stopPropagation();
-          const file = btn.dataset.file;
-          // 审查 M11：本文件此前是「唯一没走红色二次确认的删除出口」（AGENTS §2：删除类
-          // 操作必须红色确认；设置页其它删除入口与 app.js 的约定都遵守了）。
-          // 后端校验虽是全仓最严（直接子项 + 扩展名白名单 + 拒符号链接 + protect），
-          // 但误触即删掉用户自备素材这件事本身不该靠后端兜。
-          const name = String(file).split('\\').pop();
-          const ok = await window.app?.confirmDanger?.(
-            '删除背景图片',
-            `将删除「${name}」（移入回收站，可在回收站还原）。`,
-            '删除',
-            '取消',
-            '导入的图片被删除后，若它正被用作应用内渐变之外的自定义背景，背景会随即失效。'
-          );
-          if (!ok) return;
-          const resp = await window.api?.appearance?.deleteBg?.(file);
-          if (resp && resp.success === false) {
-            window.app?.toast?.('error', '删除失败：' + (resp.message || '未知原因'));
-            return;
+          // P1-7（F4c-M01）：外层那条 `.then(...).catch(...)` 链**管不到这里** —— 事件
+          // handler 是被浏览器另行调用的独立 Promise，它的 reject 不会回流到渲染链的 catch。
+          // 确认件与 deleteBg 两个 await 必须有自己的出口，否则「点删除没反应」无从归因。
+          try {
+            const file = btn.dataset.file;
+            // 审查 M11：本文件此前是「唯一没走红色二次确认的删除出口」（AGENTS §2：删除类
+            // 操作必须红色确认；设置页其它删除入口与 app.js 的约定都遵守了）。
+            // 后端校验虽是全仓最严（直接子项 + 扩展名白名单 + 拒符号链接 + protect），
+            // 但误触即删掉用户自备素材这件事本身不该靠后端兜。
+            const name = String(file).split('\\').pop();
+            // P1-7：`window.app?.confirmDanger?.(...)` 在确认件缺失时返回 undefined，
+            // 旧写法会把它当成「用户点了取消」静默 return —— 删除动作没发生，但用户看到的
+            // 仍是「点了没反应」。判据要分清「方法不存在」与「用户拒绝」，前者必须报出来。
+            if (typeof window.app?.confirmDanger !== 'function') {
+              window.app?.toast?.('error', '确认组件不可用，已取消删除（未做任何改动）');
+              return;
+            }
+            const ok = await window.app.confirmDanger(
+              '删除背景图片',
+              `将删除「${name}」（移入回收站，可在回收站还原）。`,
+              '删除',
+              '取消',
+              '导入的图片被删除后，若它正被用作应用内渐变之外的自定义背景，背景会随即失效。'
+            );
+            if (!ok) return;
+            const resp = await window.api?.appearance?.deleteBg?.(file);
+            if (resp && resp.success === false) {
+              window.app?.toast?.('error', '删除失败：' + (resp.message || '未知原因'));
+              return;
+            }
+            const ap2 = window.pathbindingAppearance.load();
+            if (ap2.bgPath === file) {
+              delete ap2.bgPath;
+              window.pathbindingAppearance.save(ap2);
+              crossfadeBg('--app-bg-fade', () => applyBackground(null));
+              refreshBgCurrent(ap2);
+            }
+            renderBgList(ap2);
+          } catch (err) {
+            window.app?.toast?.('error', '删除背景图片未完成：' + ((err && err.message) || err));
           }
-          const ap2 = window.pathbindingAppearance.load();
-          if (ap2.bgPath === file) {
-            delete ap2.bgPath;
-            window.pathbindingAppearance.save(ap2);
-            crossfadeBg('--app-bg-fade', () => applyBackground(null));
-            refreshBgCurrent(ap2);
-          }
-          renderBgList(ap2);
         });
       });
       }).catch((e) => {
@@ -295,23 +309,29 @@
 
     // 背景图片（初始展示走外观层登记的重放钩子）
     document.getElementById('btnBgImport')?.addEventListener('click', async () => {
-      const resp = await window.api?.appearance?.importBg?.();
-      if (!resp || resp.canceled) return;
-      if (!resp.success) {
-        window.app?.toast('error', (resp && resp.message) || '导入背景图片失败');
-        return;
+      // P1-7（F4c-M01）：整个 handler 原先没有 reject 出口 —— `appearance:import-bg` 是
+      // IPC，通道级失败直接变 unhandled rejection，用户点了没任何反应，还得自己猜是不是坏了。
+      try {
+        const resp = await window.api?.appearance?.importBg?.();
+        if (!resp || resp.canceled) return;
+        if (!resp.success) {
+          window.app?.toast('error', (resp && resp.message) || '导入背景图片失败');
+          return;
+        }
+        const ap2 = window.pathbindingAppearance.load();
+        ap2.bgPath = resp.data.path;
+        if (ap2.bgOpacity == null) ap2.bgOpacity = 85;
+        // 新图新视角：换图即把裁切窗口回到居中，避免沿用上一张的取景
+        delete ap2.bgPosX;
+        delete ap2.bgPosY;
+        window.pathbindingAppearance.save(ap2);
+        crossfadeBg('--app-bg-fade', () => applyBackground(ap2.bgPath, ap2.bgOpacity, ap2.bgPosX, ap2.bgPosY));
+        refreshBgCurrent(ap2);
+        renderBgList(ap2);
+        window.app?.toast('success', '背景图片已导入并应用');
+      } catch (e) {
+        window.app?.toast?.('error', '导入背景图片失败：' + ((e && e.message) || e));
       }
-      const ap2 = window.pathbindingAppearance.load();
-      ap2.bgPath = resp.data.path;
-      if (ap2.bgOpacity == null) ap2.bgOpacity = 85;
-      // 新图新视角：换图即把裁切窗口回到居中，避免沿用上一张的取景
-      delete ap2.bgPosX;
-      delete ap2.bgPosY;
-      window.pathbindingAppearance.save(ap2);
-      crossfadeBg('--app-bg-fade', () => applyBackground(ap2.bgPath, ap2.bgOpacity, ap2.bgPosX, ap2.bgPosY));
-      refreshBgCurrent(ap2);
-      renderBgList(ap2);
-      window.app?.toast('success', '背景图片已导入并应用');
     });
     document.getElementById('btnBgClear')?.addEventListener('click', () => {
       const ap2 = window.pathbindingAppearance.load();

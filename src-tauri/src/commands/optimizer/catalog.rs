@@ -22,11 +22,11 @@ pub(super) const BUILD_SENTINEL: &str = include_str!("../../../ps/optimizer_buil
 
 /// 优化项目录。**装载前先验 ed25519 签名**（M4）。
 ///
-/// fail-closed：验签失败时返回**空 vec**（不是「返回未校验的数据」）。调用方看到
-/// 的是「优化目录不可用」这一条明确事实，而不是「目录里所有项都生效了但一个都没验过」。
-/// 优化项是**会改用户系统**的目录 —— 未校验就装载等于把「数据文件被换掉」这件事
-/// 变成静默生效的劫持面。项数不在注释里写死（随数据层增补必腐烂），要引用就现算
-/// `commands::optimizer::catalog::options` 的返回长度。
+/// fail-closed：验签失败时返回**空 vec**（不是「返回未校验的数据」）。优化项是**会改用户
+/// 系统**的目录 —— 未校验就装载等于把「数据文件被换掉」这件事变成静默生效的劫持面。
+/// 但空 vec 本身说不出这个事实，所以拒因另存一格（[`load_error`]），由调用方如实回传给
+/// 渲染层（P1-6A：验签失败曾被折成「目录是空的」，用户看到的是 0 个优化项而不是失败）。
+/// 项数不在注释里写死（随数据层增补必腐烂），要引用就现算 `options()` 的返回长度。
 pub(super) fn options() -> &'static Vec<Value> {
     static OPTS: OnceLock<Vec<Value>> = OnceLock::new();
     OPTS.get_or_init(|| {
@@ -34,11 +34,20 @@ pub(super) fn options() -> &'static Vec<Value> {
             // 不 panic（panic 会把整个应用带崩，而「优化项不可用」不该阻断磁盘清理等
             // 无关域），也不放行（放行等于没验签）。
             crate::engine::log::write_log("error", &format!("优化目录签名校验失败，已拒绝装载: {reason}"));
+            let _ = LOAD_ERROR.set(Box::leak(reason.into_boxed_str()));
             return Vec::new();
         }
         serde_json::from_str(OPTIONS_JSON).expect("optimizer-runtime.json 合法")
     })
 }
+
+/// 装载被拒的原因；`None` = 目录已正常装载（含「合法装载后确实一条都没有」）。
+/// 必须先调过 [`options`]，否则这一格还没被写过 —— 调用方一律先取目录再取状态。
+pub(super) fn load_error() -> Option<&'static str> {
+    LOAD_ERROR.get().map(|s| s.as_ref())
+}
+
+static LOAD_ERROR: OnceLock<&'static str> = OnceLock::new();
 
 pub(super) fn find_option(id: &str) -> Option<&'static Value> {
     options().iter().find(|o| o.get("id").and_then(|v| v.as_str()) == Some(id))

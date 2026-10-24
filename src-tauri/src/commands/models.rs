@@ -32,7 +32,7 @@ use crate::security::SECRET_MASK;
 use super::aidesc::call_model_text;
 use super::settings::{
     self, clamp_timeout, is_http_url, is_private_api_url, js_string, js_truthy,
-    model_display_name, models_config, normalize_chat_completions_url, scope_engines,
+    model_display_name, models_config, normalize_chat_completions_url,
     truthy_string, AI_MODEL_KEYS, AI_SCOPES, GLOBAL_ENGINE_KEY,
 };
 
@@ -50,20 +50,49 @@ fn cfg_str(cfg: &Value, key: &str) -> Option<String> {
     }
 }
 
-/// `{...current, models, aiScopes: loadScopeEngines()}` + 可选写入来源模块
-fn build_next(current: &Value, models: &Value, scope: &str, key: &str) -> Value {
+/// P1-5：读-改-写的「改」只允许动**本次那一个键**。
+///
+/// 旧形态是 `build_next(current, models, scope, key)` —— 把命令开头 `models_config()`
+/// 读到的整张 models 表盖回盘上。而 `models_save` 在取快照与写入之间要等一次连通性校验
+/// （`call_model_text` 的 spawn_blocking，超时上限由该模型自己的 `timeout` 决定），
+/// 期间另一个模型键的保存早已落盘，被这份旧快照整表顶掉：
+/// 用户看到「两个都保存成功了」，盘上却只剩后写的那一个。`models_set_scope` 同病，
+/// 吞的是别的槽位。
+///
+/// `current` 由 `settings::update_settings` 在锁内给出（= 盘上最新值），本函数只在它上面
+/// 改 `models[key]` 与（scope 命中槽位时）`aiScopes[scope]`，其余键原样保留。
+/// 同一 key / 同一 slot 的并发允许后写者胜 —— 方案 P1-5 的验收边界就是这一条。
+///
+/// 返回新值而不是收 `&mut`：与本仓其余读-改-写闭包同姿势（盘上现值先拷进局部变量、
+/// 改完再 `*next =`，见 `fonts.rs` 三处与 `settings.rs` 的 `update_settings` 调用），
+/// 不新造第三种写法。
+/// `entry` 为 `None` 时只动槽位（`models_set_scope` 只要写 `aiScopes[slot]`，
+/// 不许顺手往 models 里塞一个字符串）。
+/// `slot` 为 `None` 时不动槽位 —— 是否算「一个真槽位」由调用方判：`models_save` 只在
+/// scope 命中 `AI_SCOPES` 时给 `Some`，`models_set_scope` 的 slot 已经过 `GLOBAL_ENGINE_KEY`
+/// 兜底，恒给 `Some`（判据留在调用方，本函数不猜语义）。
+fn apply_model_edit(current: &Value, key: &str, entry: Option<&Value>, slot: Option<&str>) -> Value {
     let mut next = current.clone();
-    if let Some(map) = next.as_object_mut() {
-        map.insert("models".into(), models.clone());
-        let mut scopes = scope_engines();
-        if AI_SCOPES.contains(&scope) {
-            if let Some(sm) = scopes.as_object_mut() {
-                sm.insert(scope.to_string(), json!(key));
-            }
+    let Some(map) = next.as_object_mut() else { return next };
+    if let Some(e) = entry {
+        let models = map.entry("models").or_insert_with(|| json!({}));
+        if let Some(m) = models.as_object_mut() {
+            m.insert(key.to_string(), e.clone());
         }
-        map.insert("aiScopes".into(), scopes);
+    }
+    if let Some(s) = slot {
+        let scopes = map.entry("aiScopes").or_insert_with(|| json!({}));
+        if let Some(sm) = scopes.as_object_mut() {
+            sm.insert(s.to_string(), json!(key));
+        }
     }
     next
+}
+
+/// `models_save` 的 scope ⇒ 槽位：只有命中模块槽位表才算一个槽，缺省/非法值不写
+/// （与退役前的 `build_next` 同口径）。
+fn save_slot(scope: &str) -> Option<&str> {
+    if AI_SCOPES.contains(&scope) { Some(scope) } else { None }
 }
 
 /// models:save — 保存单个模型项（含连通性校验，落盘携带密钥的配置）
@@ -167,9 +196,9 @@ pub async fn models_save<R: tauri::Runtime>(
             }
         }
         // v4 组 1：读-改-写收口 —— update_settings 内部的「最新盘上值」替代旧 current 克隆
+        let touched = models.get(&key).cloned().unwrap_or_else(|| json!({}));
         let saved = settings::update_settings(|next| {
-            let built = build_next(next, &models, scope.as_deref().unwrap_or(""), &key);
-            *next = built;
+            *next = apply_model_edit(next, &key, Some(&touched), save_slot(scope.as_deref().unwrap_or("")));
             Ok(())
         })
         .is_ok();
@@ -214,9 +243,9 @@ pub async fn models_save<R: tauri::Runtime>(
         }
     }
     // v4 组 1：读-改-写收口（同上）
+    let touched = models.get(&key).cloned().unwrap_or_else(|| json!({}));
     let saved = settings::update_settings(|next| {
-        let built = build_next(next, &models, scope.as_deref().unwrap_or(""), &key);
-        *next = built;
+        *next = apply_model_edit(next, &key, Some(&touched), save_slot(scope.as_deref().unwrap_or("")));
         Ok(())
     })
     .is_ok();
@@ -264,16 +293,12 @@ pub fn models_set_scope<R: tauri::Runtime>(
         .as_deref()
         .filter(|s| AI_SCOPES.contains(s))
         .unwrap_or(GLOBAL_ENGINE_KEY);
-    let mut scopes = scope_engines();
-    if let Some(map) = scopes.as_object_mut() {
-        map.insert(slot.to_string(), json!(key));
-    }
-    // v4 组 1：读-改-写收口（同上）
+    // P1-5：旧写法先 `scope_engines()` 取整张快照、再在闭包里 `insert("aiScopes", 整块)`
+    // —— 别的槽位被这份快照整表顶掉。现在只在锁内的盘上最新值上改**本次那一个槽**，
+    // 写入口径与 models_save 同一条（apply_model_edit 的 entry=None 分支）。
+    let slot_owned = slot.to_string();
     let ok = settings::update_settings(|next| {
-        let Some(map) = next.as_object_mut() else {
-            return Err("设置结构异常".into());
-        };
-        map.insert("aiScopes".into(), scopes);
+        *next = apply_model_edit(next, &key, None, Some(slot_owned.as_str()));
         Ok(())
     })
     .is_ok();
@@ -433,4 +458,68 @@ pub fn models_close_window<R: tauri::Runtime>(window: WebviewWindow<R>) -> Resul
         log::write_log("warn", &format!("关闭「大模型管理」窗口失败: {e}"));
     }
     Ok(json!({ "success": true }))
+}
+#[cfg(test)]
+mod p1_5_concurrency_tests {
+    use super::*;
+
+    /// 并发保存两个模型键：A 的快照是「校验开始前」读的那张，B 在校验期间落盘。
+    /// 旧 `build_next` 在这里会把整张 A 快照盖回去，B 那一键就此消失。
+    /// 判红自证：把 `apply_model_edit` 的 `entry` 分支改回
+    /// `map.insert("models", models_snapshot.clone())`（整表替换）⇒ 本用例红。
+    #[test]
+    fn 两个模型键并发保存互不吞() {
+        let 盘上最新 = json!({
+            "models": { "metaso": { "model": "m", "verified": true }, "xiaoce": { "model": "n" } },
+            "aiScopes": { "global": "metaso" },
+        });
+        // A 在校验前读到的旧快照（没有 B 那一键）
+        let a_旧快照 = json!({ "metaso": { "model": "m", "verified": true } });
+        let mut 模拟盘 = 盘上最新.clone();
+        // B 先落盘（用同一把写入口径，只是另一个键）
+        模拟盘 = apply_model_edit(&模拟盘, "xiaoce", Some(&json!({ "model": "n", "verified": true })), None);
+        // A 的校验这时才回来，拿着旧快照写
+        模拟盘 = apply_model_edit(&模拟盘, "metaso", Some(a_旧快照.get("metaso").unwrap()), None);
+
+        let models = 模拟盘["models"].as_object().unwrap();
+        assert!(models.contains_key("xiaoce"), "B 那一键被 A 的旧快照吞掉了");
+        assert!(models.contains_key("metaso"), "A 自己的键必须写入");
+        assert_eq!(models.len(), 2, "不得凭空多键或少键: {models:?}");
+        // 无关字段必须整块保住
+        assert_eq!(模拟盘["aiScopes"]["global"], json!("metaso"), "aiScopes 不得被顺手改掉");
+    }
+
+    /// 并发设两个槽位：A 设 optimizer、B 设 aidesc，两个槽都必须在。
+    /// 判红自证：把槽位分支改回「取整张 aiScopes 快照再整块 insert」⇒ 本用例红。
+    #[test]
+    fn 两个槽位并发设置互不吞() {
+        let mut 盘 = json!({ "models": {}, "aiScopes": { "global": "metaso" } });
+        盘 = apply_model_edit(&盘, "siliconflow", None, Some("aidesc"));
+        盘 = apply_model_edit(&盘, "metaso", None, Some("optimizer"));
+        let scopes = 盘["aiScopes"].as_object().unwrap();
+        assert_eq!(scopes.get("aidesc"), Some(&json!("siliconflow")));
+        assert_eq!(scopes.get("optimizer"), Some(&json!("metaso")));
+        assert_eq!(scopes.get("global"), Some(&json!("metaso")), "没被点名的槽必须原样保留");
+    }
+
+    /// 边界三条：scope 不是真槽位时不动 aiScopes；entry=None 时不往 models 塞字符串；
+    /// models/aiScopes 尚不存在时按需建出（首次保存路径）。
+    /// 判红自证：删掉 `save_slot` 的 AI_SCOPES 过滤 ⇒ 第一条红；
+    /// 把 `if let Some(e)` 的守卫去掉 ⇒ 第二条红。
+    #[test]
+    fn 未点名的键与非法槽位一律不动() {
+        let base = json!({ "models": { "metaso": { "model": "m" } }, "aiScopes": { "global": "metaso" } });
+        let out = apply_model_edit(&base, "metaso", Some(&json!({ "model": "m2" })), save_slot("随便一个不是槽位的串"));
+        assert_eq!(out["aiScopes"], base["aiScopes"], "非法 scope 不得写 aiScopes");
+        assert_eq!(out["models"]["metaso"]["model"], json!("m2"));
+
+        let out = apply_model_edit(&base, "metaso", None, Some("global"));
+        assert_eq!(out["models"]["metaso"]["model"], json!("m"), "entry=None 不得改 models");
+        assert!(out["models"]["metaso"].is_object(), "models 里不许出现字符串条目");
+
+        let 空 = json!({});
+        let out = apply_model_edit(&空, "metaso", Some(&json!({ "model": "m" })), Some("global"));
+        assert_eq!(out["models"]["metaso"]["model"], json!("m"), "首次保存必须建出 models 段");
+        assert_eq!(out["aiScopes"]["global"], json!("metaso"), "首次保存必须建出 aiScopes 段");
+    }
 }

@@ -839,7 +839,24 @@ pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
             row
         })
         .collect();
-    json!({ "success": true, "data": rows })
+    catalog_response(load_error(), &rows)
+}
+
+/// P1-6A 的回执形状（纯函数：真仓与合成对照共用同一实现）。
+///
+/// 「目录验签被拒」与「目录合法装载后确实一条没有」在旧回执里同为
+/// `success:true, data:[]` —— 渲染层于是显示「没有可优化的项」，用户以为系统很干净，
+/// 实际是劫持面被静默吞掉。两条必须结构上可分辨。
+fn catalog_response(load_err: Option<&str>, rows: &[Value]) -> Value {
+    match load_err {
+        Some(reason) => json!({
+            "success": false,
+            "code": "optimizer-catalog-unverified",
+            "message": format!("优化目录验签未通过，已拒绝装载：{reason}"),
+            "data": [],
+        }),
+        None => json!({ "success": true, "data": rows }),
+    }
 }
 
 /// optimizer:touch-recent —— 记一次「最近使用」（E10）
@@ -1134,4 +1151,33 @@ pub async fn optimizer_stale_dismiss<R: Runtime>(window: WebviewWindow<R>, ids: 
         }
     }
     json!({ "success": true, "data": { "dismissed": n } })
+}
+
+#[cfg(test)]
+mod p1_6a_catalog_response_tests {
+    use super::*;
+
+    /// P1-6A：验签被拒必须回 `success:false` + 稳定错误码，而不是「成功 + 空列表」。
+    /// 判红自证：把 `catalog_response` 的 `Some` 分支并回 `None` 分支 ⇒ 本用例红。
+    #[test]
+    fn 目录被拒与目录合法为空是两种回执() {
+        let 被拒 = catalog_response(Some("签名不匹配"), &[]);
+        assert_eq!(被拒["success"], json!(false), "验签失败不得报成功: {被拒}");
+        assert_eq!(被拒["code"], json!("optimizer-catalog-unverified"), "错误码必须稳定，前端与门禁都按它判读");
+        assert!(被拒["message"].as_str().unwrap_or("").contains("签名不匹配"), "拒因必须带上来: {被拒}");
+
+        let 合法空 = catalog_response(None, &[]);
+        assert_eq!(合法空["success"], json!(true), "合法装载后确实 0 项仍是成功（不得被顺手改成失败）");
+        assert!(合法空["code"].is_null(), "成功支不带错误码");
+        assert_ne!(被拒["success"], 合法空["success"], "两条必须结构上可分辨——这正是本项要修的病根");
+    }
+
+    /// 有目录项时走成功支，且 data 逐项带上来（防止把「有数据」也折进拒因支）。
+    /// 判红自证：`None` 分支漏传 rows ⇒ 本用例红。
+    #[test]
+    fn 正常目录仍回完整列表() {
+        let rows = vec![json!({ "id": "a" }), json!({ "id": "b" })];
+        let out = catalog_response(None, &rows);
+        assert_eq!(out["data"].as_array().map(|v| v.len()), Some(2));
+    }
 }

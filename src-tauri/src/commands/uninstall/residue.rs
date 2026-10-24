@@ -580,7 +580,8 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
     }
     let hive_str = hive_str.to_string();
     let key_path = key_path.to_string();
-    let findings = tauri::async_runtime::spawn_blocking(move || unsafe {
+    // P1-6D：阻塞池任务的 JoinError（内部 panic / 被取消）不是「这个程序没有残留」。
+    let scan = tauri::async_runtime::spawn_blocking(move || unsafe {
         use windows::Win32::System::Registry::{RegOpenKeyExW, RegCloseKey, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
         // U-4（拍板 2026-09-28）：Appx 残留口径=Remove-AppxPackage 后
         // %LOCALAPPDATA%\Packages\<PFN> 的应用数据遗留应用数据。此前「不参与残留扫描」，
@@ -932,9 +933,21 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
         // 这一支在生产里恒不命中，护栏只剩注释。
         fill_missing_buckets(&mut findings);
         (findings, display_name, notes)
-    })
-    .await
-    .unwrap_or((Vec::new(), String::new(), Vec::new()));
+    });
+    let findings = match scan.await {
+        Ok(v) => v,
+        Err(e) => {
+            // P1-6D（与 execute 侧同口径）：任务异常必须如实失败。旧写法 `.unwrap_or(空)`
+            // 回的是 `success:true` + 空清单，用户与调用方都把「扫描崩了」读成「这软件干净」，
+            // 而这份空集合随后就是本次会话的可执行快照 —— 静默假绿比报错更难发现。
+            crate::engine::log::write_log("error", &format!("残留扫描后台任务异常: {e}"));
+            return json!({
+                "success": false,
+                "code": "residue-scan-failed",
+                "message": format!("残留扫描未完成（后台任务异常：{e}），本次没有可执行候选"),
+            });
+        }
+    };
 
     // 快照落槽：执行只认这份集合（四类都进同一个 "app" 桶）
     let (finding_list, app_name, mut notes) = findings;

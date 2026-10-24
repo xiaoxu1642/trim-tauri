@@ -79,8 +79,6 @@
       : `当前：${settings.family}`;
     // M-9（2026-10-03 L3）：原生 title 延迟约 1s、样式不受 ds.css 控制、键盘不可达。
     // data-tip 由 ds.js 委托在 pointerover/focusin 时即时显示，键盘聚焦也看得到。
-    // 原先这里按 settings.family === 'MiSans' 分岔给「无级连续调节」文案，随 MiSans 一并删除；
-    // 导入的可变字体一直走的是下面这条提示，所以语义不变、不留死分支。
     modal.weightInput.setAttribute('data-tip', '系统字体受自身字重限制，滑块按最接近的可用字重渲染');
   }
 
@@ -117,8 +115,11 @@
       settings.weight = Math.min(1000, Math.max(100, Number(modal.weightInput.value) || WEIGHT_BASE));
       settings.size = Math.min(24, Math.max(12, Number(modal.sizeInput.value) || SIZE_BASE));
       applyToRoot();
-      await saveConfig();
-      window.app?.toast('success', `已应用：${settings.family} · 字重 ${settings.weight} · 字号 ${settings.size}px`);
+      // P1-7（F4c-M01）：IPC reject 必须有出口
+      try {
+        await saveConfig();
+        window.app?.toast('success', `已应用：${settings.family} · 字重 ${settings.weight} · 字号 ${settings.size}px`);
+      } catch (e) { window.app?.toast('error', '应用失败：' + ((e && e.message) || e)); }
     });
     // 「恢复默认」：把预览区和设置都改回默认（尚未全局应用，需再点「应用」）
     modal.resetBtn.addEventListener('click', () => {

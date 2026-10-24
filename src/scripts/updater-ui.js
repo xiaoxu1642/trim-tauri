@@ -568,6 +568,10 @@
       return;
     }
     pendingManual = true;
+    // P1-6F：每次检查开始先把签名态归零。`state.sigFailed` 只由回流事件置位，
+    // 不重置的话「上一次签名被拒、这一次只是网络抖动」会把弹窗继续渲染成
+    // 「已阻止（签名校验未通过）」并挂着手动下载出口 —— 那是把用户引去绕开验签。
+    state.sigFailed = false;
     let res = null;
     try {
       res = await window.api.updater.check();
@@ -590,6 +594,10 @@
       // error 事件通常已回流；极端情况下回流丢失时兜底提示（已在 error 态则不重复渲染）
       state.phase = 'error';
       state.message = res.error || '检查更新失败';
+      // P1-6F：兜底支同样要读 `sigFailed`（Rust 的 check 返回值带这一位，
+      // `updater.rs` 的 `{ ok:false, error, sigFailed }`），否则回流丢失时签名被拒
+      // 会被降级成一句普通失败，签名说明与手动下载出口都不出现。
+      state.sigFailed = res.sigFailed === true;
       activeManual = true; // 手动触发的失败需要显性弹窗
       pendingManual = false;
       render();
