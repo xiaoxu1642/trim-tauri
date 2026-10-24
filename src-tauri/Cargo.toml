@@ -56,6 +56,11 @@ tauri-plugin-updater = "2"
 # updater 的 endpoints 参数类型是 url::Url，必须直接引；该 crate 本就在依赖树内
 # （tauri / reqwest 传递依赖，实测解析为 2.5.8），提为直接依赖不增加任何编译成本。
 url = "2"
+# P1-8：`tokio::time::timeout` 给 updater 的 **check** 单独设时限。插件 builder 的 timeout
+# 会一路传进 `download()`，check 的 20s 挪到外层后必须有个定时器；运行器本来就是 tauri 带的
+# tokio 1.x 运行时，这里只把 crate 提为直接依赖并开最小的 `time` feature（同 `url` 的口径：
+# 已在依赖树内，实测解析为 1.53.1，不增加编译成本）。只此一处用 tokio API。
+tokio = { version = "1", features = ["time"] }
 # D4 液态玻璃材质映射：mica / tabbed(mica-alt) / acrylic
 # 官方 tauri-apps 维护（仓库名 tauri-plugin-vibrancy，Rust crate 名 window-vibrancy）
 window-vibrancy = "0.8"

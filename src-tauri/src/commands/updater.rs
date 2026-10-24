@@ -244,7 +244,10 @@ async fn check_once<R: Runtime>(
         .updater_builder()
         .endpoints(vec![endpoint])
         .map_err(|e| e.to_string())?
-        .timeout(std::time::Duration::from_millis(CHECK_TIMEOUT_MS))
+        // P1-8：builder **不设** timeout。插件 2.12.0 把这个 timeout 存进 `Updater`，
+        // `build()` 再原样交给 `Update`，而 `download()` 用的是同一个值 —— 20s 对一次
+        // manifest 检查合理，对整包（几十 MB）下载不合理：慢线路必然在第 20 秒被掐断，
+        // 用户看到的是「下载失败」而不是「我网慢」。check 的 20s 由下面单独判。
         // v2-L4P-21（A-3）：插件的 Windows install_inner 末尾是 `std::process::exit(0)`
         // —— 绕过 Tauri 的 RunEvent::Exit，`on_app_exit` 的 log flush / 私有 tmp 清扫 /
         // realtime 停机全部跳过。on_before_exit 是插件留给这条退出路径的唯一钩子，
@@ -252,7 +255,12 @@ async fn check_once<R: Runtime>(
         .on_before_exit(|| crate::on_app_exit())
         .build()
         .map_err(|e| e.to_string())?;
-    updater.check().await.map_err(|e| e.to_string())
+    // 超时文案刻意不提「签名」：`is_signature_failure` 按错误串分类，写成签名类会把一次
+    // 网络超时冒充验签失败，前端据此挂出「前往 Releases 手动下载」的绕验签出口（P1-8 验收）。
+    tokio::time::timeout(std::time::Duration::from_millis(CHECK_TIMEOUT_MS), updater.check())
+        .await
+        .map_err(|_| format!("线路检查超时（{} ms 内未返回清单）", CHECK_TIMEOUT_MS))?
+        .map_err(|e| e.to_string())
 }
 
 /// 多线路容灾检查（对照上游 `safeCheck`）。`silent=true` 时失败不打扰用户。

@@ -418,6 +418,25 @@ fn is_ipv4(host: &str) -> Option<[u32; 4]> {
 /// 缩写形态（n<4）都退化成 `0.x.y.z`。方向上是**过度拒绝**（`0/8` 被判私有 ⇒ 拒），
 /// 不构成放行绕过，但注释与实现相反、`http://8.8.8` 这类公网缩写被误拒，而且真正吃字节
 /// 的下游逻辑会拿到另一个 IP。现在按 `inet_aton` 的语义算，并把具体字节写进断言。
+/// host 的字形是否就是「数字型 IPv4 字面量」：1–4 段，每段是纯十进制数字，或 `0x` 前缀
+/// 加十六进制位，且整体含点。含其它字母才算域名。
+///
+/// P1-9 用它做 fail-closed 的落点：`parse_ipv4_aton` 解不出来（段溢出、位数超界、
+/// 空段）时，只要字形是数字 IP 就当私网拒，不再冒充「未知域名」放行。
+fn looks_like_numeric_ip(h: &str) -> bool {
+    let parts: Vec<&str> = h.split('.').collect();
+    if parts.is_empty() || parts.len() > 4 {
+        return false;
+    }
+    parts.iter().all(|p| {
+        if let Some(hex) = p.strip_prefix("0x").or_else(|| p.strip_prefix("0X")) {
+            !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit())
+        } else {
+            !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())
+        }
+    })
+}
+
 fn parse_ipv4_aton(host: &str) -> Option<[u32; 4]> {
     let parts: Vec<&str> = host.split('.').collect();
     if parts.is_empty() || parts.len() > 4 {
@@ -425,22 +444,32 @@ fn parse_ipv4_aton(host: &str) -> Option<[u32; 4]> {
     }
     let mut vals = Vec::with_capacity(parts.len());
     for p in &parts {
-        if p.is_empty() || p.len() > 11 {
+        if p.is_empty() {
             return None;
         }
-        let v = if let Some(hex) = p.strip_prefix("0x").or_else(|| p.strip_prefix("0X")) {
+        // P1-9：这里原先挂着 `p.len() > 11` 的公共长度闸。它不是防 DoS 的那道闸，而是
+        // 直接参与地址语义 —— 带前导 0 的八进制单段最多写到 0o7777777777（= 63.255.255.255），
+        // 于是 127/8、169.254/16、172.16/12、192.168/16、100.64/10、224/4 的 12 字符形态
+        // 全被拒成「不是 IP」，再落到调用方的「未知域名」分支被当公网放行（SSRF 旁路）。
+        // 现在按位宽判：先以 u64 解析，超过 u32 即溢出——那是「数值大到不可能是合法 IP」，
+        // 由调用方按数字字面量 fail-closed，不再冒充域名。纯字符串上限只留给防 DoS，
+        // 不参与地址语义（见 is_private_api_url 的 host 总长闸）。
+        let raw = if let Some(hex) = p.strip_prefix("0x").or_else(|| p.strip_prefix("0X")) {
             if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
                 return None;
             }
-            u32::from_str_radix(hex, 16).ok()?
+            u64::from_str_radix(hex, 16).ok()?
         } else {
             if !p.chars().all(|c| c.is_ascii_digit()) {
                 return None; // 含字母即域名
             }
             let radix = if p.len() > 1 && p.starts_with('0') { 8 } else { 10 };
-            u32::from_str_radix(p, radix).ok()?
+            u64::from_str_radix(p, radix).ok()?
         };
-        vals.push(v);
+        if raw > u64::from(u32::MAX) {
+            return None;
+        }
+        vals.push(raw as u32);
     }
     let n = vals.len();
     // 非末段各占一个字节
@@ -544,6 +573,9 @@ fn ipv4_private(o: [u32; 4]) -> bool {
         || (o[0] == 172 && (16..=31).contains(&o[1]))
         || (o[0] == 192 && o[1] == 168)
         || (o[0] == 100 && (64..=127).contains(&o[1])) // CGNAT 100.64/10
+    // P1-9：224/4 组播与 240/4 保留段（含 255.255.255.255）。这两段不是任何模型服务的
+    // 可路由单播端点，方案把它们列进「八进制单段曾可绕」的样本面，缺一档就是留口子。
+    || o[0] >= 224
 }
 
 /// IPv6 侧私有判定。除逐网段比对外，**6to4 / Teredo / NAT64 一律按私有处理**：前两者把 IPv4
@@ -617,6 +649,12 @@ pub(crate) fn is_private_api_url(raw: &str) -> bool {
     if u.host.is_empty() {
         return true;
     }
+    // P1-9 的防 DoS 闸：超过 DNS 名字总长（253）的 host 既不是合法域名也不可能是合法 IP
+    // 字面量 ⇒ fail-closed。**这条只管长度，不参与地址语义** —— 地址语义的上下界一律走
+    // `parse_ipv4_aton` 的位宽判定，两者混用正是八进制单段旁路的来历。
+    if u.host.len() > 253 {
+        return true;
+    }
     // 审查 M-17（2026-10-03 L4）：全角/兼容折叠字面族。Windows 解析器（getaddrinfo，
     // WinHTTP 同源）对 host 做 NFKC 兼容折叠——`ｌｏｃａｌｈｏｓｔ`/`localhost。`/`１２７．０．０．１`
     // 实测全部解析到回环/私网，而下面全部字面判定只认 ASCII，这类 host 会逐级漏到
@@ -636,6 +674,12 @@ pub(crate) fn is_private_api_url(raw: &str) -> bool {
     }
     if let Some(o) = is_ipv4(&u.host).or_else(|| parse_ipv4_aton(&u.host)) {
         return ipv4_private(o);
+    }
+    // P1-9：过了 aton 仍解析不出来，但 host 的**字形**就是奔着数字 IP 写的（纯数字/点/
+    // 0x 段）⇒ 那是畸形或溢出形态，不许退回去落进「未知域名」被当公网放行。
+    // 与下面尾点族（v2-L4P-24）同一条判据，只是覆盖面从「带尾点」扩到「全部数字形态」。
+    if looks_like_numeric_ip(host) {
+        return true;
     }
     // v2-L4P-24（A-6）：尾点畸形 IPv4（`127.0.0.1.`、`127.1.`）。Windows socket 解析
     // 会剥掉**一个**尾点后按数字 IP 连接，而上面的解析器认不出 ⇒ 落到「未知域名」
@@ -1341,5 +1385,41 @@ mod tests_private_url {
         for u in ["", "ftp://127.0.0.1/", "http:/x", "not a url", "http:///path"] {
             assert!(is_private_api_url(u), "{u} 应 fail-closed");
         }
+    }
+
+    /// P1-9（R1a-M05）：八进制**单段**长形态曾被段长闸 `p.len() > 11` 拒成「不是 IP」，
+    /// 再落到末尾的「未知域名」分支被当公网放行。11 字符八进制最大只到 63.255.255.255，
+    /// 所以 127/8、172.16/12、192.168/16、169.254/16、100.64/10、224/4 全在绕过面上；
+    /// 10/8 当时拦得住，也一并钉进表防回归。八进制串由 `{:o}` 现算，不手抄数字。
+    ///
+    /// 判红自证：把 `parse_ipv4_aton` 的段长判据改回 `p.is_empty() || p.len() > 11`
+    /// ⇒ 本用例至少 6 条红（10/8 那条仍绿，正是「长度闸只挡住低位网段」的事实）。
+    #[test]
+    fn 八进制单段长形态七网段全部判私() {
+        let oct = |ip: [u8; 4]| {
+            let n = (u32::from(ip[0]) << 24)
+                | (u32::from(ip[1]) << 16)
+                | (u32::from(ip[2]) << 8)
+                | u32::from(ip[3]);
+            format!("http://0{n:o}/")
+        };
+        for (ip, label) in [
+            ([127, 0, 0, 1], "127/8 回环"),
+            ([10, 0, 0, 1], "10/8"),
+            ([172, 16, 0, 1], "172.16/12"),
+            ([192, 168, 1, 1], "192.168/16"),
+            ([169, 254, 1, 1], "169.254/16 链路本地"),
+            ([100, 64, 0, 1], "100.64/10 运营商级 NAT"),
+            ([224, 0, 0, 1], "224/4 组播"),
+        ] {
+            let u = oct(ip);
+            assert!(is_private_api_url(&u), "{label} 的八进制单段 {u} 必须判私（旧长度闸把它放行过）");
+        }
+        // 溢出与畸形数字形态同样不许退回去冒充域名
+        assert!(is_private_api_url("http://09999999999999999999999/"), "八进制段溢出必须 fail-closed");
+        assert!(is_private_api_url("http://0x7fffffff0/"), "hex 段超出 u32 必须 fail-closed");
+        // 反例：公网缩写与真域名不得被新闸误伤
+        assert!(!is_private_api_url("http://8.8.8/"), "公网缩写仍要放行");
+        assert!(!is_private_api_url("https://api.example.com/v1"), "正常域名仍要放行");
     }
 }
