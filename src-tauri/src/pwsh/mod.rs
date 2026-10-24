@@ -25,7 +25,7 @@ use std::os::windows::process::CommandExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::engine::{job::ProcessJob, log, paths};
+use crate::engine::{job::ProcessJob, log, paths, protect};
 
 pub struct PsOutput {
     pub stdout: String,
@@ -1062,6 +1062,17 @@ fn collect_temp_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 
 /// 单个目录的回收执行体（不写日志，便于在一次性沙箱里断言，审查纪律：测试不改系统状态）
 fn prune_temp_scripts_in(dir: &Path, now: std::time::SystemTime, cutoff: Duration) -> usize {
+    // P0-2A（R7-K01 本体）：这两个根先前只判**子项**、没人判根。根被换成 junction 时
+    // `collect_temp_files` 已经在链接另一头枚举，子项各各「普通文件」⇒ 那边别人的旧
+    // `.ps1` 被 `remove_file` 永久删，不经回收站、不经 is_path_protected。
+    // 判定放在执行体而不是入口循环：门禁只认「自己 read_dir 那个函数 + 1 跳内删除」，
+    // 隔两跳的守卫记不上账。日志口径不破纪律——`note_root_skipped` 只在 Rejected 时落一条，
+    // 沙箱根是普通目录 ⇒ Trusted ⇒ 测试路径仍然一行日志都不写。
+    let verdict = protect::inspect_root(dir, Some(std::path::Path::new(&std::env::temp_dir())));
+    if !verdict.is_trusted() {
+        protect::note_root_skipped("临时脚本清扫", dir, &verdict);
+        return 0;
+    }
     let mut files = Vec::new();
     collect_temp_files(dir, 0, &mut files);
     let mut removed = 0;
@@ -1113,6 +1124,12 @@ fn prune_reg_backups(keep_batches: usize) {
     // 从此是两个口径，check-fail-closed 钉住「老根不得出现在裁根名单」。
     let dirs = vec![paths::backup_write_dir(REG_BACKUP_DIR)];
     for dir in dirs {
+        // P0-2A：与 cleanup_temp_scripts 同一道根判定（可信基由路径工厂 data_root_base 给）。
+        let verdict = protect::inspect_root(&dir, paths::data_root_base(&dir).as_deref());
+        if !verdict.is_trusted() {
+            protect::note_root_skipped("注册表备份裁剪", &dir, &verdict);
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };

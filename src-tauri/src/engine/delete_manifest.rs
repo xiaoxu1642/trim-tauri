@@ -124,6 +124,13 @@ fn batch_time_key(name: &str) -> Option<String> {
 /// R6b-M02（v7.2 C07）：排序键改为**解析出的批次时刻**（两种批次号形态都解析），
 /// 文件名只作同刻兜底；解析不出的排到最后（优先保留）并计数告警。
 fn prune_manifests(dir: &Path) {
+    // P0-2A：删除清单是「误删追溯的唯一凭据」，把根换成 junction 后 read_dir 会在链接
+    // 另一头按 `deleted-*.json` 形态挑最旧的投回收站 —— 恰好避开所有子项判据。
+    let verdict = crate::engine::protect::inspect_root(dir, crate::engine::paths::data_root_base(dir).as_deref());
+    if !verdict.is_trusted() {
+        crate::engine::protect::note_root_skipped("删除清单裁剪", dir, &verdict);
+        return;
+    }
     let mut files: Vec<String> = match std::fs::read_dir(dir) {
         Ok(rd) => rd
             .flatten()

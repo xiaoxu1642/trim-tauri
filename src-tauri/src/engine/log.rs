@@ -357,6 +357,13 @@ pub fn export_log(dest: &std::path::Path) -> Result<(), String> {
 /// 启动清理 30 天前日志（当天与文件名不合日期模式的文件不受影响）
 pub fn prune_old_logs() {
     let dir = paths::log_dir();
+    // P0-2A：日志根被换成 junction 时，read_dir 会枚举到链接另一头，那边同名日期形态的
+    // 旧日志会被投进回收站 —— 子项判定（下方 safe 闭包）看不见「根自己就是链接」这件事。
+    let verdict = crate::engine::protect::inspect_root(&dir, paths::data_root_base(&dir).as_deref());
+    if !verdict.is_trusted() {
+        crate::engine::protect::note_root_skipped("日志保留期裁剪", &dir, &verdict);
+        return;
+    }
     let entries = match fs::read_dir(&dir) {
         Ok(e) => e,
         Err(_) => return,

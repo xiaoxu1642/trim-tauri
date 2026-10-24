@@ -691,11 +691,27 @@ pub fn ancestor_reparse_block_reason(p: &str) -> Option<String> {
     if p.is_empty() {
         return None;
     }
+    ancestor_block_reason(std::path::Path::new(p), None)
+}
+
+/// [`ancestor_reparse_block_reason`] 的 `&Path` 内核，同时给 [`inspect_root`] 用作
+/// 「可信基到根」那一段。判据只这一处实现（N6）：字符串壳与根判定都往这里收。
+///
+/// `stop_after` 为 `Some(base)` 时，走到 base 那一级即停（base 自身及其以上由调用方背书，
+/// 不重复观测）；为 `None` 时一直走到文件系统根。路径不存在的那一级继续向上找最近的
+/// 现存祖先，与「新建链合法」口径一致。
+fn ancestor_block_reason(p: &std::path::Path, stop_after: Option<&std::path::Path>) -> Option<String> {
     // 跳过目标自身那一级：自身 reparse 由 validate_mutation_target 既有闸承担，本函数只负责父链。
-    for a in std::path::Path::new(p).ancestors().skip(1) {
+    for a in p.ancestors().skip(1) {
         // 到根即停（根无父级），根级不参与 reparse 观测，理由见上方口径
         if a.parent().is_none() {
             break;
+        }
+        // 走到可信基即停：基以内由调用方（路径工厂）背书，基本身也不做观测
+        if let Some(base) = stop_after {
+            if paths_same(a, base) {
+                break;
+            }
         }
         match std::fs::symlink_metadata(a) {
             Ok(md) => {
@@ -717,6 +733,113 @@ pub fn ancestor_reparse_block_reason(p: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// 两段路径是否同一处：Windows 路径大小写不敏感，且尾部分隔符形态不稳定，
+/// 所以按「大写归一 + 去尾分隔符」的字符串比较，不用 `canonicalize`（它会跟随链接，
+/// 观测层就错了 —— 与本文件 `canonicalize` 只用于别名面核验、不用于 reparse 观测同口径）。
+fn paths_same(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let norm = |p: &std::path::Path| -> String {
+        let s = p.to_string_lossy().to_uppercase();
+        s.trim_end_matches(['\\', '/']).to_string()
+    };
+    norm(a) == norm(b)
+}
+
+/// P0-2A（R7-K01 / 族 F-1「reparse 校验面不全」）：**破坏性枚举的根**级判定结果。
+#[derive(Debug)]
+pub enum RootVerdict {
+    /// 根可信：普通目录，且可信基到根的现存组件链上无 reparse
+    Trusted,
+    /// 根不存在：跳过本轮。不创建、不清扫 —— 裁剪入口没有「顺手建目录」的职责，
+    /// 建出来反而把「别软件删掉的根」变成我们写数据的证据。
+    SkipMissing,
+    /// 根不可信：带中文拒因（自身 reparse / 不是目录 / 父组件 reparse / 元数据读失败）
+    Rejected(String),
+}
+
+impl RootVerdict {
+    pub fn is_trusted(&self) -> bool {
+        matches!(self, RootVerdict::Trusted)
+    }
+
+    /// 拒因/跳过原因（Trusted 返回空串，调用方只在非 Trusted 时取用）。
+    pub fn reason(&self) -> &str {
+        match self {
+            RootVerdict::Trusted => "",
+            RootVerdict::SkipMissing => "根不存在（未创建、不清扫）",
+            RootVerdict::Rejected(r) => r,
+        }
+    }
+}
+
+/// P0-2A：破坏性枚举的**根**必须先过这一道，再 `read_dir`。只判定，不删除。
+///
+/// 治的病根（R7-K01 实测形状）：清扫根 `dirs.push(temp_dir().join("Trim"))` 之后逐
+/// **子项**判 reparse，根自身没人判 —— 根被换成 junction 时 `read_dir` 直接穿透到
+/// 链接另一头，那边的旧文件被 `remove_file` 永久删，不经回收站、不经 `is_path_protected`。
+/// 写侧原语 `engine::paths::temp_script_dir()` 恰恰是对**根**拒 reparse 的，同族两套口径
+/// 在这里并成一条。
+///
+/// 判据（四条，别在调用方各写一份字符串前缀检查）：
+/// 1. 根不存在 → `SkipMissing`；
+/// 2. 从 `trusted_base` **之后**到根的每一级现存组件用 `symlink_metadata` 查 reparse；
+///    `trusted_base` 为 `None` 或未包住该根时，一路查到文件系统根（只会更严，不会放宽）；
+/// 3. 根自身必须是目录且不带 reparse 属性；
+/// 4. 元数据读失败按**拒绝**处理，不按「干净」—— 读不到不等于没链接。
+///
+/// 观测层刻意不用 `canonicalize`：它跟随链接，用它当 reparse 判据等于让被检查对象
+/// 自己出具清白证明。
+///
+/// 残余风险与 P0-4 同口径：字符串路径检查与真实删除之间仍有 TOCTOU 窗口，
+/// 改成句柄相对操作之前只能证明「窗口缩窄」。
+pub fn inspect_root(root: &std::path::Path, trusted_base: Option<&std::path::Path>) -> RootVerdict {
+    if root.as_os_str().is_empty() {
+        return RootVerdict::Rejected("裁剪根为空路径".to_string());
+    }
+    let md = match std::fs::symlink_metadata(root) {
+        Ok(md) => md,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RootVerdict::SkipMissing,
+        Err(e) => {
+            return RootVerdict::Rejected(format!(
+                "裁剪根元数据读取失败，无法证明无链接，本轮跳过：{}（{e}）",
+                root.display()
+            ))
+        }
+    };
+    if is_reparse(&md) {
+        return RootVerdict::Rejected(format!(
+            "裁剪根本身是 reparse 点（junction/链接/占位符），枚举会穿透到链接另一头，本轮跳过：{}",
+            root.display()
+        ));
+    }
+    if !md.is_dir() {
+        return RootVerdict::Rejected(format!(
+            "裁剪根不是目录，本轮跳过：{}",
+            root.display()
+        ));
+    }
+    if let Some(reason) = ancestor_block_reason(root, trusted_base) {
+        return RootVerdict::Rejected(reason);
+    }
+    RootVerdict::Trusted
+}
+
+/// [`inspect_root`] 的统一日志口径：`Rejected` 写一条 warn，`SkipMissing` 静默。
+///
+/// 为什么不把 SkipMissing 也写出来：绝大多数裁剪根在「我们还没写过这类文件」时就不存在，
+/// 每次启动都念一遍是噪音，会把真正的那条（根被换成 junction）淹掉 —— 而方案的判据是
+/// 「不能只进日志」，指的是被拒的根必须有可见回执，不是没写过的根也要报告。
+///
+/// 单独成函数是为了让 14 个裁剪入口不把同一段 `matches!` + `format!` 各抄一遍
+/// （AGENTS §2「三行重复好过早产抽象」的下界：这里是十四行重复）。
+pub fn note_root_skipped(caller: &str, root: &std::path::Path, v: &RootVerdict) {
+    if matches!(v, RootVerdict::Rejected(_)) {
+        crate::engine::log::write_log(
+            "warn",
+            &format!("{caller}：根未通过 reparse 判定，本轮跳过 {}（{}）", root.display(), v.reason()),
+        );
+    }
 }
 
 /// C01（v7.2 `R1d-K01`🔴 / `R2a-M01` / `R3-M03` / `R4-M01` / `R1b-M02`）：
@@ -1885,5 +2008,78 @@ mod tests {
         let err = validate_mutation_target(&bad)
             .expect_err("父级元数据读取失败不得按干净放行");
         assert!(err.contains("无法证明无链接"), "拒因必须点名读失败闸，实得: {err}");
+    }
+
+    /// P0-2A 判据表：四种根形态各钉一次（方案 §2 P0-2A 验收明列的四种）。
+    /// 样本全部复用 Windows 内建 junction，不落盘、不自建链接：
+    /// - `C:\Documents and Settings` 是 MountPoint 联接 → 根自身 reparse；
+    /// - `C:\ProgramData\Application Data` 是嵌套在普通目录里的 junction → 父组件 reparse；
+    /// 本机取不到该形态（异常/精简环境）时显式声明未校验并返回，既不假红也不假绿。
+    /// 判红自证：把 `inspect_root` 的「自身 reparse」分支删掉 ⇒ ①红；把父链调用删掉 ⇒ ②红；
+    /// 把 `NotFound → SkipMissing` 改成 `→ Trusted` ⇒ ③红；④是唯一放行档，收紧判据即红。
+    #[test]
+    fn p0_2a_根判定四档() {
+        use std::path::Path;
+        // ① 根自身是 junction → Rejected，且拒因点名 reparse
+        let link = Path::new(r"C:\Documents and Settings");
+        if std::fs::symlink_metadata(link).is_ok() {
+            match inspect_root(link, None) {
+                RootVerdict::Rejected(r) => assert!(r.contains("reparse"), "拒因要点名 reparse: {r}"),
+                other => panic!("junction 根必须 Rejected，实得 {other:?}"),
+            }
+        } else {
+            eprintln!("SKIP：{link:?} 不可读，根自身 reparse 档未校验");
+        }
+        // ② 根的某级父组件是 junction → Rejected（read_dir 从根开始就会穿透）。
+        //   根必须**已存在**：不存在时先落到 SkipMissing（本来就没有可删的东西），
+        //   所以这里借 `Application Data` 下的真实子目录当根，父链里保留那枚 junction。
+        let under = Path::new(r"C:\ProgramData\Application Data\Microsoft");
+        if std::fs::symlink_metadata(Path::new(r"C:\ProgramData\Application Data")).is_ok() {
+            if !under.exists() {
+                eprintln!("SKIP：{under:?} 不在，父组件 reparse 档未校验");
+            } else {
+                match inspect_root(under, None) {
+                    RootVerdict::Rejected(r) => assert!(r.contains("父级链"), "拒因要点名父链: {r}"),
+                    other => panic!("父组件是 junction 必须 Rejected，实得 {other:?}"),
+                }
+            }
+        } else {
+            eprintln!("SKIP：ProgramData\\Application Data 不可读，父组件 reparse 档未校验");
+        }
+        // ③ 根不存在 → SkipMissing（不创建、不清扫，但也不拒）
+        let drive = env("SystemDrive").trim_end_matches('\\').to_string();
+        let drive = if drive.is_empty() { "C:".to_string() } else { drive };
+        let absent_s = format!(r"{drive}\ProgramData\__trim_p02_absent__");
+        let absent = Path::new(&absent_s);
+        if absent.exists() {
+            eprintln!("SKIP：{absent:?} 已存在，SkipMissing 档未校验");
+        } else {
+            assert!(matches!(inspect_root(absent, None), RootVerdict::SkipMissing));
+        }
+        // ④ 根是普通目录 → Trusted（收紧判据把合法根一起拒掉同样是缺陷）
+        match inspect_root(Path::new(&format!(r"{drive}\ProgramData")), None) {
+            RootVerdict::Trusted => {}
+            other => panic!("普通目录根必须 Trusted，实得 {other:?}"),
+        }
+    }
+
+    /// P0-2A 的可信基口径：`trusted_base` 只缩短上溯长度，不改变结论方向。
+    /// 同一对样本给基与不给基必须得到同一档 —— 否则「调用方随手给个基」就能把
+    /// junction 根洗成放行（本函数存在的理由）。
+    /// 判红自证：让 `stop_after` 命中时直接 `return None` 之前跳过根自身判定 ⇒ ②红。
+    #[test]
+    fn p0_2a_可信基只截断上溯不放宽结论() {
+        use std::path::Path;
+        let root = Path::new(r"C:\ProgramData\Application Data\Microsoft");
+        if !root.exists() {
+            eprintln!("SKIP：{root:?} 不在，可信基截断档未校验");
+            return;
+        }
+        let base = Path::new(r"C:\ProgramData");
+        let with = format!("{:?}", inspect_root(root, Some(base)));
+        let without = format!("{:?}", inspect_root(root, None));
+        // 两种给法都必须拒；措辞随停止位置不同可变，档位必须一致
+        assert!(with.starts_with("Rejected") && without.starts_with("Rejected"),
+            "基内/基外都要拒，实得 with={with} without={without}");
     }
 }

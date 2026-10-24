@@ -11,6 +11,9 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+// P0-2A/B：根级 reparse 判据的唯一真源在 protect，本文件只负责把「根 ⇄ 可信基」
+// 这一层关系算出来（data_root_base），不复制判据。
+use super::protect;
 
 const APP_NAME: &str = "Trim";
 /// 与 tauri.conf.json identifier 一致（升级链不断，D5）
@@ -173,7 +176,13 @@ pub(crate) fn lib_test_data_root() -> &'static PathBuf {
     LIB_ROOT.get_or_init(|| {
         let root = std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
-            .join("target/test-data-root/lib");
+            // 逐段 join，不写 "target/test-data-root/lib"：`join` 会把正斜杠**原样留在字符串**里，
+            // 于是本根下的路径长这样：`C:\...\target/test-data-root/lib\...`。cmd 内建命令
+            // （`mklink /J`）把 `/test-data-root` 当开关解析 ⇒ 报「无效参数」，junction 夹具
+            // 静默退化成 SKIP（B1 的 restore_pack 探针同病）。一段一路径分隔符才是 Windows 形态。
+            .join("target")
+            .join("test-data-root")
+            .join("lib");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("测试数据根可创建");
         root
@@ -235,14 +244,26 @@ pub fn backup_read_entries(sub: &str) -> Vec<(PathBuf, bool)> {
 /// **只上报文件**：`cleanup-files-backup` 的根里混着 `<规则id>\` 目录，把它们当条目会让
 /// "同名以新根为准"变成"新根一个目录屏蔽老根一份真备份"。目录过滤留在这一层，
 /// 调用方就不必各写一遍 `is_file()`。
+///
+/// P0-2B：每个候选根先过 [`protect::inspect_root`]（可信基由本文件的 [`data_root_base`]
+/// 给出，不在调用方各写前缀检查）。根自身或父组件是 junction 时整根跳过并把原因写进
+/// 日志——否则链接另一头的外部文件会被当"我们的备份"展示，还原按钮点下去就是往那边写。
 pub fn read_entries_across_roots(dirs: Vec<PathBuf>) -> Vec<(PathBuf, bool)> {
     let mut out: Vec<(PathBuf, bool)> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
     for (i, dir) in dirs.into_iter().enumerate() {
+        let verdict = protect::inspect_root(&dir, data_root_base(&dir).as_deref());
+        if !verdict.is_trusted() {
+            protect::note_root_skipped(&format!("备份枚举 {i} 号根"), &dir, &verdict);
+            continue;
+        }
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
         for ent in rd.flatten() {
             let path = ent.path();
-            if !path.is_file() {
+            // `is_file()` 跟随链接：子项自己是 junction 时它把链接另一头的实体报成
+            // "我们有一份备份"。这里只看链接本体（symlink_metadata），reparse 一律不上报。
+            let Ok(md) = std::fs::symlink_metadata(&path) else { continue };
+            if !md.is_file() || protect::is_reparse(&md) {
                 continue;
             }
             let Some(name) = ent.file_name().to_str().map(str::to_string) else { continue };
@@ -257,13 +278,53 @@ pub fn read_entries_across_roots(dirs: Vec<PathBuf>) -> Vec<(PathBuf, bool)> {
     out
 }
 
+/// P0-2A/B：**根与可信基的关系只在本文件（路径工厂）算一次**，调用方一律走这两行。
+/// 新根基是 `app_data_dir()`，老根基是 `legacy_data_dir()` / `older_legacy_data_dir()`；
+/// 都对不上返回 `None` —— `inspect_root` 在 `None` 下会一路查到文件系统根，只会更严不会放宽。
+pub fn data_root_base(dir: &Path) -> Option<PathBuf> {
+    [
+        app_data_dir().as_path(),
+        legacy_data_dir().as_path(),
+        older_legacy_data_dir().as_path(),
+    ]
+    .into_iter()
+    .find(|b| starts_with_ci(dir, b))
+    .map(PathBuf::from)
+}
+
+/// 大小写不敏感的祖先判断（Windows 路径口径）。只做**祖先**判断，不做 reparse 观测——
+/// 后者必须走 `symlink_metadata`，`canonicalize` 会跟随链接，两者在本仓不许混用。
+fn starts_with_ci(p: &Path, base: &Path) -> bool {
+    let n = |s: &Path| s.to_string_lossy().to_uppercase();
+    let (a, b) = (n(p), n(base));
+    a == b || a.starts_with(&format!("{}\\", b.trim_end_matches(['\\', '/'])))
+}
+
 /// 按文件名定位备份实体（新根优先）。还原侧**唯一**的路径解析入口——渲染层只给文件名，
 /// 拼路径的权力留在这里，别让调用方各写一遍 `join` 而漏掉老根兜底。
+///
+/// P0-2B：旧实现 `join(name).is_file()` 会跟随链接——`name` 来自渲染层，若某根里躺着
+/// 一个指向受保护文件的 junction，`is_file()` 说"是"，还原就把字节写到那边。现在先看根、
+/// 再看**链接本体**是不是普通文件；两处判据与枚举侧同源。
 pub fn resolve_backup_file(sub: &str, name: &str) -> Option<PathBuf> {
-    backup_read_dirs(sub)
-        .into_iter()
-        .map(|d| d.join(name))
-        .find(|p| p.is_file())
+    // 只认根下的**一层**普通文件：含分隔符的 name 能拼出跨目录路径，先拒
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return None;
+    }
+    for dir in backup_read_dirs(sub) {
+        let verdict = protect::inspect_root(&dir, data_root_base(&dir).as_deref());
+        if !verdict.is_trusted() {
+            protect::note_root_skipped("备份实体定位", &dir, &verdict);
+            continue;
+        }
+        let cand = dir.join(name);
+        if let Ok(md) = std::fs::symlink_metadata(&cand) {
+            if md.is_file() && !protect::is_reparse(&md) {
+                return Some(cand);
+            }
+        }
+    }
+    None
 }
 
 /// 只保留最近 `keep` 份备份（名字里的毫秒时间戳是定宽 13 位 ⇒ 字典序即时序，与
@@ -285,6 +346,13 @@ pub fn prune_backups(dir: &Path, keep: usize) {
 /// 对它恒空转（上限从未生效，盘上 9 个 .json 无界涨）。封条名 `x.reg.meta.json`
 /// 以 .reg 开头**不以 .reg 结尾** ⇒ 泛化后同样不参与计数，孤儿封条语义不变。
 pub fn prune_backups_ext(dir: &Path, keep: usize, extensions: &[&str]) {
+    // P0-2A：先判根再 read_dir。子项各自的 reparse 判定（下方 `reparse` 闭包）挡不住
+    // 「根被换成 junction」——那时 read_dir 已经在链接另一头，子项全是别人的文件。
+    let verdict = protect::inspect_root(dir, data_root_base(dir).as_deref());
+    if !verdict.is_trusted() {
+        protect::note_root_skipped("按扩展名计数裁剪", dir, &verdict);
+        return;
+    }
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     let mut names: Vec<String> = rd
         .flatten()
@@ -328,6 +396,12 @@ pub fn prune_backups_ext(dir: &Path, keep: usize, extensions: &[&str]) {
 /// `disabled.json` 这类不带 stamp 的文件永不参与计数。回收站优先与 reparse 拒同
 /// [`prune_backups`]。
 pub fn prune_stamped_files(dir: &Path, keep: usize) {
+    // P0-2A：与 prune_backups_ext 同一道根判定（判据同源，见 protect::inspect_root）。
+    let verdict = protect::inspect_root(dir, data_root_base(dir).as_deref());
+    if !verdict.is_trusted() {
+        protect::note_root_skipped("按时间戳计数裁剪", dir, &verdict);
+        return;
+    }
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     let stamp_re = |n: &str| {
         n.len() >= 13
@@ -1076,5 +1150,121 @@ mod tests {
         assert!(note.contains("empty-ignore.txt(整份)"), "{note}");
         assert_eq!(std::fs::read(cur.join("empty-ignore.txt")).unwrap(), b"C:\\b\r\n");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// P0-2B 的三条腿：① 新根（普通目录）照常可读；② **老根是 junction** ⇒ 整根不上报
+    /// （否则链接另一头的 `*.reg` 被当"升级前的备份"展示，还原按钮点下去写的是那边）；
+    /// ③ **条目自身是链接** ⇒ 该条不上报（旧写法 `path.is_file()` 跟随链接，会把外部文件
+    /// 认成我们的一份备份）。
+    ///
+    /// junction 用 `mklink /J`（免特权，仓内既有夹具同口径）；文件符号链接需特权或开发者
+    /// 模式，建不出来时③显式声明未校验并跳过，不假绿。
+    /// 判红自证：删掉 `read_entries_across_roots` 里的 `inspect_root` ⇒ ②红；
+    /// 把 `symlink_metadata(...).is_file()` 换回 `path.is_file()` ⇒ ③红。
+    #[test]
+    fn p0_2b_备份枚举整根拒junction条目拒链接() {
+        let root = sandbox("p02b");
+        let outside = root.join("outside");
+        let new = root.join("new");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(outside.join("x.reg"), "别人家的备份".as_bytes()).unwrap();
+        std::fs::write(new.join("a.reg"), "我们的备份".as_bytes()).unwrap();
+
+        // ② 老根是 junction → outside
+        let legacy_link = root.join("legacy");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&legacy_link)
+            .arg(&outside)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(made, "夹具：本机建不出 junction，②无法钉住（受限环境请直接判失败）");
+        let got = read_entries_across_roots(vec![new.clone(), legacy_link.clone()]);
+        let names: Vec<String> = got
+            .iter()
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["a.reg".to_string()], "junction 老根整根必须跳过，实得 {names:?}");
+
+        // ① 合法老根（普通目录）仍可读、仍标老根
+        let legacy_plain = root.join("legacy-plain");
+        std::fs::create_dir_all(&legacy_plain).unwrap();
+        std::fs::write(legacy_plain.join("b.reg"), "升级前的备份".as_bytes()).unwrap();
+        let got2 = read_entries_across_roots(vec![new.clone(), legacy_plain.clone()]);
+        assert_eq!(got2.len(), 2, "普通老根不得被根判定误伤");
+        assert!(got2.iter().any(|(p, l)| *l && p.ends_with("b.reg")), "老根那份要标 fromLegacy");
+
+        // ③ 条目自身是文件符号链接 → 不上报
+        let victim = root.join("victim.txt");
+        std::fs::write(&victim, "受保护的外部文件".as_bytes()).unwrap();
+        let file_link = new.join("c.reg");
+        match std::os::windows::fs::symlink_file(&victim, &file_link) {
+            Ok(_) => {
+                let got3 = read_entries_across_roots(vec![new.clone()]);
+                let n3: Vec<String> = got3
+                    .iter()
+                    .map(|(p, _)| p.file_name().unwrap().to_string_lossy().to_string())
+                    .collect();
+                assert!(!n3.contains(&"c.reg".to_string()), "链接条目不得被当备份上报，实得 {n3:?}");
+            }
+            Err(e) => eprintln!("SKIP：本机建不出文件符号链接（{e}），条目级链接档未校验"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// P0-2A 真机 `#[ignore]` 探针（**本轮未执行**，归发布前门禁）：在 lib 单测隔离数据根
+    /// 内自建 `junction → 真目录`，把裁剪入口指向 junction，要求真目录内容一字不动。
+    ///
+    /// 覆盖的是两条**通用实现**：`prune_backups_ext`（被 reg/pagefile/startup 等多条保留期
+    /// 链共用，方案 E2 明写「判一处即收多处」）与 `prune_stamped_files`。其余 12 个入口
+    /// 走的是同一道 `protect::inspect_root`，由 `check-delete-root-guard` 的函数体扫描
+    /// 逐个点名（含 caller 判定），不再各写一份真机探针。
+    ///
+    /// 判红自证：删掉 `prune_backups_ext` 里的 `inspect_root` ⇒ 第三条断言红
+    /// （真目录里最旧的 `.reg` 会被投进回收站）。
+    #[test]
+    #[ignore = "真写盘 + 需建 junction（lib 单测隔离数据根内），发布前门禁跑"]
+    fn p0_2a_裁剪入口拒绝junction根且另一头完好() {
+        use crate::engine::protect;
+        let stamp = crate::engine::now_ms();
+        let base = lib_test_data_root().join(format!("p02a-{stamp}"));
+        let real = base.join("real");
+        let link = base.join("jlink");
+        struct G(std::path::PathBuf, std::path::PathBuf);
+        impl Drop for G {
+            fn drop(&mut self) {
+                // junction 先按链接本体摘掉再清树：跟着链接 remove_dir_all 会把另一头一起删
+                let _ = std::fs::remove_dir(&self.1);
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _g = G(base.clone(), link.clone());
+        std::fs::create_dir_all(&real).unwrap();
+        for i in 0..5u64 {
+            std::fs::write(real.join(format!("170000000{i}_k_{i}.reg")), b"REG").unwrap();
+        }
+        let built = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !built {
+            eprintln!("SKIP：本机建不出 junction（受限环境），裁剪穿链档未校验");
+            return;
+        }
+        // 前置：判定本身必须拒这个根
+        assert!(matches!(
+            protect::inspect_root(&link, None),
+            protect::RootVerdict::Rejected(_)
+        ));
+        // 入口必须整轮跳过：只裁到 keep=3 的话真目录会少两份
+        prune_backups_ext(&link, 3, &["reg"]);
+        prune_stamped_files(&link, 3);
+        let left = std::fs::read_dir(&real).unwrap().flatten().count();
+        assert_eq!(left, 5, "junction 另一头的 5 份备份必须原样完好，实得 {left}");
     }
 }

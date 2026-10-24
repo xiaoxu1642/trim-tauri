@@ -13,7 +13,9 @@
 //   ③ 破坏性枚举允许跨一层调用（`prune_temp_scripts_in` → `collect_temp_files` 才是真 read_dir），
 //      所以做同文件 1 跳可达；调用方在把根传下去之前判过也算（guard 必须在根上，位置不限函数）。
 //
-// 过渡基线：本门禁随 B0 落地、随 B2 清零。`TRANSITION` 里每条都要 `{file, fn, batch, reason}`，
+// 过渡基线：本门禁随 B0 落地、随 B2 兑现。B2（2026-10-25）已把 15 条里的 14 条接进
+// `protect::inspect_root`，剩下的 1 条是**已裁定不补**并写明理由的枚举工具（不是待办）。
+// `TRANSITION` 里每条都要 `{file, fn, batch, reason}`，
 // 且**双向咬合**：代码补上判定后若豁免表还留着 ⇒ 判红（防「修完了台账还挂着」的第二类假绿）。
 //
 // 用法：node tools/check-delete-root-guard.mjs [--verbose]
@@ -30,23 +32,11 @@ const READ = 'read_dir(';
 const DESTRUCTIVE = ['remove_file(', 'remove_dir_all(', 'send_to_trash_os(', 'delete_file_with_panic('];
 const MIN_DESTRUCTIVE_ROOTS = 5; // 对象地板：低于此数说明判定正则失明，不说明仓库变安全
 
-// B0 落地时已知的未守卫根（B2 逐条清）。fn 名 + 文件锚点，改代码前先看清这一张表。
+// B2（2026-10-25）清零：原 15 条已逐条接入 `protect::inspect_root`，本表只留**裁定为不补**
+// 的那一条（有书面理由，不是「还没做」）。新根入口漏判即红，不许再往本表塞新条目 ——
+// 要塞必须先答「为什么不接判据」，答不出就接判据。
 const TRANSITION = [
-  { file: 'src-tauri/src/pwsh/mod.rs', fn: 'collect_temp_files', batch: 'B2/P0-2A', reason: '清扫根 %TEMP%\\Trim 未判 reparse（R7-K01 本体，子项判了根没判）' },
-  { file: 'src-tauri/src/engine/paths.rs', fn: 'prune_stamped_files', batch: 'B2/P0-2A', reason: '四条保留期裁剪链同族（R6b-M13）' },
-  { file: 'src-tauri/src/engine/shellicon.rs', fn: 'prune_icon_cache', batch: 'B2/P0-2A', reason: '图标缓存裁剪根未判' },
-  { file: 'src-tauri/src/engine/log.rs', fn: 'prune_old_logs', batch: 'B2/P0-2A', reason: '日志保留期裁剪根未判' },
-  { file: 'src-tauri/src/engine/delete_manifest.rs', fn: 'prune_manifests', batch: 'B2/P0-2A', reason: '删除清单台账裁剪根未判' },
-  { file: 'src-tauri/src/engine/native/cleanup.rs', fn: 'prune_file_backups_with', batch: 'B2/P0-2A', reason: '清理删前备份裁剪根未判' },
-  { file: 'src-tauri/src/security/mod.rs', fn: 'prune_stale_temps_depth', batch: 'B2/P0-2A', reason: '私有 tmp 兜底清扫根未判' },
-  { file: 'src-tauri/src/security/mod.rs', fn: 'prune_quarantined_depth', batch: 'B2/P0-2A', reason: '隔离件裁剪根未判（R7-M01 同函数）' },
-  { file: 'src-tauri/src/commands/realtime.rs', fn: 'prune_reports_in', batch: 'B2/P0-2A', reason: '实时报告裁剪根未判' },
-  { file: 'src-tauri/src/commands/realtime.rs', fn: 'realtime_report_clear', batch: 'B2/P0-2A', reason: '门禁新发现：清空报告入口自己枚举 + 删，v1/方案的 6 实例清单里没有它' },
-  { file: 'src-tauri/src/commands/peripheral.rs', fn: 'prune_backups', batch: 'B2/P0-2A', reason: '外设备份裁剪根未判' },
-  { file: 'src-tauri/src/engine/paths.rs', fn: 'prune_backups_ext', batch: 'B2/P0-2A', reason: 'v2 E2 点名的通用裁剪实现（被多条保留期链共用，判一处即收多处）' },
-  { file: 'src-tauri/src/engine/restore_pack.rs', fn: 'prune', batch: 'B2/P0-2A', reason: '还原包裁剪根未判' },
-  { file: 'src-tauri/src/pwsh/mod.rs', fn: 'prune_reg_backups', batch: 'B2/P0-2A', reason: '.reg 备份批次裁剪根未判' },
-  { file: 'src-tauri/src/engine/native/cleanup.rs', fn: 'expand_glob_dirs', batch: 'B2/待定', reason: '⚠ 门禁新发现的**边界case**：它是通配展开的枚举工具，删除发生在下游执行链且下游已过 protect/别名/祖先三闸。B2 必须明确回答「补根判定」还是「登记为命令层保护面下游」，不许含糊留在豁免里' },
+  { file: 'src-tauri/src/engine/native/cleanup.rs', fn: 'expand_glob_dirs', batch: 'B2/已裁定不补', reason: '通配展开的**枚举工具**，不是删除根：真正的删除发生在执行链，而 `engine/native/cleanup.rs:1430` 对每个 victim 调 `reparse_ancestor_memoized` → `trim_finder::scan::reparse_ancestor`，命中即 `reparse_blocked += 1` 并在回执里计数点名（`cleanup.rs:672`）。根是 junction 时该祖先链判定当场就拒 ⇒ 在这里补根判定只会把「可见的逐项拒因 + 计数」换成「静默 0 命中」，正撞方案 P1-6「失败不得伪装成空结果」。活性由 native-scanner 的 `p0_2c_祖先复检深度到文件系统根不设第二上限` 与 `s2_*` 删除链用例（断言 mode=reparse-ancestor 且真实内容完好）钉住，不是靠这条理由自证' },
 ];
 
 const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
@@ -191,4 +181,34 @@ for (const c of CONTROLS) {
 }
 if (ctrlBad === 0) g.ok(`正向对照 ${CONTROLS.length} 组通过（含「注释里写判定不算通过」与「1 跳穿透必判红」两组）`);
 
-g.finish('check-delete-root-guard: 全部通过（过渡豁免 ' + exempt.size + ' 条待 B2 清零）');
+// ── P0-4 写回链的复检面地板（B2 加）──────────────────────────────────────────
+// 方案原文要的是「所有 create_dir_all 的还原写入口必须复用同一判据」。实测那条判据在本仓
+// **不能这样钉**：`create_dir_all` 在还原链里还用于**应用自己的包目录**（`Pack::begin` 的
+// zip 目录、registry 目录），那些位置若也要求祖先复检，便携盘挂在 junction 上的合法用户
+// 会被整片拒写 —— 判据从「防穿链」变成「防自己的数据根」。
+// 因此这里钉的是可判红的**下限**：还原写回链（restore_pack.rs）的 `ancestor_reparse_block_reason`
+// 调用点不得少于 3 处（目录趟 / 文件趟 / 临时件自身观测），掉一处即红。
+// 三处各自的**行为**活性由 `engine::restore_pack::tests` 的 4 条单测与真机 #[ignore] 探针
+// `还原写回链拒绝junction父目录的新建目标` 钉住，不靠本条计数自证。
+const WRITE_CHAIN_FILE = join(ROOT, 'src-tauri', 'src', 'engine', 'restore_pack.rs');
+const WRITE_GUARD = 'ancestor_reparse_block_reason(';
+const WRITE_FLOOR = 3;
+if (existsSync(WRITE_CHAIN_FILE)) {
+  const text = blankNonCode(readFileSync(WRITE_CHAIN_FILE, 'utf8'), 'rs');
+  const n = [...text.matchAll(new RegExp(WRITE_GUARD.replace('(', '\\('), 'g'))].length;
+  if (n < WRITE_FLOOR) {
+    g.fail(`还原写回链的祖先复检调用点 ${n} < 下限 ${WRITE_FLOOR} ⇒ 有一处写点被摘掉判据（目录趟/文件趟/临时件观测三处缺一）`);
+  } else {
+    g.ok(`还原写回链祖先复检查调用点 ${n} 处（≥ 下限 ${WRITE_FLOOR}）`);
+  }
+  // 合成对照：两处写点的样本必须被同一条判据抓到（把地板降到 3 后本样本必然不达标）
+  const thin = 'fn a() { std::fs::create_dir_all(x); }\nfn b() { std::fs::create_dir_all(y); }';
+  const thinCount = [...blankNonCode(thin, 'rs').matchAll(new RegExp(WRITE_GUARD.replace('(', '\\('), 'g'))].length;
+  if (thinCount >= WRITE_FLOOR) {
+    g.fail('W 组判据失效：无复检调用的合成样本竟达到地板（这条断言永远不会红）');
+  }
+} else {
+  g.warn(`未校验：${relative(ROOT, WRITE_CHAIN_FILE).split('\\').join('/')} 不在盘上，W 组本节未验证（不算通过）`);
+}
+
+g.finish('check-delete-root-guard: 全部通过（TRANSITION 剩 ' + exempt.size + ' 条，均为已裁定的「不补」并附书面理由，非待办）');

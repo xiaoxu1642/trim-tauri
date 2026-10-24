@@ -2670,19 +2670,15 @@ pub fn broken_reparse_link(p: &Path) -> bool {
 /// 其下路径的祖先链含该 junction，删除同样会拒——拒绝是安全方向，提示已点名祖先路径，
 /// 用户改用真实路径重扫即可；不给「跟随链接删」的旁路。
 pub fn reparse_ancestor(p: &Path) -> Option<String> {
-    let mut cur = p.parent();
-    let mut depth = 0;
-    while let Some(dir) = cur {
-        // 防御病态深度：NTFS 路径上限约 512 层，32 层足以覆盖真实目录树且防死循环
-        if depth >= 32 {
-            break;
-        }
+    // P0-2C：旧实现只复检 32 层，而本 crate 的下钻上限是 `MAX_WALK_DEPTH = 64` ——
+    // 一个 40 层深的真实目录树能进清单，它的祖先链却没人查完，第 33 层以上的 junction
+    // 直接放行（深度截断在安全侧就是漏检）。父链长度由系统路径上限兜住、且路径不会
+    // 自成一环，所以遍历到文件系统根即可，不另造第二个深度常量。
+    // `ancestors()` 含 p 自身：跳过首项，保持「目标自身由 `is_reparse_target` 判」的分工。
+    for dir in p.ancestors().skip(1) {
         if is_reparse_target(dir) {
             return Some(dir.to_string_lossy().to_string());
         }
-        // 到达盘根（`C:\` 的 parent 为 None；UNC 共享根同理）即停
-        cur = dir.parent();
-        depth += 1;
     }
     None
 }
@@ -3161,6 +3157,70 @@ mod tests {
         let lines = run_delete(&real.join("kill.txt"), "file");
         assert_eq!(lines.len(), 1, "应恰有一条 delresult：{lines:?}");
         assert!(lines[0].contains("\"status\":\"ok\""), "真实路径的普通删除必须放行：{lines:?}");
+    }
+
+    /// P0-2C（2026-10-25 B2）：祖先复检**不得有第二个深度上限**。
+    ///
+    /// 旧实现在 32 层处 `break`，而本 crate 的下钻上限是 `MAX_WALK_DEPTH = 64` ⇒
+    /// 一条 40 层深的真实目录树能进清单，第 33 层以上的 junction 却没人查。
+    /// 本用例把 junction 放到距目标 40 层的位置，两档都钉：
+    /// ① 深链带 junction ⇒ 必须命中那一级（旧实现返回 None ⇒ 红）；
+    /// ② 64 层纯普通链 ⇒ 必须返回 None（收紧成「深链一律拒」同样红）。
+    ///
+    /// 目录名全用单字符：目标路径总长约 180 字符，留在 260 的 MAX_PATH 之内，
+    /// 不依赖本机开启长路径支持（AGENTS §5：用例不得依赖只在本机成立的形状）。
+    /// 建不出 junction 的受限环境显式声明未校验后返回，不假绿。
+    #[test]
+    fn p0_2c_祖先复检深度到文件系统根不设第二上限() {
+        let base = std::env::temp_dir().join(format!("trim-p02c-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        struct Clean(std::path::PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        }
+        let _clean = Clean(base.clone());
+
+        // ① junction 在目标上方第 40 级：`L` → `R`，`R` 里再套 39 层普通目录 + 一个文件
+        let real = base.join("R");
+        std::fs::create_dir_all(&real).unwrap();
+        let mut chain = real.clone();
+        for _ in 0..39 {
+            chain = chain.join("d");
+            std::fs::create_dir_all(&chain).unwrap();
+        }
+        std::fs::write(chain.join("f.txt"), b"x").unwrap();
+        let link = base.join("L");
+        let built = std::process::Command::new("cmd")
+            .arg("/C").arg("mklink").arg("/J").arg(&link).arg(&real)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !built {
+            eprintln!("[P0-2C] 本机建不出 junction（受限环境），深度档未校验");
+            return;
+        }
+        // 走链接那一头的等价路径：L\d\…\d\f.txt（L 在目标上方第 40 级）
+        let mut under_link = link;
+        for _ in 0..39 {
+            under_link = under_link.join("d");
+        }
+        let hit = super::reparse_ancestor(&under_link.join("f.txt"))
+            .unwrap_or_else(|| panic!("第 40 级祖先的 junction 必须被点名（旧实现在 32 层截断）"));
+        assert!(hit.ends_with('L'), "命中的应是 L 本身：{hit}");
+
+        // ② 64 层纯普通链 → None（不得把「深」本身当风险拒掉）
+        let mut plain = base.join("P");
+        std::fs::create_dir_all(&plain).unwrap();
+        for _ in 0..63 {
+            plain = plain.join("e");
+            std::fs::create_dir_all(&plain).unwrap();
+        }
+        std::fs::write(plain.join("z.txt"), b"z").unwrap();
+        assert!(
+            super::reparse_ancestor(&plain.join("z.txt")).is_none(),
+            "64 层纯普通链不得误报"
+        );
     }
 
     use super::*;

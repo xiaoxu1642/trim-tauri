@@ -136,6 +136,16 @@ const RAW_EXEMPT = [
     anchor: 'let made = std::process::Command::new("cmd")',
     reason: 'P0-4（R4-M09）真机 #[ignore] 探针（B1）：mklink /J 在 lib 单测隔离数据根内造 junction，验证还原写回拒绝「父链带链接」的新建目标（cfg(test) 专用、非生产执行面；与 cleanup.rs / fileclean.rs / protect.rs 夹具同口径）',
   },
+  {
+    file: 'src-tauri/src/engine/paths.rs',
+    anchor: 'let made = std::process::Command::new("cmd")',
+    reason: 'P0-2B（B2）枚举夹具：mklink /J 把「老根」换成指向外部目录的 junction，验证 read_entries_across_roots 整根跳过、链接另一头不被当备份上报（cfg(test) 专用、非生产执行面；与 cleanup.rs / restore_pack.rs 夹具同口径）',
+  },
+  {
+    file: 'src-tauri/src/engine/paths.rs',
+    anchor: 'let built = std::process::Command::new("cmd")',
+    reason: 'P0-2A（B2）真机 #[ignore] 探针：mklink /J 在 lib 单测隔离数据根内造 junction 当裁根，验证 prune_backups_ext / prune_stamped_files 整轮跳过且另一头 5 份备份完好（cfg(test) 专用、非生产执行面）',
+  },
 ];
 
 /**

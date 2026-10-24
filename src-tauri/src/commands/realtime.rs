@@ -208,6 +208,13 @@ fn ensure_report_dir() -> Result<std::path::PathBuf, String> {
 /// 不能再让它消失在 `()` 里——用户点「查看列表」时被动删掉的是他自己存的历史）。
 pub fn prune_reports() -> usize {
     let Ok(dir) = ensure_report_dir() else { return 0 };
+    // P0-2A：报告根被换成 junction 时，TTL 裁剪会在链接另一头删掉同形态的 `.json`。
+    // 这一道放在入口而不是执行体：`prune_reports_in` 要保持「只吃入参目录」的沙箱可测性。
+    let verdict = crate::engine::protect::inspect_root(&dir, crate::engine::paths::data_root_base(&dir).as_deref());
+    if !verdict.is_trusted() {
+        crate::engine::protect::note_root_skipped("网速报告 TTL 裁剪", &dir, &verdict);
+        return 0;
+    }
     prune_reports_in(&dir, crate::engine::now_ms(), REPORT_TTL_MS)
 }
 
@@ -542,6 +549,16 @@ pub async fn realtime_report_clear<R: tauri::Runtime>(
 ) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
     let dir = ensure_report_dir()?;
+    // P0-2A：清空是「全部删完」的强断言，根不可信时一条都不许删，而且**不能回 success:true
+    // + removed:0** —— 那与「本来就没有报告」同形（方案 P1-6 的「失败被伪装成空结果」族）。
+    let verdict = crate::engine::protect::inspect_root(&dir, crate::engine::paths::data_root_base(&dir).as_deref());
+    if !verdict.is_trusted() {
+        crate::engine::protect::note_root_skipped("清空网速报告", &dir, &verdict);
+        return Ok(serde_json::json!({
+            "success": false, "removed": 0, "failed": 0, "skippedReparse": true,
+            "message": format!("报告目录未通过安全判定，本次一条都没删：{}", verdict.reason()),
+        }));
+    }
     let counted = tauri::async_runtime::spawn_blocking(move || {
         let mut removed = 0usize;
         let mut gone = 0usize;

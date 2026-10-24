@@ -288,6 +288,13 @@ fn store_png(dir: &Path, key: &str, png: &[u8]) {
 /// 孤儿回收：应用升级换键后旧文件不再被命中，数量过水位时按修改时间删最旧。
 /// 只认自己的命名形态（16 位小写 hex + `.png`），用户放进同目录的其它文件不碰。
 fn prune_icon_cache(dir: &Path) {
+    // P0-2A：图标缓存根换成 junction 后，read_dir 会在链接另一头按「16 位 hex + .png」
+    // 形态挑最旧的投回收站 —— 外来文件判据（is_cache_file_name）挡不住跨根的同类命名。
+    let verdict = crate::engine::protect::inspect_root(dir, crate::engine::paths::data_root_base(dir).as_deref());
+    if !verdict.is_trusted() {
+        crate::engine::protect::note_root_skipped("图标缓存裁剪", dir, &verdict);
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };

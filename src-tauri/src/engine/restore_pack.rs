@@ -450,6 +450,13 @@ pub fn restore_path_verdict(path: &str) -> Option<String> {
 pub fn list(limit: usize) -> Vec<Value> {
     let mut rows: Vec<Value> = Vec::new();
     for root in paths::backup_read_dirs(SUB) {
+        // P0-2B：展示侧同样先判根。junction 根会让链接另一头的目录被列成「本机还原包」，
+        // 用户点还原就把字节写到受保护面之外。
+        let verdict = protect::inspect_root(&root, paths::data_root_base(&root).as_deref());
+        if !verdict.is_trusted() {
+            protect::note_root_skipped("还原包列表", &root, &verdict);
+            continue;
+        }
         let Ok(rd) = std::fs::read_dir(&root) else { continue };
         for de in rd.flatten() {
             let name = de.file_name().to_string_lossy().to_string();
@@ -496,10 +503,37 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
     if let Some(reason) = batch_id_reject_reason(batch_id) {
         return Err(format!("批次号格式不合法（{reason}）"));
     }
-    let root = paths::backup_read_dirs(SUB)
-        .into_iter()
-        .find(|d| d.join(batch_id).join(MANIFEST_NAME).is_file())
-        .ok_or_else(|| "找不到该还原包（可能已被保留策略清掉）".to_string())?;
+    // P0-2B：还原选择是唯一「决定往哪儿写字节」的一步，根判定必须在这里而不是只在展示侧。
+    // 旧写法 `find(|d| d.join(batch_id).join(MANIFEST).is_file())` 有两处跟随链接：
+    // 根是 junction 时命中链接另一头的同名批次；manifest 本体是链接时 `is_file()` 也说「是」。
+    // 跳过原因要带回 —— 只回「找不到该还原包」会把「安全拒绝」伪装成「已被裁剪策略清掉」
+    // （方案 P1-6 的失败伪装族）。
+    let mut skipped: Vec<String> = Vec::new();
+    let mut found: Option<std::path::PathBuf> = None;
+    for root in paths::backup_read_dirs(SUB) {
+        let verdict = protect::inspect_root(&root, paths::data_root_base(&root).as_deref());
+        if !verdict.is_trusted() {
+            if matches!(verdict, protect::RootVerdict::Rejected(_)) {
+                skipped.push(format!("{}（{}）", root.display(), verdict.reason()));
+            }
+            continue;
+        }
+        let mf = root.join(batch_id).join(MANIFEST_NAME);
+        let real_manifest = std::fs::symlink_metadata(&mf)
+            .map(|m| m.is_file() && !protect::is_reparse(&m))
+            .unwrap_or(false);
+        if real_manifest {
+            found = Some(root);
+            break;
+        }
+    }
+    let root = found.ok_or_else(|| {
+        if skipped.is_empty() {
+            "找不到该还原包（可能已被保留策略清掉）".to_string()
+        } else {
+            format!("找不到该还原包；另有 {} 个备份根未通过安全判定，已跳过：{}", skipped.len(), skipped.join("；"))
+        }
+    })?;
     let dir = root.join(batch_id);
     let text = std::fs::read_to_string(dir.join(MANIFEST_NAME))
         .map_err(|e| format!("读取 manifest 失败: {e}"))?;
@@ -676,6 +710,13 @@ fn file_sha256(path: &Path) -> Option<String> {
 /// 只保留最近 KEEP_BATCHES 个批次目录（batch_id 字典序即时序，与 delete_manifest 同口径）。
 /// 裁到上限是为了不让还原包变成 HiBit 那种长留 AppData 的 104 MB 包袱。
 fn prune(root: &Path) {
+    // P0-2A：还原包批次目录是「一键还原」的最后依据，根被换成 junction 时 read_dir 会在
+    // 链接另一头按「不带点的目录名」挑最旧的整批投回收站。子项 reparse 判据看不到根。
+    let verdict = protect::inspect_root(root, crate::engine::paths::data_root_base(root).as_deref());
+    if !verdict.is_trusted() {
+        protect::note_root_skipped("还原包批次裁剪", root, &verdict);
+        return;
+    }
     let Ok(rd) = std::fs::read_dir(root) else { return };
     let mut dirs: Vec<String> = rd
         .flatten()
@@ -703,6 +744,13 @@ fn prune(root: &Path) {
 pub fn total_bytes() -> u64 {
     let mut sum = 0u64;
     for root in paths::backup_read_dirs(SUB) {
+        // P0-2B：与 `list` 同一道根判定，否则界面显示的占用字节里混进链接另一头的体积，
+        // 而列表里又没有那些条目 —— 两个数对不上就是新的双源。
+        let verdict = protect::inspect_root(&root, paths::data_root_base(&root).as_deref());
+        if !verdict.is_trusted() {
+            protect::note_root_skipped("还原包占用统计", &root, &verdict);
+            continue;
+        }
         let Ok(rd) = std::fs::read_dir(&root) else { continue };
         for de in rd.flatten() {
             if !de.path().is_dir() {
@@ -1273,8 +1321,13 @@ mod tests {
         pack.add_target(&real).expect("探针目录入包");
         pack.finish().expect("收尾");
 
+        // 参数逐条传，不拼成单个 `/C "<整串>"`：拼串时 Rust 会把内嵌的双引号再转义一次，
+        // cmd 拿到的是一条它解析不了的命令行 ⇒ mklink 静默失败 ⇒ 本探针退化成 SKIP，
+        // 而「SKIP 的探针」等于这条断言从来没被执行过（与 paths.rs 的 P0-2A 探针同口径）。
         let made = std::process::Command::new("cmd")
-            .args(["/C", &format!(r#"mklink /J "{}" "{}""#, link.display(), real.display())])
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);

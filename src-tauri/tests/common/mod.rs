@@ -95,7 +95,11 @@ pub fn ensure_test_data_root() {
             .unwrap_or_else(|| "shared".to_string());
         let root = std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join("target/test-data-root")
+            // 逐段 join，不写 "target/test-data-root"：正斜杠会原样留在路径字符串里，
+            // cmd 内建命令（`mklink /J`）把 `/test-data-root` 当开关解析 ⇒ junction 夹具
+            // 静默退化成 SKIP。与 `engine::paths::lib_test_data_root` 同一条口径。
+            .join("target")
+            .join("test-data-root")
             .join(stem);
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("测试数据根可创建");

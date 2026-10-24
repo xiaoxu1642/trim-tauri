@@ -397,6 +397,13 @@ fn quarantine_name_for(original: &str, ts_ms: u128) -> String {
 /// 只删 24h 前的普通文件，不跟随 reparse，限深 4 层。
 pub fn prune_stale_atomic_temps(dir: &Path) -> usize {
     let now = SystemTime::now();
+    // P0-2A：本函数删的是**永久删**（`.tmp` 不是用户资产，不进回收站），根被换成
+    // junction 时链接另一头 `*.tmp` 形态的别人文件会被一起清掉。
+    let verdict = crate::engine::protect::inspect_root(dir, crate::engine::paths::data_root_base(dir).as_deref());
+    if !verdict.is_trusted() {
+        crate::engine::protect::note_root_skipped("原子写临时件清扫", dir, &verdict);
+        return 0;
+    }
     let removed = prune_stale_temps_depth(dir, now, 0);
     if removed > 0 {
         crate::engine::log::write_log("info", &format!("已清理过期原子写临时件 {removed} 个"));
@@ -445,6 +452,13 @@ const QUARANTINE_KEEP: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// 正是上文自述要消灭的「堆一排没人读的坏件」。机制照 pwsh 层 v2-L13 的先例
 /// （递归 + 限深 + reparse 拒）；**裁根仍只传 `app_data_dir()`**（AGENTS §6 老根不裁）。
 fn prune_quarantined_in(dir: &Path, now: SystemTime) -> usize {
+    // P0-2A：隔离件是「坏件仍算证据」的 30 天留存，根换成 junction 后链接另一头
+    // 同名 `<file>.corrupt-<ts>` 形态的件会被当成我们的过期隔离件永久删。
+    let verdict = crate::engine::protect::inspect_root(dir, crate::engine::paths::data_root_base(dir).as_deref());
+    if !verdict.is_trusted() {
+        crate::engine::protect::note_root_skipped("隔离件裁剪", dir, &verdict);
+        return 0;
+    }
     prune_quarantined_depth(dir, now, 0)
 }
 

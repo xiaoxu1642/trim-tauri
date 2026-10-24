@@ -145,6 +145,13 @@ fn prune_backups(keep: usize) {
     let dirs = vec![paths::backup_write_dir("peripheral-backup")];
 
     for dir in dirs {
+        // P0-2A：批次键取自文件名，根被换成 junction 时链接另一头同名形态的目录会被
+        // 当成「超额批次」整批投回收站；子项判据看不见根自己。
+        let verdict = crate::engine::protect::inspect_root(&dir, crate::engine::paths::data_root_base(&dir).as_deref());
+        if !verdict.is_trusted() {
+            crate::engine::protect::note_root_skipped("外设备份裁剪", &dir, &verdict);
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         let mut batches: Vec<(String, Vec<String>)> = Vec::new();
         for e in entries.flatten() {

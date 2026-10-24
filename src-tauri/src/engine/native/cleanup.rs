@@ -306,6 +306,17 @@ fn prune_file_backups(root: &std::path::Path, keep: usize) {
 
 /// 同上，`min_orphan_age_ms` 可注入（测试传 0；见 ORPHAN_GC_MIN_AGE_MS 注释）。
 fn prune_file_backups_with(root: &std::path::Path, keep: usize, min_orphan_age_ms: i64) {
+    // P0-2A：本函数的包含性核验（下方 canonicalize + starts_with）判的是「victim 在根内」，
+    // 根自己被换成 junction 时 canonicalize 把两侧一起搬过去，核验照样成立 —— 它防不住
+    // 「枚举起点已经在链接另一头」。所以先走 protect 的根判定（不 canonicalize，理由见那里）。
+    let verdict = crate::engine::protect::inspect_root(
+        root,
+        crate::engine::paths::data_root_base(root).as_deref(),
+    );
+    if !verdict.is_trusted() {
+        crate::engine::protect::note_root_skipped("清理删前备份裁剪", root, &verdict);
+        return;
+    }
     let Ok(rd) = std::fs::read_dir(root) else { return };
     let mut manifests: Vec<String> = rd
         .flatten()
