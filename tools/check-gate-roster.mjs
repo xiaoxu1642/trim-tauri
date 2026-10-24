@@ -83,6 +83,12 @@ const MUST_RUN = [
   'check-data-signatures',
   'check-fixture-freshness',
   'check-gate-roster',
+  // B0（2026-10-24 全仓重审）先落判红门禁再动代码：这四条各自钉一条本轮 🔴/🟡 的机制，
+  // 过渡豁免表都写在门禁文件内、随 B1/B3 修复逐条回收（不留长期豁免）。
+  'check-delete-root-guard',      // 递归删除/裁剪的**根**必须过 reparse 判定（R7-K01🔴 + 族 F-1）
+  'check-ignored-isolation',      // #[ignore] 真机探针必须先定隔离数据根（X1-K01🔴）
+  'check-async-exits',            // 置 busy 后 try 前的 await / 裸 async handler 无 reject 出口（F4a1-M12、F4c-M01、A2 族）
+  'check-degraded-consumption',   // 后端已分态的 degraded 前端不得折回单态（F4a2-K02🔴 + A1 族）
 ];
 
 // 少数门禁需要非默认参数；登记在这里，`--run` 会照实传。
