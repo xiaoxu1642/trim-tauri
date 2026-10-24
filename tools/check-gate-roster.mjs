@@ -13,6 +13,7 @@ import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const TOOLS = join(ROOT, 'tools');
@@ -98,10 +99,13 @@ const GATE_ARGS = {
 
 // T1b-L09：副作用档。`--run --tier=readonly` 跳过会 spawn 外部进程/写盘的门禁；
 // 不带 --tier 时维持原行为（全跑，供发版/收尾验收）。
+// P2-A/A-2：登记必须对得上源码，否则「副作用档跳过哪些」这件事本身就是假绿。
+// `check-data-parity` 曾被登记为「spawn PowerShell」，实测该文件里既没有 spawnSync 也没有
+// execFileSync —— 它是纯内存比对。留在本表意味着只读跑法会**无故跳过一条真守卫**，
+// 而台账读起来像它很危险。2026-10-25 移除，并由下面的锚点断言双向咬合。
 const SIDE_EFFECT = new Map([
   ['check-ps-extraction', 'spawn 真实 pwsh（--run 档）'],
   ['check-scan-rule-diff', 'spawn cargo test'],
-  ['check-data-parity', 'spawn PowerShell 解析数据产物'],
   ['check-positive-controls', 'spawn 全部 REGISTRY 门禁'],
   ['check-headless-cli', 'spawn cargo build + 真实扫描（OPTIONAL）'],
 ]);
@@ -140,6 +144,18 @@ const optionalNames = OPTIONAL.map((o) => o.name);
 const retiredNames = RETIRED.map((o) => o.name);
 for (const key of SIDE_EFFECT.keys()) {
   if (!MUST_RUN.includes(key) && !optionalNames.includes(key)) fail(`SIDE_EFFECT 登记的 ${key} 不在 MUST_RUN / OPTIONAL 里`);
+}
+// P2-A/A-2：副作用登记必须有**代码**锚点。判据跑在剥注释后的源码上 —— 首版没剥注释时，
+// `check-data-parity` 只在注释里写过一句「cargo test --lib protect::」就被认成有副作用，
+// 于是这条断言对本表最想抓的那条误登记恒绿（断言自己假绿，正是 A-2 要消灭的东西）。
+const SIDE_EFFECT_PRIMITIVES = /spawnSync\s*\(|execFileSync\s*\(|execSync\s*\(|child_process/;
+for (const key of SIDE_EFFECT.keys()) {
+  const p = join(TOOLS, `${key}.mjs`);
+  if (!existsSync(p)) { fail(`SIDE_EFFECT 登记的 ${key} 文件不在盘上，无法证明它真有副作用`); continue; }
+  const src = blankNonCode(readFileSync(p, 'utf8'), 'js');
+  if (!SIDE_EFFECT_PRIMITIVES.test(src)) {
+    fail(`SIDE_EFFECT 登记的 ${key} 源码（剥注释后）找不到 spawnSync/execFileSync/execSync/child_process ⇒ 登记与事实不符，应从本表移除`);
+  }
 }
 
 // ── 1. 注册表内部一致性 ──

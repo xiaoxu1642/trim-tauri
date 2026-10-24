@@ -612,10 +612,10 @@ check(
 // 收尾
 // ────────────────────────────────────────────────────────────────────
 
-if (fail > 0) {
-  console.error(`\ncheck-comment-rot: ${fail} 组断言未通过（注释已腐烂，见上）`);
-  process.exit(1);
-}
+// P2-A/A-1：这里**原本**是 `if (fail > 0) process.exit(1)`，而 K08 对账块排在它后面并继续
+// `fail++` —— 于是 K08 判红时退出码恒 0、门禁照样打印「全部通过」。假绿门禁比没门禁更糟：
+// 台账上写着「check-comment-rot 通过」，而它根本没看这一组。
+// 现在把退出闸门挪到全部断言之后（文件末尾），K08 与正向对照都在闸门之前。
 
 // ────────────────────────────────────────────────────────────────────
 // K08 对账门禁（v5 批次 9，A4-R01 / X0-K01 家族）：模块注释若声称某通道
@@ -631,12 +631,23 @@ if (fail > 0) {
     const claimed = [
       ...text.matchAll(/(?:已注册|已落地|均已落地)[^\n]*?(uninstall:[\w-]+)/g),
     ].map((m) => m[1]);
-    for (const ch of claimed) {
-      const lib = readFileSync(join(ROOT, 'src-tauri', 'src', 'lib.rs'), 'utf8');
-      const cmap = readFileSync(join(ROOT, 'src-tauri', 'src', 'scripts', 'tauri-api.js'), 'utf8');
-      if (!lib.includes(ch) && !cmap.includes(ch)) {
-        console.error(`✗ K08 对账：residue_update.rs 声称 ${ch} 已注册/已落地，但 lib.rs 与 CHANNEL_MAP 都找不到（注释写成了成就）`);
-        fail++;
+    // A-1 的真破坏验证暴露出第二处缺陷：CHANNEL_MAP 那份文件的真实路径是
+    // `src/scripts/tauri-api.js`，这里原先写 `src-tauri/src/scripts/...` —— 没有声称时
+    // 循环不执行，路径错了也无人发现；一旦真有人写下「已落地 uninstall:x」，本门禁不是
+    // 判红而是 ENOENT 崩栈（AGENTS §5 明令：读不到要显式 SKIP 并声明未校验，不崩、不假绿）。
+    const libPath = join(ROOT, 'src-tauri', 'src', 'lib.rs');
+    const cmapPath = join(ROOT, 'src', 'scripts', 'tauri-api.js');
+    if (claimed.length > 0 && (!existsSync(libPath) || !existsSync(cmapPath))) {
+      console.error(`✗ K08 对账无法执行：声称了 ${claimed.join('、')}，但注册面文件缺失（lib.rs ${existsSync(libPath) ? '在' : '缺'} / CHANNEL_MAP ${existsSync(cmapPath) ? '在' : '缺'}）——这一节未校验，按失败处理`);
+      fail++;
+    } else {
+      const lib = claimed.length > 0 ? readFileSync(libPath, 'utf8') : '';
+      const cmap = claimed.length > 0 ? readFileSync(cmapPath, 'utf8') : '';
+      for (const ch of claimed) {
+        if (!lib.includes(ch) && !cmap.includes(ch)) {
+          console.error(`✗ K08 对账：residue_update.rs 声称 ${ch} 已注册/已落地，但 lib.rs 与 CHANNEL_MAP 都找不到（注释写成了成就）`);
+          fail++;
+        }
       }
     }
     if (claimed.length === 0) {
@@ -764,5 +775,11 @@ const POSITIVE_CONTROLS = (() => {
   console.log('✓ 正向对照自检通过（六形态判据均可判红，且真样本不假红；0 对象形态由合成对照证明活性）');
   return true;
 })();
+
+// P2-A/A-1 的退出闸门：必须排在**全部**断言（含上面的正向对照与前面的 K08 对账）之后。
+if (fail > 0) {
+  console.error(`\ncheck-comment-rot: ${fail} 组断言未通过（注释已腐烂，见上）`);
+  process.exit(1);
+}
 
 console.log(`check-comment-rot: 全部通过（扫 ${commentsByFile.size} 个文件 / ${commentLineTotal} 行注释）`);
