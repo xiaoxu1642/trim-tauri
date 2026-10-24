@@ -69,6 +69,14 @@
   const ALL_KEYS = GROUPS.flatMap(g => g.items.map(i => i.key));
 
   let pathConfig = {};
+  // P0-1（F4a2-K02）：'ok' | 'degraded' 是后端 degraded 位的唯一前端落点，不再另造布尔镜像。
+  // 旧实现只读 success/data，于是「配置损坏（已被隔离）」被折成「还没有配置」，
+  // load 之后照排自动扫描，扫描结果逐个 paths.save —— 而 paths.save 写入的路径
+  // 会被清理扫描原样采纳并永久删除（paths.rs 的 R1a-M01；后端分态口径见其 A1-M12）。
+  // 真源被一次静默重建顶掉，所以这条状态位是永久删除链上的断点，不是展示层装饰。
+  // 用户显式点「手动重建路径配置」即把它转回 ok：损坏文件在后端读取时就已 quarantine，
+  // 此后写的是全新配置，不再需要额外第二个状态位表达「人工已确认」。
+  let pathConfigState = 'ok';
   let icons = {};        // groupId -> dataUrl
   let isInitialized = false;
   let modal = null;      // { ctrl, backdrop, body, hint }
@@ -138,6 +146,23 @@
   // ==================== 弹窗渲染 ====================
   function renderBody() {
     if (!modal) return;
+    // 损坏态用共享失败态件（window.errorState，A1-L07 已把「读取失败」与「确实为空」
+    // 做成可分辨的同源结构件，本域不另造第三种）：不渲染可编辑项，就没有任何顺手的
+    // 写回入口，唯一出口是用户显式重建。
+    if (pathConfigState === 'degraded') {
+      modal.body.innerHTML = window.errorState({
+        title: '路径配置已损坏并被隔离',
+        desc: '为避免误删，本次不会自动扫描，也不会写入任何路径。逐项确认后手动填写即可重建配置。',
+        cta: { text: '手动重建路径配置', target: 'manualRebuild' },
+      });
+      modal.body.querySelector('[data-empty-cta="manualRebuild"]')?.addEventListener('click', () => {
+        // 只把界面解锁成可手工编辑：不补数据、不排扫描，扫描留给用户自己再点一次。
+        pathConfigState = 'ok';
+        renderBody();
+        updateFooter();
+      });
+      return;
+    }
     modal.body.innerHTML = GROUPS.map(group => {
       const itemsHtml = group.items.map(item => {
         const value = pathConfig[item.key] || '';
@@ -234,6 +259,13 @@
 
   async function autoScan(silent) {
     if (!window.api?.paths) return 0;
+    // P0-1：degraded 下一个 paths.save 都不许发出去 —— 扫描会把损坏配置静默重建成
+    // 「扫到的就是真的」，而该真源随后被清理扫描原样采纳并永久删除（paths.rs R1a-M01）。
+    // 弹窗「重新扫描」按钮也走本入口，所以拒绝要给可见回执，不能静默返回 0。
+    if (pathConfigState === 'degraded') {
+      window.app?.toast('warning', '路径配置已损坏，请先手动重建配置后再扫描');
+      return 0;
+    }
     try {
       window.pathbindingAppearance.log('info', '开始自动扫描安装路径');
       const resp = await window.api.paths.scan();
@@ -285,6 +317,12 @@
     // （见 commands/paths.rs），正常路径不受影响。
     const d = parsedScannedAt(pathConfig.scannedAt);
     const at = d ? d.toLocaleString('zh-CN') : '';
+    if (pathConfigState === 'degraded') {
+      // 损坏态不引导任何扫描动作：脚注若仍写「可点击重新扫描自动识别」，
+      // 就与面板上的「本次不会自动扫描或写入」自相矛盾。
+      modal.hint.textContent = '路径配置损坏，请逐项手动填写后保存';
+      return;
+    }
     modal.hint.textContent = at ? `上次扫描：${at}` : '尚未扫描，可点击「重新扫描」自动识别';
   }
 
@@ -335,6 +373,16 @@
     if (!window.api?.paths) return;
     try {
       const resp = await window.api.paths.load();
+      // 必须先读 degraded 再读 data（后端 commands/paths.rs 的 A1-M12 分态口径）：
+      // 损坏被折成单态时 pathConfig 是隔离后的空对象，与首启 Absent 同形；若照旧
+      // 只看 success+data，下面就会把它当首启排 autoScan，把猜测值逐键写回 paths.save
+      // 真源（paths.rs R1a-M01：该真源被清理扫描原样采纳并永久删除）。
+      if (resp && resp.degraded === true) {
+        pathConfigState = 'degraded';
+        pathConfig = {};
+        window.pathbindingAppearance.log('warn', '路径配置已损坏并被隔离，已禁用自动扫描与自动写回');
+        return;
+      }
       if (resp && resp.success && resp.data) pathConfig = resp.data || {};
     } catch (e) {
       console.error('加载路径配置失败:', e);
@@ -346,6 +394,7 @@
     // ——清 WebView2 数据后标记丢了但 scannedAt 还在（对着已有绑定白扫一次），换机器则相反
     // （标记还在、扫描记录没了，从此再不补扫）。老配置里 scannedAt 若是升级前的 Debug 形态，
     // 由下方 normalizeScannedAt 归一后仍算「扫过」，不会退化成重新扫描。
+    // 首启 Absent（degraded 未命中才会走到这里）仍照常自动扫描，本分支不得连带关闭。
     if (!parsedScannedAt(pathConfig.scannedAt)) {
       setTimeout(() => { autoScan(true); }, 1500);
     }

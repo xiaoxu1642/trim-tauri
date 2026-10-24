@@ -462,6 +462,105 @@ pub fn read_reg_binary_opt(hive: HKEY, subkey: &str, value: &str) -> Option<Stri
     }
 }
 
+/// 注册表值读取的三态结果 —— **备份/还原链的权威口径**（P0-3）。
+///
+/// 「确认不存在」与「读不出来」是两个不同的事实：塌成同一个 `None` 会让还原链
+/// 把一次访问拒绝/解码失败当成「值本来就不存在」，进而生成 Delete —— 永久删除
+/// 本来存在的注册表值。两者在这里分成 `Absent` 与 `Unknown`。
+#[derive(Debug)]
+pub enum RegReadState {
+    /// 键路径或值名**确认**不存在（只认「找不到」那两个 Win32 码，判据同
+    /// [`open_key_missing_is_idempotent`]）
+    Absent,
+    /// 读出成功：(类型标签, 字符串化数据)，口径由 `flatten` 决定（同旧 Option 链）
+    Value(&'static str, String),
+    /// 读不出来（访问拒绝 / 其它 Win32 错误 / 尺寸或数据查询失败 / 解码失败）。
+    /// 载荷是**错误码名**，可直接落日志与回执；不得携带路径、键名或值内容。
+    Unknown(String),
+}
+
+/// win32 错误码 → 可落日志的错误名（P0-3 隐私纪律：回执链只许出现码名，
+/// 未收录的码退化为纯数字——数字同样不带任何路径/值信息）。
+fn win_reg_err_label(code: u32) -> String {
+    const ERROR_FILE_NOT_FOUND: u32 = 2;
+    const ERROR_PATH_NOT_FOUND: u32 = 3;
+    const ERROR_ACCESS_DENIED: u32 = 5;
+    const ERROR_MORE_DATA: u32 = 234;
+    match code {
+        ERROR_FILE_NOT_FOUND => "ERROR_FILE_NOT_FOUND".to_string(),
+        ERROR_PATH_NOT_FOUND => "ERROR_PATH_NOT_FOUND".to_string(),
+        ERROR_ACCESS_DENIED => "ERROR_ACCESS_DENIED".to_string(),
+        ERROR_MORE_DATA => "ERROR_MORE_DATA".to_string(),
+        c => format!("WIN32_ERROR({c})"),
+    }
+}
+
+/// 读注册表值的**唯一新内核**（三态）。备份/还原链必须直接消费本函数；
+/// [`read_reg_value_text`] / [`read_reg_value_faithful`] 只是它上面保留旧 `Option` 外观的外壳。
+///
+/// 状态映射口径（P0-3）：
+/// - `RegOpenKeyExW` 失败：码为「找不到」(2/3) → `Absent`；其余（含访问拒绝 5）→ `Unknown`；
+/// - `RegQueryValueExW` 尺寸查询失败：码为 2 → `Absent`；其余 → `Unknown`；
+/// - 数据查询出现 `ERROR_MORE_DATA`，或尺寸在两次查询之间增长 → 有限重试；
+///   重试打满仍不稳定 → `Unknown`（读写竞争时读器不猜快照）；其它失败 → `Unknown`；
+/// - 解码失败（类型不认识 / 字节长度不足类型闸门）→ `Unknown`：读不出的值不等于不存在的值。
+pub fn read_reg_value_state(hive: HKEY, subkey: &str, name: &str, flatten: bool) -> RegReadState {
+    // 重试上限与施工口径一致：竞争窗口在微秒级，有限次后仍变化说明有并发写方，
+    // 继续读只会给出一份没人见过的假快照。
+    const MAX_REREAD: u32 = 2;
+    const ERROR_FILE_NOT_FOUND: u32 = 2;
+    const ERROR_MORE_DATA: u32 = 234;
+    let sk = to_wide(subkey);
+    let mut hk = HKEY::default();
+    unsafe {
+        let opened = RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk);
+        if opened.is_err() {
+            return if open_key_missing_is_idempotent(opened.0) {
+                RegReadState::Absent
+            } else {
+                RegReadState::Unknown(win_reg_err_label(opened.0))
+            };
+        }
+        let vn = to_wide(name);
+        let mut ty = REG_VALUE_TYPE::default();
+        let mut size = 0u32;
+        let q1 = RegQueryValueExW(hk, PCWSTR(vn.as_ptr()), None, Some(&mut ty), None, Some(&mut size));
+        if q1.is_err() {
+            let _ = RegCloseKey(hk);
+            return if q1.0 == ERROR_FILE_NOT_FOUND {
+                // 键在而值名不在：确认不存在
+                RegReadState::Absent
+            } else {
+                RegReadState::Unknown(win_reg_err_label(q1.0))
+            };
+        }
+        let mut reread = 0u32;
+        loop {
+            let mut buf = vec![0u8; size as usize];
+            let mut got = size;
+            let q2 = RegQueryValueExW(hk, PCWSTR(vn.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut got));
+            if (q2.0 == ERROR_MORE_DATA || got > size) && reread < MAX_REREAD {
+                // 值在两次查询之间长大了：按回报的实际尺寸重建缓冲再读，有限重试
+                reread += 1;
+                size = got.max(size);
+                continue;
+            }
+            if q2.is_err() {
+                let _ = RegCloseKey(hk);
+                return RegReadState::Unknown(win_reg_err_label(q2.0));
+            }
+            let _ = RegCloseKey(hk);
+            // 两次查询之间值被改小时 got < buf.len()：按第二次报的实际长度截断，
+            // 否则多出来的补零会参与解码（DWORD 长度闸门就是这么被打穿的）
+            let actual = (got as usize).min(buf.len());
+            return match decode_reg_value_bytes(ty, &buf[..actual], flatten) {
+                Some((t, d)) => RegReadState::Value(t, d),
+                None => RegReadState::Unknown("decode_failed".to_string()),
+            };
+        }
+    }
+}
+
 /// 读注册表值，返回 (类型标签, 字符串化数据) —— **显示/回读链**用的展平口径。
 ///
 /// 口径逐条对齐 .NET `GetValue` 与 PS `[string]$v`（`READ_ONE_HEADER`，main.js 3481-3502 的移植）：
@@ -470,53 +569,28 @@ pub fn read_reg_binary_opt(hive: HKEY, subkey: &str, value: &str) -> Option<Stri
 /// DWORD 按**有符号 i32**、QWORD 按 i64、BINARY 按小写 hex 连写 —— 读写两侧必须同一套规则，
 /// 否则 `0xFFFFFFFF` 这类值会在「备份→还原」之间变形。
 ///
-/// **备份/还原链不要用这里**，用 [`read_reg_value_faithful`] —— 展开过的 EXPAND_SZ 写回去
-/// 会把 `%VAR%` 永久变成字面量，那正是「还原后反而变了」那一类疑难的根因。
+/// **备份/还原链不要用这里**，用 [`read_reg_value_state`] —— 本外壳把 `Absent` 与 `Unknown`
+/// 一并塌回 `None`：显示链没有破坏性动作，「读不出」与「不存在」同样是不展示；
+/// 还原链不能接受这个塌合，否则一次读失败就会生成 Delete。
 pub fn read_reg_value_text(hive: HKEY, subkey: &str, name: &str) -> Option<(&'static str, String)> {
-    read_reg_value_mode(hive, subkey, name, true)
+    match read_reg_value_state(hive, subkey, name, true) {
+        RegReadState::Value(t, d) => Some((t, d)),
+        _ => None,
+    }
 }
 
-/// 读注册表值，返回 (**真实**类型标签, 未加工内容) —— **备份/还原链**专用。
+/// 读注册表值，返回 (**真实**类型标签, 未加工内容) —— 与 [`read_reg_value_text`] 的
+/// 唯一差别是不展平（口径见 [`read_reg_value_state`]）。
 ///
-/// 与 [`read_reg_value_text`] 的唯一差别是不展平：
-/// - `REG_EXPAND_SZ` → 原样（不展开环境变量）
-/// - `REG_MULTI_SZ` → 各元素以 `\u{0}` 连接。选 NUL 作分隔是因为它**不可能**出现在元素里
-///   （NUL 本身就是注册表里的元素分隔符），所以连接是可逆的；备份文件的 `data` 只有一个
-///   真源，不必再加数组字段。渲染层只读备份的**条数**、不读 `data`，串里的 NUL 不会上屏。
-///   元素中间的空串会被丢弃（注册表保留用法，实际写入方极少），其余字节原样往返。
+/// `Option` 外观保留给存量调用方（`reg_backup` 导入回读等**非删除**路径）；
+/// 新的备份台账写入与还原比对一律直接用 [`read_reg_value_state`]，
+/// 因为这里 `None` 分不出「不存在」还是「读不出来」。
+/// 不展平的理由不变：展开过的 EXPAND_SZ 写回去会把 `%VAR%` 永久变成字面量，
+/// MULTI_SZ 的 NUL 连接可逆（NUL 不可能出现在元素里），其余字节原样往返。
 pub fn read_reg_value_faithful(hive: HKEY, subkey: &str, name: &str) -> Option<(&'static str, String)> {
-    read_reg_value_mode(hive, subkey, name, false)
-}
-
-pub(super) fn read_reg_value_mode(
-    hive: HKEY,
-    subkey: &str,
-    name: &str,
-    flatten: bool,
-) -> Option<(&'static str, String)> {
-    let sk = to_wide(subkey);
-    let mut hk = HKEY::default();
-    unsafe {
-        if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
-            return None;
-        }
-        let vn = to_wide(name);
-        let mut ty = REG_VALUE_TYPE::default();
-        let mut size = 0u32;
-        if RegQueryValueExW(hk, PCWSTR(vn.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_err() {
-            let _ = RegCloseKey(hk);
-            return None;
-        }
-        let mut buf = vec![0u8; size as usize];
-        let r = RegQueryValueExW(hk, PCWSTR(vn.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut size));
-        let _ = RegCloseKey(hk);
-        if r.is_err() {
-            return None;
-        }
-        // 两次查询之间值被改小时 size < buf.len()：按第二次报的实际长度截断，
-        // 否则多出来的补零会参与解码（DWORD 长度闸门就是这么被打穿的）
-        let actual = (size as usize).min(buf.len());
-        decode_reg_value_bytes(ty, &buf[..actual], flatten)
+    match read_reg_value_state(hive, subkey, name, false) {
+        RegReadState::Value(t, d) => Some((t, d)),
+        _ => None,
     }
 }
 
@@ -787,7 +861,10 @@ pub(super) unsafe fn reg_count_values(hk: HKEY) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::open_key_missing_is_idempotent;
+    use super::{
+        open_key_missing_is_idempotent, win_reg_err_label, read_reg_value_state, reg_key_remove,
+        reg_restore_write, RegReadState,
+    };
 
     /// R5b-M01：删值入口的「键不存在」判定必须只认 2/3，其余失败码一律判失败。
     #[test]
@@ -796,5 +873,75 @@ mod tests {
         assert!(open_key_missing_is_idempotent(3), "ERROR_PATH_NOT_FOUND = 路径不存在");
         assert!(!open_key_missing_is_idempotent(5), "ACCESS_DENIED 必须判失败（旧实现报成功）");
         assert!(!open_key_missing_is_idempotent(1008), "其它失败码必须判失败");
+    }
+
+    /// P0-3：三态读器 `Unknown` 的载荷是错误码名 —— 标签函数是它落日志/回执的唯一出处，
+    /// 未收录的码必须退化为纯数字而不是报错 panic（读器本身不能因记原因而二次失败）。
+    #[test]
+    fn 三态读器_错误码标签只含码名() {
+        assert_eq!(win_reg_err_label(2), "ERROR_FILE_NOT_FOUND");
+        assert_eq!(win_reg_err_label(3), "ERROR_PATH_NOT_FOUND");
+        assert_eq!(win_reg_err_label(5), "ERROR_ACCESS_DENIED");
+        assert_eq!(win_reg_err_label(234), "ERROR_MORE_DATA");
+        assert_eq!(win_reg_err_label(1008), "WIN32_ERROR(1008)");
+    }
+
+    /// P0-3 真机 `#[ignore]` 探针（**本轮未执行**，归发布前门禁）：HKCU 专用 scratch 键上
+    /// 把三态的三条腿各钉一次。旧实现三条腿全塌成同一个 `None`，而 `build_restore_ops`
+    /// 把 `None` 读成「确认不存在」并生成 Delete —— 一次解码失败就会永久删掉本来存在的值。
+    ///
+    /// 卫生口径照 `engine::reg_backup::live_roundtrip_原生import_类型不降级`：只碰自己的
+    /// scratch 键，`Drop` 里删干净（含断言提前返回的路径）。
+    ///
+    /// 判红自证：把 `read_reg_value_state` 的「尺寸查询失败且码非 2」分支从 `Unknown`
+    /// 折回 `Absent` ⇒ 第③条红；把第②b 条的 `q1.0 == ERROR_FILE_NOT_FOUND` 判据去掉
+    /// ⇒ 第②b 条红（键在、值名不在被误报成 Unknown）。
+    #[test]
+    #[ignore = "真实写注册表（HKCU scratch 键 + Drop 清理），发布前门禁跑"]
+    fn 三态读器_真机_absent_value_unknown_三条腿() {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_DWORD};
+        const SUB: &str = r"Software\TrimRegTriStateProbe";
+        struct Probe;
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                let _ = reg_key_remove(HKEY_CURRENT_USER, SUB, true);
+            }
+        }
+        let _probe = Probe;
+
+        // ① 键本体不存在 → RegOpenKeyExW 报「找不到」，必须是 Absent（不是 Unknown）
+        assert!(
+            matches!(read_reg_value_state(HKEY_CURRENT_USER, SUB, "whatever", false), RegReadState::Absent),
+            "键不存在必须是 Absent"
+        );
+
+        // ② 写入并读回 → Value，且类型/字节口径与旧 faithful 链一致
+        assert!(
+            reg_restore_write(HKEY_CURRENT_USER, SUB, "dw", REG_DWORD, &42u32.to_le_bytes()),
+            "scratch 键写入应成功"
+        );
+        match read_reg_value_state(HKEY_CURRENT_USER, SUB, "dw", false) {
+            RegReadState::Value(t, d) => assert_eq!((t, d.as_str()), ("REG_DWORD", "42")),
+            other => panic!("读成功必须是 Value，实得 {other:?}"),
+        }
+
+        // ②b 键在而值名不存在 → 仍是 Absent（开了键不等于读成功）
+        match read_reg_value_state(HKEY_CURRENT_USER, SUB, "nope", false) {
+            RegReadState::Absent => {}
+            other => panic!("键在、值名缺必须是 Absent，实得 {other:?}"),
+        }
+
+        // ③ 类型闸门打不通（REG_DWORD 只落 2 字节）→ Unknown。
+        //    这条就是 P0-3 的病根本体：旧实现返回 None，还原链读成「不存在」→ Delete。
+        assert!(
+            reg_restore_write(HKEY_CURRENT_USER, SUB, "bad", REG_DWORD, &[1, 2]),
+            "畸形 REG_DWORD 写入应被注册表接受（API 不校验长度，正因如此读侧必须有闸门）"
+        );
+        match read_reg_value_state(HKEY_CURRENT_USER, SUB, "bad", false) {
+            RegReadState::Unknown(r) => {
+                assert_eq!(r, "decode_failed", "Unknown 载荷必须是错误码名，实得 {r}");
+            }
+            other => panic!("REG_DWORD 长度不足必须呈报 Unknown，实得 {other:?}"),
+        }
     }
 }

@@ -667,6 +667,58 @@ pub fn is_system_namespace(p: &str) -> bool {
     low == rn.low || low.starts_with(&format!("{}\\", rn.low))
 }
 
+/// P0-4（R4-M09）：写路径对目标**现存祖先链**的逐级 reparse 复检——判据唯一实现。
+///
+/// 治的病根：目标自身不存在（新建场景合法）时，旧闸只查目标自身那一级，
+/// 「最近的现存祖先到目标」之间的 junction 没人查 —— `create_dir_all` /
+/// `File::create` 会顺着链接把数据写到链接另一头、受保护面之外。
+///
+/// 口径（自目标父级起逐级上溯，到根即停）：
+/// - 该级存在且带 reparse 属性 → 拒；
+/// - 该级不存在（NotFound）→ 合法（新建链的一部分），继续向上；
+/// - 其余读取失败（权限、非法字符等）→ 拒：读不到不等于干净，
+///   与 [`normalize_for_compare`] 的 fail-closed 契约同口径；
+/// - 观测层只用 `symlink_metadata`（不跟随链接）：`canonicalize` 会**跟随**链接，
+///   拿它当 reparse 判据的观测层就错了；属性位判据复用 [`is_reparse`]（N6，不另造常量）；
+/// - 根（盘根 / UNC share 根）不查：根不是 junction 形态，且对 `C:` 这类
+///   前缀串读属性必然报错、会造成无辜路径误拒。
+///
+/// ⚠️ TOCTOU 残余风险（必须写明）：本函数是**字符串路径**上的当场复检，
+/// 检查与真实创建之间仍有窗口——窗口内父级目录被换成 junction，写入照样穿链。
+/// 在未改成句柄相对（`CreateFile` + 相对句柄）操作之前，回归测试只能证明
+/// 「窗口缩窄」，不能宣称完全消除。
+pub fn ancestor_reparse_block_reason(p: &str) -> Option<String> {
+    if p.is_empty() {
+        return None;
+    }
+    // 跳过目标自身那一级：自身 reparse 由 validate_mutation_target 既有闸承担，本函数只负责父链。
+    for a in std::path::Path::new(p).ancestors().skip(1) {
+        // 到根即停（根无父级），根级不参与 reparse 观测，理由见上方口径
+        if a.parent().is_none() {
+            break;
+        }
+        match std::fs::symlink_metadata(a) {
+            Ok(md) => {
+                if is_reparse(&md) {
+                    return Some(format!(
+                        "目标的父级链存在 reparse 点（junction/链接/占位符），写入会落到链接另一头，已拒绝：{}",
+                        a.display()
+                    ));
+                }
+            }
+            // 「不存在」是新建链的合法形态，继续向上找最近的现存祖先
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Some(format!(
+                    "父级链元数据读取失败，无法证明无链接，已拒绝：{}（{e}）",
+                    a.display()
+                ));
+            }
+        }
+    }
+    None
+}
+
 /// C01（v7.2 `R1d-K01`🔴 / `R2a-M01` / `R3-M03` / `R4-M01` / `R1b-M02`）：
 /// **破坏性目标共同判据**——文件面删除/写回/修剪出口共用的组合闸。
 ///
@@ -690,6 +742,11 @@ pub fn is_system_namespace(p: &str) -> bool {
 /// - reparse：目标本体带 `FILE_ATTRIBUTE_REPARSE_POINT` 位（junction/链接/云占位符）
 ///   时删除/写回的实际落点不可控，按拒。目标不存在时跳过本闸（还原写回的目标
 ///   合法地可以不存在；`symlink_metadata` 不跟随链接，拿到的是链接本体属性位）。
+/// - P0-4（R4-M09）父链：目标合法地可以不存在，但「最近的现存祖先到目标」之间的
+///   junction 不能没人查——写点前用 [`ancestor_reparse_block_reason`] 逐级复检现存
+///   父链，任一级带 reparse 属性或元数据读失败（非「不存在」）即拒。残余风险：
+///   字符串路径检查与真实创建之间仍有 TOCTOU 窗口，改成句柄相对操作之前，
+///   回归测试只能证明「窗口缩窄」，不能宣称完全消除。
 ///
 /// 返回 `Err(中文拒因)`：拒因在本函数唯一真源，五个消费出口不许各写一份。
 pub fn validate_mutation_target(p: &str) -> Result<(), String> {
@@ -709,6 +766,13 @@ pub fn validate_mutation_target(p: &str) -> Result<(), String> {
         if is_reparse(&md) {
             return Err(format!("目标是 reparse 点（junction/链接/占位符），已拒绝：{p}"));
         }
+    }
+    // P0-4（R4-M09）父链闸：排在自身闸之后，与上面「作用域→受保护→别名→系统命名空间→
+    // reparse」的既有闸序同族（自身那一级已由上一道判掉，本道只判父链，见其函数注释）。
+    // 目标合法地可以不存在，但「最近的现存祖先到目标」之间的 junction 会把
+    // create_dir_all / File::create 的字节送到链接另一头，旧实现四道全放行。
+    if let Some(reason) = ancestor_reparse_block_reason(p) {
+        return Err(reason);
     }
     Ok(())
 }
@@ -1766,5 +1830,60 @@ mod tests {
     #[test]
     fn c01_无辜路径放行() {
         assert!(validate_mutation_target(r"C:\__trim_c01_clean__\probe.bin").is_ok());
+    }
+
+    /// P0-4（R4-M09）①：目标不存在且现存祖先链干净 → 放行（新建场景不得被父链闸误伤）。
+    /// 样本用必然存在的普通目录（`<SystemDrive>\ProgramData`）下的不存在子链，不落任何盘。
+    /// 判红自证：把 ancestor_reparse_block_reason 的 NotFound 分支改成「一律拒」⇒ 本用例红。
+    #[test]
+    fn p0_4_目标不存在且父链干净必须放行() {
+        let drive = env("SystemDrive");
+        let d = if drive.is_empty() { "C:".to_string() } else { drive.trim_end_matches('\\').to_string() };
+        let target = format!(r"{d}\ProgramData\__trim_p04_absent__\probe.bin");
+        assert!(
+            validate_mutation_target(&target).is_ok(),
+            "父链无 reparse 的新建路径被误拒: {target}"
+        );
+    }
+
+    /// P0-4（R4-M09）②：目标不存在 + 中间某级是 junction → 拒。
+    /// 样本复用 Windows 内建 junction `C:\Documents and Settings`（MountPoint，人人都有、
+    /// 免自建不落盘）；其下挂不存在目录 + 文件，旧实现四闸全过（父级 canonicalize 失败
+    /// fail-open），新父链闸必须点名 reparse。真机构造专用 junction 的 #[ignore] 探针归 B2。
+    /// 本机取不到该 junction（异常环境）时显式 SKIP 并声明未校验，不假绿。
+    /// 判红自证：删掉 validate_mutation_target 里的 ancestor_reparse_block_reason 调用 ⇒ 本用例红。
+    #[test]
+    fn p0_4_新建目标父链中间层是junction必须拒() {
+        let link = r"C:\Documents and Settings";
+        if std::fs::symlink_metadata(link).is_err() {
+            eprintln!("SKIP：{link} 不存在或属性不可读，junction 父链分支未校验");
+            return;
+        }
+        let target = format!(r"{link}\__trim_p04_ghost__\probe.bin");
+        let err = validate_mutation_target(&target)
+            .expect_err("父链带 junction 时新建会把数据写到链接另一头，必须拒");
+        assert!(err.contains("reparse"), "拒因必须点名 reparse 闸，实得: {err}");
+    }
+
+    /// P0-4（R4-M09）③：目标自身存在且自身是 reparse → 拒绝行为不回归。
+    /// 同样用内建 junction（不落盘）。注意拒因可能来自别名面/父链闸/自身闸中
+    /// 任意一道（`C:\` 是盘根，别名面即先拦），本用例钉的是行为底线「必须 Err」，
+    /// 自身闸的专属文案不在此重复钉（改断言顺序会假红，故只断组合结果）。
+    #[test]
+    fn p0_4_目标自身是reparse拒绝不回归() {
+        assert!(validate_mutation_target(r"C:\Documents and Settings").is_err());
+    }
+
+    /// P0-4（R4-M09）④：父链元数据读失败（非「不存在」）→ 拒，不按「干净」处理。
+    /// 免落盘的可构造形态：父级段内含 NUL 字节——std 在系统调用层直接返回
+    /// 错误（kind 非 NotFound），真实创建链同样无法穿过这种形态，拒即 fail-closed。
+    /// 判红自证：把读失败分支改成 `continue`（当干净处理）⇒ 本用例红。
+    #[cfg(windows)]
+    #[test]
+    fn p0_4_父链元数据读失败必须拒() {
+        let bad = "C:\\__trim_p04__\\\0ghost\\probe.bin";
+        let err = validate_mutation_target(&bad)
+            .expect_err("父级元数据读取失败不得按干净放行");
+        assert!(err.contains("无法证明无链接"), "拒因必须点名读失败闸，实得: {err}");
     }
 }

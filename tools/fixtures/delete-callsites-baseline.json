@@ -37,7 +37,7 @@
     "src-tauri/src/engine/paths.rs": 9,
     "src-tauri/src/engine/protect.rs": 5,
     "src-tauri/src/engine/reg_backup.rs": 12,
-    "src-tauri/src/engine/restore_pack.rs": 14,
+    "src-tauri/src/engine/restore_pack.rs": 18,
     "src-tauri/src/engine/shellicon.rs": 3,
     "src-tauri/src/pwsh/mod.rs": 6,
     "src-tauri/src/security/mod.rs": 10,
@@ -100,7 +100,8 @@
   "remove_dir": {
     "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 1,
     "src-tauri/src/commands/updater.rs": 1,
-    "src-tauri/src/engine/native/cleanup.rs": 2
+    "src-tauri/src/engine/native/cleanup.rs": 2,
+    "src-tauri/src/engine/restore_pack.rs": 1
   },
   "RegDeleteValueW": {
     "src-tauri/src/engine/native/contextmenu.rs": 5,

@@ -974,8 +974,12 @@ fn strip_js_comments(src: &str) -> String {
         assert_eq!(bytes, &want, "REG_SZ 数据被改写 ⇒ 注入防护已退化为碰运气");
 
         // hive/sub/key 同样只是数据，不是代码
+        // P0-3：删除项现在必须显式带 `presence=absent`。旧记录（无 presence 且
+        // exists=false）属 legacyUnknown —— 当年分不清「不存在」还是「读不出来」，
+        // 一律拒删（见 backup_restore::p0_3_presence_tests）。本断言仍钉 Delete 路径
+        // 逐字节原样带值。
         let ops = build_restore_ops(&[json!({
-            "hive": "LocalMachine", "sub": "S", "key": "K'$(p)", "exists": false
+            "hive": "LocalMachine", "sub": "S", "key": "K'$(p)", "presence": "absent", "exists": false
         })])
         .unwrap();
         assert_eq!(

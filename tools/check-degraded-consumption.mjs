@@ -29,7 +29,7 @@ const MIN_EMITTERS = 5; // 对象地板：低于此数说明命令解析失效�
 //   实际发射 `degraded` 的是这 7 条，其中 `appearance_*` 有两条、`startup`/`overview`/`syspanel`
 //   并不发这个位。consumed 行必须给可核锚点；pending 行只标批次与理由，不许凭空写锚点。
 const TABLE = [
-  { cmd: 'paths_load', status: 'pending', batch: 'B1/P0-1', reason: 'F4a2-K02：损坏被折成未配置 → autoScan 写回真源 → 清理链原样永久删' },
+  { cmd: 'paths_load', status: 'consumed', anchor: { file: 'src/scripts/pathbinding.js', text: 'resp.degraded === true' } },
   { cmd: 'settings_load', status: 'pending', batch: 'B3/P1-6', reason: 'F4b-M13：两个消费方一起丢该位' },
   { cmd: 'fileclean_scan', status: 'pending', batch: 'B3/P1-6', reason: 'A1 命中：未接（展示层假绿族）' },
   { cmd: 'appearance_get_material', status: 'pending', batch: 'B3/P1-6', reason: '材质面未见消费方：window-material.js 现算无 degraded' },

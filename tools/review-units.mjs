@@ -73,10 +73,21 @@ export const UNITS = [
     id: 'R6a', owner: 'main', name: 'engine 红线核心（主 agent 自审）',
     files: [`${E}/guard.rs`, `${E}/protect.rs`, `${E}/paths.rs`, `${E}/snapshot.rs`,
       `${E}/systembin.rs`, `${E}/reg_backup.rs`, `${E}/rules_signature.rs`, `${E}/rule_schema.rs`,
-      `${E}/pssteps.rs`, `${E}/mod.rs`],
-    contract: 'guard 档位 / protect 受保护路径 / 数据目录 / 快照槽 / PS 双通道编译器 / 规则验签',
+      `${E}/mod.rs`],
+    contract: 'guard 档位 / protect 受保护路径 / 数据目录 / 快照槽 / 规则验签',
     boundary: '产出《红线口径基线》，定性优先于任何域单元；条目单列、不并入 subagent 已审统计',
+    // 2026-10-25 B1：protect.rs 接入 P0-4 父链闸后本单元 8075 行越 U2 的 8000 上限。
+    // 按本门禁自述口径「优先按页面/执行链，其次按目录」把 PS 双通道编译器 pssteps.rs
+    // （整包 2210 行）切给紧随其后点名的 R6c —— 上限不放宽，其余红线件留在本单元。
     gates: ['check-guard-tiers', 'check-ps-callsites', 'check-rule-schema-sync'],
+  },
+  {
+    // 必须排在 R6b 之前：R6b 用 engine 顶层目录兜底认领，兜底只吃此前无人认领的文件。
+    id: 'R6c', owner: 'sub', name: 'engine 步骤编译（pssteps 双通道）',
+    files: [`${E}/pssteps.rs`],
+    contract: 'PS 步骤编译器 / 收件箱脚本与原生步骤两条通道的产出形状',
+    boundary: '红线口径一律引用 R6a 基线、不自解释；PS 执行咽喉 run_inbox_script 归 R7，本单元只审步骤组装',
+    gates: ['check-ps-callsites', 'check-ps-extraction'],
   },
   {
     id: 'R6b', owner: 'sub', name: 'engine 其余（外设/图标/系统信息）',
@@ -343,6 +354,17 @@ export const UNITS = [
     contract: '样式 token / 对比度 / 可达性 / 首屏预算 / HTML 与资产契约',
     boundary: '审的是「界面面」的自动判据；真机观感不属本单元（目检走 §1.5 纪律）',
     gates: ['check-css-tokens', 'check-contrast', 'check-first-paint'],
+  },
+  {
+    // 2026-10-25 B0/B1：四道「施工前置判红门禁」新增后，T1b 的兜底形态达 8096 行越 U2
+    // 的 8000 上限。沿用 2026-10-16（P2-B 切出 T1d）的同一处置：按主题点名成独立单元，
+    // 上限不放宽。必须排在 T1b 之前 —— T1b 是 check-*.mjs 的目录兜底认领位。
+    id: 'T1e', owner: 'sub', name: '门禁·B0 施工前置判红（degraded/删除根/ignore 隔离/await 出口）',
+    files: ['tools/check-degraded-consumption.mjs', 'tools/check-delete-root-guard.mjs',
+      'tools/check-ignored-isolation.mjs', 'tools/check-async-exits.mjs'],
+    contract: '修复批次 B1/B2/B3 的判红前置：每条必须内置合成对照、过渡豁免表双向咬合、对象地板防「0 对象假绿」',
+    boundary: '审的是「后续修复能不能被判红」，不是拿它审业务模块；豁免条目清零后本单元收缩',
+    gates: ['check-delete-root-guard', 'check-ignored-isolation', 'check-async-exits', 'check-degraded-consumption'],
   },
   {
     // 2026-10-16 拆分（P2-B）：新增 check-headless-cli 后兜底形态达 8005 行越 8000 上限，

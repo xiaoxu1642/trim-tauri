@@ -93,37 +93,76 @@ pub(super) fn parse_reg_targets(block: &str) -> Vec<RegTarget> {
     out
 }
 
-/// 读取一组 (hive, sub, key) 当前值；任一目标读取失败返回 None
+/// 读取一组 (hive, sub, key) 当前值；hive 解析失败返回 None
 ///
 /// B11：原先这里生成 `Read-One` PS 函数 + 逐目标调用行，spawn pwsh、60s 超时、
 /// 再解析 stdout 里的 JSON —— 就为了读几个注册表值。现在直接走注册表 API。
 ///
-/// 口径用 `native::read_reg_value_faithful`（**不展平**）：备份的目的是还原，
-/// 展平口径会把 `REG_EXPAND_SZ` 展开成字面量、把 `REG_MULTI_SZ` 压成空格串并谎报为
-/// `REG_SZ`，于是「还原」把类型和内容一起改错 —— 用户看到的正是「还原后反而变了」。
-/// DWORD/QWORD/BINARY 的字符串化规则与展平口径相同，所以既有备份文件不受影响。
+/// 口径用三态内核 `native::read_reg_value_state`（**不展平**，与旧
+/// `read_reg_value_faithful` 同一套字节规则，既有备份文件的 `type`/`data` 不受影响）：
+/// 备份的目的是还原，展平口径会把 `REG_EXPAND_SZ` 展开成字面量、把 `REG_MULTI_SZ`
+/// 压成空格串并谎报为 `REG_SZ`，于是「还原」把类型和内容一起改错 —— 用户看到的正是
+/// 「还原后反而变了」。
 ///
-/// 输出形状与旧 PS 逐字段一致：`exists=false` 时**不带** `type`/`data` 键
-/// （旧 `ConvertTo-Json` 也不会输出它们），下游 `build_restore_ops` 据此走删除分支。
+/// P0-3：条目权威状态字段是 `presence`（"absent" | "value" | "unknown"），
+/// 「确认不存在」与「读不出来」分开入账；`exists=false` 时**不带** `type`/`data` 键
+/// （旧形状不变），但 `build_restore_ops` 只认 `presence=absent` 才生成 Delete。
 pub(super) fn read_reg_values(targets: &[RegTarget]) -> Option<Vec<Value>> {
     use crate::engine::native;
     let mut out = Vec::with_capacity(targets.len());
     for t in targets {
         let Some(hive) = reg_hive(&t.root) else { return None };
-        let mut item = json!({
-            "hive": dotnet_hive(&t.root),
-            "sub": t.sub,
-            "key": t.key,
-            "exists": false,
-        });
-        if let Some((ty, data)) = native::read_reg_value_faithful(hive, &t.sub, &t.key) {
-            item["exists"] = json!(true);
+        let state = native::read_reg_value_state(hive, &t.sub, &t.key, false);
+        out.push(backup_entry_from_state(dotnet_hive(&t.root), &t.sub, &t.key, state));
+    }
+    Some(out)
+}
+
+/// 值级备份条目的**唯一构造处**：`presence` 是真源，兼容字段 `exists` 由它派生 ——
+/// 两个字段必须同源，否则台账里会出现自相矛盾的条目（P0-3 明令禁止手写两份真相）。
+/// `unknown` 时随条目落一条 `unknownReason`（只含错误码名，见
+/// `engine::native::read_reg_value_state` 的隐私纪律；不含路径、键名、值内容）。
+pub(super) fn backup_entry_from_state(
+    hive: &str,
+    sub: &str,
+    key: &str,
+    state: crate::engine::native::RegReadState,
+) -> Value {
+    use crate::engine::native::RegReadState;
+    let presence = match &state {
+        RegReadState::Value(..) => "value",
+        RegReadState::Absent => "absent",
+        RegReadState::Unknown(..) => "unknown",
+    };
+    let mut item = json!({
+        "hive": hive,
+        "sub": sub,
+        "key": key,
+        "presence": presence,
+        "exists": presence == "value",
+    });
+    match state {
+        RegReadState::Value(ty, data) => {
             item["type"] = json!(ty);
             item["data"] = json!(data);
         }
-        out.push(item);
+        RegReadState::Unknown(reason) => {
+            item["unknownReason"] = json!(reason);
+        }
+        RegReadState::Absent => {}
     }
-    Some(out)
+    item
+}
+
+/// 读取备份条目的权威 `presence`。返回 `None` = P0-3 之前生成的旧记录（没有该字段）：
+/// 其 `exists=false` 只是「当年没读到」，**不得**当作「确认不存在」；其 `exists=true`
+/// 仍可信（读成功过才会有 `type`/`data`）。无法识别的 presence 取值同样按旧记录处理，
+/// 让下游走保守分支。
+pub(super) fn backup_presence(entry: &Value) -> Option<&str> {
+    match entry.get("presence").and_then(|v| v.as_str()) {
+        Some(p @ ("absent" | "value" | "unknown")) => Some(p),
+        _ => None,
+    }
 }
 
 pub(super) fn option_targets(option_id: &str) -> Option<Vec<RegTarget>> {
@@ -445,9 +484,19 @@ pub async fn optimizer_restore_reg<R: Runtime>(
     };
     let restored = values.len();
 
-    // 先看能不能构造出还原操作（构造失败即无可核对项，直接拒）
-    let Ok(ops) = build_restore_ops(&values) else {
-        return json!({ "success": false, "message": "备份数据无法解析成还原操作" });
+    // 先看能不能构造出还原操作（构造失败即无可核对项，直接拒）。
+    // P0-3：拒因逐项如实上屏（只含序号与错误码名）并落日志；备份记录保留，
+    // 用户可查日志后重试 —— 这条链永远不靠猜着删。
+    let ops = match build_restore_ops(&values) {
+        Ok(o) => o,
+        Err(e) => {
+            log::write_log("warn", &format!("优化项还原被拒: {option_id}（{e}）"));
+            return json!({
+                "success": false,
+                "restoreRefused": true,
+                "message": format!("{e}；已保留备份记录，可查日志后重试"),
+            });
+        }
     };
     // R3-M02（v7.2 C04，AGENTS §3）：值级还原马上要写回 HKLM/HKCU 备份值——
     // 动手前把日志强制落盘，防尾部日志丢失（与 optimizer_run 执行链同口径）。
@@ -573,24 +622,47 @@ pub(super) fn restore_write_bytes(typ: &str, data: &str) -> Result<Vec<u8>, Stri
 /// 旧实现（`backup_restore_lines`）在这里生成 PS 命令行，靠单引号串 + `''` 转义把
 /// 不可信值锁住（v2-K2，有 3 条回归测试钉着）。改原生后那个攻击面整个消失 ——
 /// 值不再经过任何解析器，`A$(whoami)` 就是要写进注册表的字面字节。
+///
+/// P0-3 的删除闸门：**只有 `presence=absent` 才生成 Delete**。
+/// - `presence=unknown`（当年读不出来）与「旧记录无 presence 且 exists=false」
+///   （legacyUnknown，P0-3 之前的备份分不清两种含义）→ 逐项收集拒因，整批 `Err`；
+///   绝不产出半套操作 —— 写一半删一半比全不还原更难对账，且拒因里只允许出现
+///   逐项序号与错误码名（`unknownReason` 由读侧生成，不含路径/键名/值）。
+/// - 旧记录无 presence 但 exists=true：读成功过才会带 type/data，可信，照常写回。
 pub(super) fn build_restore_ops(values: &[Value]) -> Result<Vec<RestoreOp>, String> {
     let mut ops = Vec::with_capacity(values.len());
-    for v in values {
+    let mut refusals: Vec<String> = Vec::new();
+    for (idx, v) in values.iter().enumerate() {
         let hive = v.get("hive").and_then(|x| x.as_str()).unwrap_or("LocalMachine").to_string();
         if restore_hive(&hive).is_none() {
             return Err(format!("未知 hive: {hive}"));
         }
         let sub = v.get("sub").and_then(|x| x.as_str()).unwrap_or("").to_string();
         let key = v.get("key").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let exists = v.get("exists").and_then(|x| x.as_bool()).unwrap_or(false);
-        if !exists {
-            ops.push(RestoreOp::Delete { hive, sub, key });
-            continue;
+        let presence = match backup_presence(v) {
+            Some(p) => p,
+            None if v.get("exists").and_then(|x| x.as_bool()).unwrap_or(false) => "value",
+            None => {
+                refusals.push(format!("第 {idx} 项：旧备份无 presence 且 exists=false（legacyUnknown，无法确认不存在）"));
+                continue;
+            }
+        };
+        match presence {
+            "absent" => ops.push(RestoreOp::Delete { hive, sub, key }),
+            "unknown" => {
+                let reason = v.get("unknownReason").and_then(|x| x.as_str()).unwrap_or("未记录");
+                refusals.push(format!("第 {idx} 项：presence=unknown（拒因: {reason}）"));
+            }
+            _ => {
+                let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("REG_SZ").to_string();
+                let data = v.get("data").and_then(|x| x.as_str()).unwrap_or("");
+                let bytes = restore_write_bytes(&typ, data)?;
+                ops.push(RestoreOp::Write { hive, sub, key, typ, bytes });
+            }
         }
-        let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("REG_SZ").to_string();
-        let data = v.get("data").and_then(|x| x.as_str()).unwrap_or("");
-        let bytes = restore_write_bytes(&typ, data)?;
-        ops.push(RestoreOp::Write { hive, sub, key, typ, bytes });
+    }
+    if !refusals.is_empty() {
+        return Err(format!("注册表备份存在无法确认状态的条目，拒绝还原（不产生删除）：{}", refusals.join("；")));
     }
     Ok(ops)
 }
@@ -859,5 +931,96 @@ mod m01_type_label_tests {
             (1, 0),
             "EXPAND_SZ 值级还原回读必须判一致（mismatched>0 = M01 病灶复发）"
         );
+    }
+}
+
+#[cfg(test)]
+mod p0_3_presence_tests {
+    use super::*;
+
+    /// 单测 1（P0-3 主病灶）：`presence=unknown` 的条目 ⇒ `build_restore_ops` 整批拒绝、
+    /// 回执逐项点名拒因；同批里的合法 absent 条目也不得被带着产出半套操作 ——
+    /// 写一半删一半比全不还原更难对账。
+    /// （五种合法类型的往返行为由 contract_tests 既有用例钉住，本模块不重复造。）
+    #[test]
+    fn unknown_只回拒因不产删除() {
+        let batch = vec![
+            json!({ "hive": "LocalMachine", "sub": "S", "key": "K1",
+                "presence": "value", "exists": true, "type": "REG_DWORD", "data": "1" }),
+            json!({ "hive": "LocalMachine", "sub": "S", "key": "K2",
+                "presence": "unknown", "exists": false, "unknownReason": "ERROR_ACCESS_DENIED" }),
+            json!({ "hive": "LocalMachine", "sub": "S", "key": "K3",
+                "presence": "absent", "exists": false }),
+        ];
+        let Err(msg) = build_restore_ops(&batch) else {
+            panic!("unknown 条目必须整批拒绝（旧实现在这里生成 Delete，一次访问拒绝就删掉本来存在的值）");
+        };
+        assert!(msg.contains("拒绝还原"), "回执必须点名这是拒删: {msg}");
+        assert!(msg.contains("ERROR_ACCESS_DENIED"), "回执必须逐项携带拒因（错误码名）: {msg}");
+    }
+
+    /// 单测 2：确认不存在的 `presence=absent` 仍照常生成 Delete（合法还原能力不削弱）。
+    #[test]
+    fn absent_仍产删除() {
+        let ops = build_restore_ops(&[
+            json!({ "hive": "LocalMachine", "sub": "S", "key": "K", "presence": "absent", "exists": false }),
+        ])
+        .expect("absent 应可构造");
+        assert_eq!(ops, vec![RestoreOp::Delete {
+            hive: "LocalMachine".into(), sub: "S".into(), key: "K".into(),
+        }]);
+    }
+
+    /// 单测 3：P0-3 之前的旧记录（无 `presence` 且 `exists=false`）＝ legacyUnknown ——
+    /// 当年分不清「不存在」还是「读不出来」，一律拒删并回传拒因；同类的 exists=true
+    /// 旧记录仍可信（读成功过才会带 type/data）。
+    #[test]
+    fn 旧记录无presence且existsfalse_按存疑拒删() {
+        let Err(msg) = build_restore_ops(&[
+            json!({ "hive": "LocalMachine", "sub": "S", "key": "K", "exists": false }),
+        ]) else { panic!("legacyUnknown 必须拒绝（旧实现把它当确认不存在直接生成 Delete）") };
+        assert!(msg.contains("legacyUnknown"), "回执必须点名 legacyUnknown: {msg}");
+
+        let ops = build_restore_ops(&[
+            json!({ "hive": "LocalMachine", "sub": "S", "key": "K", "exists": true, "type": "REG_DWORD", "data": "4" }),
+        ])
+        .expect("旧记录 exists=true 仍按值写回");
+        assert!(matches!(&ops[..], [RestoreOp::Write { .. }]), "应为一条 Write: {ops:?}");
+    }
+
+    /// `presence` 与 `exists` 的同源派生：条目构造器是唯一真源（P0-3 明令不得手写两份）。
+    /// `unknown` 条目带错误码名、不带 type/data；`absent` 两者都不带（旧形状兼容）。
+    #[test]
+    fn 备份条目_presence唯一真源_exists为其派生() {
+        use crate::engine::native::RegReadState;
+        let e = backup_entry_from_state("CurrentUser", "S", "K", RegReadState::Absent);
+        assert_eq!(e["presence"], "absent");
+        assert_eq!(e["exists"], false);
+        assert!(e.get("type").is_none() && e.get("data").is_none());
+
+        let e = backup_entry_from_state(
+            "CurrentUser", "S", "K",
+            RegReadState::Unknown("ERROR_ACCESS_DENIED".into()),
+        );
+        assert_eq!(e["presence"], "unknown");
+        assert_eq!(e["exists"], false);
+        assert_eq!(e["unknownReason"], "ERROR_ACCESS_DENIED");
+        assert!(e.get("type").is_none() && e.get("data").is_none());
+
+        let e = backup_entry_from_state("CurrentUser", "S", "K", RegReadState::Value("REG_DWORD", "7".into()));
+        assert_eq!(e["presence"], "value");
+        assert_eq!(e["exists"], true);
+        assert_eq!(e["type"], "REG_DWORD");
+        assert_eq!(e["data"], "7");
+    }
+
+    /// 无法识别的 presence 取值按旧记录处理（fail-closed 进 legacyUnknown 拒删分支），
+    /// 而不是猜一个新语义。
+    #[test]
+    fn 非法presence取值_按旧记录保守处理() {
+        let Err(msg) = build_restore_ops(&[
+            json!({ "hive": "LocalMachine", "sub": "S", "key": "K", "presence": "yes", "exists": false }),
+        ]) else { panic!("不可识别 presence + exists=false 必须拒删") };
+        assert!(msg.contains("legacyUnknown"), "{msg}");
     }
 }

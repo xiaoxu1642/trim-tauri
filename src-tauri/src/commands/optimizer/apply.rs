@@ -1262,8 +1262,13 @@ pub(super) fn verify_applied(option_id: &str, opt: &Value, p: &RunParams) -> &'s
     }
 }
 
-/// 还原回读：① 按值级备份逐项比对（原值不存在则当前必须不存在）；
+/// 还原回读：① 按值级备份逐项比对（原值确认不存在则当前必须确认不存在）；
 /// ② 无备份或读取失败时退回反向判据（可检测项 check_optimized 应为 false）。
+///
+/// P0-3：逐项比对优先读 `presence`（权威三态）。want 侧旧记录无 presence 且
+/// `exists=false` = legacyUnknown，**不得**解释成「确认不存在」——既不能据此给
+/// pass（当年可能只是没读到），也不硬判 partial（无从证实不符），如实 unknown；
+/// got 侧此刻读不出来同样呈报 unknown，不冒充「不存在」或「不一致」。
 pub(super) fn verify_option_restored(option_id: &str, opt: &Value) -> &'static str {
     // 分支 1：值级备份
     let map = load_opt_backups();
@@ -1273,13 +1278,28 @@ pub(super) fn verify_option_restored(option_id: &str, opt: &Value) -> &'static s
                 if let Some(got) = read_values_by_backup(want_values) {
                     if got.len() == want_values.len() {
                         for (want, got) in want_values.iter().zip(got.iter()) {
-                            let want_exists = want.get("exists").and_then(|v| v.as_bool()).unwrap_or(false);
-                            let got_exists = got.get("exists").and_then(|v| v.as_bool()).unwrap_or(false);
-                            if want_exists != got_exists {
-                                return "partial";
+                            // want 侧：旧记录只在 exists=true 时可信为「值存在过」
+                            // （读成功过才会带 type/data）；无 presence 且 exists=false
+                            // 是 legacyUnknown，下不了任何结论。
+                            let want_p = match backup_presence(want) {
+                                Some(p) => p,
+                                None if want.get("exists").and_then(|v| v.as_bool()).unwrap_or(false) => "value",
+                                None => return "unknown",
+                            };
+                            if want_p == "unknown" {
+                                return "unknown"; // 备份时就没确认状态，回读没有比对基准
                             }
-                            if !want_exists {
-                                continue; // 原本不存在 + 当前不存在 = 已恢复
+                            // got 侧由 read_values_by_backup 现造，必带 presence；
+                            // 万一结构意外，宁可 unknown 也不猜
+                            let Some(got_p) = backup_presence(got) else { return "unknown" };
+                            if got_p == "unknown" {
+                                return "unknown"; // 此刻读不到：不能拿「不知道」冒充「不符」
+                            }
+                            if want_p != got_p {
+                                return "partial"; // 一边确认缺、一边确认在，还原没落到
+                            }
+                            if want_p == "absent" {
+                                continue; // 原本确认不存在 + 当前确认不存在 = 已恢复
                             }
                             if want.get("type").and_then(|v| v.as_str())
                                 != got.get("type").and_then(|v| v.as_str())
@@ -1318,6 +1338,9 @@ pub(super) fn verify_option_restored(option_id: &str, opt: &Value) -> &'static s
 /// **必须与 `read_reg_values` 同一口径（faithful）**：产物是给 `verify_option_restored`
 /// 逐项比对 `type`/`data` 用的。一侧展平、一侧不展平，会让每个 EXPAND_SZ/MULTI_SZ
 /// 备份项永远比出不一致，还原明明成功却报「部分还原」。
+///
+/// P0-3：同样走三态内核 + 同源条目构造 —— got 侧带 `presence`，「此刻读不到」
+/// 呈报为 unknown，不得冒充 absent 让回读把「不确定」误判成「已恢复/不一致」。
 pub(super) fn read_values_by_backup(want: &[Value]) -> Option<Vec<Value>> {
     use crate::engine::native;
     let mut out = Vec::with_capacity(want.len());
@@ -1326,13 +1349,8 @@ pub(super) fn read_values_by_backup(want: &[Value]) -> Option<Vec<Value>> {
         let sub = v.get("sub").and_then(|x| x.as_str()).unwrap_or("");
         let key = v.get("key").and_then(|x| x.as_str()).unwrap_or("");
         let Some(h) = restore_hive(hive) else { return None };
-        let mut item = json!({ "hive": hive, "sub": sub, "key": key, "exists": false });
-        if let Some((ty, data)) = native::read_reg_value_faithful(h, sub, key) {
-            item["exists"] = json!(true);
-            item["type"] = json!(ty);
-            item["data"] = json!(data);
-        }
-        out.push(item);
+        let state = native::read_reg_value_state(h, sub, key, false);
+        out.push(backup_entry_from_state(hive, sub, key, state));
     }
     Some(out)
 }

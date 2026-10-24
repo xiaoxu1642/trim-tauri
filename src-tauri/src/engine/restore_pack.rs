@@ -527,6 +527,17 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
                     conflicts += 1;
                     continue;
                 }
+                // P0-4（R4-M09）：create_dir_all 沿字符串路径逐级建——最近的现存祖先
+                // 是 junction 时，新建内容会落到链接另一头。写当场用同一判据复检父链
+                // （判据唯一真源 protect::ancestor_reparse_block_reason，N6 不另造一套），
+                // 失败项进逐项 failed 回执、其余项继续，不整批中断。
+                // 残余风险：字符串路径检查与真实创建之间仍有 TOCTOU 窗口；在未改成
+                // 句柄相对（CreateFile + 相对句柄）操作之前，回归测试只能证明「窗口缩窄」，
+                // 不能宣称完全消除。
+                if let Some(reason) = protect::ancestor_reparse_block_reason(&e.orig_path) {
+                    failed.push(json!({ "path": e.orig_path, "reason": reason }));
+                    continue;
+                }
                 match std::fs::create_dir_all(target) {
                     Ok(_) => ok += 1,
                     Err(err) => failed.push(json!({ "path": e.orig_path, "reason": format!("建目录失败: {err}") })),
@@ -552,11 +563,30 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
                     continue;
                 }
             };
+            // P0-4（R4-M09）：写点（create_dir_all 与临时文件创建）之前逐级复检现存父链，
+            // 判据与目录趟同源（TOCTOU 残余窗口说明见上趟注释与 protect 侧判据函数）。
+            if let Some(reason) = protect::ancestor_reparse_block_reason(&e.orig_path) {
+                failed.push(json!({ "path": e.orig_path, "reason": reason }));
+                continue;
+            }
             if let Some(parent) = target.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
             // 先落到目标同目录的临时名，校验哈希后再改名就位：半途失败不留「半个文件」
             let tmp = target.with_extension(format!("trim-restore-{}", std::process::id()));
+            // P0-4（R4-M09）：临时名的 pid 形态可被猜到，可能已被人预建为联接——
+            // File::create 前对 tmp 自身再观测一次（symlink_metadata 不跟随链接，判据复用
+            // protect::is_reparse）；带 reparse 属性即拒且不碰它——那是别人预建的件，
+            // 删除超出本函数职权；本进程写出的半截 tmp 仍由下方既有失败分支清理。
+            if let Ok(md) = std::fs::symlink_metadata(&tmp) {
+                if protect::is_reparse(&md) {
+                    failed.push(json!({
+                        "path": e.orig_path,
+                        "reason": format!("临时目标已是 reparse 点，写入会落到链接另一头，已拒绝：{}", tmp.display()),
+                    }));
+                    continue;
+                }
+            }
             let mut hasher = Sha256::new();
             let mut buf = vec![0u8; 1 << 16];
             let mut wr = match std::fs::File::create(&tmp) {
@@ -1128,6 +1158,162 @@ mod tests {
         assert!(
             oversize.is_empty(),
             "早退必须发生在写盘**之前**，不得留下超过声明字节的半成品: {oversize:?}"
+        );
+    }
+
+    /// P0-4（R4-M09）的 M3 判据半边：还原写回的目标**合法地可以不存在**（新建文件），
+    /// 父链全是普通目录时不得因为「不存在」就被父链闸拒。用例做法是在 manifest 里追加
+    /// 一条复用同一 zip 条目、原路径指向隔离根内「尚不存在的两层新目录」的行，要求它
+    /// 照常还原并把字节写到新位置。
+    ///
+    /// 判红自证：把 `protect::ancestor_reparse_block_reason` 的 NotFound 分支从 `continue`
+    /// 改成 `return Some(...)`（即「不存在一律拒」）⇒ 本用例的 failed 断言立刻红。
+    #[test]
+    fn 还原写回不误伤父链干净的合法新建() {
+        let stamp = crate::engine::now_ms();
+        let batch = format!("p04-ok-{stamp}");
+        let root = paths::lib_test_data_root().join(format!("p04-ok-{stamp}"));
+        let pack_dir = paths::backup_write_dir(SUB).join(&batch);
+        struct G {
+            a: PathBuf,
+            b: PathBuf,
+        }
+        impl Drop for G {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.a);
+                let _ = std::fs::remove_dir_all(&self.b);
+            }
+        }
+        let _g = G { a: root.clone(), b: pack_dir.clone() };
+        // 前置条件：测试根自身的父链必须干净。个别机器把 `target` 挂成 junction 时，
+        // 「父级普通」这条前提在环境侧就不成立 —— 显式 SKIP 并声明未校验，
+        // 既不假红也不假绿（AGENTS §5：用例不得依赖只在本机成立的形状）。
+        let base = paths::lib_test_data_root().to_string_lossy().to_string();
+        if let Some(why) = protect::ancestor_reparse_block_reason(&format!(r"{base}\precheck.txt")) {
+            eprintln!("SKIP：测试根父链带 reparse（{why}），本用例的「普通父链」前提不成立");
+            return;
+        }
+        std::fs::create_dir_all(&root).expect("建探针目录");
+        std::fs::write(root.join("a.txt"), "新建放行样本".as_bytes()).expect("写探针文件");
+
+        let mut pack = Pack::begin(&batch).expect("建包");
+        pack.add_target(&root).expect("探针目录入包");
+        pack.finish().expect("收尾");
+
+        let fresh = root.join("brandnew").join("deeper").join("a.txt");
+        let mpath = pack_dir.join(MANIFEST_NAME);
+        let text = std::fs::read_to_string(&mpath).expect("manifest 应在");
+        let first_file = text
+            .lines()
+            .skip(1)
+            .find(|l| l.splitn(5, '\t').nth(1) == Some("file"))
+            .expect("manifest 里必须有 file 条目")
+            .to_string();
+        let p: Vec<&str> = first_file.splitn(5, '\t').collect();
+        std::fs::write(
+            &mpath,
+            format!("{}\n{}\tfile\t{}\t{}\t{}\n", text.trim_end(), p[0], p[2], p[3], fresh.display()),
+        )
+        .expect("改写 manifest");
+
+        let out = restore(&batch).expect("整批不报错");
+        assert!(
+            out["failed"].as_array().map(|a| a.len()) == Some(0),
+            "父链干净的合法新建不得被父链闸误拒，实得 {out}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&fresh).ok().as_deref(),
+            Some("新建放行样本"),
+            "放行必须是真的把字节写进新建路径，不是空转"
+        );
+    }
+
+    /// P0-4（R4-M09）真机 `#[ignore]` 探针（**本轮未执行**，归发布前门禁）：在 lib 单测
+    /// 隔离数据根内自建 junction（`mklink /J` 免管理员），再往 manifest 追加一条指向
+    /// 「junction 之下、尚不存在」的原路径。要求：该项进逐项 `failed` 且拒因点名 reparse、
+    /// junction 另一头不得长出还原内容、同批其余项照常还原（逐项拒 ≠ 整批中止）。
+    ///
+    /// 判红自证：删掉 `restore` 里 file 趟 `create_dir_all` 之前的
+    /// `ancestor_reparse_block_reason` 复检 ⇒ 第三条断言红（`<root>\real\ghostdir` 会被
+    /// 真的建出来，字节落到链接另一头）。
+    ///
+    /// 只写本用例自己的隔离根子目录，不碰真实 `%APPDATA%` 与真实用户目录（C08 之后
+    /// `cfg(test)` 的数据根就是 `target/test-data-root/lib`）；受限环境建不出 junction 时
+    /// 显式 SKIP 并声明未校验，不假绿。
+    #[test]
+    #[ignore = "真写盘 + 需建 junction（lib 单测隔离数据根内），发布前门禁跑"]
+    fn 还原写回链拒绝junction父目录的新建目标() {
+        let stamp = crate::engine::now_ms();
+        let batch = format!("p04-j-{stamp}");
+        let root = paths::lib_test_data_root().join(format!("p04-j-{stamp}"));
+        let pack_dir = paths::backup_write_dir(SUB).join(&batch);
+        let real = root.join("real");
+        let link = root.join("jlink");
+        struct G {
+            a: PathBuf,
+            b: PathBuf,
+            link: PathBuf,
+        }
+        impl Drop for G {
+            fn drop(&mut self) {
+                // junction 先按链接本体摘掉再清树：直接 remove_dir_all 一棵带链接的树，
+                // 跟着链接走会把另一头的真实内容一起删掉
+                if std::fs::symlink_metadata(&self.link).is_ok() {
+                    let _ = std::fs::remove_dir(&self.link);
+                }
+                let _ = std::fs::remove_dir_all(&self.a);
+                let _ = std::fs::remove_dir_all(&self.b);
+            }
+        }
+        let _g = G { a: root.clone(), b: pack_dir.clone(), link: link.clone() };
+        std::fs::create_dir_all(&real).expect("建探针目录");
+        std::fs::write(real.join("a.txt"), "穿链样本".as_bytes()).expect("写探针文件");
+
+        let mut pack = Pack::begin(&batch).expect("建包");
+        pack.add_target(&real).expect("探针目录入包");
+        pack.finish().expect("收尾");
+
+        let made = std::process::Command::new("cmd")
+            .args(["/C", &format!(r#"mklink /J "{}" "{}""#, link.display(), real.display())])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !made {
+            eprintln!("SKIP：本机建不出 junction（受限环境），父链穿链分支未校验");
+            return;
+        }
+
+        let ghost = link.join("ghostdir").join("a.txt").to_string_lossy().to_string();
+        let mpath = pack_dir.join(MANIFEST_NAME);
+        let text = std::fs::read_to_string(&mpath).expect("manifest 应在");
+        let first_file = text
+            .lines()
+            .skip(1)
+            .find(|l| l.splitn(5, '\t').nth(1) == Some("file"))
+            .expect("manifest 里必须有 file 条目")
+            .to_string();
+        let p: Vec<&str> = first_file.splitn(5, '\t').collect();
+        std::fs::write(
+            &mpath,
+            format!("{}\n{}\tfile\t{}\t{}\t{}\n", text.trim_end(), p[0], p[2], p[3], ghost),
+        )
+        .expect("改写 manifest");
+
+        let out = restore(&batch).expect("整批不报错，失败要逐项列出来");
+        let fails = out["failed"].as_array().cloned().unwrap_or_default();
+        assert_eq!(fails.len(), 1, "只有穿链那一条该失败，其余项不得被牵连，实得 {out}");
+        assert!(
+            fails[0]["path"].as_str() == Some(ghost.as_str())
+                && fails[0]["reason"].as_str().unwrap_or("").contains("reparse"),
+            "穿链条目必须点名 reparse 拒因，实得 {out}"
+        );
+        assert!(
+            !real.join("ghostdir").exists(),
+            "junction 另一头不得长出还原内容——那正是本批要堵的实际落点"
+        );
+        assert!(
+            out["restored"].as_u64().unwrap_or(0) >= 1,
+            "坏条目之外的项仍应还原（逐项拒，不整批中止），实得 {out}"
         );
     }
 }

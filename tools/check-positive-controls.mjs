@@ -61,6 +61,12 @@ const REGISTRY = [
     selfTestArgs: ['--selftest'],
     reason: 'IPC 载荷上限跨语言单源：8 组合成样本与现盘判定共用同一 judge（前端导出值改 33 必红 / 后端锚点消失必红 / 前端锚点重复必红 / 消费面字面量副本回归必红 / 漏读导出必红（reached 只 1 个）/ 非消费文件偷抄必红 / 注释里的举例不判红 / 干净样本不假红）；对照块每次运行都跑，不再只在 --selftest 才跑',
   },
+  // B0（2026-10-24 全仓重审方案 §4 A-6…A-9）：四道「先让后续修复能被判红」的施工前置门禁，
+  // 各自内置合成对照块且每次运行都跑，落地即入本表受第 1/2 组实跑核验。
+  { file: 'check-degraded-consumption.mjs', reason: 'A-6 degraded 消费契约：发射面现算 ⇄ 通道表三态（consumed/pending/exempt）双向咬合——consumed 的 anchor 必须在源文件命中、pending 兑现后不回收必红；对照块验证「status 白名单判定本身不失真」（非法值恰好 1 个）。B1 已把 paths_load 从 pending 转 consumed，转换当天门禁即要求锚点存在' },
+  { file: 'check-delete-root-guard.mjs', reason: 'A-7 删除根守卫：5 组合成样本与真仓扫描共用同一 build() 判据（read_dir+删除且无 inspect_root 必红、caller 先判根放行、**只在注释里写判定仍必红**、1 跳穿透必红、纯枚举工具放行）；TRANSITION 豁免表双向咬合（代码补上判定但台账未回收 ⇒ 红）+ 对象地板 5 条' },
+  { file: 'check-ignored-isolation.mjs', reason: 'A-8 ignored 探针隔离：4 组合成样本与真仓解析共用同一判据（第 45 行才定根必红、注释里的属性不算属性、定根在首语句放行、纯函数不误报）；与 `cargo test -- --ignored --list` 的条数对账靠对象地板兜底' },
+  { file: 'check-async-exits.mjs', reason: 'A-9 前端 await/出口：3 组合成样本与真仓扫描共用同一判据（置 busy 后 try 前有 await 必红、置 busy 立刻 try 放行、**await 只出现在注释里不得判红**——反向也要成立）；EXEMPT 台账双向咬合' },
 ];
 
 // MUST_RUN 里尚未配「内置正向对照自检」的存量门禁（T1-M05，2026-10-09 现算 33 条）。
