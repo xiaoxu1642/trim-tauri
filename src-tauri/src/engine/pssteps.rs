@@ -53,7 +53,11 @@ pub enum PsOp {
     /// sc.exe config X start= N
     SvcSetStart { name: String, start: u32 },
     /// Disable/Enable-ScheduledTask（经 schtasks /Change，与既有启动项链同一工具）
-    TaskChange { path: Option<String>, name: String, disable: bool },
+    ///
+    /// `silent` = 源脚本的静默语义（`-ErrorAction SilentlyContinue|Ignore` 或
+    /// `2>$null` / `*>$null`）。只有「命令确实跑起来并返回非零」才允许按它降级为
+    /// 警告；命令没跑起来（spawn 失败 / 超时）一律仍是失败。
+    TaskChange { path: Option<String>, name: String, disable: bool, silent: bool },
     /// Test-Path 守卫：仅当键存在才执行其内层操作（语义是「服务没装就别硬写」）
     GuardedKeyExists { hive: Hive, subkey: String, ops: Vec<PsOp> },
     /// 注册表子键枚举（`Get-ChildItem <键> | ForEach-Object { … }`，v3-K1）
@@ -260,6 +264,63 @@ fn has_flag(cmd: &Cmd, k: &str) -> bool {
     cmd.named.iter().any(|(n, v)| n.eq_ignore_ascii_case(k) && v.is_none())
 }
 
+/// `-ErrorAction` 的已实现语义。
+///
+/// 原生面只承认两类取值：
+/// - **静默**（`SilentlyContinue` / `Ignore`）：失败按源脚本的静默语义处理
+/// - **非静默**（`Stop` / `Continue`）：失败照旧上报
+///
+/// 其余取值（`Inquire`、拼错、依赖变量展开）一律 **不识别** → 交回 PsInline 逐字
+/// 交给 PowerShell 自己解释，绝不猜一个相近语义。
+enum ErrorAction {
+    Silent,
+    Loud,
+    Unknown,
+}
+
+/// 取命令的 `-ErrorAction` 语义；`None` = 语句里没有这个参数（PS 默认非静默）。
+///
+/// 参数名大小写不敏感（PS 自身语义）；取值只认上表里的明确形态。
+fn error_action_of(cmd: &Cmd) -> Option<ErrorAction> {
+    let raw = cmd
+        .named
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case("ErrorAction"))?;
+    let Some(v) = raw.1.as_deref() else {
+        // `-ErrorAction` 不带值不是合法形态，不许当成「没写」
+        return Some(ErrorAction::Unknown);
+    };
+    let v = v.trim().trim_matches('"').trim_matches('\'');
+    if v.eq_ignore_ascii_case("SilentlyContinue") || v.eq_ignore_ascii_case("Ignore") {
+        Some(ErrorAction::Silent)
+    } else if v.eq_ignore_ascii_case("Stop") || v.eq_ignore_ascii_case("Continue") {
+        Some(ErrorAction::Loud)
+    } else {
+        Some(ErrorAction::Unknown)
+    }
+}
+
+/// 任务命令的静默语义：`-ErrorAction SilentlyContinue|Ignore` 或 `2>$null` / `*>$null`。
+///
+/// 显式的 `-ErrorAction Stop|Continue` 优先于重定向（PS 里 `2>$null` 只丢错误流
+/// 输出，不改变 `-ErrorAction Stop` 的终止语义）。不认识的取值 → Err，
+/// 由 `compile` 交回 PsInline 逐字执行。
+fn task_silent(cmd: &Cmd, redir_silent: bool) -> Result<bool, String> {
+    match error_action_of(cmd) {
+        None => Ok(redir_silent),
+        Some(ErrorAction::Silent) => Ok(true),
+        Some(ErrorAction::Loud) => Ok(false),
+        Some(ErrorAction::Unknown) => Err(format!(
+            "-ErrorAction 取值不认识，交回 PowerShell 解释: {}",
+            cmd.named
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case("ErrorAction"))
+                .and_then(|(_, v)| v.clone())
+                .unwrap_or_default()
+        )),
+    }
+}
+
 /// A5（v2-R4，2026-10-01）：`Get-ScheduledTask -TaskName "X" | Disable-ScheduledTask`
 /// 这类管道形态 → 复用既有 `TaskChange` 算子（与 `schtasks /change` 同一条执行路径，
 /// 不新写执行器）。
@@ -277,7 +338,9 @@ fn parse_task_pipe(raw: &str) -> Option<Result<Vec<PsOp>, String>> {
     if parts.len() != 2 {
         return None;
     }
-    let getter = parse_cmd(parts[0].trim())?;
+    let (getter_src, getter_redir) = strip_redirects(parts[0].trim());
+    let (setter_src, setter_redir) = strip_redirects(parts[1].trim());
+    let getter = parse_cmd(getter_src)?;
     if !getter.name.eq_ignore_ascii_case("Get-ScheduledTask") {
         return None;
     }
@@ -286,7 +349,7 @@ fn parse_task_pipe(raw: &str) -> Option<Result<Vec<PsOp>, String>> {
         Some(p) => Some(unquote(p)?),
         None => None,
     };
-    let setter = parse_cmd(parts[1].trim())?;
+    let setter = parse_cmd(setter_src)?;
     let disable = match setter.name.as_str() {
         "Disable-ScheduledTask" => true,
         "Enable-ScheduledTask" => false,
@@ -296,15 +359,63 @@ fn parse_task_pipe(raw: &str) -> Option<Result<Vec<PsOp>, String>> {
     if param(&setter, "TaskName").is_some() || param(&setter, "TaskPath").is_some() {
         return None;
     }
+    // 静默语义：两端任一端带静默标记即静默。
+    // getter 的静默 = 「任务取不到就取不到」（PS 里取不到时管道里没有对象，setter 不会执行）；
+    // setter 的静默 = 「改不动就算了」。两者都对应源脚本的「失败不要紧」。
+    let getter_ea = error_action_of(&getter);
+    let setter_ea = error_action_of(&setter);
+    if matches!(getter_ea, Some(ErrorAction::Unknown))
+        || matches!(setter_ea, Some(ErrorAction::Unknown))
+    {
+        // 不认识的取值 → 不接管，交回 PsInline 逐字执行
+        return None;
+    }
+    let silent = matches!(getter_ea, Some(ErrorAction::Silent))
+        || matches!(setter_ea, Some(ErrorAction::Silent))
+        || getter_redir
+        || setter_redir;
     Some(Ok(vec![PsOp::TaskChange {
         path: task_path,
         name: task_name,
         disable,
+        silent,
     }]))
 }
 
-/// 去掉管道尾巴与重定向；除 `| Out-Null` 外一律不支持
-fn strip_pipeline(s: &str) -> Option<&str> {
+/// 剥掉重定向（`*> $null` / `2>$null` / `1>$null`），返回 (剥后的文本, 是否静默重定向)。
+///
+/// `2>$null` / `*>$null` 把错误流丢弃，在 PS 里等价于「这一步失败不要紧」，是源脚本
+/// 表达静默语义的两种形态之一（另一种是 `-ErrorAction SilentlyContinue`）。
+/// `1>$null` 只丢标准输出，错误仍会冒出来 —— **不算**静默。
+///
+/// 这里是重定向语义的唯一实现点：静默判定与「剥掉重定向」必须同源，
+/// 否则会出现「参数说静默、重定向没剥」或反过来的分叉。
+fn strip_redirects(s: &str) -> (&str, bool) {
+    let mut t = s.trim();
+    let mut silent = false;
+    loop {
+        let trimmed = t.trim_end();
+        if let Some((head, tail)) = trimmed.rsplit_once('>') {
+            let target = tail.trim();
+            // fd 是 head 的最后一个空白分隔 token（head 以它结尾，如 `… disabled 2>`）
+            let fd = head.split_whitespace().last().unwrap_or("");
+            if (fd == "*" || fd == "1" || fd == "2") && target == "$null" {
+                if fd == "*" || fd == "2" {
+                    silent = true;
+                }
+                t = head[..head.len() - fd.len()].trim_end();
+                continue;
+            }
+        }
+        break;
+    }
+    (t, silent)
+}
+
+/// 去掉管道尾巴与重定向；除 `| Out-Null` 外一律不支持。
+///
+/// 第二个返回值是「是否出现静默重定向」，语义见 [`strip_redirects`]。
+fn strip_pipeline(s: &str) -> Option<(&str, bool)> {
     let mut t = s.trim();
     if let Some((head, tail)) = t.rsplit_once('|') {
         if tail.trim() == "Out-Null" {
@@ -313,21 +424,8 @@ fn strip_pipeline(s: &str) -> Option<&str> {
             return None;
         }
     }
-    // 重定向：`*> $null` / `2>$null` / `1>$null`（数据层两种都有）
-    loop {
-        let trimmed = t.trim_end();
-        if let Some((head, tail)) = trimmed.rsplit_once('>') {
-            let target = tail.trim();
-            // fd 是 head 的最后一个空白分隔 token（head 以它结尾，如 `… disabled 2>`）
-            let fd = head.split_whitespace().last().unwrap_or("");
-            if (fd == "*" || fd == "1" || fd == "2") && target == "$null" {
-                t = head[..head.len() - fd.len()].trim_end();
-                continue;
-            }
-        }
-        break;
-    }
-    Some(t)
+    let (t, silent) = strip_redirects(t);
+    Some((t, silent))
 }
 
 /// `$var = <expr>` 的右侧表达式
@@ -1328,7 +1426,7 @@ fn parse_statement(
             return r;
         }
     }
-    let Some(line) = strip_pipeline(raw) else {
+    let Some((line, redir_silent)) = strip_pipeline(raw) else {
         return Err(format!("不支持的管道: {raw}"));
     };
     // 位置实参拼接 `($a + $b)`（schtasks 任务名，v3-K1）
@@ -1423,7 +1521,13 @@ fn parse_statement(
                 Some(p) => Some(lit(p, "-TaskPath")?),
                 None => None,
             };
-            Ok(vec![PsOp::TaskChange { path, name, disable: cmd.name == "Disable-ScheduledTask" }])
+            let silent = task_silent(&cmd, redir_silent)?;
+            Ok(vec![PsOp::TaskChange {
+                path,
+                name,
+                disable: cmd.name == "Disable-ScheduledTask",
+                silent,
+            }])
         }
         "sc.exe" => {
             // `sc.exe config <svc> start= <n>`：位置参数 [config, <svc>, start=, <n>]
@@ -1452,13 +1556,18 @@ fn parse_statement(
             {
                 return Err(format!("schtasks 只支持 /change /tn <name> /disable|/enable: {raw}"));
             }
+            // schtasks.exe 不接受命名参数：出现即形态不认识（否则 -ErrorAction 会被
+            // 悄悄吞掉，把「静默」语义算错）
+            if !cmd.named.is_empty() {
+                return Err(format!("schtasks 不接受命名参数: {raw}"));
+            }
             let name = unquote(&cmd.positional[2]).unwrap_or_else(|| cmd.positional[2].clone());
             let disable = match cmd.positional[3].as_str() {
                 "/disable" | "/DISABLE" => true,
                 "/enable" | "/ENABLE" => false,
                 other => return Err(format!("schtasks 未知动作: {other}")),
             };
-            Ok(vec![PsOp::TaskChange { path: None, name, disable }])
+            Ok(vec![PsOp::TaskChange { path: None, name, disable, silent: redir_silent }])
         }
         other => Err(format!("不支持的 cmdlet: {other}")),
     }
@@ -1674,6 +1783,33 @@ fn reg_err(code: u32) -> String {
     }
 }
 
+/// 计划任务执行结果 → 算子结果的判定（P1-01）。**纯函数**：采集（真的跑命令）与
+/// 判定拆开，所以「命令没跑起来不许被静默吞掉」这条红线能在没有真实任务的环境里
+/// 判红（AGENTS §4.1 纪律①）。
+///
+/// 判定口径：
+/// - 命令成功 → 成功；
+/// - 命令**确实跑起来**但返回非零 → 只有源脚本带静默语义时才降级为警告（并留痕），
+///   否则照旧失败；
+/// - 命令**根本没跑起来**（解析失败 / spawn 失败 / 超时）→ 一律失败，静默语义不适用。
+fn task_op_result(silent: bool, run: &native::TaskRun) -> Result<String, String> {
+    match run {
+        native::TaskRun::Succeeded => Ok(String::new()),
+        native::TaskRun::RanFailed { message, .. } => {
+            if silent {
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("计划任务变更未生效（按源脚本静默语义忽略）: {message}"),
+                );
+                Ok(String::new())
+            } else {
+                Err(message.clone())
+            }
+        }
+        native::TaskRun::NotRan { reason } => Err(reason.clone()),
+    }
+}
+
 fn exec_one(op: &PsOp) -> Result<String, String> {
     match op {
         PsOp::KeyCreate { hive, subkey } => native::reg_key_ensure_checked(hive_handle(*hive), subkey)
@@ -1716,9 +1852,8 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
             native::service_set_start_pub(name, *start)?;
             Ok(String::new())
         }
-        PsOp::TaskChange { path, name, disable } => {
-            native::task_change(path.as_deref(), name, *disable)?;
-            Ok(String::new())
+        PsOp::TaskChange { path, name, disable, silent } => {
+            task_op_result(*silent, &native::task_change(path.as_deref(), name, *disable))
         }
         PsOp::PnpSetState { names, enable } => {
             // FFI 批量禁用/启用（tf_dev_disable 原生化）；个别设备失败不中断其余，
@@ -1958,6 +2093,7 @@ mod tests {
                 path: Some("\\Microsoft\\Windows\\Defrag".into()),
                 name: "ScheduledDefrag".into(),
                 disable: true,
+                silent: true,
             }]
         );
     }
@@ -1977,6 +2113,7 @@ mod tests {
                 path: None,
                 name: "MicrosoftEdgeUpdateTaskMachineCore".into(),
                 disable: true,
+                silent: true,
             }]
         );
         let ops = compile(
@@ -1989,6 +2126,7 @@ mod tests {
                 path: None,
                 name: "MicrosoftEdgeUpdateTaskMachineCore".into(),
                 disable: false,
+                silent: true,
             }]
         );
     }
@@ -2005,7 +2143,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(&ops[0], PsOp::TaskChange { path: Some(p), name, disable: true }
+            matches!(&ops[0], PsOp::TaskChange { path: Some(p), name, disable: true, .. }
                 if p == "\\Microsoft\\Windows\\DiskDiagnostic" && name == "X"),
             "带 TaskPath 的管道要把它带进算子: {ops:?}"
         );
@@ -2019,6 +2157,136 @@ mod tests {
         let ops = compile("Get-ScheduledTask -TaskName \"A\" | Where-Object { $_ } | Disable-ScheduledTask")
             .unwrap();
         assert!(matches!(&ops[0], PsOp::PsInline { .. }), "三段管道必须交回 PsInline: {ops:?}");
+    }
+
+    /// P1-01 判红：静默语义**只**吞「命令确实跑起来并返回非零」这一类。
+    ///
+    /// 这条是本项的红线所在：把「任务不存在 / 权限不足」和「进程没启动、超时、
+    /// 执行器不可用」混成同一个 `Err` 再整体静默，等于把「工具压根没跑」谎报成
+    /// 「做完了」。纯函数判定，不依赖真实计划任务。
+    #[test]
+    fn 任务静默只吞已运行但失败的结果() {
+        let ran_failed = native::TaskRun::RanFailed {
+            exit_code: Some(1),
+            message: "ERROR: The system cannot find the file specified.".into(),
+        };
+        // 跑起来了但非零 + 静默 → 警告并成功
+        assert!(
+            task_op_result(true, &ran_failed).is_ok(),
+            "已运行但非零 + 静默语义 ⇒ 降级为警告并成功"
+        );
+        // 跑起来了但非零 + 不静默 → 失败
+        let err = task_op_result(false, &ran_failed);
+        assert!(err.is_err(), "已运行但非零 + 无静默语义 ⇒ 必须失败");
+        assert!(err.unwrap_err().contains("cannot find"), "失败原因要原样带出");
+        // 根本没跑起来（spawn 失败 / 超时）→ 静默语义不适用，一律失败
+        for reason in ["schtasks 未运行（命令未启动或超时）", "schtasks 无法定位（命令未运行）"] {
+            let not_ran = native::TaskRun::NotRan { reason: reason.into() };
+            assert!(
+                task_op_result(true, &not_ran).is_err(),
+                "命令没跑起来不许被静默吞掉: {reason}"
+            );
+            assert!(task_op_result(false, &not_ran).is_err());
+        }
+        // 成功 → 成功
+        assert!(task_op_result(true, &native::TaskRun::Succeeded).is_ok());
+        assert!(task_op_result(false, &native::TaskRun::Succeeded).is_ok());
+    }
+
+    /// P1-01 判红：静默语义的**来源**必须被如实识别，且不静默时不能被误判为静默。
+    #[test]
+    fn 任务静默语义来源可判别() {
+        // 参数形态：-ErrorAction SilentlyContinue / -ErrorAction Ignore
+        for src in [
+            "Disable-ScheduledTask -TaskName \"T\" -ErrorAction SilentlyContinue",
+            "Disable-ScheduledTask -TaskName \"T\" -ErrorAction Ignore",
+        ] {
+            let ops = compile(src).unwrap();
+            assert!(
+                matches!(&ops[0], PsOp::TaskChange { silent: true, .. }),
+                "参数形态的静默必须被识别: {src} → {ops:?}"
+            );
+        }
+        // 重定向形态：2>$null / *>$null
+        for src in [
+            "schtasks /change /tn \"T\" /disable 2>$null | Out-Null",
+            "schtasks /change /tn \"T\" /disable *>$null | Out-Null",
+        ] {
+            let ops = compile(src).unwrap();
+            assert!(
+                matches!(&ops[0], PsOp::TaskChange { silent: true, .. }),
+                "重定向形态的静默必须被识别: {src} → {ops:?}"
+            );
+        }
+        // 任务管道里的静默参数（数据层真实形态）
+        let ops = compile(
+            "Get-ScheduledTask -TaskName \"T\" -ErrorAction SilentlyContinue | Disable-ScheduledTask -ErrorAction SilentlyContinue",
+        )
+        .unwrap();
+        assert!(
+            matches!(&ops[0], PsOp::TaskChange { silent: true, .. }),
+            "任务管道的静默参数必须被识别: {ops:?}"
+        );
+        // 无静默标记 ⇒ 不是静默
+        for src in [
+            "Disable-ScheduledTask -TaskName \"T\"",
+            "schtasks /change /tn \"T\" /disable | Out-Null",
+            "Get-ScheduledTask -TaskName \"T\" | Disable-ScheduledTask",
+        ] {
+            let ops = compile(src).unwrap();
+            assert!(
+                matches!(&ops[0], PsOp::TaskChange { silent: false, .. }),
+                "没有静默标记时不得判成静默: {src} → {ops:?}"
+            );
+        }
+        // 不认识的 -ErrorAction 取值 → 不接管，交回 PsInline 逐字执行
+        let ops = compile("Disable-ScheduledTask -TaskName \"T\" -ErrorAction Inquire").unwrap();
+        assert!(
+            matches!(&ops[0], PsOp::PsInline { .. }),
+            "不认识的 ErrorAction 必须交回 PsInline: {ops:?}"
+        );
+    }
+
+    /// P1-01 真机探针：任务不存在时，schtasks **确实跑起来**并返回非零 ——
+    /// 必须归到 `RanFailed`（可按静默语义降级为警告），不能归到 `NotRan`。
+    ///
+    /// 只读探针：本机已验证 `WindowsBackup` 计划任务不存在（查询为「未找到」），
+    /// 因此不产生任何系统副作用。
+    #[test]
+    #[ignore = "真机：调用 schtasks 改一个不存在的任务，验证失败分类落在 RanFailed"]
+    fn live_missing_task_is_ran_failed() {
+        let run = crate::engine::native::task_change(
+            Some("\\Microsoft\\Windows\\WindowsBackup\\"),
+            "AutomaticBackup",
+            true,
+        );
+        assert!(
+            matches!(run, crate::engine::native::TaskRun::RanFailed { .. }),
+            "不存在的任务应归 RanFailed（命令跑起来但非零），实际: {run:?}"
+        );
+        // 静默语义下只降级为警告；不静默时照旧失败
+        assert!(task_op_result(true, &run).is_ok());
+        assert!(task_op_result(false, &run).is_err());
+    }
+
+    /// P1-01 真机探针：操作被拒（无权限 / 目标不存在）时，schtasks 同样是**跑起来**
+    /// 并返回非零 —— 原生面必须把它归到 `RanFailed` 而不是 `NotRan`。
+    ///
+    /// schtasks 对「不存在」与「拒绝访问」都给非零退出且本地化文案，原生面**无法**
+    /// 区分两者（不做猜测映射）；本探针因此只守分类边界，并断言失败分类不依赖
+    /// stderr 文案。目标名在受保护路径下且**确定不存在** ⇒ 无任何系统副作用。
+    #[test]
+    #[ignore = "真机：schtasks 对受保护路径下的不存在任务返回非零，验证分类落在 RanFailed"]
+    fn live_rejected_task_is_ran_failed() {
+        let run = crate::engine::native::task_change(
+            Some("\\Microsoft\\Windows\\Defrag\\"),
+            "TrimP1ProbeNoSuchTask",
+            true,
+        );
+        assert!(
+            matches!(run, crate::engine::native::TaskRun::RanFailed { .. }),
+            "被拒/不存在应归 RanFailed，实际: {run:?}"
+        );
     }
 
     #[test]

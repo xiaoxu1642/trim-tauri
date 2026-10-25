@@ -125,29 +125,72 @@ mod maint_reparse_tests {
 }
 
 
+/// 计划任务变更的执行结果分类（P1-01）。
+///
+/// 三类必须分开，不能共用一个 `Result<(), String>`：
+/// - [`TaskRun::Succeeded`]：命令成功；
+/// - [`TaskRun::RanFailed`]：命令**确实启动**并返回了非零退出码（任务不存在、
+///   权限不足等）；
+/// - [`TaskRun::NotRan`]：命令**根本没跑起来**（系统工具解析失败、spawn 失败、超时）。
+///
+/// 只有第二类才允许按源脚本的静默语义降级成警告：把第三类也降级，等于把
+/// 「执行器不可用」谎报成「已完成」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskRun {
+    Succeeded,
+    /// 命令跑起来了但返回非零退出码
+    RanFailed { exit_code: Option<i32>, message: String },
+    /// 命令没跑起来（解析失败 / spawn 失败 / 超时）
+    NotRan { reason: String },
+}
+
 /// 启用/禁用计划任务（对应 `Disable/Enable-ScheduledTask`，与启动项链同一工具）
 ///
 /// `path` 为含尾反斜杠的任务路径（如 `\Microsoft\Windows\Defrag\`），与数据层 `taskPath` 同形。
-pub fn task_change(path: Option<&str>, name: &str, disable: bool) -> Result<(), String> {
+///
+/// 返回值是**执行分类**而不是 `Result`：调用方要能分辨「任务改不动」与「命令没跑起来」，
+/// 前者可按源脚本的静默语义降级，后者一律是失败。
+pub fn task_change(path: Option<&str>, name: &str, disable: bool) -> TaskRun {
     let full = format!("{}{}", path.unwrap_or_default(), name);
     let arg = if disable { "/DISABLE" } else { "/ENABLE" };
     // v4 R5-M07：裸 .output() 改带超时（任务计划服务被拖住时不能永久锁 IPC）
     // v6-K01（P0-2）：解析失败与 spawn 失败同报错口径
-    let output = crate::engine::systembin::quiet_cmd_timeout(
-        system_tool("schtasks")?,
+    let exe = match crate::engine::systembin::system_tool("schtasks") {
+        Ok(p) => p,
+        Err(e) => {
+            return TaskRun::NotRan {
+                reason: format!("schtasks 无法定位（命令未运行）: {e}"),
+            }
+        }
+    };
+    let output = match crate::engine::systembin::quiet_cmd_timeout(
+        &exe,
         &["/Change", "/TN", &full, arg],
         crate::engine::systembin::SCHTASKS_TIMEOUT,
-    )
-    .map_err(|e| format!("schtasks 执行失败: {e}"))?;
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            return TaskRun::NotRan {
+                reason: format!("schtasks 未运行（命令未启动或超时）: {e}"),
+            }
+        }
+    };
     if output.status.success() {
-        Ok(())
+        TaskRun::Succeeded
     } else {
         let stderr = crate::engine::systembin::decode_native_output(&output.stderr);
-        Err(if stderr.is_empty() {
-            format!("计划任务{}未生效（可能需要管理员权限）: {full}", if disable { "禁用" } else { "启用" })
+        let message = if stderr.is_empty() {
+            format!(
+                "计划任务{}未生效（可能需要管理员权限）: {full}",
+                if disable { "禁用" } else { "启用" }
+            )
         } else {
             stderr
-        })
+        };
+        TaskRun::RanFailed {
+            exit_code: output.status.code(),
+            message,
+        }
     }
 }
 

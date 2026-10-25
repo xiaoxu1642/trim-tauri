@@ -18,7 +18,7 @@ pub use contextmenu::{cm_restart_explorer, cm_scan, cm_toggle};
 mod diagnostics;
 pub use diagnostics::{sysdisk, device_info};
 mod maintenance;
-pub use maintenance::{task_change, MAINT_CMD_TIMEOUT, maint_run};
+pub use maintenance::{task_change, TaskRun, MAINT_CMD_TIMEOUT, maint_run};
 pub(crate) use maintenance::{dir_delete_blocked};
 pub(crate) use maintenance::ancestor_reparse_blocked;
 mod memory;
