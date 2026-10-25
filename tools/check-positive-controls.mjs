@@ -54,6 +54,7 @@ const REGISTRY = [
   { file: 'check-test-sandbox.mjs', reason: 'D 轮（2026-10-25）新增：测试沙箱必须走自删守卫。判定器 judge() 与门禁共用同一实现，内置三向合成对照——未登记新文件 / 计数上升 / 守卫实现整体消失，任一失效即红；另钉守卫本体活性（impl Drop + remove_dir_all 缺一即红，防「①全绿而守卫已被掏空」）' },
   { file: 'check-optimizer-security.mjs', reason: '找违规型：扩库夹带关闭安全组件即红（内置对照块随跑随验，2026-10-20 从 PENDING 迁入）' },
   { file: 'check-optimizer-groups-sidecar.mjs', reason: '对拍型：分类侧表 ⇄ 渲染层兜底常量（内置 6 条对照样本随跑随验，2026-10-20 从 PENDING 迁入）' },
+  { file: 'check-optimizer-schema-sync.mjs', reason: '优化域标量 ⇄ 契约表 optimizer 段：六条合成样本（齐全放行 / Rust 常量、渲染层常量、风险档清单、目录越档 risk、侧表 schemaVer 各自判红）' },
   // T1c-M02 / T1c-M05（v7.2 C09）两条新门禁：
   { file: 'check-data-signatures.mjs', reason: '数据产物逐件验签（D1-M03 扩到五件）：签名面现算 ⇄ 登记面双向对账（摘一件必红、塞一件无签名的必红，两向均在 2026-10-21 实跑判红并点名对象）+ 四件内联 _sig 产物逐件字节对照（正文追加空格 / 签名换尾八字节必须拒）；判定 import 自 sign-cleanup-rules 单一实现。段序=对账→对照→逐件验签，真样本验签不过归第 3 段以「改后必须重签」点名，不再冒充「判定器不可信」' },
   { file: 'check-fixture-freshness.mjs', reason: '夹具新鲜度：比对器 isFresh 正反合成样本钉方向（反相 = 全绿假象）；主断言「盘上 ⇄ 生成器导出逐字节」的手改破坏由真破坏验证兜底' },

@@ -193,7 +193,79 @@ const POSITIVE_CONTROLS = [
     const bad = vocabViolations(nomark, MINI_SCHEMA).bad;
     return bad.some((x) => x.includes('找不到 #[cfg(test)]')) ? '' : '剥离失败没有被点名';
   }],
+  ['反向：表里新增死键应判红', () => {
+    const mini = { cleanup: { a: ['x'], limits: { maxItems: 1 }, dead: 1 }, residue: { b: ['y'] }, crossTrack: { c: ['z'] } };
+    const r = reverseKeyProblems(mini, 'req_list("cleanup","a");\nreq_number("cleanup","maxItems");', 'rs::list("residue","b");', {});
+    return r.missing.includes('cleanup.dead') ? '' : '反向判定器没抓住已知死键';
+  }],
+  ['反向：书面 scope 放行 / 过期登记判红', () => {
+    const mini = { cleanup: { dead: 1 }, residue: {}, crossTrack: {} };
+    const ok = reverseKeyProblems(mini, '', '', { 'cleanup.dead': '书面 scope' });
+    const stale = reverseKeyProblems(mini, '', '', { 'cleanup.gone': '书面 scope' });
+    return ok.missing.length === 0 && stale.stale.includes('cleanup.gone') ? '' : 'scope 登记或过期判定失效';
+  }],
 ];
+
+// ---------- 反向：表里的叶子键必须有消费者（A6-L03 / P2-C，2026-10-26） ----------
+// 「每个叶子都必须被 req_* 查询」过宽：结构表 / 类型表 / 允许集各有消费方式。
+// 判据 = 直接查询集（四类 query + cross） ∪ 书面 scope 登记；两边都没有 ⇒ 红。
+// 登记表达的是「谁在读、为什么不是 req_*」，新增死键不会再静默通过。
+const TOOL_CONSUMED_SCOPE = {
+  'cleanup.file': 'check-cleanup-rule-contract（schemaFile 读取）',
+  'residue.file': 'check-residue-rule-contract（schemaFile 读取）',
+  'cleanup.tokens.allowed': 'token 判定器整体读取（schemaTokens）',
+  'cleanup.tokens.caseInsensitive': 'token 判定器整体读取（schemaTokens）',
+  'residue.tokens.allowed': 'token 判定器整体读取（schemaTokens）',
+  'residue.tokens.caseInsensitive': 'token 判定器整体读取（schemaTokens）',
+  'cleanup.versionRatchetMin': 'check-cleanup-rule-contract 版本棘轮',
+  'cleanup.frozenWinapp2Version': 'check-cleanup-rule-contract winapp2 冻结值',
+  'residue.versionRatchetMin': 'check-residue-rule-contract 版本棘轮',
+  'residue.matchGroupsMinNonEmpty': 'rule_schema.rs 装载侧直接读取',
+  'crossTrack.points': 'check-cleanup-rule-contract 跨轨登记',
+  'crossTrack.notCovered': 'gen-rule-coverage 覆盖账',
+  'optimizer.riskLevels': 'check-optimizer-schema-sync（RISK_TEXT 键集对拍）',
+  'optimizer.sideTableSchemaVer': 'check-optimizer-subitem-contract + check-optimizer-schema-sync',
+  'optimizer.limits.wuPauseMaxDays': 'check-optimizer-schema-sync（Rust/JS 常量对拍）',
+};
+function schemaLeafKeys(schema) {
+  const out = [];
+  const walk = (node, prefix) => {
+    if (node && typeof node === 'object' && !Array.isArray(node)) {
+      for (const [k, v] of Object.entries(node)) {
+        if (k.startsWith('_')) continue;
+        walk(v, prefix ? `${prefix}.${k}` : k);
+      }
+    } else {
+      out.push(prefix);
+    }
+  };
+  for (const dom of ['cleanup', 'residue', 'optimizer', 'crossTrack']) {
+    if (schema[dom] === undefined) continue;
+    walk(schema[dom], dom);
+  }
+  return out;
+}
+function directQueriedKeys(schema, rulesText, residueText) {
+  const out = new Set();
+  const keys = (text, re) => [...text.matchAll(re)].map((m) => m[1]);
+  for (const k of keys(rulesText, /req_list\("cleanup",\s*"(\w+)"\)/g)) out.add(`cleanup.${k}`);
+  for (const k of keys(rulesText, /req_number\("cleanup",\s*"(\w+)"\)/g)) {
+    out.add(schema.cleanup?.limits?.[k] !== undefined ? `cleanup.limits.${k}` : `cleanup.${k}`);
+  }
+  for (const k of keys(residueText, /rs::list\("residue",\s*"(\w+)"\)/g)) out.add(`residue.${k}`);
+  for (const k of keys(residueText, /rs::number\("residue",\s*"(\w+)"\)/g)) {
+    out.add(schema.residue?.limits?.[k] !== undefined ? `residue.limits.${k}` : `residue.${k}`);
+  }
+  for (const k of keys(rulesText, /rule_schema::cross\("(\w+)"\)/g)) out.add(`crossTrack.${k}`);
+  return out;
+}
+function reverseKeyProblems(schema, rulesText, residueText, scope) {
+  const leaves = schemaLeafKeys(schema);
+  const direct = directQueriedKeys(schema, rulesText, residueText);
+  const missing = leaves.filter((l) => !direct.has(l) && !(l in scope));
+  const stale = Object.keys(scope).filter((k) => !leaves.includes(k));
+  return { leaves, direct, missing, stale };
+}
 
 let fail = 0;
 const check = (ok, label, detail = '') => {
@@ -242,6 +314,13 @@ check(
   sep.bad.length === 0,
   `4. 两域允许集分离（cleanup ${sep.perDomain.cleanup} / residue ${sep.perDomain.residue} / 大小写不敏感交集 ${sep.inter}）`,
   sep.bad.join('；'),
+);
+
+const rev = reverseKeyProblems(schema, rulesText, residueText, TOOL_CONSUMED_SCOPE);
+check(
+  rev.leaves.length >= 50 && rev.missing.length === 0 && rev.stale.length === 0,
+  `5. 反向：表里叶子键均有消费者（叶子 ${rev.leaves.length} / 直接查询 ${rev.direct.size} / 书面 scope ${Object.keys(TOOL_CONSUMED_SCOPE).length}）`,
+  `无消费者 ${rev.missing.join('、') || '无'}；过期 scope ${rev.stale.join('、') || '无'}`,
 );
 
 if (fail > 0) {

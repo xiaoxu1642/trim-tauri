@@ -67,6 +67,13 @@ export function tokens(domain) {
   return { allowed: t.allowed, caseInsensitive: t.caseInsensitive };
 }
 
+/** 域对应的规则库路径（仓内相对路径，唯一真源）—— 契约门禁不再各抄一份字面量 */
+export function file(domain) {
+  const v = loadSchema()[domain]?.file;
+  if (typeof v !== 'string' || !v.trim()) throw new Error(`契约表 ${domain}.file 缺失`);
+  return v;
+}
+
 /** crossTrack 登记表（V2 P2-D7 实测不等价点）；缺失即抛，不静默当空表 */
 export function crossTrack(key) {
   const v = loadSchema().crossTrack?.[key];

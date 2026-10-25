@@ -25,13 +25,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const RULES = path.join(ROOT, 'src-tauri', 'data', 'uninstall-residue-rules.json');
 // v3 D2：卸载域按命令契约拆成 commands/uninstall/ 目录，装载/校验/更新链集中在
 // residue_update.rs。这里读整目录而不是单文件——坐标再搬家时断言仍然有效，
 // 不会退化成「文件不在了就跳过」的假绿。
 const UNINSTALL_DIR = path.join(ROOT, 'src-tauri', 'src', 'commands', 'uninstall');
 import { leadingToken, makeTokenChecker } from './rule-tokens.mjs';
-import { list as schemaList, number as schemaNumber, tokens as schemaTokens } from './rule-schema.mjs';
+import { list as schemaList, number as schemaNumber, tokens as schemaTokens, file as schemaFile } from './rule-schema.mjs';
+const RULES = path.join(ROOT, schemaFile('residue'));
 const FIXTURE = path.join(ROOT, 'tools', 'fixtures', 'residue-contract.json');
 // 词汇与上限取自 `tools/rule-schema.json`（V2 P0-A2，2026-09-30）：同一份字节也被 Rust 装载侧
 // 编译期嵌入（engine/rule_schema.rs），本文件不再抄第二份清单 —— 抄了就会出现"改了表没改门禁"

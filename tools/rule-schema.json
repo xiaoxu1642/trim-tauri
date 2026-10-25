@@ -176,21 +176,14 @@
       "maxRegKeysPerItem": 32,
       "maxExcludePathsPerItem": 32,
       "maxTargetLen": 260,
-      "maxTextLen": 200,
-      "maxNameLen": 120,
-      "maxSegments": 32
+      "maxTextLen": 200
     },
     "itemBannedKeys": [
       "deleteMode",
       "excludeKeys"
     ],
     "versionRatchetMin": 20260928,
-    "frozenWinapp2Version": "260730",
-    "itemBannedReasons": {
-      "deleteMode": "P0-5 已裁决移除（Rust/前端零消费方），回潮即红",
-      "excludeKeys": "执行侧未实现排除过滤，放行等于「扫描排除、执行照删」"
-    },
-    "entryVersionField": "ver"
+    "frozenWinapp2Version": "260730"
   },
   "residue": {
     "file": "src-tauri/data/uninstall-residue-rules.json",
@@ -230,7 +223,6 @@
       "reg_key",
       "reg_value"
     ],
-    "idCharset": "A-Za-z0-9._-",
     "tokens": {
       "caseInsensitive": true,
       "allowed": [
@@ -254,8 +246,23 @@
       "maxTextLen": 200,
       "maxSegments": 32
     },
-    "versionRatchetMin": 20260928,
-    "entryVersionField": "ver"
+    "versionRatchetMin": 20260928
+  },
+  "optimizer": {
+    "_说明": [
+      "优化域跨端标量（D4 拍板）：只收会被多端消费的上限 / 版本下限 / 类型清单。",
+      "item 的完整形状仍由优化域校验器（check-optimizer-write-contract / catalog.rs）管，",
+      "不在这里复制 item 字段——复制一份就等于多一处要同步的真源。"
+    ],
+    "riskLevels": [
+      "low",
+      "medium",
+      "high"
+    ],
+    "sideTableSchemaVer": 1,
+    "limits": {
+      "wuPauseMaxDays": 35
+    }
   },
   "crossTrack": {
     "_说明": [

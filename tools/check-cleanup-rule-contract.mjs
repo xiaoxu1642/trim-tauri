@@ -23,12 +23,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-import { loadSchema, number as schemaNumber } from './rule-schema.mjs';
+import { loadSchema, number as schemaNumber, file as schemaFile } from './rule-schema.mjs';
 import { ASSERTIONS, validateCleanupPackage, selfTest } from './cleanup-contract.mjs';
 import { allItems } from './lib/rule-shape.mjs';
 import { findWholeTreeOverlaps } from './lib/rule-overlap.mjs';
 
-const RULES_REL = path.join('src-tauri', 'data', 'cleanup-rules.json');
+const RULES_REL = schemaFile('cleanup');
 const FIXTURE_REL = path.join('tools', 'fixtures', 'cleanup-contract.json');
 // 跨条目整树覆盖台账（现算回填，见 4c）
 const OVERLAP_REL = path.join('tools', 'fixtures', 'cleanup-overlaps.json');

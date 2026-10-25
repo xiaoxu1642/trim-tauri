@@ -28,6 +28,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadSchema } from './rule-schema.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
@@ -83,7 +84,8 @@ function extractArrays(pwsh) {
 
 // ---- 1. 结构与必登项 ----
 const items = sub.items ?? {};
-check(sub.schemaVer === 1, '1. schemaVer = 1', `实际 ${sub.schemaVer}`);
+const SIDE_SCHEMA_VER = loadSchema().optimizer?.sideTableSchemaVer;
+check(sub.schemaVer === SIDE_SCHEMA_VER, `1. schemaVer = ${SIDE_SCHEMA_VER}（契约表 optimizer.sideTableSchemaVer）`, `实际 ${sub.schemaVer}`);
 for (const id of REQUIRED) {
   check(Object.prototype.hasOwnProperty.call(items, id), `1. 已登记批量项 ${id}`);
 }
