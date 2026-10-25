@@ -46,6 +46,9 @@ use crate::security;
 /// 改法换成把逐条 syscall 去掉（见 `scan_root` 里的 reparse 复核），
 /// 遍历面与判定面一字未动：命中集、先到先得的行序、截断点全部照旧。
 const MAX_FILES: usize = 2000;
+/// 一次扫描的**全局**输出上限（R1d-M12）：单根有上限，但内容根随账号数放大；
+/// 按 5× 单根取 10,000（2026-10-26 小旭拍板，上界现算见 P2-E 卡）。
+const MAX_FILES_TOTAL: usize = 10_000;
 /// 单个内容根的深度闸。**不是**「内容在第几层」的判据（那由内容根决定），只是防病态树的
 /// 兜底；取 24 与常规清理域 `FK_SNAPSHOT_MAX_DEPTH` 同口径。
 ///
@@ -235,12 +238,6 @@ fn classify(ext: &str) -> Option<&'static str> {
     }
 }
 
-/// 扫一个内容根：根目录自身的文件也收（内容根的第一层就是内容，不是容器），
-/// 与「配置根的根层文件不收」区分开——后者在 `scan_root` 的 `collect_root_files=false`。
-fn scan_content_root(root: &Path) -> (Vec<Value>, usize, usize, bool) {
-    scan_dir(root, true, MAX_DEPTH, MAX_FILES)
-}
-
 /// 扫配置根整棵（旧口径，仅在展开不出任何内容根时兜底），根层文件不收。
 fn scan_root(root: &Path) -> (Vec<Value>, usize, usize, bool) {
     scan_dir(root, false, MAX_DEPTH, MAX_FILES)
@@ -249,16 +246,35 @@ fn scan_root(root: &Path) -> (Vec<Value>, usize, usize, bool) {
 /// 多个内容根合并：各路独立计数、独立计深，任一路触顶即整体 `truncated`。
 /// 内容根之间天然不相交（账号目录下的不同子目录），不做跨路去重。
 fn scan_lanes(lanes: &[PathBuf]) -> (Vec<Value>, usize, usize, bool) {
+    scan_lanes_capped(lanes, MAX_FILES, MAX_FILES_TOTAL)
+}
+
+/// 多路合并 + 全局总量闸（R1d-M12）：每路仍按 `per_lane` 计深/截断；
+/// 全局满额即停，尚有余路时把 `truncated` 置真（恰好收满且已无余路不算截断）。
+fn scan_lanes_capped(lanes: &[PathBuf], per_lane: usize, total_cap: usize) -> (Vec<Value>, usize, usize, bool) {
     let mut items: Vec<Value> = Vec::new();
     let mut scanned = 0usize;
     let mut unhandled = 0usize;
     let mut truncated = false;
-    for lane in lanes {
-        let (mut it, s, u, t) = scan_content_root(lane);
+    for (i, lane) in lanes.iter().enumerate() {
+        if items.len() >= total_cap {
+            truncated = true;
+            break;
+        }
+        let (mut it, s, u, t) = scan_dir(lane, true, MAX_DEPTH, per_lane);
+        let room = total_cap.saturating_sub(items.len());
+        if it.len() > room {
+            it.truncate(room);
+            truncated = true;
+        }
         items.append(&mut it);
         scanned += s;
         unhandled += u;
         truncated |= t;
+        if items.len() == total_cap && i + 1 < lanes.len() {
+            truncated = true;
+            break;
+        }
     }
     (items, scanned, unhandled, truncated)
 }
@@ -751,7 +767,7 @@ pub async fn fileclean_execute<R: Runtime>(
         return json!({ "success": false, "message": "扫描会话已过期，请重新扫描后再删除" });
     };
 
-    let batch_max = FILECLEAN_DELETE_MAX.max(scope.files.len());
+    let batch_max = FILECLEAN_DELETE_MAX.max(scope.files.len()).min(MAX_FILES_TOTAL);
     if files.len() > batch_max {
         log::write_log(
             "warn",
@@ -1490,4 +1506,29 @@ mod tests {
             ),
         }
     }
+
+    /// R1d-M12：多路合并受全局总量闸约束，收满且有余额路时置 truncated。
+    #[test]
+    fn 扫描总量封顶且收满时置截断() {
+        let sb = crate::testutil::Sandbox::new("p2e-m12");
+        let mut lanes = Vec::new();
+        for i in 0..3 {
+            let d = sb.path().join(format!("lane{i}"));
+            std::fs::create_dir_all(&d).unwrap();
+            for j in 0..51 {
+                std::fs::write(d.join(format!("f{j}.log")), b"x").unwrap();
+            }
+            lanes.push(d);
+        }
+        let (items, _s, _u, truncated) = scan_lanes_capped(&lanes, 200, 100);
+        assert_eq!(items.len(), 100, "全局闸应把三路 153 项截到 100");
+        assert!(truncated, "截断必须置位");
+        let (exact, _s, _u, t_exact) = scan_lanes_capped(&lanes[..1], 200, 51);
+        assert_eq!(exact.len(), 51);
+        assert!(!t_exact, "恰好收满且已无余路不算截断");
+        let (fit, _s, _u, t_fit) = scan_lanes_capped(&lanes[..1], 200, 100);
+        assert_eq!(fit.len(), 51);
+        assert!(!t_fit);
+    }
+
 }

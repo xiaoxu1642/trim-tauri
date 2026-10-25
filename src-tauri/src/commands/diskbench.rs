@@ -247,8 +247,10 @@ pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options:
             "message": "已有一次磁盘测速在进行，请等待其结束后再试",
         }));
     }
-    // Drop 里放位：五条早退出口与 panic 路径都不用各写一遍 store(false)
-    let _run_guard = RunGuard;
+    // Drop 里放位：五条早退出口与 panic 路径都不用各写一遍 store(false)。
+    // R1d-M10：guard 所有权要交给工作线程——超时出口不能放位，否则野线程还在独占读盘，
+    // 第二场立刻被放行。早退路径仍由本作用域的 guard 负责释放。
+    let run_guard = RunGuard;
     let opts = options.unwrap_or_else(|| json!({}));
 
     let requested = opts
@@ -351,7 +353,9 @@ pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options:
     // 主线程用 recv_timeout 模拟 Electron 的进程超时中止。
     let handle = window.clone();
     let (tx, rx) = mpsc::channel::<String>();
+    let worker_guard = run_guard;
     std::thread::spawn(move || {
+        let _worker_guard = worker_guard;
         let mut emit = |line: &str| {
             if let Ok(v) = serde_json::from_str::<Value>(line) {
                 let _ = handle.emit("diskbench:progress", v);
@@ -456,4 +460,15 @@ mod p1_6e_diskbench_param_tests {
         // data 原样带回，历史记录字段一个都不能少
         assert_eq!(r["data"]["measured"], json!(true));
     }
+
+    /// R1d-M10：单飞位所有权移进工作线程，超时出口不再提前放位。
+    /// 判红自证：把 worker_guard 捕获移出闭包（恢复 `let _run_guard`）⇒ 断言红。
+    #[test]
+    fn 测速单飞位所有权交给工作线程() {
+        let src = include_str!("diskbench.rs");
+        assert!(src.contains(concat!("let run_guard", " = RunGuard;")), "命令体持有 guard 以覆盖早退路径");
+        assert!(src.contains(concat!("let worker_guard", " = run_guard;")), "spawn 前把 guard 移进闭包");
+        assert!(src.contains(concat!("let _worker_guard", " = worker_guard;")), "工作线程收尾才放位");
+    }
+
 }

@@ -627,13 +627,16 @@
     };
     // 保存到缓存目录（7 天自动清理）
     let savedName = '';
+    let saveMsg = '';
     if (window.api?.realtime?.reportSave) {
       try {
         const resp = await window.api.realtime.reportSave(report);
         if (resp && resp.success) savedName = resp.name;
-      } catch (e) { /* 保存失败仍可本地预览 */ }
+        else if (resp && resp.message) saveMsg = resp.message;
+      } catch (e) { saveMsg = '保存网速报告失败：' + ((e && e.message) || e); }
     }
-    window.app?.toast('success', savedName ? '网速报告已保存到缓存目录' : '网速报告生成完成');
+    if (saveMsg) window.app?.toast('warning', saveMsg);
+    else window.app?.toast('success', savedName ? '网速报告已保存到缓存目录' : '网速报告生成完成');
     window.app?.log('info', `网速记录结束：持续 ${durationSec}s，下载峰值 ${formatSpeed(maxDown)}，上传峰值 ${formatSpeed(maxUp)}`);
     openReportModal(report, savedName);
   }

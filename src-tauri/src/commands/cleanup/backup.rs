@@ -203,11 +203,20 @@ pub(super) fn valid_restore_target(p: &str) -> bool {
 }
 
 /// cleanup:file-backup-list — 列出永久删批次的文件备份清单（只读；≤50 份按时间倒序）
+///
+/// R4-M11：改 async + spawn_blocking（读全部清单曾是同步主线程 I/O），entries 只借用
+/// 遍历不再深克隆；回执字段与口径不变。
 #[tauri::command]
-pub fn cleanup_file_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+pub async fn cleanup_file_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
+    tauri::async_runtime::spawn_blocking(collect_file_backup_list)
+        .await
+        .unwrap_or_else(|e| json!({ "success": false, "message": format!("备份清单读取任务异常: {e}") }))
+}
+
+fn collect_file_backup_list() -> Value {
     let mut items: Vec<Value> = Vec::new();
     let mut total_bytes: i64 = 0;
     for (p, from_legacy) in crate::engine::paths::backup_read_entries(FILES_BACKUP_SUB) {
@@ -220,16 +229,15 @@ pub fn cleanup_file_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> 
         let Ok(meta) = p.metadata() else { continue };
         let Ok(text) = std::fs::read_to_string(&p) else { continue };
         let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
-        let entries = v.get("entries").and_then(|e| e.as_array()).cloned().unwrap_or_default();
+        let entries = v.get("entries").and_then(|e| e.as_array());
         let total: i64 = entries
-            .iter()
-            .filter_map(|e| e.get("size").and_then(|s| s.as_i64()))
-            .sum();
+            .map(|arr| arr.iter().filter_map(|e| e.get("size").and_then(|s| s.as_i64())).sum())
+            .unwrap_or(0);
         total_bytes = total_bytes.saturating_add(total);
         items.push(json!({
             "file": name,
             "ts": v.get("ts").and_then(|t| t.as_i64()).unwrap_or(0),
-            "count": entries.len(),
+            "count": entries.map(|a| a.len()).unwrap_or(0),
             "totalSize": total,
             "fromLegacy": from_legacy,
             "mtimeMs": meta.modified().ok()
@@ -360,5 +368,16 @@ mod tests {
         assert!(ok(r"\\server\share\dir\file.txt"), "UNC 至少要 server\\share 两段");
         assert!(!ok(r"\\server"), "UNC 只有一段不是合法共享路径");
     }
+
+    /// R4-M11：命令必须是 async + spawn_blocking，entries 不再深克隆。
+    /// 判红自证：把 `pub async` 改回 `pub fn` 或把 `.cloned()` 粘回 ⇒ 断言红。
+    #[test]
+    fn 备份列表命令异步且不再深克隆() {
+        let src = include_str!("backup.rs");
+        assert!(src.contains(concat!("pub async fn ", "cleanup_file_backup_list")), "必须是 async 命令");
+        assert!(src.contains(concat!("spawn_blocking(", "collect_file_backup_list)")), "读盘必须进阻塞池");
+        assert!(!src.contains(concat!(".cloned()", ".unwrap_or_default()")), "entries 不得整棵深克隆");
+    }
+
 }
 

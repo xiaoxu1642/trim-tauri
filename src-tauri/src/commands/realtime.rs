@@ -105,13 +105,35 @@ fn start_reaper_once() {
     }
     std::thread::spawn(|| loop {
         std::thread::sleep(Duration::from_millis(IDLE_TICK_MS));
-        let idle = with_sampler(|s| {
-            s.stop.is_some() && crate::engine::now_ms() - s.last_request_at > IDLE_STOP_MS
-        });
-        if idle {
-            stop_sampler("空闲回收");
+        stop_sampler_if_idle(crate::engine::now_ms());
+    });
+}
+
+/// 空闲停机判据（纯函数，单测钉住边界）：只有「采样器存在」且「确实超过空闲阈值」才停。
+fn idle_stop_needed(stop_present: bool, last_request_at: i64, now: i64) -> bool {
+    stop_present && now - last_request_at > IDLE_STOP_MS
+}
+
+fn stop_sampler_if_idle(now: i64) -> bool {
+    // R1d-M14：判空闲与停机必须在**同一把锁**里复查；旧实现先判后停，两步之间的
+    // 采样请求会被刚发起的回收打断。
+    let stopped = with_sampler(|s| {
+        if !idle_stop_needed(s.stop.is_some(), s.last_request_at, now) {
+            return false;
+        }
+        match s.stop.take() {
+            Some(flag) => {
+                flag.store(true, Ordering::Relaxed);
+                true
+            }
+            None => false,
         }
     });
+    if stopped {
+        *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        log::write_log("info", "实时网速采样器已停止（空闲回收）");
+    }
+    stopped
 }
 
 fn stop_sampler(cause: &str) {
@@ -167,11 +189,10 @@ pub fn realtime_sample<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Va
     if alive {
         Ok(serde_json::json!({ "success": true, "adapters": [] }))
     } else {
-        // R1d-U01：采样器是**进程内线程**（`ensure_sampler` 必置 `stop`），不是独立进程；
-        // 旧文案「流量采样进程未就绪」把用户引向任务管理器。该分支在现行实现下不可达
-        // （`ensure_sampler` 之后 `alive` 恒真），保留它只是防御将来改坏采样器启动逻辑时
-        // 仍有一句诚实的回执，不再声称存在一个可被用户观测的「进程」。
-        Ok(serde_json::json!({ "success": false, "message": "采样器未就绪" }))
+        // R1d-M14：采样器被显式停机（退出/其它入口）后，本拍重启并按首拍空列表返回，
+        // 不再产出 success:false —— 前端会据此弹「采集失败」，而事实只是首拍没数据。
+        ensure_sampler();
+        Ok(serde_json::json!({ "success": true, "adapters": [] }))
     }
 }
 
@@ -296,6 +317,21 @@ fn validate_report(data: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// 报告体积闸（R1d-M13）：与读取侧同常量、同 pretty 序列化口径。
+/// 旧实现写侧只限样本数（1e6 ≈ 83 MiB），读侧限 8 MiB ⇒ 能保存但永远打不开。
+fn report_bytes_check(data: &Value) -> Result<usize, String> {
+    let bytes = serde_json::to_string_pretty(data)
+        .map_err(|e| format!("报告序列化失败: {e}"))?
+        .len();
+    if bytes > REPORT_READ_MAX_BYTES as usize {
+        return Err(format!(
+            "报告体积 {} B 超过单份可读上限 {} B，未保存",
+            bytes, REPORT_READ_MAX_BYTES
+        ));
+    }
+    Ok(bytes)
+}
+
 /// 报告名后缀的进程内序号（v7.2 `R1d-L12`）。
 /// 只用毫秒时间戳时，同一毫秒内两次 save 会生成**同一个名字**：后一份静默覆盖前一份，
 /// 而两条回执都回同一个 `name` ⇒ 用户在列表里看到两份、盘上只有一份。
@@ -325,9 +361,10 @@ pub async fn realtime_report_save<R: tauri::Runtime>(window: WebviewWindow<R>, d
     // 审查 v2-F13：目录清理 + `to_string_pretty` 序列化 + `sync_all` 全是磁盘 I/O，
     // 同步命令会把这段停顿留在主线程上。与同文件另两条写法对齐，丢进阻塞池。
     // 性能优化 P1：建目录的 `create_dir_all` 同样是磁盘 I/O，一并收进同一个阻塞任务。
-    let payload = data.clone();
+    let payload = data;
     let report_name = name.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
+        report_bytes_check(&payload)?;
         let dir = ensure_report_dir()?;
         let path = dir.join(&report_name);
         let pruned = prune_reports_in(&dir, crate::engine::now_ms(), REPORT_TTL_MS);
@@ -382,6 +419,20 @@ pub async fn realtime_report_list<R: tauri::Runtime>(window: WebviewWindow<R>) -
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if !name.ends_with(".json") {
+                    continue;
+                }
+                // R1d-M13：超过单份可读上限的件不再整读+解析，只回轻量标记。
+                let meta = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if meta.len() > REPORT_READ_MAX_BYTES {
+                    out.push(serde_json::json!({
+                        "name": name,
+                        "tooLarge": true,
+                        "bytes": meta.len(),
+                        "sampleCount": 0,
+                    }));
                     continue;
                 }
                 let Ok(text) = std::fs::read_to_string(entry.path()) else {
@@ -662,5 +713,24 @@ mod tests {
         assert!(!old.exists(), "超过 7 天的报告必须被回收");
         assert!(fresh.exists() && other.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R1d-M14：空闲停机只在超过阈值时成立（边界两侧各测一次）。
+    #[test]
+    fn 空闲停机只在超过阈值时成立() {
+        assert!(!idle_stop_needed(false, 0, 1_000_000));
+        assert!(!idle_stop_needed(true, 1_000_000, 1_000_000 + IDLE_STOP_MS));
+        assert!(idle_stop_needed(true, 1_000_000, 1_000_001 + IDLE_STOP_MS));
+    }
+
+    /// R1d-M13：写侧体积闸与读上限同源（1e6 样本不再能保存成打不开的文件）。
+    #[test]
+    fn 报告体积闸与读上限同源() {
+        let small = serde_json::json!({"samples": [{"t": 1, "down": 1.0, "up": 1.0}]});
+        assert!(report_bytes_check(&small).is_ok());
+        let one = serde_json::json!({"t": 1, "down": 1.0, "up": 1.0});
+        let big = serde_json::json!({"samples": vec![one; 200_000]});
+        let err = report_bytes_check(&big).unwrap_err();
+        assert!(err.contains("可读上限"), "{err}");
     }
 }
