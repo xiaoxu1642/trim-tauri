@@ -47,6 +47,8 @@ export const AUDIT_ROOTS = [
   { dir: 'native-scanner/tests', ext: ['.rs'] },
   { dir: 'tools', ext: ['.mjs'], depth: 1 },
   { dir: 'tools/lib', ext: ['.mjs'], depth: 1 },
+  { dir: 'tools/fixtures', depth: 2 },
+  { file: 'tools/rule-schema.json' },
   { dir: 'src-tauri/data', ext: ['.json'], depth: 1 },
   { dir: 'src-tauri/capabilities', ext: ['.json'], depth: 1 },
   { dir: 'src-tauri/tests' },
@@ -376,6 +378,36 @@ export const UNITS = [
     contract: '修复批次 B1/B2/B3 的判红前置：每条必须内置合成对照、过渡豁免表双向咬合、对象地板防「0 对象假绿」',
     boundary: '审的是「后续修复能不能被判红」，不是拿它审业务模块；豁免条目清零后本单元收缩',
     gates: ['check-delete-root-guard', 'check-ignored-isolation', 'check-async-exits', 'check-degraded-consumption'],
+  },
+  {
+    // 2026-10-26 P2-C：优化域双源门禁新增断言后，T1b 的兜底形态越 U2 上限（现算见
+    // `node tools/check-review-units.mjs` 的 U2 输出）。沿用 T1d/T1e 的同一处置：
+    // 按主题点名成独立单元，上限不放宽。
+    id: 'T1f', owner: 'sub', name: '门禁·优化域数据契约（简介/子项/分组/写入/安全/动态）',
+    files: ['tools/check-item-intro.mjs', 'tools/check-optimizer-subitem-contract.mjs',
+      'tools/check-optimizer-groups-sidecar.mjs',
+      'tools/check-optimizer-security.mjs', 'tools/check-optimizer-dynamic.mjs'],
+    contract: '优化域侧表 ⇄ 运行目录 / 简介库 / 写入契约 / 安全面 / 动态判据的双源对拍',
+    boundary: '审的是侧表与目录/词表的一致性，不重复审运行时行为；真机执行面归 R3b/R5*',
+    gates: ['check-item-intro', 'check-optimizer-subitem-contract', 'check-optimizer-groups-sidecar'],
+  },
+  {
+    // 2026-10-26 P2-C 审计盲区：tools/fixtures/** 与 tools/rule-schema.json 此前不在
+    // 任何认领根内（A6/D1 的「从未被认领」），现在显式收进本单元。夹具是机器重算的
+    // 基线/契约快照，`generated` 逐件登记出处（U5c 会查生成器点名）；rule-schema 是
+    // 手写契约表，必须进精读面。
+    id: 'T1g', owner: 'sub', name: '契约表与门禁夹具（生成物只查出处）',
+    files: ['tools/rule-schema.json'],
+    dirs: [{ dir: 'tools/fixtures', depth: 2 }],
+    generated: ['tools/fixtures/artifact-size-baseline.json',
+      'tools/fixtures/cleanup-contract.json', 'tools/fixtures/cleanup-overlaps.json',
+      'tools/fixtures/comment-number-baseline.json', 'tools/fixtures/delete-callsites-baseline.json',
+      'tools/fixtures/finder-delete-modes.json', 'tools/fixtures/protect-parity.json',
+      'tools/fixtures/residue-contract.json', 'tools/fixtures/rule-coverage-baseline.json',
+      'tools/fixtures/rules-canonical/cases.json'],
+    contract: 'rule-schema 字段表 ⇄ 两侧消费者；夹具/基线由对应 --write 或 gen-* 重出',
+    boundary: '夹具内容不逐行精读（机器重算口径），审的是「出处可追」与 rule-schema 的消费面',
+    gates: ['check-rule-schema-sync', 'check-fixture-freshness'],
   },
   {
     // 2026-10-16 拆分（P2-B）：新增 check-headless-cli 后兜底形态达 8005 行越 8000 上限，

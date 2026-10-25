@@ -215,6 +215,86 @@ for (const scope of ['startup', 'contextmenu', 'memoryclean', 'residue']) {
   }
 }
 
+// ---- ⑧ 四张子表 ⇄ 后端词表（D1-L04，2026-10-26）----
+// 简介静默降级为通用文案的根因是「子表键集没人对拍」：
+//   byGroup ⇄ runtime 原始分组；memoryclean.byId ⇄ REGIONS；
+//   contextmenu.byCategory ⇄ CATEGORY_ORDER；residue.byClass ⇄ 后端 class/origin 词表。
+// 后两张允许显式兜底登记（刻意走通用文案 / 真源不在本仓），但登记本身进断言。
+function setDiff(a, b) {
+  return [...a].filter((x) => !b.has(x));
+}
+function classKeyProblems(vocab, keys, fallback) {
+  const uncovered = [...vocab].filter((x) => !keys.has(x) && !fallback.has(x));
+  const ghost = [...keys].filter((x) => !vocab.has(x));
+  return { uncovered, ghost };
+}
+{
+  const groups = new Set((Array.isArray(catalog) ? catalog : []).map((x) => x.group));
+  const byGroup = new Set(Object.keys(intro.scopes.optimizer.byGroup || {}));
+  check(
+    groups.size >= 10 && byGroup.size >= 10 && setDiff(groups, byGroup).length === 0 && setDiff(byGroup, groups).length === 0,
+    `⑧a byGroup ⇄ runtime 原始分组（${byGroup.size} / ${groups.size}）`,
+    `目录缺简介 ${setDiff(groups, byGroup).join('、') || '无'}；简介多出 ${setDiff(byGroup, groups).join('、') || '无'}`,
+  );
+
+  const mcJs = fs.readFileSync(path.join(ROOT, 'src', 'scripts', 'memoryclean.js'), 'utf8');
+  const rm = mcJs.match(/const REGIONS = \[([\s\S]*?)\n  \];/);
+  const regions = new Set(rm ? [...rm[1].matchAll(/\bid:\s*'([^']+)'/g)].map((x) => x[1]) : []);
+  const byIdMc = new Set(Object.keys(intro.scopes.memoryclean.byId || {}));
+  check(
+    regions.size >= 5 && setDiff(regions, byIdMc).length === 0 && setDiff(byIdMc, regions).length === 0,
+    `⑧b memoryclean.byId ⇄ REGIONS（${byIdMc.size} / ${regions.size}）`,
+    `REGIONS 缺简介 ${setDiff(regions, byIdMc).join('、') || '无'}；简介多出 ${setDiff(byIdMc, regions).join('、') || '无'}`,
+  );
+
+  const ctxJs = fs.readFileSync(path.join(ROOT, 'src', 'scripts', 'contextmenu.js'), 'utf8');
+  const co = ctxJs.match(/const CATEGORY_ORDER = \[([\s\S]*?)\];/);
+  const order = new Set(co ? [...co[1].matchAll(/'([^']+)'/g)].map((x) => x[1]) : []);
+  const byCat = new Set(Object.keys(intro.scopes.contextmenu.byCategory || {}));
+  // 刻意走通用文案的 3 类（D1-L04 现算）：新建菜单 / 打开方式 / Win+X
+  const CATEGORY_FALLBACK = new Set(['新建菜单', '打开方式', 'Win+X']);
+  const catMissing = setDiff(order, byCat);
+  const catUncovered = catMissing.filter((x) => !CATEGORY_FALLBACK.has(x));
+  check(
+    order.size >= 10 && catUncovered.length === 0 && setDiff(byCat, order).length === 0,
+    `⑧c contextmenu.byCategory ⇄ CATEGORY_ORDER（${byCat.size} / ${order.size}，兜底登记 ${CATEGORY_FALLBACK.size}）`,
+    `未覆盖且未登记 ${catUncovered.join('、') || '无'}；简介多出 ${setDiff(byCat, order).join('、') || '无'}`,
+  );
+
+  const rustDir = path.join(ROOT, 'src-tauri', 'src', 'commands', 'uninstall');
+  const vocab = new Set();
+  for (const f of fs.readdirSync(rustDir).filter((x) => x.endsWith('.rs'))) {
+    const t = fs.readFileSync(path.join(rustDir, f), 'utf8');
+    for (const m of t.matchAll(/"class"\s*:\s*"([a-z][a-z0-9_]+)"/g)) vocab.add(m[1]);
+    for (const m of t.matchAll(/\bclass\s*:\s*"([a-z][a-z0-9_]+)"/g)) vocab.add(m[1]);
+    for (const m of t.matchAll(/ServiceClass::\w+\s*=>\s*"([a-z][a-z0-9_]+)"/g)) vocab.add(m[1]);
+    for (const m of t.matchAll(/\(\s*"([a-z][a-z0-9_]+)"\s*,\s*"(?:high|medium|low)"/g)) vocab.add(m[1]);
+    for (const m of t.matchAll(/"class"\s*:\s*if[^{]*\{\s*"([a-z][a-z0-9_]+)"\s*\}\s*else\s*\{\s*"([a-z][a-z0-9_]+)"\s*\}/g)) {
+      vocab.add(m[1]);
+      vocab.add(m[2]);
+    }
+    for (const m of t.matchAll(/residue_snapshot_put\([^,]+,\s*"([a-z][a-z0-9_]+)"/g)) vocab.add(m[1]);
+  }
+  // 刻意走通用兜底的类（D1-L04 现算 + 2026-10-26 复算）；写得出来才算「已知缺口」
+  const CLASS_FALLBACK = new Set([
+    'com_inproc_missing', 'com_local_missing', 'appreg_exe_missing', 'fileext_progid_missing',
+    'run_no_target', 'run_target_missing', 'run_unparseable',
+    'dead_driver_landing', 'dead_service_landing', 'protected_in_use', 'no_evidence',
+  ]);
+  const byClassKeys = new Set(Object.keys(intro.scopes.residue.byClass || {}));
+  const { uncovered, ghost } = classKeyProblems(vocab, byClassKeys, CLASS_FALLBACK);
+  // 正向对照：新增一个后端类而既不补简介也不登记兜底 ⇒ 必须判红
+  check(
+    classKeyProblems(new Set([...vocab, '__new_backend_class__']), byClassKeys, CLASS_FALLBACK).uncovered.includes('__new_backend_class__'),
+    '⑧d 对照：新后端类没补简介/没登记兜底必须判红',
+  );
+  check(
+    vocab.size >= 12 && uncovered.length === 0 && ghost.length === 0,
+    `⑧e residue.byClass ⇄ 后端 class/origin 词表（${byClassKeys.size} / 词表 ${vocab.size}，兜底登记 ${CLASS_FALLBACK.size}）`,
+    `后端类未覆盖且未登记 ${uncovered.join('、') || '无'}；简介键后端不认 ${ghost.join('、') || '无'}`,
+  );
+}
+
 console.log(`\n简介库：optimizer byId ${Object.keys(byId).length} 条 / 有 tips ${tipsCount} 条 / 覆盖率 ${(tipsCount / Object.keys(byId).length * 100).toFixed(1)}%`);
 console.log(fail === 0 ? '\n门禁通过' : `\n门禁失败：${fail} 组断言未通过`);
 process.exit(fail === 0 ? 0 : 1);

@@ -170,7 +170,7 @@
   "tools/check-native-hygiene.mjs": 5,
   "tools/check-optimizer-dynamic.mjs": 9,
   "tools/check-optimizer-security.mjs": 3,
-  "tools/check-optimizer-subitem-contract.mjs": 3,
+  "tools/check-optimizer-subitem-contract.mjs": 2,
   "tools/check-optimizer-write-contract.mjs": 22,
   "tools/check-pending-batch-limit.mjs": 2,
   "tools/check-positive-controls.mjs": 7,

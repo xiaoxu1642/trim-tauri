@@ -315,6 +315,57 @@ const NO_PARITY_REGISTRY = [
   );
 }
 
+// ---------------------------------------------------------------------------
+// 第 4.6 组（D1-L05 / D1-L09，2026-10-26；件数现算）：无 _comment 的 data 件逐件登记 +
+// 退役目录不变量。_comment 是下一任维护者的导航；没有它的件必须写明为什么
+//（生成物 / 签名件 / 说明另有落点），否则「没人写坐标」与「坐标写了但没人扫」
+// 在门禁上都看不见。退役目录另有不变量：retired ∩ 运行目录 = ∅（项被重新加回
+// 目录却忘了摘退役 ≈ 还原白名单失真，两处都认它）。
+// ---------------------------------------------------------------------------
+const NO_COMMENT_REGISTRY = [
+  { file: 'cleanup-rules.json', why: '签名规则库：加字段会改规范化体，必须重签；坐标由 check-cleanup-rule-contract / rule-schema 管' },
+  { file: 'item-intro.json', why: '顶层 note 已承担说明；简介正文不是坐标表' },
+  { file: 'maintenance-tasks.json', why: '生成物（vendor/maintenance-scripts.js），任务表内无仓内坐标' },
+  { file: 'optimizer-runtime.json', why: '生成物（vendor OPTIONS）+ 顶层是裸数组挂不了字段，签名走 sidecar' },
+  { file: 'optimizer-runtime.json.sig.json', why: '签名载体本身' },
+  { file: 'uninstall-residue-rules.json', why: '签名规则库：加字段会改规范化体，必须重签；坐标由 residue 契约门禁管' },
+];
+{
+  const problems = [];
+  const dataDir = join(REPO_ROOT, 'src-tauri', 'data');
+  for (const f of readdirSync(dataDir).filter((x) => x.endsWith('.json'))) {
+    let j;
+    try {
+      j = JSON.parse(readFileSync(join(dataDir, f), 'utf8'));
+    } catch (e) {
+      problems.push(`${f} JSON 损坏（${e.message.slice(0, 60)}）`);
+      continue;
+    }
+    const hasComment = !Array.isArray(j) && typeof j._comment === 'string';
+    const reg = NO_COMMENT_REGISTRY.find((r) => r.file === f);
+    if (!hasComment && !reg) problems.push(`${f} 没有 _comment 且未登记理由`);
+    if (hasComment && reg) problems.push(`${f} 已有 _comment，登记表里的理由过期了（摘掉这条）`);
+  }
+  for (const r of NO_COMMENT_REGISTRY) {
+    if (!existsSync(join(dataDir, r.file))) problems.push(`登记件 ${r.file} 不在盘上（删了没走处置）`);
+  }
+  const retired = JSON.parse(readFileSync(join(dataDir, 'retired-optimizations.json'), 'utf8'));
+  const runtime = JSON.parse(readFileSync(join(dataDir, 'optimizer-runtime.json'), 'utf8'));
+  const items = Array.isArray(retired.items) ? retired.items : [];
+  const catalog = new Set((Array.isArray(runtime) ? runtime : []).map((x) => x.id));
+  if (!Array.isArray(runtime) || runtime.length < 100) {
+    problems.push(`runtime 目录只解析到 ${Array.isArray(runtime) ? runtime.length : 0} 项（< 100）⇒ 判定失明`);
+  }
+  if (items.length < 30) problems.push(`退役目录只解析到 ${items.length} 条（< 30）⇒ 判定失明`);
+  const overlap = items.map((x) => x.id).filter((id) => catalog.has(id));
+  if (overlap.length) problems.push(`退役目录与运行目录重叠：${overlap.join('、')}（重新上线要先摘退役登记）`);
+  check(
+    problems.length === 0,
+    `4.6. 无 _comment 的 data 件逐件登记（${NO_COMMENT_REGISTRY.length} 件）+ 退役目录不变量（退役 ${items.length} / 目录 ${Array.isArray(runtime) ? runtime.length : 0}）`,
+    problems.join('；') || '登记在册、退役与目录无交集',
+  );
+}
+
 // ==================== 第 5 组：_comment 点名的仓内坐标必须存活 ====================
 // v5 批次 9（门禁候选 8；v4 D1-M03 + 本轮真死 1 条）：数据 JSON 的 _comment 是
 // 下一任维护者的导航——retired-optimizations.json 曾把真实读取方写成已删除的
@@ -355,6 +406,15 @@ const NO_PARITY_REGISTRY = [
         .filter((rel) => !rel.startsWith('src-tauri/data/'))
         .map((rel) => ({ label: rel, abs: join(REPO_ROOT, rel) })),
     );
+  // D1-L09（2026-10-26）：retired 的坐标写在 items[].note 里、不在顶层 _comment；
+  // 对该件扫**全部字符串**，否则「note 里的坐标腐烂」永远无人管。
+  const FULL_STRING_SCAN = new Set(['retired-optimizations.json']);
+  const collectStrings = (node, out = []) => {
+    if (typeof node === 'string') out.push(node);
+    else if (Array.isArray(node)) for (const x of node) collectStrings(x, out);
+    else if (node && typeof node === 'object') for (const x of Object.values(node)) collectStrings(x, out);
+    return out;
+  };
   for (const { label, abs } of scanTargets) {
     const f = label;
     // T1b-M01：JSON.parse 套 try——损坏件必须以判红点名，不许拿 node 堆栈当失败输出
@@ -366,13 +426,17 @@ const NO_PARITY_REGISTRY = [
       console.error(`✗ 5. _comment 坐标存活：${f} JSON 损坏（${e.message.slice(0, 80)}）`);
       continue;
     }
-    const comment = v && typeof v === 'object' && !Array.isArray(v) ? v._comment : null;
-    if (typeof comment !== 'string') continue;
-    for (const m of comment.matchAll(extRe)) {
-      const base = pathMod.basename(m[1]);
-      if (RUNTIME_GENERATED.has(base)) continue;
-      checkedNames++;
-      if (!nameIndex.has(base)) dead.push(`${f}: ${m[1]}`);
+    const texts = FULL_STRING_SCAN.has(f)
+      ? collectStrings(v)
+      : [v && typeof v === 'object' && !Array.isArray(v) ? v._comment : null].filter((x) => typeof x === 'string');
+    if (!texts.length) continue;
+    for (const text of texts) {
+      for (const m of text.matchAll(extRe)) {
+        const base = pathMod.basename(m[1]);
+        if (RUNTIME_GENERATED.has(base)) continue;
+        checkedNames++;
+        if (!nameIndex.has(base)) dead.push(`${f}: ${m[1]}`);
+      }
     }
   }
   if (checkedNames < 20) fail++, console.error(`✗ 5. _comment 坐标存活：只解析到 ${checkedNames} 个点名（< 20）⇒ 语料失明`);

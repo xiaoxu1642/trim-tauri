@@ -443,7 +443,7 @@ check(dup.length === 0 && drifted.length === 0, 'U3 认领无冲突（重复点�
   [...dup, ...drifted].slice(0, 6).join('、'));
 
 const unclaimed = detectUnclaimed([...allFiles].sort(), ownerOf);
-check(unclaimed.length === 0, `U4 覆盖率 100%（${allFiles.size} 个文件全部有归属）`,
+check(unclaimed.length === 0, `U4 已声明根内覆盖率 100%（${allFiles.size} 个文件全部有归属；不是全仓 100%）`,
   unclaimed.slice(0, 20).join('、') + (unclaimed.length > 20 ? ` …共 ${unclaimed.length} 个` : ''));
 
 const overCap = detectOverCap(unitsWithClaims, sizeOf, CAP_LINES);

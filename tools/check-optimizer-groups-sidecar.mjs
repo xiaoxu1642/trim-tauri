@@ -169,6 +169,81 @@ if (!js.includes('GROUP_FALLBACK')) {
 }
 check(eProblems.length === 0, 'E. 侧表被真正消费（applyGroupSidecar + listGroups + 兜底常量）', eProblems.join('; '));
 
+// ---- F. 展示分组 ⇄ 面板隐藏集（D1-M03，2026-10-26） ----
+// 判据轴 = runtime 的「映射后展示分组」：itemOverride → groupMap → 原始 group。
+// 未写进 default 的分组若还有人没被面板隐藏，界面就会多出一个导航组，而 readme
+// 仍写 8；privacy 面板另做双向：隐藏集必须恰好等于「映射后属隐私防护」的成员。
+function groupCoverageProblems({ runtime, defaultGroups, groupMap, itemOverride, hiddenUnion, privacyHidden, privacyGroup }) {
+  const out = [];
+  const runtimeGroups = new Set(runtime.map((x) => x.group));
+  const deadMap = Object.keys(groupMap).filter((k) => !runtimeGroups.has(k));
+  if (deadMap.length) out.push(`groupMap 死映射：${deadMap.join('、')}（runtime 无此原始分组）`);
+  const ids = new Set(runtime.map((x) => x.id));
+  const deadOverride = Object.keys(itemOverride).filter((id) => !ids.has(id));
+  if (deadOverride.length) out.push(`itemOverride 死 id：${deadOverride.join('、')}`);
+  const byDisplay = new Map();
+  for (const it of runtime) {
+    const g = itemOverride[it.id] || groupMap[it.group] || it.group;
+    if (!byDisplay.has(g)) byDisplay.set(g, []);
+    byDisplay.get(g).push(it.id);
+  }
+  const extra = [...byDisplay.keys()].filter((g) => !defaultGroups.includes(g));
+  for (const g of extra) {
+    const loose = byDisplay.get(g).filter((id) => !hiddenUnion.has(id));
+    if (loose.length) out.push(`未登记分组「${g}」有 ${loose.length} 项未被任何面板隐藏：${loose.slice(0, 5).join('、')}`);
+  }
+  const members = new Set(byDisplay.get(privacyGroup) || []);
+  const onlyMembers = [...members].filter((id) => !privacyHidden.has(id));
+  const onlyHidden = [...privacyHidden].filter((id) => !members.has(id));
+  if (onlyMembers.length) out.push(`「${privacyGroup}」组成员未进隐私面板隐藏集：${onlyMembers.join('、')}`);
+  if (onlyHidden.length) out.push(`隐私面板隐藏集里不属于「${privacyGroup}」组：${onlyHidden.join('、')}`);
+  return { problems: out, displayGroups: byDisplay.size, extraGroups: extra.length };
+}
+{
+  const runtime = JSON.parse(read('src-tauri', 'data', 'optimizer-runtime.json'));
+  const privacy = JSON.parse(read('src-tauri', 'data', 'optimizer-privacy-panel.json'));
+  const nara = JSON.parse(read('src-tauri', 'data', 'optimizer-nara-panel.json'));
+  const hiddenUnion = new Set([...(privacy.hiddenFromOptimizer || []), ...(nara.hiddenFromOptimizer || [])]);
+  const privacyHidden = new Set(privacy.hiddenFromOptimizer || []);
+  const base = {
+    runtime: [{ id: 'a', group: 'G1' }, { id: 'b', group: 'X' }],
+    defaultGroups: ['G1'],
+    groupMap: { X: '隐私防护' },
+    itemOverride: {},
+    hiddenUnion: new Set(['b']),
+    privacyHidden: new Set(['b']),
+    privacyGroup: '隐私防护',
+  };
+  const good = groupCoverageProblems(base);
+  check(good.problems.length === 0 && good.extraGroups === 1, 'F. 对照：齐全样本放行', JSON.stringify(good));
+  check(
+    groupCoverageProblems({ ...base, hiddenUnion: new Set() }).problems.some((p) => p.includes('未被任何面板隐藏')),
+    'F. 对照：未隐藏的未登记组必须判红',
+  );
+  check(
+    groupCoverageProblems({ ...base, groupMap: { X: '隐私防护', Dead: 'G1' } }).problems.some((p) => p.includes('死映射')),
+    'F. 对照：死映射必须判红',
+  );
+  check(
+    groupCoverageProblems({ ...base, privacyHidden: new Set() }).problems.some((p) => p.includes('未进隐私面板')),
+    'F. 对照：隐私双向差集必须判红',
+  );
+  const res = groupCoverageProblems({
+    runtime,
+    defaultGroups: groups.default || [],
+    groupMap: groups.custom?.groupMap || {},
+    itemOverride: groups.custom?.itemOverride || {},
+    hiddenUnion,
+    privacyHidden,
+    privacyGroup: '隐私防护',
+  });
+  check(
+    res.problems.length === 0,
+    `F. 展示分组 ⇄ 面板隐藏集（映射后 ${res.displayGroups} 组 / 未登记 ${res.extraGroups} 组）`,
+    res.problems.join('; '),
+  );
+}
+
 console.log('');
 if (fail > 0) {
   console.error(`E7 分类侧表门禁失败 ${fail} 项。`);
