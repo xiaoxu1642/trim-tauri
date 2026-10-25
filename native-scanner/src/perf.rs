@@ -10,6 +10,7 @@
 
 use crate::json_escape;
 use std::io::Write as _;
+use windows_sys::Win32::Storage::FileSystem::DeleteFileW;
 
 // 手写 ntdll / kernel32 / advapi32 补充声明已集中到 `crate::util::ffi`（v3 C-3）；
 // 本文件不再自建 extern 块（windows-sys 覆盖不到或类型 Hunt 成本高的少量函数）。
@@ -156,6 +157,32 @@ fn close_bench_json(base: &str, warn: &[String]) -> String {
     format!("{base}{}}}", bench_warn_field(warn))
 }
 
+/// 清理同一测速目录里上一轮留下的 `tb_*.bin`（只碰本工具自己的命名形态）。
+fn sweep_stale_bench_files(dir: &std::path::Path) -> (usize, usize) {
+    let mut removed = 0usize;
+    let mut failed = 0usize;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name();
+            let s = name.to_string_lossy();
+            if s.starts_with("tb_") && s.ends_with(".bin") {
+                match std::fs::remove_file(entry.path()) {
+                    Ok(_) => removed += 1,
+                    Err(_) => failed += 1,
+                }
+            }
+        }
+    }
+    (removed, failed)
+}
+
+fn delete_bench_file(path: &str, warn: &mut Vec<String>) {
+    if unsafe { DeleteFileW(wide(path).as_ptr()) } == 0 {
+        let err = std::io::Error::last_os_error();
+        warn.push(format!("测速文件未删除: {path}（{err}）"));
+    }
+}
+
 /// 进度行：`{"phase","percent"}`（**不含** `__PROG__` 前缀）。
 /// CLI 包装补前缀直写 stdout，Tauri 侧把同一 JSON 直接派发给前端事件。
 fn bench_progress(on_progress: &mut dyn FnMut(&str), phase: &str, percent: u64) {
@@ -296,7 +323,7 @@ unsafe fn open_bench_file(path: &str, size: u64, nobuf: bool) -> *mut core::ffi:
 /// CLI 与 lib 共用**同一实现**（`run_diskbench` 只做 stdout 写回包装，不得另写一份）。
 fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<String, String> {
     use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::Storage::FileSystem::{DeleteFileW, GetDiskFreeSpaceW};
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceW;
     let dir = match arg_value(args, "path") {
         Some(p) => p.trim_end_matches('\\').to_string(),
         None => return Err("缺少 --path".to_string()),
@@ -332,10 +359,16 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
     // QD=每线程在途上限；受每线程 16MB 缓冲上限折算（guide 说明）
     let qd_eff = qd_req.max(1).min((BUF_CAP_PER_THREAD / block as usize).max(1));
     let bench_dir = resolve_bench_dir(&dir, arg_value(args, "bench-dir"))?;
+    if let Err(e) = std::fs::create_dir_all(&bench_dir) {
+        return Err(format!("测试目录创建失败: {bench_dir}（{e}）"));
+    }
+    let (swept, sweep_failed) = sweep_stale_bench_files(std::path::Path::new(&bench_dir));
+    if swept > 0 || sweep_failed > 0 {
+        arg_warn.push(format!("上一轮测速残留清理: 删除 {swept} 个、失败 {sweep_failed} 个"));
+    }
     bench_progress(on_progress, "seqwrite", 0);
 
     unsafe {
-        let _ = std::fs::create_dir_all(&bench_dir);
         let seq_per = (SEQ_WINDOW_TOTAL / threads as u64 / block).max(8) * block;
         let rand_per = ((RAND_WINDOW_TOTAL / threads as u64) / 4096).max(8) * 4096;
         // 文件名带 PID + 单调时钟戳（审查 v2-M6）：超时后原生工作线程**仍在跑完整轮**
@@ -353,7 +386,7 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
             files.push(full);
         }
         if handles.is_empty() {
-            for f in &files { DeleteFileW(wide(f).as_ptr()); }
+            for f in &files { delete_bench_file(f, &mut arg_warn); }
             return Err("测试文件创建失败".to_string());
         }
         // 审查 v2-M6：句柄数不足时**不能**继续 —— 原实现 `break` 后照样往下测，
@@ -364,7 +397,7 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
             let opened = handles.len();
             let _ = opened;
             for h in handles { let _ = CloseHandle(h); }
-            for f in &files { DeleteFileW(wide(f).as_ptr()); }
+            for f in &files { delete_bench_file(f, &mut arg_warn); }
             return Err(msg);
         }
         let t0 = mono_ms();
@@ -414,7 +447,7 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
         let opened = handles.len();
         if let Err(msg) = bench_verdict(opened, threads, [seq_w.1, seq_r.1, rd_r.1, wr_r.1]) {
             for h in handles { let _ = CloseHandle(h); }
-            for f in &files { DeleteFileW(wide(f).as_ptr()); }
+            for f in &files { delete_bench_file(f, &mut arg_warn); }
             return Err(msg);
         }
         let base = format!(
@@ -422,11 +455,11 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
             seq_read, seq_write, rand_read, rand_write, iops, latency, block, qd_req, opened, duration,
             if nobuf { "nobuf" } else { "buf" }, qd_eff, elapsed
         );
-        let result = close_bench_json(&base, &arg_warn);
         // 失败分支（上面的 `Err(msg)`）不带 warn：那一轮的结果整份作废，调用方只看错误消息，
         // 再拼一条参数回落反而会把真正的失败原因挤掉。留痕只针对「这一轮确实出了数」。
         for h in handles { let _ = CloseHandle(h); }
-        for f in &files { DeleteFileW(wide(f).as_ptr()); }
+        for f in &files { delete_bench_file(f, &mut arg_warn); }
+        let result = close_bench_json(&base, &arg_warn);
         Ok(result)
     }
 }
@@ -1440,5 +1473,25 @@ mod p1_6e_arg_tests {
         assert!(resolve_bench_dir("C:\\base", Some("D:\\other\\Trim-DiskBench-1")).is_err(), "目录不在 --path 之下要拒");
         assert!(resolve_bench_dir("C:\\base", Some("C:\\base")).is_err(), "目录等于根本身要拒（清理动作会指向用户的整个目录）");
         assert!(resolve_bench_dir("C:\\base", Some("c:\\BASE\\Trim-DiskBench-1")).is_ok(), "Windows 路径大小写不敏感");
+    }
+}
+
+#[cfg(test)]
+mod p2e_m17_tests {
+    use super::*;
+
+    /// 上一轮 tb_*.bin 必须被清扫，别的文件不许动。
+    /// 判红自证：把前缀判定删掉 ⇒ removed 断言红（会删 keep.txt 或删不掉）。
+    #[test]
+    fn 清理上一轮测速残留_只碰自己的命名() {
+        let sb = crate::util::sandbox("p2e-m17");
+        let dir: &std::path::Path = sb.as_ref();
+        std::fs::write(dir.join("tb_0_111_222.bin"), b"x").unwrap();
+        std::fs::write(dir.join("tb_1_111_222.bin"), b"y").unwrap();
+        std::fs::write(dir.join("keep.txt"), b"z").unwrap();
+        let (removed, failed) = sweep_stale_bench_files(dir);
+        assert_eq!((removed, failed), (2, 0));
+        assert!(dir.join("keep.txt").exists(), "不得误删非测速文件");
+        assert!(!dir.join("tb_0_111_222.bin").exists());
     }
 }

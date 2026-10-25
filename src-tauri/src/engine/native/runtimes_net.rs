@@ -29,6 +29,50 @@ const VC_DLLS_X86: &[&str] = &["msvcp140.dll", "vcruntime140.dll", "concrt140.dl
 
 /// 覆盖：VC++ 2015-2022 x64/x86（注册表+dll）、.NET Framework 4.x/3.5、
 /// DirectX 9.0c 附属组件、旧版 VC++ 2005-2013 信息级列举。
+/// 代理串 → 端点列表（`http=127.0.0.1:7890;socks=...` 逐段拆；无端口保留 None，
+/// 不折成 0）。R5b-M20：旧实现只探最后一段的端口，多协议串会漏判。
+fn parse_proxy_endpoints(server: &str) -> Vec<(String, Option<u16>)> {
+    let mut out = Vec::new();
+    for seg in server.split(';') {
+        let part = seg.trim();
+        if part.is_empty() { continue; }
+        let hostport = part.rsplit_once('=').map(|(_, v)| v.trim()).unwrap_or(part);
+        if hostport.is_empty() { continue; }
+        if let Some(rest) = hostport.strip_prefix('[') {
+            if let Some(end) = rest.find(']') {
+                let host = format!("[{}]", &rest[..end]);
+                let port = rest[end + 1..].strip_prefix(':').and_then(|p| p.parse::<u16>().ok());
+                out.push((host, port));
+                continue;
+            }
+        }
+        match hostport.rsplit_once(':') {
+            Some((h, p)) if !h.is_empty() => out.push((h.to_string(), p.parse::<u16>().ok())),
+            _ => out.push((hostport.to_string(), None)),
+        }
+    }
+    out
+}
+
+/// 单端点监听判定：Some(true/false) = 有结论；None = 不可判定（无端口 / 非本机 /
+/// 双栈探针都不可用）。IPv4 与 IPv6 各探一次，任一在听即算在听。
+fn endpoint_listening(host: &str, port: Option<u16>) -> Option<bool> {
+    let Some(port) = port else { return None };
+    let loopback = host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "[::1]";
+    if !loopback { return None; }
+    let probe = |addr: &str| -> Option<bool> {
+        match std::net::TcpListener::bind((addr, port)) {
+            Ok(_) => Some(false),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Some(true),
+            Err(_) => None, // 地址族不可用 / 端口不可绑：不据此判定
+        }
+    };
+    let probes = [probe("127.0.0.1"), probe("::1")];
+    if probes.iter().any(|p| *p == Some(true)) { Some(true) }
+    else if probes.iter().any(|p| p.is_some()) { Some(false) }
+    else { None }
+}
+
 pub fn runtimes_status() -> Result<Value, String> {
     unsafe {
         let mut items: Vec<Value> = Vec::new();
@@ -581,16 +625,42 @@ pub fn netcheck_status() -> Result<Value, String> {
             proxy_detail = "代理由组策略下发，本工具不提供修复入口".to_string();
         } else if p_enable && !p_server.is_empty() {
             proxy_evidence.push(format!("用户代理已启用：{}", mask_proxy(&p_server)));
-            // 检查本机代理端口是否在监听
-            let listening = if let Some(port_str) = p_server.rsplit(':').next() {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
-                } else { false }
-            } else { false };
-            if p_server.contains("127.0.0.1") && !listening {
-                proxy_status = "warn";
-                proxy_detail = "代理指向本机但无进程监听该端口（残留代理，典型「能连但打不开网页」根因）".to_string();
-                proxy_repair = json!({"id": "disable-user-proxy"});
+            // R5b-M20：逐段探测全部端点（含 IPv6）；无端口/不可判定一律不给修复入口
+            let endpoints = parse_proxy_endpoints(&p_server);
+            let mut any_listening = false;
+            let mut any_unknown = false;
+            let is_loopback = endpoints.iter().any(|(h, _)| {
+                h.eq_ignore_ascii_case("localhost") || h == "127.0.0.1" || h == "[::1]"
+            });
+            for (h, port) in &endpoints {
+                match endpoint_listening(h, *port) {
+                    Some(true) => any_listening = true,
+                    Some(false) => {}
+                    None => any_unknown = true,
+                }
+            }
+            let ep_text = endpoints
+                .iter()
+                .map(|(h, p)| match p {
+                    Some(p) => format!("{h}:{p}"),
+                    None => format!("{h}:端口未知"),
+                })
+                .collect::<Vec<_>>()
+                .join("、");
+            proxy_evidence.push(format!(
+                "代理端点：{}（{}）",
+                ep_text,
+                if any_listening { "有监听" } else if any_unknown { "未判定" } else { "无监听" }
+            ));
+            if is_loopback && !any_listening {
+                if any_unknown || endpoints.is_empty() {
+                    proxy_status = "ok";
+                    proxy_detail = "代理指向本机，但端口无法确认是否在监听（未判定，不提供修复入口）".to_string();
+                } else {
+                    proxy_status = "warn";
+                    proxy_detail = "代理指向本机但无进程监听该端口（残留代理，典型「能连但打不开网页」根因）".to_string();
+                    proxy_repair = json!({"id": "disable-user-proxy"});
+                }
             } else {
                 proxy_status = "ok";
                 proxy_detail = "检测到用户自配代理（属合法配置，不做改动）".to_string();
@@ -932,5 +1002,26 @@ mod tests {
             assert!(VC_DLLS_X64.contains(&d), "x64 名单缺 {d}");
             assert!(VC_DLLS_X86.contains(&d), "x86 名单缺 {d}");
         }
+    }
+
+    /// R5b-M20：多协议串逐段拆、IPv6 与无端口保留「未判定」。
+    /// 判红自证：把解析换回 `rsplit(':').next()` ⇒ 多协议断言红。
+    #[test]
+    fn 代理端点解析逐段且保留未判定() {
+        let eps = parse_proxy_endpoints("http=127.0.0.1:7890;socks=127.0.0.1:7891");
+        assert_eq!(eps.len(), 2, "{eps:?}");
+        assert!(eps.iter().any(|(h, p)| h == "127.0.0.1" && *p == Some(7890)), "{eps:?}");
+        assert!(eps.iter().any(|(h, p)| h == "127.0.0.1" && *p == Some(7891)), "{eps:?}");
+        assert_eq!(
+            parse_proxy_endpoints("127.0.0.1"),
+            vec![("127.0.0.1".to_string(), None)],
+            "无端口必须保留未判定，不能折成 0"
+        );
+        assert_eq!(
+            parse_proxy_endpoints("http=[::1]:7890"),
+            vec![("[::1]".to_string(), Some(7890))]
+        );
+        assert!(endpoint_listening("127.0.0.1", None).is_none());
+        assert!(endpoint_listening("example.com", Some(7890)).is_none());
     }
 }

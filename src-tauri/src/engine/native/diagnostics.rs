@@ -62,6 +62,8 @@ pub fn sysdisk() -> Result<Value, String> {
                                 let id = String::from_utf16_lossy(&ibuf[..(isize/2) as usize]).trim_matches('\0').trim().to_string();
                                 if !id.is_empty() {
                                     model = id;
+                                    // 命中即退出：关闭必须发生在 break 之前，否则每命中一次漏一个句柄
+                                    let _ = RegCloseKey(hk2);
                                     break;
                                 }
                             }

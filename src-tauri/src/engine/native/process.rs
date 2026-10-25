@@ -12,6 +12,7 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS};
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess};
+use windows::Win32::Storage::FileSystem::GetLogicalDrives;
 use super::common::*;
 use super::services::*;
 // ==================== B2：进程控制 ====================
@@ -116,16 +117,25 @@ pub(crate) fn stubborn_install_roots() -> Vec<String> {
             }
         }
     }
-    // 装在非系统盘「Program Files」的软件（MuMu/剪映装在 D 盘很常见）：逐个盘符补齐，
+    // 装在非系统盘「Program Files」的软件（MuMu/剪映装在 D 盘很常见）：按位图补齐，
     // 只认 `X:\Program Files` 与 `X:\Program Files (x86)` 两档，不放开整个盘符。
-    for d in 'A'..='Z' {
-        let drive = format!("{d}:\\");
-        if std::path::Path::new(&drive).exists() {
-            roots.push(format!("{drive}Program Files\\").to_lowercase());
-            roots.push(format!("{drive}Program Files (x86)\\").to_lowercase());
+    // 不用逐盘符 `Path::exists()` 探测：空光驱/离线映射盘会把命令线程阻塞住。
+    let mask = unsafe { GetLogicalDrives() };
+    roots.extend(roots_from_drive_mask(mask));
+    roots
+}
+
+/// 盘符位图 → 每置位盘符两条 Program Files 根（纯函数，单测注入位图）。
+fn roots_from_drive_mask(mask: u32) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in 0..26u32 {
+        if mask & (1 << i) != 0 {
+            let d = (b'A' + i as u8) as char;
+            out.push(format!("{d}:\\Program Files\\").to_lowercase());
+            out.push(format!("{d}:\\Program Files (x86)\\").to_lowercase());
         }
     }
-    roots
+    out
 }
 
 /// 明确拒绝的目录：即便名字命中，落在用户内容 / 临时 / 系统目录下的进程一律不杀
@@ -197,6 +207,33 @@ fn query_process_image_path(pid: u32) -> Option<String> {
     }
 }
 
+/// 残留账的一行：允许集内 / 允许集外 / 镜像路径读不到（无法确认）。
+/// 「读不到」必须单独计数：它与「确实没有残留」在界面上不能同形。
+#[derive(Debug)]
+enum ResidualRow {
+    Keep(String),
+    Outside,
+    Unreadable,
+}
+
+fn account_leftover(rows: Vec<ResidualRow>) -> (Vec<String>, usize) {
+    let mut seen = std::collections::HashSet::new();
+    let mut names = Vec::new();
+    let mut unreadable = 0usize;
+    for row in rows {
+        match row {
+            ResidualRow::Keep(stem) => {
+                if seen.insert(stem.clone()) {
+                    names.push(stem);
+                }
+            }
+            ResidualRow::Outside => {}
+            ResidualRow::Unreadable => unreadable += 1,
+        }
+    }
+    (names, unreadable)
+}
+
 pub fn stubborn_kill() -> Result<Value, String> {
     let install_roots = stubborn_install_roots();
     let denied_roots = stubborn_denied_roots();
@@ -243,12 +280,11 @@ pub fn stubborn_kill() -> Result<Value, String> {
         }
         let _ = CloseHandle(snap);
     }
-    let mut leftover: Vec<String> = Vec::new();
+    let mut rows: Vec<ResidualRow> = Vec::new();
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).map_err(|_| "无法枚举进程".to_string())?;
         let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..std::mem::zeroed() };
         let mut first = true;
-        let mut seen = std::collections::HashSet::new();
         while (if first { first = false; Process32FirstW(snap, &mut entry) } else { Process32NextW(snap, &mut entry) }).is_ok() {
             let end = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
             let exe = String::from_utf16_lossy(&entry.szExeFile[..end]);
@@ -259,18 +295,26 @@ pub fn stubborn_kill() -> Result<Value, String> {
             if pid == 0 || pid == self_pid { continue; }
             // 与执行侧同一口径：只统计「确认在预期安装目录内」的残留，
             // 避免把用户自己放在下载目录的同名进程报成「顽固软件清不掉」。
-            let Some(image) = query_process_image_path(pid) else { continue; };
-            if !stubborn_path_allowed(&image, &install_roots, &denied_roots) { continue; }
-            if seen.insert(stem.clone()) { leftover.push(stem); }
+            let Some(image) = query_process_image_path(pid) else {
+                rows.push(ResidualRow::Unreadable);
+                continue;
+            };
+            if !stubborn_path_allowed(&image, &install_roots, &denied_roots) {
+                rows.push(ResidualRow::Outside);
+                continue;
+            }
+            rows.push(ResidualRow::Keep(stem));
         }
         let _ = CloseHandle(snap);
     }
+    let (leftover, leftover_unreadable) = account_leftover(rows);
     Ok(json!({
         "killed": killed,
         "failed": failed,
         "skipped": skipped.len(),
         "skippedDetail": skipped,
-        "leftover": leftover
+        "leftover": leftover,
+        "leftoverUnreadable": leftover_unreadable
     }))
 }
 
@@ -850,5 +894,30 @@ mod stubborn_block_selector_tests {
             stubborn_task_backup_name("\\QuarkCloudDriveUpdaterSystem\\QuarkCloudDriveUpdaterTaskSystem1.0.0.11"),
             "QuarkCloudDriveUpdaterSystem_QuarkCloudDriveUpdaterTaskSystem1.0.0.11"
         );
+    }
+
+    /// 盘符位图不得产生未置位盘符的候选根（R5b-M19）。
+    /// 判红自证：把 mask 判定改成恒 true ⇒ 未置位盘符断言红。
+    #[test]
+    fn 盘符位图不得产生未置位盘符的候选根() {
+        let roots = roots_from_drive_mask((1 << 2) | (1 << 3)); // C: + D:
+        assert_eq!(roots.len(), 4, "两个盘符应各两条根：{roots:?}");
+        assert!(roots.iter().all(|r| r.starts_with("c:") || r.starts_with("d:")));
+        assert!(!roots.iter().any(|r| r.starts_with("a:")), "A: 未置位却出现候选根");
+        assert!(roots_from_drive_mask(0).is_empty());
+    }
+
+    /// 残留账：镜像路径读不到必须单独计数（R5b-M23）。
+    /// 判红自证：把 Unreadable 分支并回 Outside ⇒ 计数断言红。
+    #[test]
+    fn 残留账_镜像读不到必须计数() {
+        let (names, unreadable) = account_leftover(vec![
+            ResidualRow::Keep("a".to_string()),
+            ResidualRow::Keep("a".to_string()),
+            ResidualRow::Outside,
+            ResidualRow::Unreadable,
+        ]);
+        assert_eq!(names, vec!["a".to_string()], "同名只记一次");
+        assert_eq!(unreadable, 1, "读不到必须单独计数");
     }
 }

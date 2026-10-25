@@ -1680,11 +1680,9 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
             .map(|_| String::new())
             .map_err(|c| format!("创建注册表键失败: {subkey} —— {}", reg_err(c))),
         PsOp::KeyRemove { hive, subkey, recurse } => {
-            if native::reg_key_remove(hive_handle(*hive), subkey, *recurse) {
-                Ok(String::new())
-            } else {
-                Err(format!("删除注册表键失败: {subkey}"))
-            }
+            native::reg_key_remove_checked(hive_handle(*hive), subkey, *recurse)
+                .map(|_| String::new())
+                .map_err(|c| format!("删除注册表键失败: {subkey} —— {}", native::remove_cause_label(c)))
         }
         PsOp::ValueWrite { hive, subkey, name, kind, data } => {
             match native::reg_restore_write_checked(hive_handle(*hive), subkey, name, kind_of(*kind), data) {

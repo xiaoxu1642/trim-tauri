@@ -426,12 +426,18 @@
         }
         const leftover = d.leftover;
         const skippedDetail = d.skippedDetail;
+        const unreadable = num(d.leftoverUnreadable) ?? 0;
         const summary = `顽固软件专杀完成：已结束 ${killed} 个进程`
           + (failed ? `，${failed} 个失败` : '')
-          + (leftover.length ? `，仍有残留 ${leftover.join('、')}` : '');
+          + (leftover.length ? `，仍有残留 ${leftover.join('、')}` : '')
+          + (unreadable ? `，${unreadable} 个同名进程无法确认` : '');
         // 审查 v2-M1：被路径判定跳过的进程必须被看见，不能表现为「静默成功 0 个」
         if (resp.success === false) {
           window.app?.toast('error', (resp && resp.message) || `${summary}；${failed} 个失败`);
+        } else if (unreadable > 0) {
+          // 镜像路径读不到 ≠ 没有残留：不能落 success
+          window.app?.toast('warning', `${summary}；有 ${unreadable} 个同名进程的镜像路径读不到，残留情况未知`);
+          window.app?.log('warn', `顽固软件专杀：${unreadable} 个同名进程无法读取镜像路径，残留未确认`);
         } else if (skipped > 0) {
           window.app?.toast('warning', `${summary}；${skipped} 个同名进程不在预期安装目录已跳过`);
           window.app?.log('warn', `顽固软件专杀跳过 ${skipped} 个同名进程：${skippedDetail.join('；')}`);

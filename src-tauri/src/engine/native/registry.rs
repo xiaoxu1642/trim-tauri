@@ -273,28 +273,45 @@ pub fn reg_key_ensure_checked(hive: HKEY, subkey: &str) -> Result<(), u32> {
     }
 }
 
-/// 删除键（对应 PS `Remove-Item`；`recurse` 走 `RegDeleteTreeW`，含全部子键与值）
-pub fn reg_key_remove(hive: HKEY, subkey: &str, recurse: bool) -> bool {
+/// 删除键的带因版本：返回 Win32 错误码（0 不当错误），供回执点名失败原因。
+pub fn reg_key_remove_checked(hive: HKEY, subkey: &str, recurse: bool) -> Result<(), u32> {
     use windows::Win32::System::Registry::{RegDeleteTreeW, RegDeleteKeyW};
     let sk = to_wide(subkey);
     unsafe {
         if recurse {
             // RegDeleteTreeW 可直接作用于父 hive + 子键路径
-            RegDeleteTreeW(hive, PCWSTR(sk.as_ptr())).is_ok()
-        } else {
-            // 非递归删除只对**最末段**有效：拆出父键与末段
-            let Some((parent, last)) = subkey.rsplit_once('\\') else {
-                return RegDeleteKeyW(hive, PCWSTR(sk.as_ptr())).is_ok();
-            };
-            let mut hk = HKEY::default();
-            if RegOpenKeyExW(hive, PCWSTR(to_wide(parent).as_ptr()), Some(0), KEY_SET_VALUE, &mut hk).is_err() {
-                return false;
-            }
-            let r = RegDeleteKeyW(hk, PCWSTR(to_wide(last).as_ptr()));
-            let _ = RegCloseKey(hk);
-            r.is_ok()
+            let e = RegDeleteTreeW(hive, PCWSTR(sk.as_ptr()));
+            return if e.is_ok() { Ok(()) } else { Err(e.0) };
         }
+        // 非递归删除只对**最末段**有效：拆出父键与末段
+        let Some((parent, last)) = subkey.rsplit_once('\\') else {
+            let e = RegDeleteKeyW(hive, PCWSTR(sk.as_ptr()));
+            return if e.is_ok() { Ok(()) } else { Err(e.0) };
+        };
+        let mut hk = HKEY::default();
+        let open = RegOpenKeyExW(hive, PCWSTR(to_wide(parent).as_ptr()), Some(0), KEY_SET_VALUE, &mut hk);
+        if open.is_err() {
+            return Err(open.0);
+        }
+        let r = RegDeleteKeyW(hk, PCWSTR(to_wide(last).as_ptr()));
+        let _ = RegCloseKey(hk);
+        if r.is_ok() { Ok(()) } else { Err(r.0) }
     }
+}
+
+/// 删除键的失败原因人话（纯函数，单测钉住「四种因不折成一句」）。
+pub fn remove_cause_label(code: u32) -> String {
+    match code {
+        5 => "拒绝访问(5)：父键不允许删除子键".to_string(),
+        1018 => "键仍有子键(1018)：非递归删除前需先清空".to_string(),
+        2 | 3 => "键不存在(2)".to_string(),
+        other => format!("win32={other}"),
+    }
+}
+
+/// 删除键（对应 PS `Remove-Item`；`recurse` 走 `RegDeleteTreeW`，含全部子键与值）
+pub fn reg_key_remove(hive: HKEY, subkey: &str, recurse: bool) -> bool {
+    reg_key_remove_checked(hive, subkey, recurse).is_ok()
 }
 
 /// 枚举子键名（v3-K1：`Get-ChildItem <注册表键>` 的等价物）。
@@ -897,7 +914,7 @@ pub(super) unsafe fn reg_count_values(hk: HKEY) -> usize {
 mod tests {
     use super::{
         open_key_missing_is_idempotent, win_reg_err_label, read_reg_value_state, reg_key_remove,
-        reg_restore_write, reg_enum_value_names_pub, to_wide, RegReadState,
+        reg_restore_write, reg_enum_value_names_pub, to_wide, RegReadState, remove_cause_label,
     };
 
     /// R5b-M01：删值入口的「键不存在」判定必须只认 2/3，其余失败码一律判失败。
@@ -1010,5 +1027,19 @@ mod tests {
         let (names, incomplete) = reg_enum_value_names_pub(HKEY_CURRENT_USER, SUB);
         assert!(names.iter().any(|n| *n == long), "超长值名必须枚举到，实得 {names:?}");
         assert!(!incomplete, "正常结束不得报「清单不完整」");
+    }
+
+    /// R5b-M21：删键失败原因必须四分，不许折回一句「失败」。
+    #[test]
+    fn 删键失败原因四种不折成一句() {
+        let denied = remove_cause_label(5);
+        let has_children = remove_cause_label(1018);
+        let missing = remove_cause_label(2);
+        assert!(denied.contains('5'), "{denied}");
+        assert!(has_children.contains("1018"), "{has_children}");
+        assert!(missing.contains('2'), "{missing}");
+        assert_ne!(denied, has_children);
+        assert_ne!(has_children, missing);
+        assert_eq!(remove_cause_label(87), "win32=87");
     }
 }

@@ -497,8 +497,9 @@ fn walk_level(
 fn child_dir_sizes(root: &Path, out: &mut Vec<(PathBuf, u64)>, beat: &ScanBeat) {
     let rd = match fs::read_dir(root) {
         Ok(r) => r,
-        Err(_) => {
+        Err(e) => {
             note_unreadable_dir();
+            beat.warn(&format!("appdata：目录读不到 {}（{e}）", root.display()));
             return;
         }
     };
@@ -717,8 +718,9 @@ fn analyze_dir_deep(
     while let Some(d) = stack.pop() {
         let rd = match fs::read_dir(&d) {
             Ok(r) => r,
-            Err(_) => {
+            Err(e) => {
                 note_unreadable_dir();
+                beat.warn(&format!("analyze：目录读不到 {}（{e}）", d.display()));
                 continue;
             }
         };
@@ -825,7 +827,9 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
     // 用户先点哪个功能（先点 duplicates 就会被别人初始化过）。补初始化，行为面只有线程数上限。
     init_scan_threads();
     for p in paths {
-        let root = Path::new(p);
+        // N1b-M13：与 duplicates/bigfiles/empty 同口径，根统一过 canonical，
+        // 否则同一棵深树在两条链上的可见深度不同。
+        let root = canonical(p).unwrap_or_else(|| PathBuf::from(p));
         if !root.is_dir() {
             continue;
         }
@@ -834,7 +838,7 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
         // 清零等于把并发扫描（宿主每路都进 spawn_blocking）的留痕偷走，第二路恒报 0。
         let reparse_base = REPARSE_SKIPS.mark();
         let unreadable_base = UNREADABLE_DIRS.mark();
-        let rd = match fs::read_dir(root) {
+        let rd = match fs::read_dir(&root) {
             Ok(r) => r,
             // v7.2-C03（N1b-M01）：根级 read_dir 失败原先整根静默跳过，输出与
             // 「该目录没有内容」一模一样（N1b-M01 的 analyze 侧）。留痕后继续，
@@ -933,7 +937,7 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
             children.truncate(200);
             children_truncated = true;
         }
-        item(sink, "analyzer", root, total, &[
+        item(sink, "analyzer", &root, total, &[
             ("kind", "summary".to_string()),
             ("dirCount", dir_count.to_string()),
             ("fileCount", file_count.to_string()),
@@ -950,7 +954,7 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
         for (name, sz) in ext_ranking(exts) {
             // family：类型家族由 Rust 一处实现（`ext_family`），前端分组渲染与「老旧大文件」
             // 类型过滤共用，不在 JS 侧建第二张映射表（§5.16）
-            item(sink, "analyzer", root, sz, &[
+            item(sink, "analyzer", &root, sz, &[
                 ("kind", "ext".to_string()),
                 ("ext", name.clone()),
                 ("family", ext_family(&name).to_string()),
@@ -959,7 +963,7 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
         // M6 时间维度：6 桶全发（含 0 字节桶），渲染层因此可以无条件按下标取标签，
         // 也才能当场校验「各桶相加 = 总量」。
         for (i, label) in TIME_BUCKET_LABELS.iter().enumerate() {
-            item(sink, "analyzer", root, times[i], &[
+            item(sink, "analyzer", &root, times[i], &[
                 ("kind", "time".to_string()),
                 ("bucket", i.to_string()),
                 ("label", (*label).to_string()),
@@ -2140,7 +2144,7 @@ pub fn appdata(min_size_mb: u64, sink: &dyn Sink) {
         match std::env::var(name) {
             Ok(v) if !v.trim().is_empty() => {
                 let label = if name == "LOCALAPPDATA" { "Local" } else { "Roaming" };
-                roots.push((label.to_string(), PathBuf::from(v)));
+                roots.push((label.to_string(), canonical(&v).unwrap_or_else(|| PathBuf::from(&v))));
             }
             Ok(_) => sink.warn(&format!(
                 "应用数据扫描：环境变量 {name} 为空，跳过该根（其余根继续）"
@@ -2183,23 +2187,23 @@ pub fn sizes(paths: &[String], sink: &dyn Sink) {
     let mut total_files = 0usize;
     let mut total_dirs = 0usize;
     for rp in paths {
-        let p = Path::new(rp);
+        let p = canonical(rp).unwrap_or_else(|| PathBuf::from(rp));
         if !p.exists() {
-            item(sink, "size", p, 0, &[("exists", "false".to_string())]);
+            item(sink, "size", &p, 0, &[("exists", "false".to_string())]);
             continue;
         }
         if p.is_file() {
-            let sz = fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            let sz = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
             total_files += 1;
-            item(sink, "size", p, sz, &[("exists", "true".to_string())]);
+            item(sink, "size", &p, sz, &[("exists", "true".to_string())]);
         } else if p.is_dir() {
             // `None`：v3 §5.6 的零反馈清单只有 analyze/appdata/bigfiles 三条，sizes 不在
             // 其中；接心跳等于给它新增一类输出行（CLI 侧 stdout 会变），属另行拍板的改动面。
             // N1b-M02：本路径区间的基线，读增量而非清零。
             let reparse_base = REPARSE_SKIPS.mark();
-            let sz = dir_size(p, None);
+            let sz = dir_size(&p, None);
             total_dirs += 1;
-            item(sink, "size", p, sz, &[("exists", "true".to_string()), ("skippedReparse", REPARSE_SKIPS.since(reparse_base).to_string())]); // v5-K02 批次2：本根 reparse 跳过量（只呈现）
+            item(sink, "size", &p, sz, &[("exists", "true".to_string()), ("skippedReparse", REPARSE_SKIPS.since(reparse_base).to_string())]); // v5-K02 批次2：本根 reparse 跳过量（只呈现）
         }
     }
     let _ = (total_files, total_dirs);
@@ -5152,4 +5156,54 @@ mod depth_cap_tests {
         }
         let _ = fs::remove_dir_all(&base);
     }
+
+    /// N1b-M13：短路径根（>260）经 canonical 后应能看见深节点。
+    /// 本机前提不成立（Rust std 的短路径已能直接访问深树）⇒ 标 ignore 当真机探针，
+    /// 不当快速组的绿；需要未声明 longPathAware 的环境复跑。
+    #[test]
+    #[ignore = "长路径前提本机不成立：短路径可直接访问深节点，需在受限环境复跑"]
+    fn 长路径根经canonical后可见深节点() {
+        let sb = crate::util::sandbox("p2e-m13");
+        let base = sb.to_string_lossy().to_string();
+        let verbatim = format!(r"\\?\{base}");
+        let mut deep = verbatim.clone();
+        for i in 0..8 {
+            deep.push_str(&format!("\\dir{}_{}", i, "x".repeat(30)));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        let f1 = format!("{deep}\\a.bin");
+        let f2 = format!("{deep}\\b.bin");
+        fs::write(&f1, vec![0u8; 4096]).unwrap();
+        fs::write(&f2, vec![0u8; 4096]).unwrap();
+        let short_root = base.clone();
+        let short_leaf = f1.trim_start_matches(r"\\?\").to_string();
+        if fs::metadata(&short_leaf).is_ok() {
+            println!("SKIP：本机短路径可直接访问深节点，N1b-M13 的前提未成立（未验证）");
+            return;
+        }
+        struct Collect(std::sync::Mutex<Vec<String>>);
+        impl Sink for Collect {
+            fn item(&self, _p: &Path, line: &str) {
+                self.0.lock().unwrap_or_else(|e| e.into_inner()).push(line.to_string());
+            }
+            fn progress(&self, _n: u64) {}
+            fn scanned(&self, _n: u64) {}
+            fn warn(&self, _m: &str) {}
+        }
+        let sink = Collect(Default::default());
+        analyze(&[short_root], &sink);
+        let lines = sink.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let total = lines
+            .iter()
+            .filter(|l| l.contains("\"kind\":\"summary\""))
+            .filter_map(|l| {
+                let i = l.find("\"size\":")? + 7;
+                let j = i + l[i..].find(|c: char| !c.is_ascii_digit())?;
+                l[i..j].parse::<u64>().ok()
+            })
+            .max()
+            .unwrap_or(0);
+        assert!(total >= 8192, "短路径根经 canonical 后应看见两个 4096 字节深文件，实得 {total}");
+    }
+
 }
