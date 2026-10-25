@@ -44,9 +44,21 @@
 
   function removeProgressBar() { document.getElementById('benchProgress')?.remove(); }
 
+  // P1-6E①：档位外回落可以，但必须当场留一句告警跟着回执走。旧写法
+  // `[1,8,32].includes(Number(v)) ? Number(v) : 1` 把「用户选了个不在档里的值」折成
+  // 「他选了 1」，界面、历史记录、回执三处都看不出这次其实没按所选执行。
+  const TIER_WARN = [];
+  function pickTier(raw, tiers, fallback, label) {
+    const n = Number(raw);
+    if (tiers.includes(n)) return n;
+    TIER_WARN.push(`${label}的 ${raw} 不是可选项，已按 ${fallback} 测试`);
+    return fallback;
+  }
+
   async function run() {
     if (running) return;
     running = true;
+    TIER_WARN.length = 0;
     const button = $('btnDiskBench');
     if (button) button.disabled = true;
     if ($('diskBenchStatus')) $('diskBenchStatus').textContent = '准备测试...';
@@ -54,16 +66,13 @@
     // L06：参数组装与进度订阅并入 try——原实现 running=true 之后、try 之前有约
     // 20 行可抛代码，一旦抛出 running 永久为 true、按钮永久禁用；finally 统一复位。
     try {
-      // 时长仅允许 4/8/16 秒，异常值回落 8 秒
-      const rawDuration = Number($('diskDuration')?.value || 8);
-      const duration = [4, 8, 16].includes(rawDuration) ? rawDuration : 8;
       const options = {
         path: ($('diskBenchPath')?.value || '').trim(), // 空路径由主进程白名单校验拒绝，不再回落硬编码开发机路径
-        blockSize: Number($('diskBlockSize')?.value || 1048576),
+        blockSize: pickTier($('diskBlockSize')?.value, [4096, 65536, 1048576], 1048576, '块大小'),
         // v3.7.1 R1：QD=每线程在途上限、线程数真实生效（Rust OVERLAPPED 并发）；白名单与主进程一致
-        queueDepth: [1, 8, 32].includes(Number($('diskQueueDepth')?.value)) ? Number($('diskQueueDepth').value) : 1,
-        threads: [1, 4, 8].includes(Number($('diskThreads')?.value)) ? Number($('diskThreads').value) : 1,
-        duration
+        queueDepth: pickTier($('diskQueueDepth')?.value, [1, 8, 32], 1, '队列深度'),
+        threads: pickTier($('diskThreads')?.value, [1, 4, 8], 1, '线程数'),
+        duration: pickTier($('diskDuration')?.value, [4, 8, 16], 8, '时长')
       };
       // 订阅后端真实进度
       if (window.api?.diskbench?.onProgress) {
@@ -73,11 +82,14 @@
       }
       let result = MOCK;
       let engine = '';
+      const paramNotes = [];
       if (window.api?.diskbench) {
         const response = await window.api.diskbench.run(options);
         if (!response.success) throw new Error(response.message);
         result = response.data;
         engine = response.engine || '';
+        // 主进程与原生动机的回落告警合成一份，前端不再各说各话
+        if (Array.isArray(response.warn)) paramNotes.push(...response.warn);
       } else {
         // 演示模式：按 3×duration 模拟进度（数据与状态行都必须带「演示」标识，L03）
         engine = 'demo';
@@ -99,7 +111,9 @@
           : engine === 'demo' ? '测试完成（演示数据，非本机实测）'
           : '测试完成';
       }
+      paramNotes.push(...TIER_WARN);
       window.app?.toast('success', '磁盘测速完成，测试文件已清理');
+      if (paramNotes.length) window.app?.toast('warning', `本次未按所选参数测试：${paramNotes.join('；')}`);
       // 保存历史记录
       saveHistoryRecord(result, options, engine);
     } catch (error) {

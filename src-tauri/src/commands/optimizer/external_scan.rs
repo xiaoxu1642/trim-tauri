@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use tauri::{Runtime, WebviewWindow};
 
 use crate::engine::guard;
-use crate::engine::native::{hive_hklm, read_reg_dword_opt};
+use crate::engine::native::hive_hklm;
 
 struct ExtTweak {
     id: &'static str,
@@ -258,7 +258,7 @@ mod tests {
         let hive = hive_hklm();
         let mut hits: Vec<String> = Vec::new();
         for t in EXTERNAL_TWEAKS {
-            let cur = read_reg_dword_opt(hive, t.subkey, t.value_name);
+            let cur = crate::engine::native::read_reg_dword_opt(hive, t.subkey, t.value_name);
             if let Some(shape) = judge_external(cur, t.hits) {
                 hits.push(format!(
                     "{}({}) = {:?} → {}",

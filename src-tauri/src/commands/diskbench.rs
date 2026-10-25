@@ -157,19 +157,54 @@ fn js_number(v: Option<&Value>) -> Option<f64> {
     }
 }
 
-/// 参数白名单化：允许值集合内取原值，否则回落默认
-fn pick(v: Option<&Value>, allowed: &[i64], default: i64) -> i64 {
-    match js_number(v) {
-        Some(n) => {
-            let i = n.trunc() as i64;
-            if allowed.contains(&i) {
-                i
-            } else {
-                default
-            }
-        }
-        None => default,
+/// 参数白名单化：允许值集合内取原值，否则回落默认。
+///
+/// P1-6E①：回落这件事**必须留痕**。三种形态要分清 ——
+///   · 「这个键根本没给」= 前端没传，属正常默认路径，不产告警；
+///   · 「给了但不在档位里」/「给了但不是数」/「给了个带小数」= 用户以为按自己选的在跑，
+///     实际跑的是默认值，回执里的 `queueDepth/threads` 又会写成**回落后的值**，
+///     于是「4 线程」的历史记录其实是 1 线程 —— 不告警就无人能发现。
+fn pick(v: Option<&Value>, allowed: &[i64], default: i64, label: &str, warn: &mut Vec<String>) -> i64 {
+    let Some(raw) = v else { return default };
+    let Some(n) = js_number(Some(raw)) else {
+        warn.push(format!("{label}不是可选值，已按默认 {default} 执行"));
+        return default;
+    };
+    let i = n.trunc() as i64;
+    if n != i as f64 {
+        warn.push(format!("{label}的 {n} 不是整数，已取整为 {i}"));
     }
+    if allowed.contains(&i) {
+        i
+    } else {
+        warn.push(format!("{label}的 {i} 不是可选值，已按默认 {default} 执行"));
+        default
+    }
+}
+
+/// 原生回执 → 前端契约（纯函数，便于断言）。
+///
+/// 做三件事：① 把 `pick` 的回落告警与原生侧 `data.warn` 合成一个 `warn` 数组（只在非空时出现）；
+/// ② 原生失败分支返回的是 `{"error":"…"}`，旧写法只判 `measured` 就吐
+/// `{"success":false}`，把真实原因整条丢掉 —— 前端 `throw new Error(response.message)`
+/// 于是显示「磁盘测速失败：undefined」，用户看不到"为什么没测成"（P1-6 族的同一个形状：
+/// 失败信息被折成无信息）。现在 `error` 原样抬到 `message`。
+/// ③ `measured` 仍是唯一的成功判据，不从 `data` 里猜。
+fn bench_response(data: Value, mut warn: Vec<String>) -> Value {
+    if let Some(arr) = data.get("warn").and_then(|w| w.as_array()) {
+        for w in arr.iter().filter_map(|x| x.as_str()) {
+            warn.push(w.to_string());
+        }
+    }
+    let measured = data.get("measured").and_then(|v| v.as_bool()) == Some(true);
+    let mut out = json!({ "success": measured, "data": data, "engine": "rust" });
+    if !measured {
+        out["message"] = json!(data.get("error").and_then(|e| e.as_str()).unwrap_or("磁盘测速未成功（原生引擎无更多说明）"));
+    }
+    if !warn.is_empty() {
+        out["warn"] = json!(warn);
+    }
+    out
 }
 
 /// diskbench:run — 磁盘测速（原生引擎优先）
@@ -255,11 +290,15 @@ pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options:
         }
     }
 
-    // 参数白名单化（非法值一律回落默认）
-    let block = pick(opts.get("blockSize"), &[4096, 65536, 1048576], 1048576);
-    let qd = pick(opts.get("queueDepth"), &[1, 8, 32], 1);
-    let threads = pick(opts.get("threads"), &[1, 4, 8], 1);
-    let dur = pick(opts.get("duration"), &[4, 8, 16], 8);
+    // 参数白名单化（非法值回落默认，但**每一条回落都记进 warn 并随回执带回**，P1-6E①）
+    let mut param_warn: Vec<String> = Vec::new();
+    let block = pick(opts.get("blockSize"), &[4096, 65536, 1048576], 1048576, "块大小", &mut param_warn);
+    let qd = pick(opts.get("queueDepth"), &[1, 8, 32], 1, "队列深度", &mut param_warn);
+    let threads = pick(opts.get("threads"), &[1, 4, 8], 1, "线程数", &mut param_warn);
+    let dur = pick(opts.get("duration"), &[4, 8, 16], 8, "时长", &mut param_warn);
+    if !param_warn.is_empty() {
+        log::write_log("warn", &format!("磁盘测速参数回落: {}", param_warn.join("；")));
+    }
     let io_mode = if opts.get("ioMode").and_then(|v| v.as_str()) == Some("buf") {
         "buf"
     } else {
@@ -327,5 +366,77 @@ pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options:
         // 测量未完成也做残留清理（同异常路径口径）
         cleanup_residue(&residue_dir);
     }
-    Ok(json!({ "success": measured, "data": data, "engine": "rust" }))
+    Ok(bench_response(data, param_warn))
+}
+
+#[cfg(test)]
+mod p1_6e_diskbench_param_tests {
+    use super::{bench_response, pick};
+    use serde_json::json;
+
+    const QD: &[i64] = &[1, 8, 32];
+
+    /// 「没给键」与「给了但不在档位」都回落默认，但只有后者留痕（P1-6E①）。
+    /// 判红自证：把 `pick` 的 `None => return default` 之外那条 `warn.push` 删掉 ⇒ 第二段红。
+    #[test]
+    fn 缺键不告警_档位外与带小数都要点名() {
+        let mut w: Vec<String> = Vec::new();
+        assert_eq!(pick(None, QD, 1, "队列深度", &mut w), 1);
+        assert!(w.is_empty(), "前端没传这个键不是异常：{w:?}");
+
+        assert_eq!(pick(Some(&json!(3)), QD, 1, "队列深度", &mut w), 1);
+        assert_eq!(w.len(), 1, "档位外的值必须留痕：{w:?}");
+        assert!(w[0].contains("队列深度") && w[0].contains("3") && w[0].contains("默认 1"), "告警要点名参数、原值与回落值：{w:?}");
+
+        assert_eq!(pick(Some(&json!("8")), QD, 1, "队列深度", &mut w), 8);
+        assert_eq!(w.len(), 1, "数字字符串命中档位，不追加告警：{w:?}");
+
+        assert_eq!(pick(Some(&json!(8.5)), QD, 1, "队列深度", &mut w), 8);
+        assert_eq!(w.len(), 2, "带小数取整也要留痕，否则「8.5」静默变成 8：{w:?}");
+        assert!(w[1].contains("不是整数"), "告警要说清是取整不是回落：{w:?}");
+
+        assert_eq!(pick(Some(&json!("abc")), QD, 1, "队列深度", &mut w), 1);
+        assert_eq!(w.len(), 3, "给了但不是数字同样要留痕：{w:?}");
+    }
+
+    /// 测速没跑成时，原生侧的失败原因必须抬到 `message`。
+    /// 旧写法只吐 `{"success":false}`，前端 `new Error(response.message)` 得到
+    /// 「磁盘测速失败：undefined」——真正的失败原因整条消失。
+    /// 判红自证：把 `bench_response` 里 `!measured` 那段删掉 ⇒ 第一条红。
+    #[test]
+    fn 原生error不得折成无消息() {
+        let r = bench_response(json!({ "error": "测试文件只建成 1/8 个，本轮测速作废" }), Vec::new());
+        assert_eq!(r["success"], json!(false));
+        assert_eq!(r["message"], json!("测试文件只建成 1/8 个，本轮测速作废"));
+
+        // measured 缺失/为 false 但也没有 error：仍要给一句可显示的说明，不能再留 undefined
+        let r2 = bench_response(json!({ "sequentialRead": 0.0 }), Vec::new());
+        assert_eq!(r2["success"], json!(false));
+        assert!(r2["message"].as_str().unwrap_or_default().contains("磁盘测速"), "无 error 也要有兜底文案：{r2}");
+
+        // 成功分支不造 message 字段，前端按 success 走展示路径
+        let r3 = bench_response(json!({ "measured": true, "iops": 1234 }), Vec::new());
+        assert_eq!(r3["success"], json!(true));
+        assert!(r3.get("message").is_none(), "成功回执不塞 message：{r3}");
+    }
+
+    /// 告警只有一个出口：`pick` 的回落与原生 `data.warn` 合并进同一个 `warn` 数组，
+    /// 空清单整段缺席（前端不必分辨两种形态）。
+    /// 判红自证：把 `bench_response` 里合并 `data.warn` 的循环删掉 ⇒ 第二条红。
+    #[test]
+    fn 两路告警合成一个warn数组且空时缺席() {
+        let clean = bench_response(json!({ "measured": true }), Vec::new());
+        assert!(clean.get("warn").is_none(), "无告警不塞空数组：{clean}");
+
+        let r = bench_response(
+            json!({ "measured": true, "warn": ["qd=3 不在档位内，已按 1 执行"] }),
+            vec!["线程数的 9 不是可选值，已按默认 1 执行".to_string()],
+        );
+        let arr = r["warn"].as_array().expect("warn 必须是数组");
+        assert_eq!(arr.len(), 2, "前端侧与原生侧各一条：{arr:?}");
+        assert!(arr.iter().any(|x| x.as_str().unwrap_or_default().contains("线程数")));
+        assert!(arr.iter().any(|x| x.as_str().unwrap_or_default().contains("qd=3")));
+        // data 原样带回，历史记录字段一个都不能少
+        assert_eq!(r["data"]["measured"], json!(true));
+    }
 }

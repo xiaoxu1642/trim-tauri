@@ -106,6 +106,48 @@ const BUF_CAP_PER_THREAD: usize = 16 * 1024 * 1024;
 const SEQ_WINDOW_TOTAL: u64 = 256 * 1024 * 1024;
 const RAND_WINDOW_TOTAL: u64 = 128 * 1024 * 1024;
 
+/// 数值参数解析（P1-6E①）：「没给」与「给了但不是数字」都回落默认，但后者**必须留痕**。
+/// 旧写法 `.parse().unwrap_or(默认)` 让两种情况完全同形，报告上看不出任何异常。
+fn parse_bench_arg(raw: Option<&str>, default: u64, name: &str, warn: &mut Vec<String>) -> u64 {
+    let Some(v) = raw else { return default };
+    match v.parse::<u64>() {
+        Ok(n) => n,
+        Err(_) => {
+            warn.push(format!("{name}={v} 不是数字，已按默认 {default} 执行"));
+            default
+        }
+    }
+}
+
+/// 白名单外的取值回落默认，但**必须留一条告警**（P1-6E①）。
+/// 抽成函数只为了让它可单测：`--qd 3` 这种「不在档位里」的写法与「畸形字符串」一样，
+/// 都不许悄悄变成 qd=1 的实测数字。
+fn clamp_to_whitelist(
+    got: usize,
+    allowed: &[usize],
+    default: usize,
+    name: &str,
+    warn: &mut Vec<String>,
+) -> usize {
+    if allowed.contains(&got) {
+        return got;
+    }
+    warn.push(format!("{name}={got} 不在档位 {:?} 内，已按 {default} 执行", allowed));
+    default
+}
+
+/// 告警进**回执 JSON**（P1-6E 的验收口径：「不能只写 stderr」）。
+/// 这个 crate 的两个入口共用 `diskbench_core`：CLI 把返回值原样写成 stdout 末行，
+/// Tauri 侧走 `diskbench_json` 直接拿返回值 —— 所以往 stdout 打告警行，lib 调用方
+/// 一个字也收不到，等于没留痕。空清单必须整段缺席，不能塞 `"warn":[]` 骗解析端。
+fn bench_warn_field(warn: &[String]) -> String {
+    if warn.is_empty() {
+        return String::new();
+    }
+    let items: Vec<String> = warn.iter().map(|w| format!("\"{}\"", json_escape(w))).collect();
+    format!(",\"warn\":[{}]", items.join(","))
+}
+
 /// 进度行：`{"phase","percent"}`（**不含** `__PROG__` 前缀）。
 /// CLI 包装补前缀直写 stdout，Tauri 侧把同一 JSON 直接派发给前端事件。
 fn bench_progress(on_progress: &mut dyn FnMut(&str), phase: &str, percent: u64) {
@@ -251,16 +293,21 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
         Some(p) => p.trim_end_matches('\\').to_string(),
         None => return Err("缺少 --path".to_string()),
     };
-    let block = arg_value(args, "block-bytes").map(|v| v.parse::<u64>().unwrap_or(1048576)).unwrap_or(1048576);
-    let duration = arg_value(args, "duration").map(|v| v.parse::<u64>().unwrap_or(8)).unwrap_or(8);
-    let qd_req = arg_value(args, "qd").map(|v| v.parse::<usize>().unwrap_or(1)).unwrap_or(1);
-    let th_req = arg_value(args, "threads").map(|v| v.parse::<usize>().unwrap_or(1)).unwrap_or(1);
+    // P1-6E①：参数「畸形」与「没给」是两件事。旧写法先 `parse().unwrap_or(默认)` 再查白名单，
+    // 于是 `--qd abc` 与「用户没写 --qd」完全同形 —— 明明要的是高队列深度，实测回来的
+    // 却是 qd=1 的数字且没有任何痕迹，报告上看不出错。现在四个数值参数统一走 parse_arg：
+    // 回落默认照旧（不改变可跑性），但**必须留下一条告警**，由 `@@PERFWARN@@` 透到输出里。
+    let mut arg_warn: Vec<String> = Vec::new();
+    let block = parse_bench_arg(arg_value(args, "block-bytes"), 1048576, "block-bytes", &mut arg_warn);
+    let duration = parse_bench_arg(arg_value(args, "duration"), 8, "duration", &mut arg_warn);
+    let qd_req = parse_bench_arg(arg_value(args, "qd"), 1, "qd", &mut arg_warn) as usize;
+    let th_req = parse_bench_arg(arg_value(args, "threads"), 1, "threads", &mut arg_warn) as usize;
     let mode = arg_value(args, "mode").unwrap_or("nobuf").to_string();
     if !BENCH_BLOCKS.contains(&block) || !BENCH_DURATIONS.contains(&duration) {
         return Err("非法参数（block/duration 不在白名单）".to_string());
     }
-    let qd_req = if BENCH_QD.contains(&qd_req) { qd_req } else { 1 };
-    let threads = if BENCH_THREADS.contains(&th_req) { th_req } else { 1 };
+    let qd_req = clamp_to_whitelist(qd_req, &BENCH_QD, 1, "qd", &mut arg_warn);
+    let threads = clamp_to_whitelist(th_req, &BENCH_THREADS, 1, "threads", &mut arg_warn);
     // 非固定盘 / 探测失败回落 buf（nobuf 在内存盘、网络盘不可靠）
     let mut nobuf = mode != "buf";
     unsafe {
@@ -363,10 +410,12 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
             return Err(msg);
         }
         let result = format!(
-            "{{\"measured\":true,\"sequentialRead\":{:.1},\"sequentialWrite\":{:.1},\"randomRead\":{:.1},\"randomWrite\":{:.1},\"iops\":{:.0},\"latency\":{:.3},\"blockSize\":{},\"queueDepth\":{},\"threads\":{},\"duration\":{},\"ioMode\":\"{}\",\"qdEffective\":{},\"elapsedMs\":{}}}",
+            "{{\"measured\":true,\"sequentialRead\":{:.1},\"sequentialWrite\":{:.1},\"randomRead\":{:.1},\"randomWrite\":{:.1},\"iops\":{:.0},\"latency\":{:.3},\"blockSize\":{},\"queueDepth\":{},\"threads\":{},\"duration\":{},\"ioMode\":\"{}\",\"qdEffective\":{},\"elapsedMs\":{}}}{}",
             seq_read, seq_write, rand_read, rand_write, iops, latency, block, qd_req, opened, duration,
-            if nobuf { "nobuf" } else { "buf" }, qd_eff, elapsed
+            if nobuf { "nobuf" } else { "buf" }, qd_eff, elapsed, bench_warn_field(&arg_warn)
         );
+        // 失败分支（上面的 `Err(msg)`）不带 warn：那一轮的结果整份作废，调用方只看错误消息，
+        // 再拼一条参数回落反而会把真正的失败原因挤掉。留痕只针对「这一轮确实出了数」。
         for h in handles { let _ = CloseHandle(h); }
         for f in &files { DeleteFileW(wide(f).as_ptr()); }
         Ok(result)
@@ -1269,6 +1318,59 @@ mod tests {
         assert!(
             !b.is_empty() && b.chars().all(|c| c.is_ascii_digit()),
             "build 必须是十进制数字串：{b}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod p1_6e_arg_tests {
+    use super::{bench_warn_field, clamp_to_whitelist, parse_bench_arg};
+
+    /// 「没给参数」与「给了但不是数字」都回落默认，但只有后者留痕。
+    /// 判红自证：把 `parse_bench_arg` 的 `Err(_) =>` 支并回 `unwrap_or(default)` ⇒ 第二条红。
+    #[test]
+    fn 缺参与畸形参回落同一默认但只有一条留痕() {
+        let mut w: Vec<String> = Vec::new();
+        assert_eq!(parse_bench_arg(None, 8, "duration", &mut w), 8);
+        assert!(w.is_empty(), "没给参数不是异常，不得造告警：{w:?}");
+        assert_eq!(parse_bench_arg(Some("abc"), 8, "duration", &mut w), 8);
+        assert_eq!(w.len(), 1, "畸形值必须留一条：{w:?}");
+        assert!(w[0].contains("duration=abc") && w[0].contains("已按默认 8"), "告警点名原值与默认值：{w:?}");
+        assert_eq!(parse_bench_arg(Some("12"), 8, "duration", &mut w), 12);
+        assert_eq!(w.len(), 1, "合法值不再追加告警：{w:?}");
+    }
+
+    /// P1-6E①：白名单外的取值可以回落默认，但**必须留下告警** —— 旧写法是
+    /// `if allowed.contains { v } else { 1 }`，「用户要的是 3」这条信息整条消失，
+    /// 报告上只剩一个看不出问题的 qd=1。
+    /// 判红自证：把 `clamp_to_whitelist` 里的 `warn.push(..)` 删掉 ⇒ 后两条断言红。
+    #[test]
+    fn 档位外的值回落默认但必须留痕() {
+        let mut w: Vec<String> = Vec::new();
+        assert_eq!(clamp_to_whitelist(8, &[1usize, 8, 32], 1, "qd", &mut w), 8);
+        assert!(w.is_empty(), "命中档位不得造告警：{w:?}");
+
+        assert_eq!(clamp_to_whitelist(3, &[1usize, 8, 32], 1, "qd", &mut w), 1);
+        assert_eq!(w.len(), 1, "回落默认必须留一条告警，实得 {w:?}");
+        assert!(w[0].contains("qd=3") && w[0].contains("已按 1 执行"), "告警要点名原值与回落值：{w:?}");
+
+        assert_eq!(clamp_to_whitelist(9, &[1usize, 4, 8], 1, "threads", &mut w), 1);
+        assert_eq!(w.len(), 2, "两次回落要留两条：{w:?}");
+    }
+
+    /// 留痕的落点是**回执 JSON**，不是 stdout/stderr：`diskbench_json`（Tauri 直调）
+    /// 根本不读标准输出，写在 stdout 等于没写。
+    /// 判红自证：把 `bench_warn_field` 直接改成返回空串 ⇒ 前两条断言红。
+    #[test]
+    fn 告警渲染进回执且空清单整段缺席() {
+        assert_eq!(bench_warn_field(&[]), "", "空清单要整段缺席，不得塞 \"warn\":[]");
+        let one = bench_warn_field(&["qd=3 不在档位内，已按 1 执行".to_string()]);
+        assert!(one.starts_with(",\"warn\":["), "必须拼在既有对象末尾：{one}");
+        assert!(one.contains("qd=3"), "告警原文要能在回执里找到：{one}");
+        assert_eq!(
+            bench_warn_field(&["a".to_string(), "b\"带引号\"".to_string()]),
+            ",\"warn\":[\"a\",\"b\\\"带引号\\\"\"]",
+            "两条都要进数组，且内嵌引号必须转义（否则回执整段解析失败）"
         );
     }
 }

@@ -42,7 +42,7 @@
     "src-tauri/src/pwsh/mod.rs": 6,
     "src-tauri/src/security/mod.rs": 10,
     "native-scanner/src/cleanup_scan.rs": 31,
-    "native-scanner/src/scan.rs": 39,
+    "native-scanner/src/scan.rs": 41,
     "native-scanner/src/util.rs": 4
   },
   "remove_file": {

@@ -591,6 +591,25 @@ fn analyze_ext_key(name: &str) -> String {
     }
 }
 
+/// 名字读不成 UTF-8 的条目所进的桶（P1-6E④）。
+///
+/// 为什么必须有这个名字：Windows 文件名允许孤立代理项，`OsStr::to_str()` 对这种名字
+/// 返回 `None`。旧写法拿 `to_str()` 的结果当入桶前提，取不到就**整个跳过**——体积照进总量，
+/// 类型排行里却一个字都没有，等价于「这类文件不存在」。
+/// 一个 50 GB 的下载目录如果全是这种名字，磁盘分析页会显示「视频 3 GB」并到此为止。
+/// 单独成桶而不是 `to_string_lossy()`：后者会把 U+FFFD 带进键名，排行里出现一串乱码，
+/// 而且同一个原始名字可能因代理项位置不同裂成好几个键。
+const EXT_LOSSY_KEY: &str = "(名字读不出的文件)";
+
+/// [`analyze_ext_key`] 的 OsStr 门面（§5.16：入桶只有一条路，别让调用方各自决定
+/// 「读不出怎么办」）。可读出的名字走同一份键规则，读不出的进 [`EXT_LOSSY_KEY`]。
+fn analyze_ext_key_os(name: &std::ffi::OsStr) -> String {
+    match name.to_str() {
+        Some(s) => analyze_ext_key(s),
+        None => EXT_LOSSY_KEY.to_string(),
+    }
+}
+
 /// 扩展名聚合表的**键数**上限。
 /// 为什么要有：病态目录的扩展名种类可达上万，全收就把「排行」变成了「字典」。
 /// N1b-L02 说的不是这个上限，而是**取舍押在到达顺序上**：旧写法
@@ -736,10 +755,7 @@ fn analyze_dir_deep(
                             }
                         }
                     }
-                    if let Some(name) = ent.file_name().to_str() {
-                        let key = analyze_ext_key(name);
-                        ext_note(exts, key, sz);
-                    }
+                    ext_note(exts, analyze_ext_key_os(ent.file_name().as_os_str()), sz);
                 }
                 _ => {}
             }
@@ -863,10 +879,7 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
                             }
                         }
                     }
-                    if let Some(name) = ent.file_name().to_str() {
-                        let key = analyze_ext_key(name);
-                        ext_note(&mut exts, key, sz);
-                    }
+                    ext_note(&mut exts, analyze_ext_key_os(ent.file_name().as_os_str()), sz);
                 }
                 _ => {}
             }
@@ -1242,7 +1255,7 @@ type TopHeap = BinaryHeap<std::cmp::Reverse<(u64, PathBuf)>>;
 ///   其子目录单独成任务继续向下，保证每个文件恰好归属一个任务，绝不重复计数。
 /// - 最深层（深度 == task_depth）的任务整体递归其子树，兜住更深处的大文件。
 /// 任务粒度太浅→无并行，太深→任务爆炸。
-fn expand_tasks(root: &Path, task_depth: usize) -> Vec<(PathBuf, bool)> {
+fn expand_tasks(root: &Path, task_depth: usize, trace: &BigfilesTrace) -> Vec<(PathBuf, bool)> {
     let mut out: Vec<(PathBuf, bool)> = vec![(root.to_path_buf(), false)];
     let mut level: Vec<PathBuf> = vec![root.to_path_buf()];
     for gen in 1..=task_depth {
@@ -1253,10 +1266,17 @@ fn expand_tasks(root: &Path, task_depth: usize) -> Vec<(PathBuf, bool)> {
                 Ok(r) => r,
                 Err(_) => {
                     note_unreadable_dir();
+                    trace.note_dir_unreadable();
                     continue;
                 }
             };
-            for ent in rd.flatten() {
+            // P1-6E②：`rd.flatten()` 会把「单个条目读失败」和「这个目录没有更多条目」
+            // 折成同一个循环终点。改回逐 Result 判定：错误记数后继续，循环正常结束才算枚举完。
+            for ent in rd {
+                let Ok(ent) = ent else {
+                    trace.note_entry_error();
+                    continue;
+                };
                 if let Ok(ft) = ent.file_type() {
                     if ft.is_dir() && !is_reparse(&ent) {
                         let p = ent.path();
@@ -1275,6 +1295,70 @@ fn expand_tasks(root: &Path, task_depth: usize) -> Vec<(PathBuf, bool)> {
         }
     }
     out
+}
+
+/// 一场 bigfiles 的留痕账（P1-6E②③）。
+///
+/// 三个数都**只留痕、不参与任何判定**，与 [`ScanCtx`] 里的 reparse/unreadable 计数器
+/// 同一口径（那些计数进判定就是行为变更，混进留痕批次里没人审得出）。
+/// 为什么不用现成的进程级静态（`UNREADABLE_DIRS` 那一类）：静态是**跨扫描累计**的，
+/// 而 bigfiles 的收尾告警要说的是「这一场少报了几个」，必须按实例记。
+#[derive(Default)]
+struct BigfilesTrace {
+    /// ② 单个条目读取失败（权限 / IO / 枚举中断）的条数
+    entry_errors: AtomicU64,
+    /// ② 整目录 `read_dir` 失败的次数（展开层与递归层共用一份账）
+    dir_errors: AtomicU64,
+    /// ③ 够格进候选（≥min_size 且创建在今年）的**总条数**。
+    /// 只记「谁够格」，不记「谁被挤出」：Top-K 是置换语义（新来的大文件会把已在堆里的
+    /// 小文件顶出去），按顶出去计数的话，「1,2,3,4,5 取前 2」会算出 0 个丢失 ——
+    /// 少报的条数只能在收尾用「够格总数 − 实发条数」现算。
+    qualified: AtomicU64,
+}
+
+impl BigfilesTrace {
+    fn note_entry_error(&self) {
+        self.entry_errors.fetch_add(1, Ordering::Relaxed);
+    }
+    fn note_dir_unreadable(&self) {
+        self.dir_errors.fetch_add(1, Ordering::Relaxed);
+    }
+    fn note_qualified(&self) {
+        self.qualified.fetch_add(1, Ordering::Relaxed);
+    }
+    fn entry_errors(&self) -> u64 {
+        self.entry_errors.load(Ordering::Relaxed)
+    }
+    fn dir_errors(&self) -> u64 {
+        self.dir_errors.load(Ordering::Relaxed)
+    }
+    /// 够格但**没列出来**的条数（③ 的「受限」判据就落在这一个数上）。
+    fn unlisted(&self, listed: usize) -> u64 {
+        self.qualified.load(Ordering::Relaxed).saturating_sub(listed as u64)
+    }
+    /// 收尾三句话（P1-6E 验收口径：成功 / 部分失败 / 失败必须给得出差别）。
+    /// 返回 `true` = 结果受限（够格候选多于实发条数），调用方据此发 `sink.truncated()`。
+    fn finish_lines(&self, listed: usize) -> (Vec<String>, bool) {
+        let mut lines: Vec<String> = Vec::new();
+        let unlisted = self.unlisted(listed);
+        if unlisted > 0 {
+            lines.push(format!(
+                "够格的大文件共 {} 个，本轮只列出最大的 {listed} 个，另有 {unlisted} 个未列出",
+                listed + unlisted as usize
+            ));
+        }
+        let entry = self.entry_errors();
+        if entry > 0 {
+            lines.push(format!(
+                "有 {entry} 个条目读不到（权限或 IO 失败），这部分未计入，结果可能不完整"
+            ));
+        }
+        let dirs = self.dir_errors();
+        if dirs > 0 {
+            lines.push(format!("有 {dirs} 个目录读不到（权限或 IO 失败），结果可能不完整"));
+        }
+        (lines, unlisted > 0)
+    }
 }
 
 #[inline]
@@ -1300,7 +1384,7 @@ fn merge_topk_into(a: &mut TopHeap, b: TopHeap, cap: usize) {
 }
 
 /// 单个任务内串行递归，只用容量 cap 的堆保留最大项；顺带累计计数并输出心跳。
-fn topk_in(dir: &Path, recursive: bool, cap: usize, min_size: u64, beat: &ScanBeat) -> TopHeap {
+fn topk_in(dir: &Path, recursive: bool, cap: usize, min_size: u64, beat: &ScanBeat, trace: &BigfilesTrace) -> TopHeap {
     let mut heap: TopHeap = BinaryHeap::new();
     let mut stack: Vec<(PathBuf, bool)> = vec![(dir.to_path_buf(), recursive)];
     while let Some((d, rec)) = stack.pop() {
@@ -1308,12 +1392,19 @@ fn topk_in(dir: &Path, recursive: bool, cap: usize, min_size: u64, beat: &ScanBe
             Ok(r) => r,
             Err(_) => {
                 note_unreadable_dir();
+                trace.note_dir_unreadable();
                 continue;
             }
         };
         // 本目录直属文件数（P2-J：心跳按目录结算，见下方收尾注释）
         let mut local: u64 = 0;
-        for ent in rd.flatten() {
+        // P1-6E②：不再 `rd.flatten()` —— 那会把「单个条目读失败」折成「这个目录到此为止」，
+        // 于是半途中断的枚举看起来就是一次完整扫描，少掉的文件没有任何一句话说明。
+        for ent in rd {
+            let Ok(ent) = ent else {
+                trace.note_entry_error();
+                continue;
+            };
             let ft = match ent.file_type() {
                 Ok(t) => t,
                 Err(_) => continue,
@@ -1335,6 +1426,10 @@ fn topk_in(dir: &Path, recursive: bool, cap: usize, min_size: u64, beat: &ScanBe
                 if let Ok(md) = ent.metadata() {
                     let sz = md.len();
                     if sz >= min_size && created_in_current_year(&md) {
+                        // ③：先记「够格」，最后由 `unlisted()` 现算少发了几个 ——
+                        // 只有这一条 counted，才能在「0 条结果」时区分「真没有大文件」
+                        // 与「一条都没读进来」。
+                        trace.note_qualified();
                         push_topk(&mut heap, sz, ent.path(), cap);
                     }
                     local += 1;
@@ -1358,18 +1453,26 @@ pub fn bigfiles(roots: &[String], count: usize, min_size: u64, sink: &dyn Sink) 
     init_scan_threads();
     let cap = count.max(1);
     let beat = ScanBeat::new(sink);
+    let trace = BigfilesTrace::default();
     let mut tasks: Vec<(PathBuf, bool)> = Vec::new();
     for r in roots {
         if let Some(p) = canonical(r) {
-            tasks.extend(expand_tasks(&p, 2));
+            tasks.extend(expand_tasks(&p, 2, &trace));
         }
     }
     if tasks.is_empty() {
+        // 走得通这条的唯一输入是「一个根都没给」：`expand_tasks` 至少把根本身排进任务表，
+        // 根读不到也照样留下一条待扫任务（随后由 `dir_errors` 记账并告警）。
+        // 旧写法在这里直接 `return` —— 既不告警也不发 `progress(100)`，
+        // 于是调用方拿到一条「什么都没有、而且连终值信号都没有」的静默链，
+        // 界面把它显示成「未发现大文件」。
+        sink.warn("大文件扫描没有收到任何扫描根，本轮没有清单");
+        progress(sink, 100);
         return;
     }
     let heap: TopHeap = tasks
         .par_iter()
-        .map(|(d, rec)| topk_in(d, *rec, cap, min_size, &beat))
+        .map(|(d, rec)| topk_in(d, *rec, cap, min_size, &beat, &trace))
         .reduce(|| BinaryHeap::new(), |mut a, b| {
             merge_topk_into(&mut a, b, cap);
             a
@@ -1381,6 +1484,15 @@ pub fn bigfiles(roots: &[String], count: usize, min_size: u64, sink: &dyn Sink) 
     all.sort_by(|a, b| b.0.cmp(&a.0));
     for (i, (sz, p)) in all.iter().enumerate() {
         item(sink, "bigfile", p, *sz, &[("rank", (i + 1).to_string())]);
+    }
+    // P1-6E②③：收尾留痕。`truncated` 只由「够格数 > 实发数」决定（③ 的受限），
+    // 条目/目录读失败与根缺失走 warn（② 的不完整），三类各有各的出口。
+    let (lines, limited) = trace.finish_lines(all.len());
+    for line in &lines {
+        sink.warn(line);
+    }
+    if limited {
+        sink.truncated();
     }
     // P2-J：心跳已在每个目录结算完毕，计数器到这儿就是终值，不再有「收尾补一次
     // bump_scanned(0)」的余地（那本来就是 n=0 早退的空操作，不产出任何行）。
@@ -3568,7 +3680,7 @@ mod tests {
 
         let sink = BeatSink::default();
         let beat = ScanBeat::with_every(&sink, 2);
-        let heap = topk_in(&root, true, 200, 0, &beat);
+        let heap = topk_in(&root, true, 200, 0, &beat, &BigfilesTrace::default());
 
         let got = sink.values();
         assert!(
@@ -3646,7 +3758,9 @@ mod tests {
         );
 
         // ③ bigfiles：留证对比「事件数 vs 任务数」（旧形态事件数恒 ≤ 任务数）
-        let tasks = canonical(&local_str).map(|p| expand_tasks(&p, 2).len()).unwrap_or(0);
+        let tasks = canonical(&local_str)
+            .map(|p| expand_tasks(&p, 2, &BigfilesTrace::default()).len())
+            .unwrap_or(0);
         let sink3 = BeatSink::default();
         bigfiles(&[local_str], 200, 300 * 1024 * 1024, &sink3);
         let events3 = sink3.values();
@@ -3663,6 +3777,190 @@ mod tests {
         assert_eq!(analyze_ext_key("a.verylongextensionname"), "(其他)");
         assert_eq!(analyze_ext_key(".gitignore"), ".gitignore");
     }
+
+    /// P1-6E④：读不成 UTF-8 的名字必须有归宿，不许静默不进类型排行。
+    /// 判红自证：把 `analyze_ext_key_os` 的 `None` 支改成返回空串并在 `ext_note` 里
+    /// 跳过空键（等价于旧写法的 `if let Some(..)`），第一条断言即红。
+    #[test]
+    #[cfg(windows)]
+    fn 非unicode名进独立桶而不是丢字节() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        // 0xD800 是前导代理项却没有后继 ⇒ to_str() 必为 None（与 lossy 探针同一份样本形态）
+        let weird = OsString::from_wide(&[0xD800, 'x' as u16, '.' as u16, 't' as u16, 'x' as u16]);
+        assert_eq!(weird.to_str(), None, "样本必须真的是读不出 UTF-8 的名字");
+        assert_eq!(analyze_ext_key_os(weird.as_os_str()), EXT_LOSSY_KEY, "读不出的名字要进独立桶");
+        // 可读出的名字必须走原来那份键规则，不许被新门面顺手改写
+        assert_eq!(analyze_ext_key_os(std::ffi::OsStr::new("Photo.PNG")), ".png");
+        assert_eq!(analyze_ext_key_os(std::ffi::OsStr::new("Makefile")), "(其他)");
+    }
+
+    /// P1-6E④ 接线：两处入桶点都必须走 `analyze_ext_key_os`（旧写法是 `to_str()` 取不到就跳过）。
+    /// 只钉生产段，避免把本用例自己也算成语料（§4.1 假阳性②）。
+    #[test]
+    fn 入桶点只有一条_lossy_门面() {
+        let prod = include_str!("scan.rs").split("\nmod tests {").next().unwrap_or("");
+        let needle = "ext_note(exts, analyze_ext_key_os(ent.file_name().as_os_str()), sz);";
+        let needle2 = "ext_note(&mut exts, analyze_ext_key_os(ent.file_name().as_os_str()), sz);";
+        let wired = prod.matches(needle).count() + prod.matches(needle2).count();
+        assert_eq!(wired, 2, "类型入桶的接线点应有 2 处走 lossy 门面，实得 {wired} 处");
+        assert!(
+            !prod.contains("if let Some(name) = ent.file_name().to_str()"),
+            "又出现了「读不出就整个跳过」的入桶写法（P1-6E④ 回归）"
+        );
+    }
+
+    /// P1-6E②③ 接线：bigfiles 这一条枚举链上不许再出现 `rd.flatten()`，
+    /// 且三个计数点（条目失败 / 目录失败 / 够格候选）都必须挂在具体分支上。
+    /// 条目级 IO 失败没法在 CI 里造出来（要 ACL 或拔盘），所以这里钉的是**接线**，
+    /// 数字口径由 `大文件少发的条数按够格总数现算` 与 `大文件扫描三态留痕与终值信号` 负责。
+    /// 判红自证：把 `topk_in` 任一行 `trace.note_entry_error();` 删掉，第一条计数断言即红。
+    #[test]
+    fn 大文件枚举链不再用flatten吞条目错误() {
+        let prod = include_str!("scan.rs").split("\nmod tests {").next().unwrap_or("");
+        let seg = prod
+            .split("fn expand_tasks")
+            .nth(1)
+            .and_then(|s| s.split("\npub fn bigfiles").next())
+            .unwrap_or("");
+        assert!(!seg.is_empty(), "语料段取空了（expand_tasks/bigfiles 的相对位置变了，本用例已失明）");
+        // 只看代码行：本文件解释「为什么不用 flatten」的注释里就带着这个词，
+        // 拿全文当语料会让这条断言永远红（§4.1 假阳性②的另一种形态）。
+        let code: Vec<&str> = seg.lines().filter(|l| !l.trim_start().starts_with("//")).collect();
+        let code = code.join("\n");
+        assert!(!code.contains("rd.flatten()"), "bigfiles 链上又出现 `rd.flatten()`：条目错误会被折成循环正常结束");
+        assert_eq!(seg.matches("trace.note_entry_error();").count(), 2, "展开层与递归层各记一次条目错误");
+        assert_eq!(seg.matches("trace.note_dir_unreadable();").count(), 2, "展开层与递归层各记一次目录错误");
+        assert_eq!(seg.matches("trace.note_qualified();").count(), 1, "够格候选只在过滤通过的这一处计数");
+    }
+
+    /// P1-6E③ 的账怎么算：Top-K 是**置换**语义，够格数与实发数的差才是「少报了几个」。
+    /// 按「被挤出」计数会把 `1,2,3,4,5 取前 2` 算成 0 个丢失（每次都是新条目赢），
+    /// 于是界面显示「共 2 个大文件」而实际有 5 个。
+    /// 判红自证：把 `unlisted` 改成用 `dropped` 计数（或 `saturating_sub` 换成裸减），本条红。
+    #[test]
+    fn 大文件少发的条数按够格总数现算() {
+        let t = BigfilesTrace::default();
+        assert_eq!(t.unlisted(0), 0, "一条都没够格 ⇒ 没有少发，不得谎报受限");
+        for i in 1..=5u64 {
+            for _ in 0..i {
+                t.note_qualified();
+            }
+        }
+        assert_eq!(t.unlisted(2), 13, "够格 15 条、实发 2 条 ⇒ 少发 13");
+        assert_eq!(t.unlisted(99), 0, "实发不可能多于够格，差值必须夹到 0");
+        let (lines, limited) = t.finish_lines(2);
+        assert!(limited, "有少发就必须标受限（调用方据此发 truncated）");
+        assert_eq!(lines.len(), 1, "干净场景只有那一句：{lines:?}");
+        assert!(lines[0].contains("15 个") && lines[0].contains("另有 13 个未列出"), "数字要能对上账：{lines:?}");
+
+        // 条目/目录读失败各加一句，且不影响「受限」判定
+        let t2 = BigfilesTrace::default();
+        t2.note_entry_error();
+        t2.note_dir_unreadable();
+        let (lines2, limited2) = t2.finish_lines(7);
+        assert!(!limited2, "没有少发就不算受限");
+        assert_eq!(lines2.len(), 2, "两类留痕各一句：{lines2:?}");
+        assert!(lines2[0].contains("1 个条目读不到") && lines2[1].contains("1 个目录读不到"));
+    }
+
+    /// P1-6E②③：bigfiles 的四种收场必须互不相同 —— 「扫完了没有大文件」「只给前 N 个」
+    /// 「根读不到」「一个根都没给」，旧实现后两种只留一条静默链（连 `progress(100)` 都不发）。
+    /// 判红自证：删掉收尾的 `sink.truncated()` ⇒ 第二段红；删掉空根早退分支的
+    /// `progress(sink, 100)` ⇒ 第四段红；把 `dir_errors` 那句 warn 去掉 ⇒ 第三段红。
+    #[test]
+    fn 大文件扫描三态留痕与终值信号() {
+        let root = std::env::temp_dir().join(format!("trim-bigfiles-trace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        // 5 个够格文件（min_size=1、创建时间就是现在 ⇒ 必过今年门槛）
+        for i in 1..=5u64 {
+            fs::write(root.join(format!("f{i}.bin")), vec![b'x'; i as usize * 8]).unwrap();
+        }
+        let dir = root.to_string_lossy().to_string();
+
+        // ① 成功态：cap 足够大 ⇒ 无 warn、无 truncated、5 条实发 + 终值 progress
+        let ok = TraceProbeSink::default();
+        bigfiles(&[dir.clone()], 200, 1, &ok);
+        assert_eq!(ok.items(), 5, "5 个够格文件应全部列出");
+        assert_eq!(ok.truncated_calls(), 0, "没少发就不许标受限");
+        assert!(ok.warns().is_empty(), "成功态不该有话：{:?}", ok.warns());
+        assert_eq!(ok.progress(), Some(100), "终值进度必须发");
+
+        // ② 部分失败态：cap=2 ⇒ 少发 3 个，必须 truncated + 点名数字
+        let part = TraceProbeSink::default();
+        bigfiles(&[dir.clone()], 2, 1, &part);
+        assert_eq!(part.items(), 2, "只留最大的 2 个");
+        assert_eq!(part.truncated_calls(), 1, "受限必须翻成 truncated 回执");
+        assert!(
+            part.warns().iter().any(|w| w.contains("另有 3 个未列出")),
+            "告警要给出少发数字：{:?}",
+            part.warns()
+        );
+
+        // ③ 读不到态：根不存在 ⇒ 0 条，但必须点名「目录读不到」并有终值，
+        //    不能与「这个根确实没有大文件」同形
+        let bad = TraceProbeSink::default();
+        bigfiles(&[root.join("no-such-dir").to_string_lossy().to_string()], 200, 1, &bad);
+        assert_eq!(bad.items(), 0);
+        assert!(
+            bad.warns().iter().any(|w| w.contains("个目录读不到")),
+            "根读不到必须留痕，否则与「确实没有大文件」同形：{:?}",
+            bad.warns()
+        );
+        assert_eq!(bad.progress(), Some(100), "读不到也要发终值进度，调用方才知道这一场结束了");
+
+        // ④ 空输入态：一个根都没给 ⇒ 早退分支同样必须留痕 + 发终值（旧写法直接 return）
+        let none = TraceProbeSink::default();
+        bigfiles(&[], 200, 1, &none);
+        assert_eq!(none.items(), 0);
+        assert_eq!(none.warns().len(), 1, "空根要留 exactly 一句：{:?}", none.warns());
+        assert!(none.warns()[0].contains("没有收到任何扫描根"), "要说清是「没给根」：{:?}", none.warns());
+        assert_eq!(none.progress(), Some(100), "早退分支缺终值进度 ⇒ 调用方永远等在「扫描中」");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 只记录「回执元数据」的探针 sink：条目数、warn 文本、truncated 次数、末次进度。
+    #[derive(Default)]
+    struct TraceProbeSink {
+        n_items: AtomicU64,
+        warns: Mutex<Vec<String>>,
+        trunc: AtomicU64,
+        progress_calls: AtomicU64,
+        last_progress: AtomicU64,
+    }
+    impl Sink for TraceProbeSink {
+        fn item(&self, _p: &Path, _line: &str) {
+            self.n_items.fetch_add(1, Ordering::Relaxed);
+        }
+        fn progress(&self, n: u64) {
+            self.progress_calls.fetch_add(1, Ordering::Relaxed);
+            self.last_progress.store(n, Ordering::Relaxed);
+        }
+        fn scanned(&self, _n: u64) {}
+        fn warn(&self, msg: &str) {
+            self.warns.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
+        }
+        fn truncated(&self) {
+            self.trunc.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    impl TraceProbeSink {
+        fn items(&self) -> u64 { self.n_items.load(Ordering::Relaxed) }
+        fn warns(&self) -> Vec<String> {
+            self.warns.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+        fn truncated_calls(&self) -> u64 { self.trunc.load(Ordering::Relaxed) }
+        /// 末次进度取值；`None` = 这一场**根本没发过**终值信号（与「发了但没到 100」是两件事）
+        fn progress(&self) -> Option<u64> {
+            if self.progress_calls.load(Ordering::Relaxed) == 0 {
+                return None;
+            }
+            Some(self.last_progress.load(Ordering::Relaxed))
+        }
+    }
+
 
     /// M6 时间维度：边界必须说清「正好 7 天」落在哪一桶，且取不到 mtime 要单独成桶
     /// ——否则「各桶相加 = 总量」这条不变量会在时间读取失败的文件上漏字节。
