@@ -277,7 +277,7 @@ const OPTIONS = [
 
   // ---------- 系统服务与内存 ----------
   // 第六大点-B（2026-09-14 重复点审查）：原「禁用下载地图管理器」(maps_off) 与
-  // 「禁用冗余后台服务」(services_off) 已下线，合并进「禁用 70+ 非必要服务」(tf_svc_bulk)：
+  // 「禁用冗余后台服务」(services_off) 已下线，合并进「禁用非必要服务」(tf_svc_bulk)：
   //   · MapsBroker 本就在 tf_svc_bulk 清单内；
   //   · services_off 的 5 个独有服务（XblAuthManager / XblGameSave / XboxNetApiSvc /
   //     WpnService / lfsvc）已并入 tf_svc_bulk 清单，其余 4 个（SysMain / DiagTrack /
@@ -293,7 +293,7 @@ const OPTIONS = [
   // 它是「关闭内存压缩与内存页合并」(tf_mmagent) 的子集（后者 = 本项 + PageCombining），
   // 合并后只保留超集项，避免同一项 Disable-MMAgent 被两个入口各执行一次。
   {
-    id: 'tf_svc_bulk', group: '系统服务与内存', title: '禁用 70+ 非必要服务', risk: 'high',
+    id: 'tf_svc_bulk', group: '系统服务与内存', title: '禁用非必要服务', risk: 'high',
     desc: '批量调整服务启动类型：默认把 wuauserv（Windows 更新）由「自动」改为「手动」（更新仍可手动检查），其余非必要服务全部禁用(Start=4)，并关闭 Edge 预启动/预加载；应用商店其余服务保持默认。\n\n执行时会单独弹窗询问是否连商店相关服务一并禁用——含 ClipSVC（许可）、InstallService（安装）、PushToInstall（远程安装）、wuauserv（Windows 更新）、DoSvc（传递优化下载），选择禁用会影响 Windows 应用商店的使用、更新与下载以及系统更新。\n\n禁用(Start=4)服务清单：TapiSrv、FontCache3.0.0.0、WpcMonSvc、SEMgrSvc、PNRPsvc、LanmanWorkstation、WEPHOSTSVC、p2psvc、p2pimsvc、PhoneSvc、Wecsvc、perceptionsimulation、StiSvc、WMPNetworkSvc、autotimesvc、edgeupdatem、MicrosoftEdgeElevationService、ALG、QWAVE、IpxlatCfgSvc、icssvc、DusmSvc、MapsBroker、edgeupdate、SensorService、shpamsvc、svsvc、SysMain、MSiSCSI、Netlogon、CscService、ssh-agent、AppReadiness、tzautoupdate、NfsClnt、wisvc、defragsvc、SharedRealitySvc、RetailDemo、lltdsvc、TrkWks、CryptSvc、DiagTrack、diagsvc、DPS、WdiServiceHost、WdiSystemHost、dmwappushservice、TroubleshootingSvc、DsSvc、FrameServer、FontCache、OSRSS、sedsvc、SENS、TabletInputService、Themes、BcastDVRUserService、CaptureService、diagnosticshub.standardcollector.service、XblAuthManager、XblGameSave、XboxNetApiSvc、WpnService、lfsvc。',
     steps: [
       { label: '批量禁用非必要服务（wuauserv 改手动，商店服务保持默认）', pwsh: [
@@ -628,7 +628,7 @@ const OPTIONS = [
     ]
   },
   {
-    id: 'tf_dev_disable', group: '键鼠与外设', title: '禁用 24 个冗余板载设备', risk: 'medium',
+    id: 'tf_dev_disable', group: '键鼠与外设', title: '禁用冗余板载设备', risk: 'medium',
     desc: 'Trim DisableDevices（DevManView 已改写为 Disable-PnpDevice，按设备名匹配，可逆）：高精度事件定时器(HPET)、GS 波表合成、RRAS 根枚举、SM Bus、Amdlog、AMD PSP、系统扬声器、复合总线枚举、虚拟驱动器枚举、Hyper-V 虚拟化基础结构、NDIS 虚拟网卡枚举、远程桌面重定向总线、UMBus、7 个 WAN Miniport、高清音频控制器、Root 打印队列等（已剔除 IPv6 相关虚拟适配器，遵守项目硬约束）。逐项选择里 Intel ME / MEI / SMBus 三项默认不勾（可能影响厂商散热工具与传感器读数）；禁用 HPET/虚拟化设备可能影响设备管理或虚拟化，可在设备管理器重新启用。',
     steps: [
       { label: '按名称禁用设备', pwsh: [
@@ -648,7 +648,7 @@ const OPTIONS = [
   // 该项另用裸 Remove-Item 绕过 trashOrUnlink / 删除清单 / confirmDanger，违反项目安全红线。
   // ---------- 系统精简 ----------
   {
-    id: 'tf_appx', group: '系统精简', title: '移除 25 个内置 UWP 应用', risk: 'medium',
+    id: 'tf_appx', group: '系统精简', title: '移除内置 UWP 应用', risk: 'medium',
     desc: 'Trim Debloat：按名称通配移除所有用户下的预装 AppX——3D Builder、Bing 全家桶（资讯/财经/体育/天气）、CommsPhone、Drawboard PDF、Facebook、Getstarted、Messaging、Office Hub、OneNote、人脉、Skype、纸牌合集、Sway、Twitter、闹钟时钟、手机、地图、反馈中心、录音机、邮件日历、Zune（Groove/影视）等。移除后部分应用需从商店重装。OneDrive 不是 AppX，它的彻底卸载收在逐项选择弹窗的「附带操作」里（默认不执行，会把同步目录移入回收站）。',
     steps: [
       { label: '移除预装 AppX 清单', pwsh: [
@@ -2379,7 +2379,7 @@ const PROS_CONS = {
   'tf_resource_policy': { pros: '解除系统资源策略限制，释放被节流的 CPU/内存额度。', cons: '绕开系统配额保护，失控进程可能占满系统资源。' },
   // 'prefetch_off'（关闭预读）条目已移除：该优化项已不在 OPTIONS 中，属历史孤儿映射
   'svc_mem_gb': { pros: '按内存档位调整 SVCHost 拆分阈值，减少服务进程内存碎片。', cons: '阈值与内存不匹配时反而增加进程切换开销。' },
-  'tf_svc_bulk': { pros: '批量禁用 70+ 非必要服务，显著释放内存并减少后台活动。', cons: '高度激进，可能破坏打印机、蓝牙、商店等功能，风险较高；商店段禁用的 wuauserv 可能被 Windows Update Medic 服务（WaaSMedicSvc）自动复位，Trim 不修改该服务。' },
+  'tf_svc_bulk': { pros: '批量禁用非必要服务，显著释放内存并减少后台活动。', cons: '高度激进，可能破坏打印机、蓝牙、商店等功能，风险较高；商店段禁用的 wuauserv 可能被 Windows Update Medic 服务（WaaSMedicSvc）自动复位，Trim 不修改该服务。' },
   'tf_drv_disable': { pros: '禁用高风险驱动服务，减少内核攻击面与运行时开销。', cons: '可能影响硬件识别或安全软件，需要谨慎选择。' },
   'spectre_off': { pros: '关闭幽灵/熔断缓解，可明显提升 CPU 密集与游戏性能。', cons: '重新暴露 Spectre/Meltdown 类漏洞，系统安全性下降。' },
   'share_off': { pros: '关闭默认管理共享与弱会话，降低局域网被入侵的风险。', cons: '无法再使用 \\\\主机\\C$ 之类管理共享，远程管理不便。' },
