@@ -30,28 +30,13 @@ const ISOLATED = ['ensure_test_data_root(', 'probe_guard(', 'MockRuntime', 'mock
 const LIB_REF = /trim_tauri_lib\s*::|app_data_dir\s*\(/;
 const MIN_IGNORED = 15; // 对象地板：低于此数说明属性解析失效，不是仓库变干净
 
-// 过渡基线：X1-K01 扩面结果（v1 只报了 1 条，M3 现算 + 本门禁给出 11 条）。B3 逐条清零。
-const TRANSITION = [
-  'paths_file_icon_still_serves_local_system_dll_icon',
-  'settings_set_pref_accepts_only_boolean_for_restore_point_key',
-  'appearance_set_pref_accepts_legal_values_roundtrip',
-  'residue_scan_on_real_apps_keeps_uninstall_key_candidate',
-  'uninstall_list_rows_carry_resolvable_shortcuts',
-  'reg_backup_restore_writes_registry_end_to_end',
-  'cleanup_scan_l1_l2_probe',
-  'optimizer_restore_frequency_main_window_passes_with_deterministic_reply',
-  'startup_scan_real_count_vs_writer_cap_probe',
-  'cleanup_query_locked_probe_names_locking_process',
-  'u_r1d_diskbench_leaves_no_residue_on_success',
-  // 以下 7 条由本门禁在 135301c 上现算补出（v1 与 X1 只看了 module_smoke，漏了另两个测试文件）
-  'memory_info_reports_total',
-  'memory_processes_non_empty',
-  'memory_kill_requires_recent_scan',
-  'finder_scan_bigfiles_small_dir',
-  'runtimes_collect_shape',
-  'netcheck_collect_shape',
-  'decrypts_electron44_oscrypt_and_dotnet_dpapi',
-].map((fn) => ({ fn, batch: 'B3/P1-4', reason: '探针未先定隔离根，并行时可把 DATA_DIR 定到真实 %APPDATA%（X1-K01）' }));
+// 过渡基线：X1-K01 扩面结果（v1 只报了 1 条，M3 现算 + 本门禁给出 18 条 = module_smoke 11
+// + ipc_smoke 6 + safestorage_compat 1）。
+// B3/P1-4（2026-10-25）全部清零：18 条探针的首个可执行语句统一 `let _data = probe_guard();`，
+// 它内部先 `ensure_test_data_root()` 并**返回持有的隔离根**（`#[must_use]`，写成
+// `probe_guard();` 丢弃会出警告 —— 「首语句确实定过根」于是既有语义也有形式）。
+// 本表**只减不增**：新增真机探针必须首语句自己定根，不许往这里塞名字。
+const TRANSITION = [];
 
 const g = gate(import.meta.url);
 const exempt = new Map(TRANSITION.map((t) => [t.fn, t]));
@@ -106,7 +91,7 @@ for (const [fn, t] of exempt) {
 if (ignored.length < MIN_IGNORED) {
   g.fail(`断言对象地板不成立：只认出 ${ignored.length} 条 #[ignore] 探针（地板 ${MIN_IGNORED}）⇒ 属性解析或目录根失效，不是仓库变干净`);
 }
-g.ok(`ignored 探针隔离对账：#[ignore] ${ignored.length} 条 / 未先定根 ${bad} 条（全部在过渡豁免内，B3 清零）`);
+g.ok(`ignored 探针隔离对账：#[ignore] ${ignored.length} 条 / 未先定根 ${bad} 条（豁免表剩余 ${exempt.size} 条；B3/P1-4 已清零，本表只减不增）`);
 
 // 合成样本正向对照（每次都跑）
 const CONTROLS = [
@@ -149,4 +134,4 @@ for (const c of CONTROLS) {
 }
 if (ctrlBad === 0) g.ok(`正向对照 ${CONTROLS.length} 组通过（含「定根太晚必判红」「注释里的属性不算属性」两组）`);
 
-g.finish('check-ignored-isolation: 全部通过（过渡豁免 ' + exempt.size + ' 条待 B3 清零）');
+g.finish('check-ignored-isolation: 全部通过（过渡豁免 ' + exempt.size + ' 条；B3/P1-4 清零后本表只减不增）');

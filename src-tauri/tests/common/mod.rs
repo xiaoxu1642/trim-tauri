@@ -82,7 +82,10 @@ pub fn window_with_label(label: &str) -> WebviewWindow<MockRuntime> {
 /// 直接调引擎函数的真机 `#[ignore]` 探针（启动项台账、pref 写入那一族）不建窗——
 /// 那样数据根隔离就变成「同一进程里恰好有用例先建过窗」的竞态结果，
 /// 单条 `--ignored` 跑时 `disabled.json` 会落到用户真实数据目录。探针要自己点名隔离。
-pub fn ensure_test_data_root() {
+///
+/// 返回隔离根（P1-4：`probe_guard` 要拿它自证）。返回值的既有调用方全部忽略它，
+/// 这个 widening 不破坏任何调用点。
+pub fn ensure_test_data_root() -> &'static std::path::PathBuf {
     static ONCE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     ONCE.get_or_init(|| {
         let stem = std::env::current_exe()
@@ -107,7 +110,42 @@ pub fn ensure_test_data_root() {
         // 与 DATA_DIR 的 OnceLock 首次 init 竞态无害（值相同，谁先设都一样）。
         std::env::set_var("TRIM_TEST_DATA_ROOT", &root);
         root
-    });
+    })
+}
+
+/// P1-4（X1-K01）：**真机 `#[ignore]` 探针的统一首语句**。
+///
+/// 与 `ensure_test_data_root()` 的差别不是「多做了一件事」，而是**做这件事的姿势能被门禁看见**：
+/// 探针原先要么首句就是 `main_window()`（定根藏在 helper 里），要么首句直接调
+/// `trim_tauri_lib::…`。后者在并行跑时把进程级 `DATA_DIR` 的 `OnceLock` 定死到**真实**
+/// `%APPDATA%`，同批其它探针随后就写进用户数据目录——单条 `--ignored` 跑时还一切正常，
+/// 全量跑才出问题，正是最难复现的那类。
+///
+/// 返回值刻意**要求持有**（`#[must_use]`）：`probe_guard();` 这种丢弃写法会出警告，
+/// 于是「首语句确实是定根」这件事既有语义（拿到根路径可自证）也有形式（不能空转过去）。
+/// 幂等性由 `ensure_test_data_root` 的 `OnceLock` 保证，同一条测试里重复调用无害。
+#[must_use = "探针必须自己声明隔离根（helper 里替它定根，门禁看不见这条探针有没有定过）"]
+pub fn probe_guard() -> TestDataGuard {
+    let g = ensure_test_data_root();
+    TestDataGuard { root: g.clone() }
+}
+
+/// [`probe_guard`] 的持有物：测试数据根的**实际落点**。
+///
+/// 探针可以直接拿它自证「我写的文件确实落在 target 下而不是 %APPDATA% 下」——
+/// 这是 C08 那次事故（夹具把 `optimization-state.json` 的 `prefs.recent` 覆盖成假条目）
+/// 唯一可靠的现场检查。
+pub struct TestDataGuard {
+    pub root: std::path::PathBuf,
+}
+
+impl TestDataGuard {
+    /// 断言这个根在 `target` 下而不是用户目录（探针写盘前的一眼自检）。
+    pub fn assert_isolated(&self) {
+        let s = self.root.to_string_lossy().replace('\\', "/");
+        assert!(s.contains("test-data-root"), "测试数据根不在 target/test-data-root 下: {s}");
+        assert!(!s.to_uppercase().contains(r"APPDATA"), "测试数据根指向用户目录: {s}");
+    }
 }
 
 /// C08（v7.2 X1-M05）：清空全部快照槽（测试底座隔离出口）。

@@ -16,7 +16,7 @@ mod common;
 
 use common::{
     assert_guard_rejected, ensure_test_data_root, invoke, invoke_text, main_window,
-    skip_and_record, sub_windows, window_with_label, GUARD_REJECT_MARK,
+    probe_guard, skip_and_record, sub_windows, window_with_label, GUARD_REJECT_MARK,
 };
 use serde_json::{json, Value};
 use trim_tauri_lib::engine::guard::APP_WINDOWS;
@@ -207,6 +207,7 @@ fn paths_file_icon_tier_stays_readonly_and_unknown_label_still_rejected() {
 #[test]
 #[ignore = "真机：SHGetFileInfoW 取系统 dll 图标（只读，发布前人工跑）"]
 fn paths_file_icon_still_serves_local_system_dll_icon() {
+    let _data = probe_guard();
     let w = main_window();
     let res = invoke(
         &w,
@@ -285,6 +286,7 @@ fn settings_get_prefs_shape_lists_all_whitelist_keys() {
 #[test]
 #[ignore = "写 settings.json（集成测试注入的数据根，非用户真实目录），发布前门禁跑"]
 fn settings_set_pref_accepts_only_boolean_for_restore_point_key() {
+    let _data = probe_guard();
     let w = main_window();
     // 正向：布尔必须收（新键与 residueBackupPack 同形状）
     let ok = invoke(
@@ -504,6 +506,7 @@ fn appearance_set_pref_rejects_bad_shape_before_writing() {
 #[test]
 #[ignore = "写 appearance.json（集成测试注入的数据根，非用户真实目录），发布前门禁跑"]
 fn appearance_set_pref_accepts_legal_values_roundtrip() {
+    let _data = probe_guard();
     let w = main_window();
     let mut reached: Vec<String> = Vec::new();
     let legal: &[(&str, serde_json::Value)] = &[
@@ -1137,6 +1140,7 @@ fn restore_reg_recognises_retired_ids_but_still_refuses_unknown() {
 #[test]
 #[ignore = "逐个程序残留扫描会读多目录且依赖装机清单，发布前门禁跑"]
 fn residue_scan_on_real_apps_keeps_uninstall_key_candidate() {
+    let _data = probe_guard();
     use serde_json::Value;
     use trim_tauri_lib::engine::protect;
     let w = main_window();
@@ -1240,6 +1244,7 @@ fn residue_scan_on_real_apps_keeps_uninstall_key_candidate() {
 #[test]
 #[ignore = "读桌面与开始菜单，发布前门禁跑"]
 fn uninstall_list_rows_carry_resolvable_shortcuts() {
+    let _data = probe_guard();
     let w = main_window();
     let res = invoke(&w, "uninstall_list", json!({ "scope": "user" }));
     assert_eq!(res["success"], json!(true), "列表应成功: {res}");
@@ -1302,6 +1307,7 @@ impl Drop for RestoreProbeGuard {
 #[test]
 #[ignore = "真跑 reg import 写注册表（一次性 HKCU 探针键），发布前门禁跑"]
 fn reg_backup_restore_writes_registry_end_to_end() {
+    let _data = probe_guard();
     use trim_tauri_lib::engine::{native, paths};
     use windows::Win32::System::Registry::HKEY_CURRENT_USER;
     let sub = r"Software\TrimRestoreProbe";
@@ -1896,6 +1902,7 @@ fn cleanup_item_detail_path_rejected_without_snapshot() {
 #[test]
 #[ignore = "真机性能探针：全量扫描 + 载荷计量，非回归判据"]
 fn cleanup_scan_l1_l2_probe() {
+    let _data = probe_guard();
     use std::time::Instant;
     // 与渲染层 ALL_IDS 同源：规则库按 groups/subGroups 展开；空数组会被命令自身拒。
     let rules: Value =
@@ -2006,6 +2013,7 @@ fn cleanup_scan_l1_l2_probe() {
 #[test]
 #[ignore = "管理员环境会真写注册表（恢复频率键，幂等；顺带清本机 0x0 残留），发布前门禁跑"]
 fn optimizer_restore_frequency_main_window_passes_with_deterministic_reply() {
+    let _data = probe_guard();
     let w = main_window();
     let res = invoke(&w, "optimizer_restore_frequency", json!({}));
     let text = res.to_string();
@@ -2503,6 +2511,7 @@ fn bench_history_list_matches_file_truth() {
 #[test]
 #[ignore = "真机实测：读注册表与计划任务，非回归判据，取数时手动 --ignored 跑"]
 fn startup_scan_real_count_vs_writer_cap_probe() {
+    let _data = probe_guard();
     let Ok(items) = trim_tauri_lib::engine::native::startup_scan() else {
         skip_and_record("startup_scan：本机启动项枚举失败（取数探针无对象，先查环境再谈判据）");
         return;
@@ -2612,6 +2621,7 @@ fn cleanup_query_locked_reports_missing_path_honestly() {
 #[ignore = "真机探针：起 powershell 持文件句柄（自建自清），发布前门禁跑"]
 #[cfg(windows)]
 fn cleanup_query_locked_probe_names_locking_process() {
+    let _data = probe_guard();
     // 先建窗（注入测试数据根），再取探针目录——`temp_script_dir()` 首次调用定 OnceLock 的次序纪律。
     // X1-L08：探针不再落全局可写的 %TEMP%（提权场景 TOCTOU），与 reg_backup 用例同走应用私有 tmp。
     let w = main_window();
@@ -2785,6 +2795,7 @@ fn u_r1d_diskbench_single_flight_not_dirty_after_path_reject() {
 #[test]
 #[ignore = "真读写盘（独占测速，秒级到十几秒），只在发布前手工核对"]
 fn u_r1d_diskbench_leaves_no_residue_on_success() {
+    let _data = probe_guard();
     let w = main_window();
     let root =
         std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());

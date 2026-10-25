@@ -42,9 +42,15 @@ use trim_tauri_lib::safestorage::{
     crypt_unprotect, decrypt_dpapi_v1, load_oscrypt_key_from_local_state,
 };
 
+mod common;
+
 #[test]
 #[ignore = "依赖本机真实密文样本，仅 Phase 0 验证与发布前手动跑"]
 fn decrypts_electron44_oscrypt_and_dotnet_dpapi() {
+    // P1-4：本探针不建窗、不碰 settings.json，但 `load_oscrypt_key_from_local_state` 走的
+    // 是应用数据根那套 OnceLock；不先定根的话，与同批其它真机探针并行时进程级
+    // `DATA_DIR` 会被定到真实 %APPDATA%（X1-K01）。helper 的可见性因此从 pub(crate) 提到 pub。
+    let _data = common::probe_guard();
     let sample_path =
         std::env::var("TRIM_DPAPI_SAMPLE").expect("需设置 TRIM_DPAPI_SAMPLE 指向样本 JSON");
     let json: serde_json::Value =

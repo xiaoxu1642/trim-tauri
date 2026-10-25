@@ -26,8 +26,8 @@
 mod common;
 
 use common::{
-    assert_guard_passed, invoke, invoke_text, main_window, message_of, sub_windows,
-    window_with_label,
+    assert_guard_passed, invoke, invoke_text, main_window, message_of, probe_guard,
+    sub_windows, window_with_label,
 };
 use serde_json::json;
 
@@ -158,6 +158,7 @@ fn finder_delete_manifest_shape() {
 #[test]
 #[ignore = "读真实性能计数器（进程外 API，毫秒级），发布前门禁跑"]
 fn memory_info_reports_total() {
+    let _data = probe_guard();
     let w = main_window();
     let res = invoke(&w, "memory_info", json!({}));
     assert_eq!(res["success"], json!(true), "memory:info 应成功: {res}");
@@ -170,6 +171,7 @@ fn memory_info_reports_total() {
 #[test]
 #[ignore = "走真实 PowerShell 枚举进程（外呼 + 秒级），发布前门禁跑"]
 fn memory_processes_non_empty() {
+    let _data = probe_guard();
     let w = main_window();
     let res = invoke(&w, "memory_processes", json!({}));
     assert_eq!(res["success"], json!(true), "memory:processes 应成功: {res}");
@@ -182,6 +184,7 @@ fn memory_processes_non_empty() {
 #[test]
 #[ignore = "依赖 memory:processes 的扫描语义（快照白名单），与重/外呼组同跑"]
 fn memory_kill_requires_recent_scan() {
+    let _data = probe_guard();
     let w = main_window();
     let res = invoke(&w, "memory_kill", json!({ "pid": 2_147_483_000 }));
     assert_eq!(res["success"], json!(false), "未扫描 PID 必须被拒: {res}");
@@ -196,6 +199,7 @@ fn memory_kill_requires_recent_scan() {
 #[test]
 #[ignore = "真实递归扫盘（IO 成本），发布前门禁跑"]
 fn finder_scan_bigfiles_small_dir() {
+    let _data = probe_guard();
     let w = main_window();
     let src = concat!(env!("CARGO_MANIFEST_DIR"), "\\src");
     let res = invoke(
@@ -223,6 +227,7 @@ fn finder_scan_bigfiles_small_dir() {
 #[test]
 #[ignore = "探测本机运行时（可能触发外部命令/外呼），发布前门禁跑"]
 fn runtimes_collect_shape() {
+    let _data = probe_guard();
     let w = main_window();
     let res = invoke(&w, "runtimes_collect", json!({}));
     assert!(res["success"].is_boolean(), "success 必须是布尔: {res}");
@@ -255,6 +260,7 @@ fn runtimes_collect_shape() {
 #[test]
 #[ignore = "真实网络探测（外网依赖），发布前门禁跑"]
 fn netcheck_collect_shape() {
+    let _data = probe_guard();
     let w = main_window();
     let res = invoke(&w, "netcheck_collect", json!({}));
     assert!(res["success"].is_boolean(), "success 必须是布尔: {res}");
