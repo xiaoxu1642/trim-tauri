@@ -148,6 +148,14 @@ fn bench_warn_field(warn: &[String]) -> String {
     format!(",\"warn\":[{}]", items.join(","))
 }
 
+/// 收尾回执 JSON：`base` 是**尚未闭合**的对象前缀，告警必须拼在闭合大括号之前。
+/// 拆出来是为了让「带告警时整段仍是合法 JSON」能被单测直接钉住——2026-10-25 真机跑
+/// `--qd abc` 时发现原来的写法把 `}` 写在 warn 之前，末行成了
+/// `{…},"warn":[…]`（对象已闭合、告警落在外面），解析端整段作废。
+fn close_bench_json(base: &str, warn: &[String]) -> String {
+    format!("{base}{}}}", bench_warn_field(warn))
+}
+
 /// 进度行：`{"phase","percent"}`（**不含** `__PROG__` 前缀）。
 /// CLI 包装补前缀直写 stdout，Tauri 侧把同一 JSON 直接派发给前端事件。
 fn bench_progress(on_progress: &mut dyn FnMut(&str), phase: &str, percent: u64) {
@@ -409,11 +417,12 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
             for f in &files { DeleteFileW(wide(f).as_ptr()); }
             return Err(msg);
         }
-        let result = format!(
-            "{{\"measured\":true,\"sequentialRead\":{:.1},\"sequentialWrite\":{:.1},\"randomRead\":{:.1},\"randomWrite\":{:.1},\"iops\":{:.0},\"latency\":{:.3},\"blockSize\":{},\"queueDepth\":{},\"threads\":{},\"duration\":{},\"ioMode\":\"{}\",\"qdEffective\":{},\"elapsedMs\":{}}}{}",
+        let base = format!(
+            "{{\"measured\":true,\"sequentialRead\":{:.1},\"sequentialWrite\":{:.1},\"randomRead\":{:.1},\"randomWrite\":{:.1},\"iops\":{:.0},\"latency\":{:.3},\"blockSize\":{},\"queueDepth\":{},\"threads\":{},\"duration\":{},\"ioMode\":\"{}\",\"qdEffective\":{},\"elapsedMs\":{}",
             seq_read, seq_write, rand_read, rand_write, iops, latency, block, qd_req, opened, duration,
-            if nobuf { "nobuf" } else { "buf" }, qd_eff, elapsed, bench_warn_field(&arg_warn)
+            if nobuf { "nobuf" } else { "buf" }, qd_eff, elapsed
         );
+        let result = close_bench_json(&base, &arg_warn);
         // 失败分支（上面的 `Err(msg)`）不带 warn：那一轮的结果整份作废，调用方只看错误消息，
         // 再拼一条参数回落反而会把真正的失败原因挤掉。留痕只针对「这一轮确实出了数」。
         for h in handles { let _ = CloseHandle(h); }
@@ -1345,7 +1354,7 @@ mod tests {
 
 #[cfg(test)]
 mod p1_6e_arg_tests {
-    use super::{bench_warn_field, clamp_to_whitelist, parse_bench_arg, resolve_bench_dir};
+    use super::{bench_warn_field, clamp_to_whitelist, close_bench_json, parse_bench_arg, resolve_bench_dir};
 
     /// 「没给参数」与「给了但不是数字」都回落默认，但只有后者留痕。
     /// 判红自证：把 `parse_bench_arg` 的 `Err(_) =>` 支并回 `unwrap_or(default)` ⇒ 第二条红。
@@ -1392,6 +1401,25 @@ mod p1_6e_arg_tests {
             bench_warn_field(&["a".to_string(), "b\"带引号\"".to_string()]),
             ",\"warn\":[\"a\",\"b\\\"带引号\\\"\"]",
             "两条都要进数组，且内嵌引号必须转义（否则回执整段解析失败）"
+        );
+    }
+
+    /// 判红自证：把 `close_bench_json` 的闭合大括号挪到告警之前 ⇒ 后两条断言红
+    ///（2026-10-25 真机跑 `--qd abc` 抓到的就是这个形状）。
+    #[test]
+    fn 回执带告警时仍是完整对象() {
+        let base = "{\"measured\":true,\"elapsedMs\":12928";
+        assert_eq!(close_bench_json(base, &[]), "{\"measured\":true,\"elapsedMs\":12928}");
+        let with = close_bench_json(base, &["qd=abc 不是数字，已按默认 1 执行".to_string()]);
+        assert_eq!(
+            with,
+            "{\"measured\":true,\"elapsedMs\":12928,\"warn\":[\"qd=abc 不是数字，已按默认 1 执行\"]}",
+            "告警必须拼在对象内部"
+        );
+        assert_eq!(with.matches('{').count(), with.matches('}').count(), "大括号必须配平：{with}");
+        assert!(
+            with.rfind('}').expect("必须有闭合大括号") > with.find("\"warn\"").expect("warn 字段必须存在"),
+            "闭合大括号必须位于 warn 之后：{with}"
         );
     }
 
