@@ -31,7 +31,7 @@
 //
 // 用法：node tools/check-comment-rot.mjs
 'use strict';
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -819,6 +819,76 @@ const POSITIVE_CONTROLS = (() => {
   console.log('✓ 正向对照自检通过（六形态判据均可判红，且真样本不假红；0 对象形态由合成对照证明活性）');
   return true;
 })();
+
+// ---------- R3g（P2-B 阶段2，2026-10-25 D 轮）：注释里的「数字声明」必须旁有取数命令 ----------
+// 判据的来处：《方法论》U8 与修复方案 P2-B 阶段2 —— 表格与注释里的数字是下一轮审查的
+// 派单依据，数字旁边没有取数命令，漂移就无人能发现（v5 轮 X0-3 现算过 14+12 处过期）。
+// 阶段1 已把「有现算入口」的四类（R3a/R3b/R3c+R3e/R3d/R3f）做成逐形态判红；本条补的是
+// **剩下没有入口的那一大片**：形态 = 注释行里出现「数字 + 量词」，但同一行没有取数标记。
+// 为什么是总量棘轮 + 按文件基线，而不是「今天全部改完」：现算命中约 392 处 / 100 个文件，
+// 一次大编辑会把注释区改成没人再读的取数命令堆（方案 §4 明确禁止合并成一次大编辑）。
+// 所以：基线落 `tools/fixtures/comment-number-baseline.json`（按文件计数），
+// **任一文件计数上升或新文件进场即红**，下降则提示同步收紧 —— 只减不增，逐批清零。
+const RE_NUM_CLAIM = /\d+\s*(处|条|个|行|字节|KB|MB|ms|%|组|站点|文件|窗|键|项|步)/;
+const RE_FETCH_MARK = /现算|取数命令|命令[:：]|node tools\/|node --|cargo |rg |grep |readdir|统计自|由.+生成/;
+function numberClaimsWithoutSource(cs) {
+  const out = [];
+  for (const c of cs) {
+    if (RE_NUM_CLAIM.test(c.text) && !RE_FETCH_MARK.test(c.text)) out.push(c.line);
+  }
+  return out;
+}
+const R3G_FIXTURE = join(ROOT, 'tools', 'fixtures', 'comment-number-baseline.json');
+{
+  const live = new Map();
+  for (const [rel, cs] of commentsByFile) {
+    const hits = numberClaimsWithoutSource(cs);
+    if (hits.length) live.set(rel, hits.length);
+  }
+  const liveTotal = [...live.values()].reduce((s, n) => s + n, 0);
+  if (process.argv.includes('--write-r3g')) {
+    const body = JSON.stringify({ _说明: 'R3g 过渡基线：注释里「数字声明但无取数命令」的按文件计数，只减不增。生成：node tools/check-comment-rot.mjs --write-r3g', files: Object.fromEntries([...live.entries()].sort()) }, null, 1) + '\n';
+    writeFileSync(R3G_FIXTURE, body);
+    console.log(`✓ R3g 基线已重算落盘：tools/fixtures/comment-number-baseline.json（${liveTotal} 处 / ${live.size} 个文件）`);
+  } else if (!existsSync(R3G_FIXTURE)) {
+    fail++;
+    console.error('✗ R3g 基线文件缺失（tools/fixtures/comment-number-baseline.json，随仓库跟踪）⇒ 本条**未校验**，跑 --write-r3g 生成');
+  } else {
+    const base = JSON.parse(readFileSync(R3G_FIXTURE, 'utf8')).files || {};
+    const worse = [];
+    const shrunk = [];
+    for (const [f, n] of live) {
+      if (base[f] === undefined) worse.push(`${f} 新增 ${n} 处（不在基线里）`);
+      else if (n > base[f]) worse.push(`${f} ${base[f]}→${n}`);
+      else if (n < base[f]) shrunk.push(`${f} ${base[f]}→${n}`);
+    }
+    for (const f of Object.keys(base)) if (!live.has(f)) shrunk.push(`${f} ${base[f]}→0`);
+    if (worse.length) {
+      fail++;
+      console.error(`✗ R3g 注释数字声明上升（只减不增）：${worse.slice(0, 8).join('；')}${worse.length > 8 ? ` …共 ${worse.length} 处` : ''}`);
+      console.error('   修法二选一：把数字改成现算措辞（同行写「现算」或给出取数命令），或让这句话根本不带数字。');
+    } else {
+      check(true, `R3g. 注释「数字声明必带取数命令」按文件棘轮在位（现算 ${liveTotal} 处 / ${live.size} 个文件；基线 ${Object.values(base).reduce((s, n) => s + n, 0)}）`);
+    }
+    if (shrunk.length) {
+      console.log(`ℹ R3g 有 ${shrunk.length} 个文件债务已减（跑 --write-r3g 收紧基线）：${shrunk.slice(0, 5).join('；')}${shrunk.length > 5 ? ' …' : ''}`);
+    }
+  }
+  // 正向对照：同一判定器必须能判红，且「带取数命令」的写法必须放行（否则清零永远做不完）
+  {
+    const badLines = numberClaimsWithoutSource([{ line: 7, text: '  // 命中 394 处，涉及 100 个文件' }]);
+    const goodLines = numberClaimsWithoutSource([{ line: 7, text: '  // 现算命中 394 处（node tools/check-comment-rot.mjs --write-r3g 可重算）' }]);
+    const problems = [];
+    if (badLines.length !== 1) problems.push('R3g 失效：裸数字声明样本没被判红');
+    if (goodLines.length !== 0) problems.push('R3g 失效：带取数命令的样本被误判红（清零永远做不完）');
+    if (problems.length) {
+      for (const p of problems) console.error(`✗ ${p}`);
+      fail++;
+    } else {
+      check(true, 'R3g 正向对照：裸数字声明判红、带取数命令放行（判定器本身可判红）');
+    }
+  }
+}
 
 // P2-A/A-1 的退出闸门：必须排在**全部**断言（含上面的正向对照与前面的 K08 对账）之后。
 if (fail > 0) {
