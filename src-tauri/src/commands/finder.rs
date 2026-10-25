@@ -370,35 +370,41 @@ impl<R: tauri::Runtime> Sink for FinderSink<R> {
 
 // ==================== finder:scan ====================
 
-/// finder:scan — 四类扫描（duplicates/bigfiles/empty/appdata）。
-/// 参数校验与默认值语义逐条对齐 Electron（`Math.max` / `Number(x) || default`）。
-#[tauri::command]
-pub async fn finder_scan<R: tauri::Runtime>(
-    window: WebviewWindow<R>,
-    scan_type: String,
-    paths: Option<Vec<Value>>,
-    min_size: Option<Value>,
-    min_size_mb: Option<Value>,
-) -> Value {
-    if let Err(msg) = guard::guard_readonly(&window) {
-        return json!({ "success": false, "message": msg });
-    }
-    if !FINDER_SCAN_TYPES.contains(&scan_type.as_str()) {
-        return json!({ "success": false, "message": "未知扫描类型" });
-    }
+/// 扫描根相关的失败回执：统一带 `droppedRoots` / `rootsTruncated`，并由 message
+/// 点名被丢弃/截断的数量。
+///
+/// 为什么必须统一（P1-04）：前端拿到成功回执会读这两个字段来决定要不要提示；
+/// 早退分支若不带这两个字段，前端就分不出「结果完整」与「结果被裁过」。
+/// 数量必须由**后端**点名 —— 前端拿不到被丢的是哪几个根。
+fn scan_roots_failure(message: &str, dropped_roots: usize, roots_truncated: bool) -> Value {
+    json!({
+        "success": false,
+        "message": message,
+        "droppedRoots": dropped_roots,
+        "rootsTruncated": roots_truncated
+    })
+}
+
+/// 扫描根的解析结果：根集 + 计数。
+struct ScanRoots {
+    dirs: Vec<String>,
+    dropped: usize,
+    truncated: bool,
+}
+
+/// 按扫描类型定出本次要扫的根；不能扫时回**带计数**的失败回执。
+///
+/// 可测内核：早退回执的形状与文案在这里定型，单测按扫描类型逐条对拍
+/// （「把任一后端早退分支删字段 ⇒ 该类型用例必须红」）。
+fn resolve_scan_roots(scan_type: &str, raw_inputs: &[String]) -> Result<ScanRoots, Value> {
     // 路径归一（v2-L4P-39 / F-8）：trim → 展开变量 → **展开后**再量长度 → 上限截断。
     // 三类丢弃都显式计数并回执，不再静默：静默丢弃 = 用户给的目录被偷偷缩小扫描面。
-    let raw_inputs: Vec<String> = paths
-        .unwrap_or_default()
-        .iter()
-        .map(js_string)
-        .map(|s| s.trim().to_string())
-        .collect();
-    let provided = raw_inputs.iter().filter(|s| !s.is_empty()).count();
+    let provided = raw_inputs.iter().filter(|s| !s.trim().is_empty()).count();
     let mut plist: Vec<String> = Vec::new();
     let mut dropped_roots: usize = 0;
     let mut roots_truncated = false;
-    for s in &raw_inputs {
+    for s in raw_inputs {
+        let s = s.trim();
         if s.is_empty() {
             continue;
         }
@@ -417,36 +423,38 @@ pub async fn finder_scan<R: tauri::Runtime>(
         plist.push(expanded);
     }
 
-    // 默认值：--min-size 0 / --count 50 / --min-size-mb 10（对照 Math.max 语义）
-    let mut min_size_arg = 0u64;
-    let mut count_arg = 50usize;
-    let mut min_size_mb_arg = 10u64;
-
-    match scan_type.as_str() {
+    match scan_type {
         "duplicates" => {
             if plist.is_empty() {
                 // v2-L4P-39（F-8）：只有「用户什么都没填」才回落默认根；填了但全部
                 // 被丢弃/超限时不得回落——那等于把无效输入伪装成一次成功的默认扫描。
                 if provided > 0 {
-                    return json!({
-                        "success": false,
-                        "message": "提供的扫描目录全部无效（不存在/超长），未执行扫描；请修正后重试",
-                        "droppedRoots": dropped_roots,
-                        "rootsTruncated": roots_truncated
-                    });
+                    return Err(scan_roots_failure(
+                        &format!(
+                            "提供的扫描目录全部无效（不存在/超长），已丢弃 {dropped_roots} 个{}，未执行扫描；请修正后重试",
+                            if roots_truncated { "，另有目录数超限被截断" } else { "" }
+                        ),
+                        dropped_roots,
+                        roots_truncated,
+                    ));
                 }
                 // 输入为「默认」占位：解析内置目录，缺哪个跳哪个，全缺则报错
-                let defaults: Vec<String> = FINDER_DEFAULT_DUP_DIRS.iter().map(|d| expand_env_path(d)).collect();
+                let defaults: Vec<String> =
+                    FINDER_DEFAULT_DUP_DIRS.iter().map(|d| expand_env_path(d)).collect();
                 let (found, missing) = resolve_existing_dirs(&defaults);
                 if !missing.is_empty() {
                     log::write_log("info", &format!("finder 默认目录缺失跳过: {}", missing.join(", ")));
                 }
                 if found.is_empty() {
                     log::write_log("warn", "finder 默认扫描目录均不存在");
-                    return json!({
-                        "success": false,
-                        "message": "默认扫描目录均不存在（Downloads/Desktop/Documents/Pictures），请在「扫描目录」中手动填写"
-                    });
+                    return Err(scan_roots_failure(
+                        &format!(
+                            "默认扫描目录均不存在（Downloads/Desktop/Documents/Pictures），已跳过 {} 个，请在「扫描目录」中手动填写",
+                            missing.len()
+                        ),
+                        dropped_roots,
+                        roots_truncated,
+                    ));
                 }
                 plist = found;
             } else {
@@ -456,35 +464,117 @@ pub async fn finder_scan<R: tauri::Runtime>(
                     log::write_log("info", &format!("finder 指定目录缺失跳过: {}", missing.join(", ")));
                 }
                 if found.is_empty() {
-                    return json!({ "success": false, "message": "指定的扫描目录均不存在，请检查路径" });
+                    return Err(scan_roots_failure(
+                        &format!(
+                            "指定的 {} 个扫描目录均不存在，已跳过 {} 个，请检查路径",
+                            plist.len(),
+                            missing.len()
+                        ),
+                        dropped_roots + missing.len(),
+                        roots_truncated,
+                    ));
                 }
                 plist = found;
             }
-            min_size_arg = num_or(min_size.as_ref(), 0.0).max(0.0) as u64;
         }
         "bigfiles" => {
             if plist.is_empty() {
-                return json!({ "success": false, "message": "至少需要一个扫描目录" });
+                return Err(scan_roots_failure(
+                    &no_valid_roots_message(dropped_roots, roots_truncated),
+                    dropped_roots,
+                    roots_truncated,
+                ));
             }
-            // 六轮拍板 2026-09-28：数量上限删除（固定 200）、大文件阈值固定 300MB——
-            // 前端两处下拉已移除，这里作为唯一口径（CLI 侧 main.rs 同值）
-            count_arg = 200;
         }
         "appdata" => {
-            min_size_mb_arg = num_or(min_size_mb.as_ref(), 10.0).max(1.0) as u64;
+            // 扫的是 AppData 固定位置，用户给的根不参与（回执里 rootScope 会说明）
         }
         "analyze" => {
             // C-5：paths 即待分析目录（盘符或下钻层），无额外参数
             if plist.is_empty() {
-                return json!({ "success": false, "message": "至少需要一个分析目录" });
+                return Err(scan_roots_failure(
+                    &no_valid_roots_message(dropped_roots, roots_truncated),
+                    dropped_roots,
+                    roots_truncated,
+                ));
             }
         }
         _ => {
             // empty：无额外参数
             if plist.is_empty() {
-                return json!({ "success": false, "message": "至少需要一个扫描目录" });
+                return Err(scan_roots_failure(
+                    &no_valid_roots_message(dropped_roots, roots_truncated),
+                    dropped_roots,
+                    roots_truncated,
+                ));
             }
         }
+    }
+    Ok(ScanRoots { dirs: plist, dropped: dropped_roots, truncated: roots_truncated })
+}
+
+/// 「没有可用的根」时的统一文案：必须点名丢了几个/有没有截断，
+/// 不能只说「至少需要一个目录」（P1-04）。
+fn no_valid_roots_message(dropped_roots: usize, roots_truncated: bool) -> String {
+    let mut s = String::from("没有可扫描的目录");
+    if dropped_roots > 0 {
+        s.push_str(&format!("（已丢弃 {dropped_roots} 个无效目录"));
+        if roots_truncated {
+            s.push_str("，另有目录数超限被截断");
+        }
+        s.push('）');
+    } else if roots_truncated {
+        s.push_str("（目录数超上限，已截断");
+        s.push('）');
+    }
+    s.push_str("，请至少填写一个存在的扫描目录");
+    s
+}
+
+/// finder:scan — 四类扫描（duplicates/bigfiles/empty/appdata）。
+/// 参数校验与默认值语义逐条对齐 Electron（`Math.max` / `Number(x) || default`）。
+#[tauri::command]
+pub async fn finder_scan<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    scan_type: String,
+    paths: Option<Vec<Value>>,
+    min_size: Option<Value>,
+    min_size_mb: Option<Value>,
+) -> Value {
+    if let Err(msg) = guard::guard_readonly(&window) {
+        return json!({ "success": false, "message": msg });
+    }
+    if !FINDER_SCAN_TYPES.contains(&scan_type.as_str()) {
+        return json!({ "success": false, "message": "未知扫描类型" });
+    }
+    let raw_inputs: Vec<String> = paths
+        .unwrap_or_default()
+        .iter()
+        .map(js_string)
+        .map(|s| s.trim().to_string())
+        .collect();
+
+    let roots = match resolve_scan_roots(&scan_type, &raw_inputs) {
+        Ok(r) => r,
+        Err(receipt) => return receipt,
+    };
+    let plist = roots.dirs;
+    let dropped_roots = roots.dropped;
+    let roots_truncated = roots.truncated;
+
+    // 默认值：--min-size 0 / --count 50 / --min-size-mb 10（对照 Math.max 语义）
+    let mut min_size_arg = 0u64;
+    let mut count_arg = 50usize;
+    let mut min_size_mb_arg = 10u64;
+    match scan_type.as_str() {
+        "duplicates" => min_size_arg = num_or(min_size.as_ref(), 0.0).max(0.0) as u64,
+        "bigfiles" => {
+            // 六轮拍板 2026-09-28：数量上限删除（固定 200）、大文件阈值固定 300MB——
+            // 前端两处下拉已移除，这里作为唯一口径（CLI 侧 main.rs 同值）
+            count_arg = 200;
+        }
+        "appdata" => min_size_mb_arg = num_or(min_size_mb.as_ref(), 10.0).max(1.0) as u64,
+        _ => {}
     }
 
     log::write_log(
@@ -520,7 +610,13 @@ pub async fn finder_scan<R: tauri::Runtime>(
         Ok(v) => v,
         Err(e) => {
             log::write_log("error", &format!("finder {scan_type} 失败: {e}"));
-            return json!({ "success": false, "message": format!("扫描失败: {e}") });
+            return json!({
+                "success": false,
+                "message": format!("扫描失败: {e}"),
+                "droppedRoots": dropped_roots,
+                "rootsTruncated": roots_truncated,
+                "rootScope": root_scope_of(&scan_type)
+            });
         }
     };
 
@@ -552,6 +648,8 @@ pub async fn finder_scan<R: tauri::Runtime>(
     // `errors`/`truncated`/`unhandled` 是给渲染层的判据：空结果 + errors>0 要说「有 N 处没能读到」，
     // 而不是「没有重复文件」（B2 禁吞异常伪装空结果）；unhandled 则要说「N 项因文件名无法处理」。
     // v2-L4P-39（F-8）：扫描根丢弃/截断随回执透出。
+    // P1-04：`rootScope` 说明这次扫的是不是用户给的根 —— appdata 扫的是固定位置，
+    // 用户填的目录不参与，必须让回执讲清楚，否则用户会以为「自己填的目录被扫过了」。
     json!({
         "success": true,
         "data": items,
@@ -559,8 +657,15 @@ pub async fn finder_scan<R: tauri::Runtime>(
         "truncated": report.truncated,
         "unhandled": unhandled,
         "droppedRoots": dropped_roots,
-        "rootsTruncated": roots_truncated
+        "rootsTruncated": roots_truncated,
+        "rootScope": root_scope_of(&scan_type)
     })
+}
+
+/// 这次扫描扫的是不是「用户给的根」：`appdata` 扫的是固定位置（用户填的目录不参与），
+/// 其余类型扫的就是用户给的根。
+fn root_scope_of(scan_type: &str) -> &'static str {
+    if scan_type == "appdata" { "appdata" } else { "user" }
 }
 
 // ==================== finder:delete ====================
@@ -1312,5 +1417,49 @@ mod tests {
             });
             assert!(consumed, "finder.js 没有把分档字段 {field} 当数消费（必须出现在 Number(…) 内）");
         }
+    }
+
+    /// P1-04 判红：每种扫描类型的「全部无效」早退回执都必须带丢根/截断字段，
+    /// 且 message 点名数量 —— 前端拿不到被丢的是哪些根，数量只能由后端给。
+    #[test]
+    fn 全部无效早退回执都带丢根与截断字段() {
+        // 超长路径 ⇒ 展开后超限 ⇒ 被丢弃 ⇒ 根集为空 ⇒ 各类型走早退
+        let too_long = format!("C:\\{}", "x".repeat(FINDER_PATH_MAX_LEN + 10));
+        for scan_type in ["duplicates", "bigfiles", "empty", "analyze"] {
+            let Err(receipt) = resolve_scan_roots(scan_type, &[too_long.clone()]) else {
+                panic!("{scan_type} 全部无效时必须早退");
+            };
+            assert_eq!(
+                receipt.get("success").and_then(Value::as_bool),
+                Some(false),
+                "{scan_type}: {receipt}"
+            );
+            assert_eq!(
+                receipt.get("droppedRoots").and_then(Value::as_u64),
+                Some(1),
+                "{scan_type} 必须带丢根计数: {receipt}"
+            );
+            assert_eq!(
+                receipt.get("rootsTruncated").and_then(Value::as_bool),
+                Some(false),
+                "{scan_type} 必须带根截断标记: {receipt}"
+            );
+            let msg = receipt.get("message").and_then(Value::as_str).unwrap_or("");
+            assert!(msg.contains('1'), "{scan_type} 的回执必须点名丢弃数量: {msg}");
+            assert!(
+                !msg.contains("至少需要一个扫描目录"),
+                "{scan_type} 不得只说「至少需要一个目录」: {msg}"
+            );
+        }
+    }
+
+    /// P1-04：appdata 扫的是固定位置，不依赖用户给的根 ⇒ 不得早退；
+    /// 回执要能说明「这次不是用户根扫描」。
+    #[test]
+    fn appdata扫描明示不是用户根扫描() {
+        let roots = resolve_scan_roots("appdata", &[]).expect("appdata 不依赖用户根，不得早退");
+        assert!(roots.dirs.is_empty());
+        assert_eq!(root_scope_of("appdata"), "appdata");
+        assert_eq!(root_scope_of("duplicates"), "user");
     }
 }

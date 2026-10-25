@@ -1019,10 +1019,9 @@
       // 审查 M8/B2：空结果不等于「没有重复」。原生侧读不到的目录会计进 errors、
       // 条目到上限会置 truncated，两者都必须显式说出来，否则用户会把「没权限看」
       // 当成「这个目录真干净」，进而相信清理结果是完整的。
-      const notes = [];
-      if (resp.truncated) notes.push('条目已达扫描上限，结果被截断');
-      const errCount = Number(resp.errors) || 0;
-      if (errCount > 0) notes.push(`${errCount} 处无法读取`);
+      // P1-04：丢根与根截断同样必须说出来 —— 只扫了一部分却报「扫描完成」，
+      // 等于谎报这次扫描是完整的。
+      const notes = finderScanNotes(resp);
       window.app?.toast?.(
         notes.length ? 'warning' : 'success',
         `扫描完成，找到 ${s.results.length} 项` + (notes.length ? `（${notes.join('；')}）` : '')
@@ -1042,6 +1041,20 @@
       updateAllButtons();
       setTimeout(() => hideProgress(cfg), 600);
     }
+  }
+
+  // 扫描回执 → 给用户看的提示条目（纯函数，无副作用，便于门禁直接跑这份实现）。
+  // 只陈述事实，不解释实现：条目截断、读不到的目录、无效目录、根数超限。
+  function finderScanNotes(resp) {
+    const notes = [];
+    if (!resp) return notes;
+    if (resp.truncated) notes.push('条目已达扫描上限，结果被截断');
+    const errCount = Number(resp.errors) || 0;
+    if (errCount > 0) notes.push(`${errCount} 处无法读取`);
+    const droppedCount = Number(resp.droppedRoots) || 0;
+    if (droppedCount > 0) notes.push(`${droppedCount} 个扫描目录无效，未扫描`);
+    if (resp.rootsTruncated) notes.push('扫描目录数量超上限，部分目录未扫描');
+    return notes;
   }
 
   function render(key) { RENDER_FN[key](); }

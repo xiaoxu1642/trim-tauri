@@ -20,6 +20,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 // 需要正向对照的找违规型门禁清单（新增必须登记，带理由）
 const REGISTRY = [
   { file: 'check-delete-exits.mjs', reason: '删除出口枚举：剥离/命中两向自检' },
+  { file: 'check-finder-scan-notes.mjs', reason: 'P1-04 finder 扫描提示条目：真实回执对照（丢根 2 + 根截断 ⇒ 两条提示）/ 零值对照（丢根 0 + 未截断 ⇒ 无提示）/ 字段名对照（把 rootsTruncated 读成 truncated ⇒ 文案必判红）/ 调用点不许悬空；实现直接切自 src/scripts/finder.js，不复制第二份' },
   { file: 'check-escape-delegation.mjs', reason: 'escape 委托：非委托样本自检' },
   { file: 'check-html-contract.mjs', reason: 'HTML 合同：内联 script 样本自检' },
   { file: 'check-cleanup-rule-contract.mjs', reason: '规则契约：37 条反例自检（既有范本）+ 4c 跨条目整树覆盖判据 8 组合成样本（真机形态必判红 / recurse:false 父条与兄弟目录不得过严 / 同根双向 / 路径含 ++ 不误判未知 / 空字面量必报不可判），台账双向咬合：缺行与陈旧行各判红一条' },
