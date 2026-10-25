@@ -428,7 +428,7 @@ body {
 .titlebar-title {
   font-size: var(--fs-secondary);
   font-weight: calc(600 * var(--font-weight-scale, 1));
-  color: #1C1C1C;
+  color: var(--fg-primary);
   letter-spacing: 0;
 }
 
@@ -2041,7 +2041,7 @@ select.field-input { cursor: pointer; appearance: auto; }
 .toast-progress-fill {
   height: 100%;
   width: 0;
-  border-radius: 99px;
+  border-radius: 999px;
   background: var(--accent);
   transition: width 200ms var(--ease-standard);
 }
@@ -2529,9 +2529,9 @@ input[type="radio"]:focus-visible {
   display: flex;
   flex-direction: column;
   background: var(--bg-card);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-large);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-btn);
+  box-shadow: 0 20px 60px -20px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.04);
   overflow: hidden;
 }
 
@@ -3348,9 +3348,6 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 }
 .model-picker-spacer { flex: 1 1 auto; }
 .ctx-detail-modal {
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-btn);
-  box-shadow: 0 20px 60px -20px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.04);
   animation: modalScaleIn var(--duration-base) var(--ease-emphasized);
 }
 .settings-entry-card {
@@ -3803,11 +3800,6 @@ body.mw-window {
   .pw-topbar { flex-direction: column; align-items: stretch; }
   .pw-topbar-actions { justify-content: flex-end; }
 }
-.ctx-detail-modal {
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-btn);
-  box-shadow: 0 20px 60px -20px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.04);
-}
 .rt-report-chart {
   padding: 12px 12px 6px;
   border: 1px solid var(--border-default);
@@ -3929,7 +3921,7 @@ body.mw-window {
   width: 14px;
   height: 14px;
   transform: rotate(0deg);
-  /* v3.5.1 动效审查 L2：--duration-scale 全仓未定义、仅此一处引用，靠 fallback 兜底 */
+  /* v3.5.1 动效审查 L2：--duration-scale 此前全仓未定义，2026-10-26 已收敛到 --duration-fast */
   transition: transform var(--duration-fast) var(--ease-standard);
 }
 .mem-group-row[aria-expanded="true"] .mem-tree-toggle-icon { transform: rotate(90deg); }
@@ -3966,7 +3958,7 @@ body.mw-window {
   min-height: 54px;
   margin: 0 0 12px;
   padding: 10px 14px;
-  background: var(--warning-soft, rgba(176, 129, 0, 0.10));
+  background: var(--warning-soft);
   border: 1px solid var(--border-default);
   border-left: 3px solid var(--warning);
   border-radius: var(--radius-medium);
@@ -4884,13 +4876,13 @@ body.bg-image-on .main-content {
   border-radius: var(--radius-btn);
   padding: 6px 10px;
   font-size: var(--fs-secondary);
-  color: var(--fg-primary, #1a2530);
+  color: var(--fg-primary);
   outline: none;
   min-width: 200px;
 }
 .input-style:focus {
-  border-color: var(--accent, #0EA5E9);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #0EA5E9) 18%, transparent);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 /* 盘符点选器（finder 大文件/空文件页，2026-09-28 六轮拍板）：胶囊式复选标签 */
 .drive-picker {
@@ -4940,11 +4932,11 @@ body.bg-image-on .main-content {
   padding: 8px 12px;
   font-size: var(--fs-secondary);
   font-weight: 600;
-  color: var(--fg-secondary, #5a6b7c);
+  color: var(--fg-secondary);
   border-top: 1px solid var(--border-subtle); /* v2-L6：--border-soft 无定义，恒吃 fallback rgba(0,0,0,.06) → 取既有同档 token */
 }
 .finder-group-header:first-child { border-top: none; }
-.xtable-td .finder-role-kept { color: var(--success, var(--success)); }
+.xtable-td .finder-role-kept { color: var(--success); }
 .xtable-td .finder-role-candidate { color: var(--warning); }
 
 /* 查找器结果表格：两栏 grid（路径 | 大小），行内含复选框 */
@@ -4967,8 +4959,8 @@ body.bg-image-on .main-content {
   border-bottom: 1px solid var(--border-subtle); /* v2-L6：--border-soft 无定义，恒吃 fallback rgba(0,0,0,.05) → 最浅档 --border-subtle */
   vertical-align: middle;
 }
-.finder-table tbody tr:hover { background: color-mix(in srgb, var(--accent, #0EA5E9) 6%, transparent); }
-.finder-table tbody tr.finder-row-selected { background: color-mix(in srgb, var(--accent, #0EA5E9) 5%, transparent); }
+.finder-table tbody tr:hover { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.finder-table tbody tr.finder-row-selected { background: color-mix(in srgb, var(--accent) 5%, transparent); }
 .finder-col-size { text-align: right !important; font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* fixed 布局（大文件/空页表格，2026-09-28 八轮）：路径列 ellipsis 不再覆盖大小列；
    大小列左侧留透明隔离带，路径再长也顶不到数字 */
@@ -5012,9 +5004,9 @@ body.bg-image-on .main-content {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--fg-primary, #1a2530);
+  color: var(--fg-primary);
 }
-.finder-name-text { color: var(--fg-primary, #1a2530); }
+.finder-name-text { color: var(--fg-primary); }
 .finder-role-kept { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
 .finder-role-candidate { background: color-mix(in srgb, var(--warning) 14%, transparent); color: var(--warning); }
 .empty-pane {
@@ -5739,7 +5731,7 @@ body[data-preset-bg] .app-wallpaper::before {
   height: 18px;
   /* 刻意设计：滑块旋钮恒白，保证在任意强调色/壁纸上都清晰可见 */
   background: #ffffff;
-  border: 2px solid var(--accent, #8B8EE0);
+  border: 2px solid var(--accent);
   border-radius: 50%;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
   cursor: grab;

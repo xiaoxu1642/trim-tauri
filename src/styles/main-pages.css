@@ -429,7 +429,7 @@
 .benchmark-note, .benchmark-status-detail { color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1.55; margin: 14px 0 0; }
 .benchmark-status { font-size: calc(24px * var(--font-size-scale, 1)); font-weight: calc(700 * var(--font-weight-scale, 1)); color: var(--accent); }
 .bench-progress { margin-top: 12px; height: 6px; border-radius: var(--radius-badge); background: var(--bg-elevated); border: 1px solid var(--border-default); overflow: hidden; }
-.bench-progress-fill { height: 100%; width: 0%; border-radius: var(--radius-badge); background: linear-gradient(90deg, var(--accent), var(--accent-light)); transition: width var(--duration-base) var(--ease-standard); }
+.bench-progress-fill { height: 100%; width: 0%; border-radius: var(--radius-badge); background: linear-gradient(90deg, var(--accent), var(--accent-hover)); transition: width var(--duration-base) var(--ease-standard); }
 .external-site-picker { display: flex; justify-content: flex-end; margin: -10px 0 16px; }
 .benchmark-results { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .external-test-source { margin: -8px 0 12px; color: var(--fg-tertiary); font-size: var(--fs-meta); }
@@ -674,7 +674,7 @@
 .toast-progress-bar {
   width: 100%;
   height: 4px;
-  border-radius: 99px;
+  border-radius: 999px;
   background: var(--bg-card-hover);
   overflow: hidden;
 }
@@ -1206,9 +1206,9 @@
 .rt-report-row-title { font-size: var(--fs-secondary); font-weight: calc(600 * var(--font-weight-scale, 1)); color: var(--fg-primary); }
 .rt-report-row-meta { margin-top: 2px; font-size: calc(11px * var(--font-size-scale, 1)); color: var(--fg-tertiary); }
 #btnRealtimeRecord.recording {
-  background: color-mix(in srgb, var(--danger, var(--danger)) 12%, transparent);
-  border-color: var(--danger, var(--danger));
-  color: var(--danger, var(--danger));
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-color: var(--danger);
+  color: var(--danger);
 }@media (max-width: 640px) {
 
   .rt-stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2254,7 +2254,7 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   width: 0%;
   background: var(--accent);
   border-radius: 999px;
-  transition: width 0.05s linear; /* 贴手回显：50ms linear 刻意不走 --duration-*/--ease-* token（都是百毫秒级缓动，会让填充滞后于拖动） */
+  transition: width 0.05s linear; /* 贴手回显：50ms linear 刻意不走 --duration-* / --ease-* token（都是百毫秒级缓动，会让填充滞后于拖动） */
 }
 .bbr-val {
   font-size: var(--fs-secondary);

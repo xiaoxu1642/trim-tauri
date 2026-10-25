@@ -359,14 +359,14 @@ export const UNITS = [
     // 顺序约束（同 N1 先例）：显式点名必须排在兜底 dirs 之前——目录认领只吃此前
     // 无人认领的文件，T1d 若排在 T1b 之后，点名会成装饰（U3 判红实测过）。
     id: 'T1d', owner: 'sub', name: '门禁·样式与前端面',
-    files: ['tools/check-contrast.mjs', 'tools/check-css-tokens.mjs',
+    files: ['tools/check-contrast.mjs', 'tools/check-css-tokens.mjs', 'tools/check-css-hygiene.mjs',
       'tools/check-a11y.mjs', 'tools/check-subwindow-css.mjs',
       'tools/check-html-contract.mjs', 'tools/check-first-paint.mjs',
       'tools/check-treemap-layout.mjs', 'tools/check-assets-used.mjs',
       'tools/check-asset-size.mjs'],
-    contract: '样式 token / 对比度 / 可达性 / 首屏预算 / HTML 与资产契约',
+    contract: '样式 token / 对比度 / CSS 卫生 / 可达性 / 首屏预算 / HTML 与资产契约',
     boundary: '审的是「界面面」的自动判据；真机观感不属本单元（目检走 §1.5 纪律）',
-    gates: ['check-css-tokens', 'check-contrast', 'check-first-paint'],
+    gates: ['check-css-tokens', 'check-css-hygiene', 'check-contrast', 'check-first-paint'],
   },
   {
     // 2026-10-25 B0/B1：四道「施工前置判红门禁」新增后，T1b 的兜底形态达 8096 行越 U2

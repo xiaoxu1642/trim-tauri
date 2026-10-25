@@ -47,6 +47,7 @@ const REGISTRY = [
   { file: 'check-layering.mjs', reason: 'v6-P2：判定器抽 layeringHit 纯函数，三样本自检（代码行必中 / **注释行也必中**——「注释不豁免」口径被悄悄改掉必须红 / 干净行放行）+ 既有扫描面地板与 commands 层正向对照' },
   { file: 'check-fail-closed.mjs', reason: 'v6-P2：A/B 判定器抽纯函数（tempScriptDowngrades / toStrUnwraps），四样本自检（A 违例必红、A 干净放行、B 违例必红、B 注释行放行）与真仓扫描共用同一实现' },
   { file: 'check-css-tokens.mjs', reason: 'v6-P2：三组判据抽纯函数（radiusViolations / undeclaredTokenRefs / curveOffenders），合成样本自检（违档 5px/2px 必红、档位与胶囊放行；未定义引用必红、已定义与 ALLOW 放行；曲线越集必红、值集内放行）' },
+  { file: 'check-css-hygiene.mjs', reason: 'P2-E/P3 CSS 卫生六断言：颜色兜底 / 同名自引用 / 注释提前终止 / 99px 胶囊 / .ctx-detail-modal 声明唯一 / .titlebar-title 离表 hex，各配正反合成样本；真仓破坏对照另跑过（三项同时注入必红）' },
   { file: 'check-tests-helper-parity.mjs', reason: 'X1-M06：tests/ 底座 helper 单一真源——判定器抽 auditContent 纯函数（剥注释后判本地重复定义 / 调用未接真源），6 条合成样本与之共用同一实现（抄 fn main_window() 与 pub async fn invoke() 必红、use common 与全路径 common:: 放行、调 helper 未接真源必红、注释里的定义不误伤）；另设真源清单地板防塌缩恒绿' },
   // T1b-M02（v7.2 C09）：三条其实已带对照块、却因理由句写「缺合成样本」滞留 PENDING——
   // 对照块坏了没人红。迁入 REGISTRY 后受第 1/2 组实跑核验。
