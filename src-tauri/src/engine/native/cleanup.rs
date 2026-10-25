@@ -996,7 +996,13 @@ fn cleanup_execute_with_backup_root(
                     crate::engine::paths::BACKUP_KEEP,
                 );
                 // P0-01：裁剪后同步对账 HKLM 摘要，删孤立值
-                crate::engine::reg_backup::reconcile_admin_seals("cleanup", &backup_dir);
+                // P1-03：对账读根 = 候选读根（新根 + 老根兜底），不再只扫写根；
+                // 读根出错则整轮放弃（零删除），不把「读不到」当成空集。
+                {
+                    let dirs = crate::engine::paths::backup_read_dirs("cleanup-reg-backup");
+                    let roots = crate::engine::reg_backup::seal_read_roots(&dirs);
+                    crate::engine::reg_backup::reconcile_admin_seals("cleanup", &roots);
+                }
                 let mut removed = 0i64;
                 let mut reg_failed = 0i64;
                 for (hive, rest, value) in &parsed {

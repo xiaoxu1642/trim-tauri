@@ -178,6 +178,10 @@ pub fn read_admin_seal(domain: &str, file: &Path) -> Option<String> {
 
 /// 对账纯判据：现存备份文件名集合 vs HKLM 摘要值名集合，返回应删除的孤立值名。
 /// 拆成纯函数：真实 HKLM 读写归 #[ignore] 探针，此处逻辑在无窗单测覆盖。
+///
+/// P1-03：现存集合是**小写**文件名（Windows 上文件名大小写不敏感），
+/// 比对时值名末段也按小写归一 —— 只有大小写改名的备份**仍算存在**，
+/// 不能因为大小写不同就把摘要当孤立件删掉。
 fn stale_admin_seal_value_names(
     domain: &str,
     existing_files: &std::collections::HashSet<String>,
@@ -189,25 +193,130 @@ fn stale_admin_seal_value_names(
         .filter_map(|vn| {
             // 非本域值名不参与；本域但备份已不存在 ⇒ 待删
             vn.strip_prefix(&prefix)
-                .filter(|leaf| !existing_files.contains(*leaf))
+                .filter(|leaf| !existing_files.contains(&leaf.to_lowercase()))
                 .map(|_| vn.clone())
         })
         .collect()
 }
 
-/// 备份裁剪（prune_backups）之后对账：删除 HKLM 下指向已不存在备份的摘要，避免无限累积。
-/// 必须在提权实例执行才真正删除；非提权静默跳过。
-pub fn reconcile_admin_seals(domain: &str, dir: &Path) {
-    let mut existing = std::collections::HashSet::new();
-    if let Ok(rd) = std::fs::read_dir(dir) {
-        for ent in rd.flatten() {
-            if let Some(n) = ent.file_name().to_str() {
-                if n.to_lowercase().ends_with(".reg") {
-                    existing.insert(n.to_string());
-                }
-            }
+// ==================== P1-03：对账读根语义 ====================
+
+/// 对账读根的角色。
+///
+/// **主根（新根）**是写根：本工具自己写的备份都在那儿。它必须存在且可信 ——
+/// 它读不到就意味着「我不知道现在有哪些备份」，此时按空集处理等于把本域摘要
+/// 全删掉（真实后果：备份还在，但管理员摘要没了 ⇒ 以后还原不了）。
+///
+/// **老根**是兜底读根：不存在是正常状态（搬迁没搬过去），按空集处理；
+/// 但它「存在却读不动」是异常，同样不许当成空集。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SealRootRole {
+    Primary,
+    Legacy,
+}
+
+/// 把候选读根清单转成带角色的对账输入：**第一个是主根（新根）**，其余是老根。
+///
+/// 约定与 `paths::backup_read_entries` 同源（新根在前），免得两处各认一套。
+pub fn seal_read_roots(dirs: &[PathBuf]) -> Vec<(SealRootRole, &Path)> {
+    dirs.iter()
+        .enumerate()
+        .map(|(i, d)| {
+            (
+                if i == 0 { SealRootRole::Primary } else { SealRootRole::Legacy },
+                d.as_path(),
+            )
+        })
+        .collect()
+}
+
+/// 读一个对账根的 `.reg` 文件名集合（小写）。
+///
+/// `Ok(Some)` = 读到；`Ok(None)` = 根不存在；`Err` = 出错（根不可信 / 读不动 /
+/// 目录项读错）。**出错绝不等于空集** —— 空集会让上层把本域摘要全判成孤立。
+fn read_seal_root_files(dir: &Path) -> Result<Option<std::collections::HashSet<String>>, String> {
+    // 根可信性：与备份枚举、实体定位同一口径（P0-2B），不绕过 reparse 体系
+    let verdict = crate::engine::protect::inspect_root(
+        dir,
+        crate::engine::paths::data_root_base(dir).as_deref(),
+    );
+    match verdict {
+        crate::engine::protect::RootVerdict::Trusted => {}
+        crate::engine::protect::RootVerdict::SkipMissing => return Ok(None),
+        crate::engine::protect::RootVerdict::Rejected(reason) => {
+            return Err(format!("根未通过可信判定：{reason}"))
         }
     }
+    let rd = std::fs::read_dir(dir).map_err(|e| format!("读取目录失败：{e}"))?;
+    let mut names = std::collections::HashSet::new();
+    for ent in rd {
+        let ent = ent.map_err(|e| format!("目录项读取失败：{e}"))?;
+        let Some(name) = ent.file_name().to_str().map(str::to_string) else {
+            return Err("目录项名不可解码".into());
+        };
+        if !name.to_lowercase().ends_with(".reg") {
+            continue;
+        }
+        // 只认普通文件：同名目录、链接件都不算「备份还在」
+        let Ok(md) = std::fs::symlink_metadata(ent.path()) else {
+            return Err("目录项元数据读取失败".into());
+        };
+        if !md.is_file() || crate::engine::protect::is_reparse(&md) {
+            continue;
+        }
+        names.insert(name.to_lowercase());
+    }
+    Ok(Some(names))
+}
+
+/// 对账内核（读根器可注入）：把各根的 `.reg` 文件名并起来。
+///
+/// 任一根出错 ⇒ `Err`（**整轮放弃**，一个摘要都不删）；只有「老根不存在」
+/// 可以按空集处理。
+fn collect_seal_existing_with<F>(
+    roots: &[(SealRootRole, &Path)],
+    mut read: F,
+) -> Result<std::collections::HashSet<String>, String>
+where
+    F: FnMut(&Path) -> Result<Option<std::collections::HashSet<String>>, String>,
+{
+    let mut out = std::collections::HashSet::new();
+    for (role, dir) in roots {
+        match read(dir) {
+            Ok(Some(names)) => out.extend(names),
+            Ok(None) => {
+                if *role == SealRootRole::Primary {
+                    return Err(format!("主根不存在：{}", dir.display()));
+                }
+                // 老根不存在 = 搬迁没搬过去，按空集处理
+            }
+            Err(reason) => return Err(format!("读根失败：{reason}")),
+        }
+    }
+    Ok(out)
+}
+
+/// 备份裁剪（prune_backups）之后对账：删除 HKLM 下指向已不存在备份的摘要，避免无限累积。
+/// 必须在提权实例执行才真正删除；非提权静默跳过。
+///
+/// P1-03：读根不再是单个目录，而是「候选读根 + 根角色」：
+/// - 主根（新根）必须存在且可信 —— 缺失/出错 ⇒ 本轮整轮放弃，**零删除**；
+/// - 老根允许不存在（按空集处理），其它错误 ⇒ 整轮放弃；
+/// - 成功读取的根按**小写**文件名取并集（大小写改名不算「备份已不存在」）。
+///
+/// 旧实现只有一个目录，且 `read_dir` 失败就静默当成空集 ⇒ 一次读不到就把本域
+/// 摘要全删了；老根里的备份也不在视野内 ⇒ 只扫新根会把老根里仍存在的备份判成孤立。
+pub fn reconcile_admin_seals(domain: &str, roots: &[(SealRootRole, &Path)]) {
+    let existing = match collect_seal_existing_with(roots, read_seal_root_files) {
+        Ok(set) => set,
+        Err(reason) => {
+            crate::engine::log::write_log(
+                "warn",
+                &format!("管理摘要对账：{reason}，本轮跳过（不删任何摘要）"),
+            );
+            return;
+        }
+    };
     let hklm = crate::engine::native::hive_hklm();
     let (value_names, incomplete) = crate::engine::native::reg_enum_value_names_pub(hklm, ADMIN_SEAL_SUBKEY);
     if incomplete {
@@ -676,6 +785,118 @@ mod reg_backup_common_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// P1-03 判红：对账读根失败 ⇒ **整轮放弃，零删除**。
+    ///
+    /// 夹具把四种形态各摆一遍：主根不存在（必须放弃）、老根不存在（合法，按空集）、
+    /// 根读不动、目录项读错（都必须放弃）。旧实现把 `read_dir` 失败静默当成空集，
+    /// 于是「读不到」= 「备份全没了」= 本域摘要被全删。
+    #[test]
+    fn 对账读根失败整轮放弃() {
+        let primary = PathBuf::from("新根");
+        let legacy = PathBuf::from("老根");
+        let roots = vec![
+            (SealRootRole::Primary, primary.as_path()),
+            (SealRootRole::Legacy, legacy.as_path()),
+        ];
+        let set = |names: &[&str]| -> std::collections::HashSet<String> {
+            names.iter().map(|s| s.to_lowercase()).collect()
+        };
+        // 正常：两根都读到 ⇒ 取并集
+        let ok = collect_seal_existing_with(&roots, |dir| {
+            Ok(Some(set(if dir == primary.as_path() {
+                &["a.reg"][..]
+            } else {
+                &["b.reg"][..]
+            })))
+        })
+        .expect("两根都读到时必须成功");
+        assert!(
+            ok.contains("a.reg") && ok.contains("b.reg"),
+            "并集必须含两根的文件: {ok:?}"
+        );
+        // 老根不存在（搬迁没搬过去）⇒ 按空集处理，主根正常 ⇒ 仍成功
+        let ok = collect_seal_existing_with(&roots, |dir| {
+            if dir == legacy.as_path() {
+                Ok(None)
+            } else {
+                Ok(Some(set(&["a.reg"])))
+            }
+        })
+        .expect("老根不存在应按空集处理");
+        assert_eq!(ok.len(), 1, "只剩主根的文件: {ok:?}");
+        // 主根不存在 ⇒ 整轮放弃（**不得**当成空集）
+        let err = collect_seal_existing_with(&roots, |dir| {
+            if dir == primary.as_path() {
+                Ok(None)
+            } else {
+                Ok(Some(set(&["b.reg"])))
+            }
+        })
+        .expect_err("主根不存在必须整轮放弃");
+        assert!(err.contains("主根"), "{err}");
+        // 根读不动 / 目录项读错 ⇒ 整轮放弃
+        for reason in ["读取目录失败", "目录项读取失败"] {
+            let err = collect_seal_existing_with(&roots, |_| Err(reason.to_string()))
+                .expect_err("读根出错必须整轮放弃");
+            assert!(err.contains(reason), "{err}");
+        }
+    }
+
+    /// P1-03 判红：只有大小写改名的备份**仍算存在**，不得被判成孤立摘要。
+    #[test]
+    fn 对账按小写比较文件名() {
+        let existing: std::collections::HashSet<String> =
+            ["acme.reg"].iter().map(|s| s.to_lowercase()).collect();
+        let names = vec![
+            "cleanup/Acme.reg".to_string(),
+            "cleanup/other.reg".to_string(),
+        ];
+        let stale = stale_admin_seal_value_names("cleanup", &existing, &names);
+        assert_eq!(
+            stale,
+            vec!["cleanup/other.reg".to_string()],
+            "大小写改名不得判成孤立: {stale:?}"
+        );
+    }
+
+    /// P1-03 判红：老根里存在的备份（同名或不同名）必须保留对应摘要。
+    #[test]
+    fn 老根里的备份保留摘要() {
+        let existing: std::collections::HashSet<String> = ["old.reg", "same.reg"]
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+        let names = vec![
+            "cleanup/old.reg".to_string(),
+            "cleanup/same.reg".to_string(),
+            "cleanup/gone.reg".to_string(),
+        ];
+        let stale = stale_admin_seal_value_names("cleanup", &existing, &names);
+        assert_eq!(
+            stale,
+            vec!["cleanup/gone.reg".to_string()],
+            "老根里的备份必须保住摘要: {stale:?}"
+        );
+    }
+
+    /// P1-03：真实读根器必须区分「根不存在」与「根读不动」。
+    /// 前者是老根的正常状态（按空集处理），后者是异常（整轮放弃）。
+    #[test]
+    fn 读根器区分不存在与读不动() {
+        let root = sandbox("readroot");
+        let missing = root.join("no-such-dir");
+        assert!(
+            matches!(read_seal_root_files(&missing), Ok(None)),
+            "不存在的根应报「不存在」而不是错误"
+        );
+        // 拿一个普通文件冒充根：inspect_root 判「不是目录」⇒ 报错（不是空集）
+        let not_dir = root.join("plain.txt");
+        std::fs::write(&not_dir, b"x").unwrap();
+        let r = read_seal_root_files(&not_dir);
+        assert!(r.is_err(), "不是目录的根必须报错而不是当成空集: {r:?}");
+        rm_sandbox(&root);
+    }
+
     /// P1-02 判红：闸的判决必须**跟随传入的文本与摘要**，而不是磁盘当前状态。
     ///
     /// 夹具刻意造出「磁盘上是 A、传入的是 B」：封条里记的是 B 的摘要。
@@ -927,7 +1148,7 @@ mod reg_backup_common_tests {
         std::fs::write(&q, body.replace("TrimProbe", "TrimProbe2")).unwrap();
         write_reg_backup_seals("cleanup", &q, r"HKLM\Software\TrimProbe\App");
         std::fs::remove_file(&q).unwrap();
-        reconcile_admin_seals("cleanup", &root);
+        reconcile_admin_seals("cleanup", &seal_read_roots(&[root.clone()]));
         let (names, incomplete) = crate::engine::native::reg_enum_value_names_pub(
             crate::engine::native::hive_hklm(),
             ADMIN_SEAL_SUBKEY,

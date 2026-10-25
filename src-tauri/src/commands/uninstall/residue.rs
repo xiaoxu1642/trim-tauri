@@ -1418,7 +1418,12 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             // 刚写的这份是最新项，不会被自己裁掉。
             crate::engine::paths::prune_backups(&backup_dir, crate::engine::paths::BACKUP_KEEP);
             // P0-01：裁剪后对账 HKLM 摘要
-            reconcile_admin_seals("uninstall", &backup_dir);
+            // P1-03：对账读根 = 候选读根（新根 + 老根兜底）；读根出错整轮放弃（零删除）
+            {
+                let dirs = crate::engine::paths::backup_read_dirs(UNINSTALL_REG_BACKUP_SUB);
+                let roots = crate::engine::reg_backup::seal_read_roots(&dirs);
+                reconcile_admin_seals("uninstall", &roots);
+            }
             if let Some(p) = pack.as_mut() {
                 let _ = p.include_reg_backup(&file);
             }
@@ -1484,7 +1489,12 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             // 就等于"删值的备份不参与限额"，盘上照样无限涨）
             crate::engine::paths::prune_backups(&backup_dir, crate::engine::paths::BACKUP_KEEP);
             // P0-01：同样对账（幂等，与 reg_key 分支同目录）
-            reconcile_admin_seals("uninstall", &backup_dir);
+            // P1-03：对账读根 = 候选读根（新根 + 老根兜底）；读根出错整轮放弃（零删除）
+            {
+                let dirs = crate::engine::paths::backup_read_dirs(UNINSTALL_REG_BACKUP_SUB);
+                let roots = crate::engine::reg_backup::seal_read_roots(&dirs);
+                reconcile_admin_seals("uninstall", &roots);
+            }
             if let Some(p) = pack.as_mut() {
                 // 副本只为「一批一个去处」；写注册表的还原入口仍然只有 uninstall_reg_backup_restore
                 if let Err(e) = p.include_reg_backup(&file) {
