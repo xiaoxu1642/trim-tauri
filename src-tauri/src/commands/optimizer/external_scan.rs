@@ -101,33 +101,116 @@ fn judge_external(current: Option<i64>, hits: &[(i64, &'static str)]) -> Option<
     hits.iter().find(|(v, _)| *v == cur).map(|(_, s)| *s)
 }
 
+/// 单个外部键的一次读取结果（P1-6B）。
+///
+/// 旧写法只调 `read_reg_dword_opt`，它的 `None` 同时代表**三种不同的事实**：键/值不存在、
+/// 类型不是 DWORD、访问被拒或解码失败。而回执里 `scanned` 又恒等于表长，于是
+/// 「一次访问拒绝」被记成「扫过了、没命中」——账外核对这个面板的全部意义就是说真话。
+#[derive(Debug, PartialEq)]
+pub(super) enum ExtRead {
+    /// 确认不存在（只认「找不到」那两个 Win32 码，判据同三态读器）
+    Absent,
+    /// 读到了值，但不是可读的 DWORD：算「核对过」，不参与命中判定
+    NotDWord,
+    /// 读到的 DWORD 现值（按无符号口径，与 `read_reg_dword_opt` 一致）
+    DWord(i64),
+    /// 读不出来（访问拒绝 / 其它 Win32 错误 / 解码失败），载荷是错误码名
+    Unreadable(String),
+}
+
+impl ExtRead {
+    /// 这次读取有没有给出**确定的事实**——`Unreadable` 没有。`scanned` 只数这个。
+    fn is_read(&self) -> bool {
+        !matches!(self, ExtRead::Unreadable(_))
+    }
+}
+
+/// 单项状态标签（回执与日志共用，不各处再拼一套字符串）。
+fn ext_state(read: &ExtRead, hits: &[(i64, &'static str)]) -> &'static str {
+    match read {
+        ExtRead::Absent => "absent",
+        ExtRead::NotDWord => "notDWord",
+        ExtRead::Unreadable(_) => "unreadable",
+        ExtRead::DWord(v) => {
+            if hits.iter().any(|(h, _)| *h == *v) { "matched" } else { "present" }
+        }
+    }
+}
+
+/// 三态读器的 REG_DWORD 文本（i32 口径）→ 本表使用的无符号 i64。
+/// 单独成函数只为了让「`0xFFFFFFFF` 必须读成 4294967295」这条既有回归可单测。
+fn dword_from_reg_text(text: &str) -> Option<i64> {
+    text.parse::<i32>().map(|v| v as u32 as i64).ok()
+}
+
+/// 把一次三态读器的结果折成 `ExtRead`。DWORD 的无符号口径在这里复刻一次：
+/// `read_reg_value_state` 按 i32 回报（对齐 .NET/PS），`read_reg_dword_opt` 按 u32→i64，
+/// 两者差的就是这一步转换 —— 不复刻会让 `0xFFFFFFFF` 这类阈值形态永远命中不上。
+fn read_ext_dword(hive: windows::Win32::System::Registry::HKEY, subkey: &str, name: &str) -> ExtRead {
+    use crate::engine::native::RegReadState;
+    match crate::engine::native::read_reg_value_state(hive, subkey, name, false) {
+        RegReadState::Absent => ExtRead::Absent,
+        RegReadState::Unknown(reason) => ExtRead::Unreadable(reason),
+        RegReadState::Value("REG_DWORD", data) => match dword_from_reg_text(&data) {
+            Some(v) => ExtRead::DWord(v),
+            None => ExtRead::NotDWord,
+        },
+        RegReadState::Value(_, _) => ExtRead::NotDWord,
+    }
+}
+
 #[tauri::command]
 pub fn optimizer_external_scan<R: Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
     let hive = hive_hklm();
-    let findings: Vec<Value> = EXTERNAL_TWEAKS
-        .iter()
-        .filter_map(|t| {
-            let current = read_reg_dword_opt(hive, t.subkey, t.value_name);
-            let shape = judge_external(current, t.hits)?;
-            Some(json!({
+    let mut findings: Vec<Value> = Vec::new();
+    let mut scanned = 0usize;
+    let mut unreadable = 0usize;
+    let mut unreadable_ids: Vec<&'static str> = Vec::new();
+    for t in EXTERNAL_TWEAKS.iter() {
+        let read = read_ext_dword(hive, t.subkey, t.value_name);
+        if read.is_read() {
+            scanned += 1;
+        } else {
+            unreadable += 1;
+            unreadable_ids.push(t.id);
+        }
+        let shape = judge_external(match &read { ExtRead::DWord(v) => Some(*v), _ => None }, t.hits);
+        if let Some(s) = shape {
+            findings.push(json!({
                 "id": t.id,
                 "title": t.title,
                 "hive": "HKLM",
                 "subkey": t.subkey,
                 "value": t.value_name,
-                "current": current,
-                "shape": shape,
+                "current": match &read { ExtRead::DWord(v) => json!(*v), _ => Value::Null },
+                "shape": s,
                 "note": t.note,
-            }))
-        })
-        .collect();
-    json!({
-        "success": true,
-        "data": { "scanned": EXTERNAL_TWEAKS.len(), "findings": findings }
-    })
+                // P1-6B：单项状态随条目一起给出，前端不必再从「有没有这条」反推
+                "state": ext_state(&read, t.hits),
+            }));
+        }
+    }
+    // 「成功」只在没有读不出的键时成立（方案 P1-6B）。partial 一并带回，前端据此把
+    // 「N 个键没能核对」显示出来，而不是把一条部分失败的扫描渲染成「一切正常，只是没命中」。
+    let data = json!({
+        "scanned": scanned,
+        "total": EXTERNAL_TWEAKS.len(),
+        "unreadable": unreadable,
+        "unreadableIds": unreadable_ids,
+        "findings": findings,
+    });
+    if unreadable > 0 {
+        return json!({
+            "success": false,
+            "partial": true,
+            "message": format!("账外核对有 {unreadable} 个键读不出来（权限不足或类型异常），未计入已核对"),
+            "data": data,
+        });
+    }
+    json!({ "success": true, "partial": false, "data": data })
 }
 
 #[cfg(test)]
@@ -189,5 +272,51 @@ mod tests {
             EXTERNAL_TWEAKS.len(),
             if hits.is_empty() { "（无）".to_string() } else { hits.join("；") }
         );
+    }
+}
+
+#[cfg(test)]
+mod p1_6b_three_state_tests {
+    use super::*;
+
+    /// P1-6B：`absent` / `notDWord` / `unreadable` / `matched` / `present` 五档必须互不相同。
+    /// 旧实现里前四种全被 `read_reg_dword_opt` 的 `None` 折成一档，回执的 `scanned` 又恒等于
+    /// 表长 ⇒ 一次访问拒绝被记成「扫过了、没命中」。
+    ///
+    /// 判红自证：① 把 `ext_state` 的 `Unreadable` 支并进 `Absent` ⇒ 第三条断言红；
+    /// ② 把 `is_read` 改成恒 `true`（等于旧口径）⇒ 第四条红。
+    #[test]
+    fn 五种读取结果各自可分辨且只数读成功的() {
+        let hits: &[(i64, &'static str)] = &[(1, "开启"), (0, "关闭")];
+        assert_eq!(ext_state(&ExtRead::Absent, hits), "absent");
+        assert_eq!(ext_state(&ExtRead::NotDWord, hits), "notDWord");
+        assert_eq!(
+            ext_state(&ExtRead::Unreadable("ERROR_ACCESS_DENIED".to_string()), hits),
+            "unreadable",
+            "读不出来不得与「确认不存在」同档"
+        );
+        assert_eq!(ext_state(&ExtRead::DWord(1), hits), "matched");
+        assert_eq!(ext_state(&ExtRead::DWord(7), hits), "present");
+
+        let 三条 = [
+            ExtRead::Absent,
+            ExtRead::DWord(9),
+            ExtRead::NotDWord,
+            ExtRead::Unreadable("ERROR_FILE_NOT_FOUND".to_string()),
+        ];
+        assert_eq!(
+           三条.iter().filter(|r| r.is_read()).count(),
+            3,
+            "scanned 只数给出确定事实的三条，表长 4 不是已核对数"
+        );
+    }
+
+    /// 无符号口径回归：三态读器按 i32 回报，本表面板要的是 u32→i64。
+    /// 判红自证：把 `v as u32 as i64` 改成 `v as i64` ⇒ 第二条红（-1 再也不是 4294967295）。
+    #[test]
+    fn dword_文本按无符号解释() {
+        assert_eq!(dword_from_reg_text("-1"), Some(4294967295));
+        assert_eq!(dword_from_reg_text("0"), Some(0));
+        assert_eq!(dword_from_reg_text("4294967295"), None, "超 i32 文本不是本读器的形态");
     }
 }

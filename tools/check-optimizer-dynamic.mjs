@@ -559,5 +559,21 @@ check(
   console.log(`   · R0-c 修复入口覆盖：${jsIds.join(', ') || '（空）'}`);
 }
 
+// ── A10（P1-6H）：灰态成员判据必须取全目录 ALL_OPTIONS，不得取展示列表 OPTIONS ──
+// hiddenFromOptimizer 是「隐私面板 ∪ 永劫专项」两份侧表的并集，这些项仍在目录里、只是不
+// 在优化中心这一列显示。用展示列表当成员判据会把它们从「已执行落盘」集合里丢掉 ⇒
+// 「明明优化过的项因为归属某个面板而变回未优化」，用户可再次执行 —— 而灰态正是防重复
+// 执行的唯一护栏。退役项离表由目录数据本身决定，与本判据无关。
+{
+  const GREY_WIRES = [
+    ['成员判据取全目录', /const known = new Set\(ALL_OPTIONS\.map\(o => o\.id\)\);/],
+    ['载入时机在目录赋值之后', /ALL_OPTIONS = optsAll;[\s\S]{0,1200}?loadAppliedLocal\(\);/],
+  ];
+  const missingGrey = GREY_WIRES.filter(([, re]) => !re.test(jsOpt)).map(([n]) => n);
+  check(missingGrey.length === 0,
+    'A10 灰态成员判据取 ALL_OPTIONS（隐藏侧表项保留灰态、退役项仍离表）',
+    missingGrey.length ? `缺：${missingGrey.join(' / ')}——退回 OPTIONS 会把侧表并集里的项从灰态集合里丢掉` : '');
+}
+
 console.log(`\n${fail === 0 ? '门禁通过' : `${fail} 项未通过`}`);
 process.exit(fail === 0 ? 0 : 1);

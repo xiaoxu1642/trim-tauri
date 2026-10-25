@@ -1559,8 +1559,12 @@
     try {
       const raw = JSON.parse(localStorage.getItem(OPT_APPLIED_KEY) || '[]');
       if (!Array.isArray(raw)) return;
-      // 只认当前还存在的项：退役/改名项顺带清出，避免集合无限增长
-      const known = new Set(OPTIONS.map(o => o.id));
+      // P1-6H：成员判据取**全目录** ALL_OPTIONS，不取展示列表 OPTIONS。
+      // hiddenFromOptimizer 是隐私面板与永劫专项两份侧表的并集 —— 这些项仍在目录里、
+      // 只是不在优化中心这一列显示。按 OPTIONS 判成员会把它们从「已执行落盘」集合里丢掉，
+      // 于是「明明优化过的项因为归属了某个面板而变回未优化」，用户可再次勾选执行；
+      // 灰态是防重复执行的唯一护栏（宁可多灰，不可漏灰）。退役项离表由目录数据自己决定。
+      const known = new Set(ALL_OPTIONS.map(o => o.id));
       for (const id of raw) if (typeof id === 'string' && known.has(id)) appliedLocal.add(id);
     } catch (e) { /* 损坏即从空集合开始：漏灰有还原兜底，误灰会挡住合法操作 */ }
   }
@@ -1985,11 +1989,22 @@
     let resp = null;
     try { resp = await window.api.optimizer.externalScan(); } catch (e) { resp = null; }
     if (!body.isConnected) return; // 等待期间用户已关窗
+    // P1-6B：后端现在把「N 个键读不出来」如实回成 success:false + partial + data。
+    // 旧分支只认 success，一有读不出的键就把已经命中的清单整块换成一句「扫描失败」——
+    // 那是把「部分失败」再伪装成「彻底失败」，方向相反但同样是假信息。
+    let data = (resp && resp.data) || {};
+    let partialNote = '';
     if (!resp || !resp.success) {
-      body.innerHTML = `<p class="empty-state"><span>${escapeHtml((resp && resp.message) || '扫描失败')}</span></p>`;
-      return;
+      const part = resp && resp.partial ? resp.data : null;
+      if (!part || !Array.isArray(part.findings) || !part.findings.length) {
+        body.innerHTML = `<p class="empty-state"><span>${escapeHtml((resp && resp.message) || '扫描失败')}</span></p>`;
+        return;
+      }
+      data = part;
+      const ids = Array.isArray(part.unreadableIds) && part.unreadableIds.length
+        ? `（${part.unreadableIds.join('、')}）` : '';
+      partialNote = `<p class="opt-ext-foot">${escapeHtml(`${resp.message || '部分键未能核对'}${ids}`)}</p>`;
     }
-    const data = resp.data || {};
     const findings = Array.isArray(data.findings) ? data.findings : [];
     if (!findings.length) {
       body.innerHTML = `<p class="empty-state"><span>没有发现已知的手动调整（已核对 ${Number(data.scanned) || 0} 个键）</span></p>`;
@@ -2005,6 +2020,7 @@
     body.innerHTML = `
       <p class="opt-ext-lead">发现 ${findings.length} 项系统上被手动改过的设置（共核对 ${Number(data.scanned) || 0} 个键）。</p>
       ${items}
+      ${partialNote}
       <p class="opt-ext-foot">本清单只读：只检测、不修改。需要恢复默认值请自行调整注册表或相关设置。</p>`;
   }
 

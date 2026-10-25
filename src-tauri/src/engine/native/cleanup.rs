@@ -1009,7 +1009,18 @@ fn cleanup_execute_with_backup_root(
                         // 口径注：扫描侧对 value="*" 只计 1 项，执行侧按实际值数记账，
                         // 「清理数 ≥ 扫描数」属本规则的既定形态。
                         Some("*") => {
-                            for name in reg_enum_value_names_pub(*hive, rest) {
+                            // P1-6G：枚举不完整（键打不开 / 中途报错 / 值名超缓冲上限）时，
+                            // 展开出来的「0 条」不是「这个键本来没值」。旧签名只回 Vec，
+                            // 于是这条规则静默空转、回执还报成功 —— 现按该目标失败记账。
+                            let (names, incomplete) = reg_enum_value_names_pub(*hive, rest);
+                            if incomplete {
+                                reg_failed += 1;
+                                crate::engine::log::write_log(
+                                    "warn",
+                                    &format!("注册表通配删除：{hive:?}\\{rest} 的值名枚举不完整，已按未清完记账（不当作空键成功）"),
+                                );
+                            }
+                            for name in names {
                                 if reg_restore_delete(*hive, rest, &name) {
                                     removed += 1;
                                 } else {

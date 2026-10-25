@@ -1224,7 +1224,16 @@
       return null;
     }
     const procs = Array.isArray(info.procs) ? info.procs : [];
-    if (!procs.length) return null; // 无占用
+    // P1-6C：后端现在把畸形 `@@LOCKED@@` 行数随回执带下来（`malformed`/`partial`）。
+    // 不消费它的话，「协议被打断、一条都没解析出来」与「确实没有文件被占用」在界面上
+    // 仍然同形，用户会当成可以安全清理。占用告知是咨询性的，因此**只提示不拦**：
+    // 真被占用时执行侧仍会逐条如实报失败（与 R4 的失败分档同口径）。
+    const partialNote = Number(info.malformed) > 0
+      ? `占用检测有 ${info.malformed} 条输出畸形已跳过，下方列表可能不完整。` : '';
+    if (!procs.length) {
+      if (partialNote) window.app?.toast?.('warning', partialNote);
+      return null; // 无占用（但协议异常要单独说一声）
+    }
     // 可结束进程（非系统关键）；critical 进程只展示不提供结束入口
     const killable = procs.filter(p => !p.critical);
     const critical = procs.filter(p => p.critical);
@@ -1254,7 +1263,7 @@
         bodyHtml: `
           <div class="confirm-message">以下应用正在使用要清理的文件，目前无法清理，您可以关闭它们以正常清理。</div>
           <div class="lock-app-list">${listRows}</div>
-          ${criticalNote}`,
+          ${criticalNote}${partialNote ? `<div class="lock-critical-note">${escapeHtml(partialNote)}</div>` : ''}`,
         footerHtml: `
           <span class="model-picker-spacer"></span>
           <button class="btn btn-secondary" data-lock="skip" type="button">不结束并放弃清理它们</button>

@@ -1186,30 +1186,47 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
                 &format!("占用检测输出含 {} 条畸形 @@LOCKED@@ 行，已跳过（扫描器协议异常）", parsed.malformed),
             );
         }
-        (
-            Some((parsed.locked, parsed.by_app, parsed.procs, parsed.locked_by_item, parsed.whitelist)),
-            String::new(),
-        )
+        // P1-6C：畸形计数不能只停在日志里。回执带 `malformed`+`partial` 之后，
+        // 「一条占用都没查到」与「协议被打断、根本没查全」在渲染层才是两件事。
+        // 整包 `LockedParse` 原样交给 `locked_receipt` 构造 —— 两条链共用同一份字段表。
+        (Some(parsed), String::new())
     });
     let (payload, err) = match task.await {
         Ok(v) => v,
         Err(e) => return json!({ "success": false, "message": e.to_string() }),
     };
-    let Some((locked, by_app, procs, locked_by_item, whitelist)) = payload else {
+    let Some(mut parsed) = payload else {
         return json!({ "success": false, "message": err });
     };
     // 白名单每次检测覆盖（防「检测 A 文件后延时结束 B 进程」的窗口）；
     // 只有走到这一行（检测全成功）才有名单，失败路径留在前的 reset 上空槽（R4-M03）
-    store_lock_whitelist(&label, whitelist);
-    json!({
+    store_lock_whitelist(&label, std::mem::take(&mut parsed.whitelist));
+    locked_receipt(parsed, scanned, truncated, None)
+}
+
+/// P1-6C：占用两回执的**唯一构造处**（`cleanup:check-locked` / `cleanup:query-locked` 共用）。
+///
+/// 两条链原先各写一份字段表，且畸形行计数**只进日志**——于是 `locked` 为空同时兼容
+/// 「真没被占用」与「@@LOCKED@@ 协议被打断、根本没查全」两种事实，用户按前者直接去清理，
+/// 撞上的是一条删除失败。`malformed` 与 `partial` 进回执之后两者才可分辨；
+/// 收在一处也堵住以后「改一侧漏一侧」的双源形状。
+/// `path` 只有查询侧带（它查的是单条路径，回执要原样标出来；检测侧是一批条目，无单一 path）。
+fn locked_receipt(parsed: LockedParse, scanned: usize, truncated: bool, path: Option<&str>) -> Value {
+    let mut out = json!({
         "success": true,
-        "locked": locked,
-        "byApp": Value::Object(by_app),
-        "procs": procs,
-        "lockedByItem": Value::Object(locked_by_item),
+        "locked": parsed.locked,
+        "byApp": Value::Object(parsed.by_app),
+        "procs": parsed.procs,
+        "lockedByItem": Value::Object(parsed.locked_by_item),
         "scanned": scanned,
-        "truncated": truncated
-    })
+        "truncated": truncated,
+        "malformed": parsed.malformed,
+        "partial": parsed.malformed > 0
+    });
+    if let Some(p) = path {
+        out["path"] = json!(p);
+    }
+    out
 }
 
 /// 占用查询的目录整树收集上限（与 PLAN_LOCK_CAP 同数量级：RM 单次会话注册 2 万个
@@ -1351,22 +1368,14 @@ pub async fn cleanup_query_locked<R: tauri::Runtime>(
         Ok(v) => v,
         Err(e) => return json!({ "success": false, "message": e.to_string() }),
     };
-    let Some(parsed) = parsed else {
+    let Some(mut parsed) = parsed else {
         return json!({ "success": false, "message": err });
     };
     // 白名单每次查询覆盖（与 check-locked 同键同语义：紧随其后的结束进程只认这份名单，
     // 防「查询 A 路径后延时结束 B 进程」的窗口）
-    store_lock_whitelist(&label, parsed.whitelist);
-    json!({
-        "success": true,
-        "path": expanded,
-        "locked": Value::Array(parsed.locked),
-        "byApp": Value::Object(parsed.by_app),
-        "procs": Value::Array(parsed.procs),
-        "lockedByItem": Value::Object(parsed.locked_by_item),
-        "scanned": scanned,
-        "truncated": truncated
-    })
+    store_lock_whitelist(&label, std::mem::take(&mut parsed.whitelist));
+    // P1-6C：与占用检测同一构造处（同字段表、同 `malformed`/`partial` 语义）
+    locked_receipt(parsed, scanned, truncated, Some(&expanded))
 }
 
 /// 结束进程用的 kernel32 绑定（零依赖原则：手写 FFI，与 native-scanner 同风格）
@@ -1672,5 +1681,38 @@ mod tests {
         println!(
             "PAIRING_COST files={files} clone_ms={clone_ms:.1} pair_ms={pair_ms:.1} inflated={inflated}"
         );
+    }
+}
+
+#[cfg(test)]
+mod p1_6c_malformed_tests {
+    use super::*;
+
+    /// P1-6C：注入畸形 `@@LOCKED@@` 行 ⇒ 计数必须显式非零，且**回执**必须带
+    /// `malformed`/`partial`。旧实现只 write_log，两条命令的 `locked` 为空与
+    /// 「协议被打断、根本没查全」在渲染层长得一模一样。
+    ///
+    /// 判红自证：把 `parse_locked_lines` 里三处 `malformed += 1` 改成裸 `continue`
+    /// ⇒ 第一条红；把 `locked_receipt` 的 `malformed`/`partial` 两行摘掉 ⇒ 第二条红。
+    #[test]
+    fn 畸形行必须进计数并进回执() {
+        let stdout = "@@LOCKED@@{\"path\":\"C:\\\\a.txt\",\"id\":\"i1\",\"procs\":[]}\n\
+                      @@LOCKED@@{坏 JSON\n\
+                      @@LOCKED@@{\"id\":\"i1\"}\n\
+                      @@LOCKED@@{\"path\":\"\",\"id\":\"i1\"}\n";
+        let parsed = parse_locked_lines(stdout, 1);
+        assert_eq!(parsed.locked.len(), 1, "合法行照常收下，畸形计数不得连带吞掉好数据");
+        assert_eq!(parsed.malformed, 3, "非 JSON / 缺 path / path 空 三条都要逐条计数");
+
+        let out = locked_receipt(parsed, 1, false, Some(r"C:\a.txt"));
+        assert_eq!(out["malformed"], json!(3));
+        assert_eq!(out["partial"], json!(true), "有畸形行即 partial，不许回「全量已查」的单态");
+        assert_eq!(out["success"], json!(true), "partial 不等于整批失败：查到的那条仍要给用户");
+        assert_eq!(out["path"], json!(r"C:\a.txt"), "查询侧的 path 字段是既有契约，收拢构造时不许丢");
+
+        let clean = locked_receipt(parse_locked_lines("@@LOCKED@@{\"path\":\"C:\\\\b.txt\"}\n", 1), 1, false, None);
+        assert_eq!(clean["malformed"], json!(0));
+        assert_eq!(clean["partial"], json!(false), "全干净时不得挂着 partial，否则两档又混回一潭");
+        assert!(clean.get("path").is_none(), "检测侧没有单一 path，不得凭空造一个");
     }
 }

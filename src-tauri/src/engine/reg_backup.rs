@@ -146,7 +146,13 @@ pub fn reconcile_admin_seals(domain: &str, dir: &Path) {
         }
     }
     let hklm = crate::engine::native::hive_hklm();
-    let value_names = crate::engine::native::reg_enum_value_names_pub(hklm, ADMIN_SEAL_SUBKEY);
+    let (value_names, incomplete) = crate::engine::native::reg_enum_value_names_pub(hklm, ADMIN_SEAL_SUBKEY);
+    if incomplete {
+        // P1-6G：枚举不完整 ⇒ 「盘上还有哪些摘要」这个集合不可信。本轮放弃对账：
+        // 拿一份被截断的「现存清单」去算孤立摘要，会把仍被引用的摘要当孤立件删掉。
+        crate::engine::log::write_log("warn", "管理摘要对账：值名枚举不完整，本轮跳过（不删任何摘要）");
+        return;
+    }
     for vn in stale_admin_seal_value_names(domain, &existing, &value_names) {
         let _ = crate::engine::native::reg_restore_delete(hklm, ADMIN_SEAL_SUBKEY, &vn);
     }
@@ -694,10 +700,11 @@ mod reg_backup_common_tests {
         write_admin_seal("cleanup", &q);
         std::fs::remove_file(&q).unwrap();
         reconcile_admin_seals("cleanup", &root);
-        let names = crate::engine::native::reg_enum_value_names_pub(
+        let (names, incomplete) = crate::engine::native::reg_enum_value_names_pub(
             crate::engine::native::hive_hklm(),
             ADMIN_SEAL_SUBKEY,
         );
+        assert!(!incomplete, "P1-6G：该键可写且刚被本用例枚举过，不该报「清单不完整」");
         assert!(!names.contains(&String::from("cleanup/liveprobe2.reg")), "孤立摘要应被删：{names:?}");
         assert!(names.contains(&String::from("cleanup/liveprobe.reg")), "现存备份摘要应保留：{names:?}");
 

@@ -77,7 +77,7 @@
     "src-tauri/src/commands/optimizer/contract_tests.rs": 1,
     "src-tauri/src/commands/uninstall/residue.rs": 1,
     "src-tauri/src/engine/native/cleanup.rs": 1,
-    "src-tauri/src/engine/native/registry.rs": 2,
+    "src-tauri/src/engine/native/registry.rs": 3,
     "src-tauri/src/engine/pssteps.rs": 1,
     "src-tauri/src/engine/reg_backup.rs": 2
   },

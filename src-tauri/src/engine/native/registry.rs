@@ -114,13 +114,24 @@ pub(super) unsafe fn reg_query_value(hk: HKEY, name: &str) -> Option<(REG_VALUE_
 ///
 /// 审查 M-2（2026-10-07）：原实现把**任何**错误都当「枚举结束」—— 权限不足等情况下
 /// 静默返回空集，上层把「读不到」当成「没有」，扫描结果不完整且无从察觉。现在只把
-/// `ERROR_NO_MORE_ITEMS`(259) 认作正常结束；其余错误记一条 warn 后再终止（不中断
-/// 调用方，但留下痕迹）。键/值名长度受 Windows 限制（≤255 字符），260 缓冲足够。
-pub(super) unsafe fn reg_enum_values(hk: HKEY) -> Vec<String> {
+/// `ERROR_NO_MORE_ITEMS`(259) 认作正常结束；其余错误记一条 warn 后再终止。
+///
+/// P1-6G：`incomplete` 位交回调用方 —— **截断的清单不得再被当成完整清单**。旧注释写
+/// 「值名 ≤255 字符、260 缓冲足够」是错的：Win32 值名上限是 `KEY_MAX_VALUE_NAME_LEN`
+/// = 16367 字符，缓冲区不足时 `RegEnumValueW` 报 `ERROR_MORE_DATA` 并回填所需长度，
+/// 旧写法把它当普通错误 break（或按 260 截断），于是超常长的值名被静默截/丢。
+/// 现在按需增长缓冲重试同一条目（有界，见 `ENUM_NAME_CAP`），只有真·正常结束才 `false`。
+pub(super) unsafe fn reg_enum_values_scan(hk: HKEY) -> (Vec<String>, bool) {
+    // RegEnumValueW 的 pcchName 入参是「缓冲区长度」、出参是「含尾 NUL 的所需长度」；
+    // 值名合法上界即 KEY_MAX_VALUE_NAME_LEN（16367），再加 NUL 一位。以此为硬上限，
+    // 既不再按 260 截断，也不给畸形返回值开无界分配。
+    const ENUM_NAME_CAP: usize = 16367 + 1;
+    const ERROR_MORE_DATA: u32 = 234;
     let mut names = Vec::new();
     let mut index = 0u32;
+    let mut cap = 260usize;
     loop {
-        let mut name_buf = [0u16; 260];
+        let mut name_buf = vec![0u16; cap];
         let mut name_len = name_buf.len() as u32;
         let r = RegEnumValueW(
             hk, index,
@@ -130,20 +141,38 @@ pub(super) unsafe fn reg_enum_values(hk: HKEY) -> Vec<String> {
         );
         // RegEnumValueW 直接返回 LSTATUS（WIN32_ERROR）
         if r == ERROR_NO_MORE_ITEMS {
-            break;
+            return (names, false);
+        }
+        if r.0 == ERROR_MORE_DATA {
+            // 出参写回所需长度：按它放大缓冲后**重试同一条**（不 ++index，否则这条被跳过）。
+            // 用 max/min 而不是 clamp —— clamp 在 min>max 时 panic，而 cap 顶到上限后
+            // `cap + 1` 恰好会大于上界，那正是要走「清单不完整」分支的时刻。
+            let want = (name_len as usize).max(cap + 1).min(ENUM_NAME_CAP);
+            if want > cap { cap = want; continue; }
+            crate::engine::log::write_log("warn", &format!("注册表值枚举缓冲已达上限仍不足（index={index}），清单不完整"));
+            return (names, true);
         }
         if r.is_err() {
             crate::engine::log::write_log("warn", &format!("注册表值枚举非正常结束（index={index}, err={}）", r.0));
-            break;
+            return (names, true);
         }
         let name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
         if !name.is_empty() { names.push(name); }
         index += 1;
     }
-    names
 }
 
-/// 枚举注册表键的所有子键名。错误处置同 [`reg_enum_values`]（M-2）。
+/// 只读枚举出口（右键菜单、路径扫描等「少一条只是显示不全」的调用方）。
+/// 需要区分「没有」与「没枚举完」的调用方一律走 [`reg_enum_values_scan`]。
+pub(super) unsafe fn reg_enum_values(hk: HKEY) -> Vec<String> {
+    reg_enum_values_scan(hk).0
+}
+
+/// 枚举注册表键的所有子键名。错误处置同 [`reg_enum_values_scan`]（M-2）。
+///
+/// 与值名的区别要写清（P1-6G 复核时容易混）：`RegEnumKeyExW` 的子键名上限确实是 255 字符
+/// （Win32 硬限制），260 缓冲够用；**值名**的上限是 `KEY_MAX_VALUE_NAME_LEN` = 16367，
+/// 所以只有值名枚举需要按需增长缓冲，这里保持定长、不照抄过去。
 pub(super) unsafe fn reg_enum_subkeys(hk: HKEY) -> Vec<String> {
     let mut names = Vec::new();
     let mut index = 0u32;
@@ -734,17 +763,22 @@ pub fn file_ads_bytes(path: &std::path::Path) -> (u64, usize) {
     (bytes, count)
 }
 
-/// 枚举指定键的全部值名（F-1：regKeys `value:"*"` 展开用）。键打不开 → 空集。
-pub fn reg_enum_value_names_pub(hive: HKEY, subkey: &str) -> Vec<String> {
+/// 枚举指定键的全部值名（F-1：regKeys `value:"*"` 展开、管理摘要对账用）。
+///
+/// P1-6G：返回 `(names, incomplete)`。旧签名只给 `Vec`，于是**两种完全不同的事实**
+/// 在调用方同形：「这个键确实没有值」与「键打不开 / 枚举中途报错 / 值名长过缓冲上限」。
+/// 前者展开成 0 条删除是正确行为，后者展开成 0 条则是「静默空转 + 回执报成功」——
+/// 正是 `value:"*"` 那条链最怕的形状。开键失败同样算 `incomplete`（它不是「无值」）。
+pub fn reg_enum_value_names_pub(hive: HKEY, subkey: &str) -> (Vec<String>, bool) {
     let sk = to_wide(subkey);
     let mut hk = HKEY::default();
     unsafe {
         if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
-            return Vec::new();
+            return (Vec::new(), true);
         }
-        let names = reg_enum_values(hk);
+        let (names, incomplete) = reg_enum_values_scan(hk);
         let _ = RegCloseKey(hk);
-        names
+        (names, incomplete)
     }
 }
 
@@ -863,7 +897,7 @@ pub(super) unsafe fn reg_count_values(hk: HKEY) -> usize {
 mod tests {
     use super::{
         open_key_missing_is_idempotent, win_reg_err_label, read_reg_value_state, reg_key_remove,
-        reg_restore_write, RegReadState,
+        reg_restore_write, reg_enum_value_names_pub, to_wide, RegReadState,
     };
 
     /// R5b-M01：删值入口的「键不存在」判定必须只认 2/3，其余失败码一律判失败。
@@ -943,5 +977,38 @@ mod tests {
             }
             other => panic!("REG_DWORD 长度不足必须呈报 Unknown，实得 {other:?}"),
         }
+    }
+
+    /// P1-6G 真机 `#[ignore]` 探针（**本轮未执行**，归发布前门禁）：超长**值名**必须能枚举到。
+    ///
+    /// 旧写法 `[0u16; 260]` 定长缓冲 + 把 `ERROR_MORE_DATA` 当普通错误 `break`，
+    /// 于是 300 字符的值名既不截断上报、也不计入不完整 —— 调用方（`value:"*"` 通配展开、
+    /// 管理摘要对账）拿到的是一份「看起来枚举完了」的短清单。
+    /// 值名合法上界是 `KEY_MAX_VALUE_NAME_LEN` = 16367，300 完全合法。
+    ///
+    /// 判红自证：把 `reg_enum_values_scan` 的 `ERROR_MORE_DATA` 支并回 `r.is_err()`
+    /// ⇒ 第一条红（长名消失）；把 `(names, true)` 改成 `(names, false)` ⇒ 第二条红。
+    /// 卫生口径照三态探针：只碰自己的 scratch 键，`Drop` 里删干净。
+    #[test]
+    #[ignore = "真实写注册表（HKCU scratch 键 + Drop 清理），发布前门禁跑"]
+    fn 超长值名必须枚举到且清单不得谎报完整() {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ};
+        const SUB: &str = r"Software\TrimEnumProbe";
+        struct Probe;
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                let _ = reg_key_remove(HKEY_CURRENT_USER, SUB, true);
+            }
+        }
+        let _probe = Probe;
+        let long = "x".repeat(300);
+        let payload: Vec<u8> = to_wide("探针").into_iter().flat_map(|u| u.to_le_bytes()).collect();
+        assert!(
+            reg_restore_write(HKEY_CURRENT_USER, SUB, &long, REG_SZ, &payload),
+            "300 字符值名应可写入（上界 16367）"
+        );
+        let (names, incomplete) = reg_enum_value_names_pub(HKEY_CURRENT_USER, SUB);
+        assert!(names.iter().any(|n| *n == long), "超长值名必须枚举到，实得 {names:?}");
+        assert!(!incomplete, "正常结束不得报「清单不完整」");
     }
 }
