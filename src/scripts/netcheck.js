@@ -118,6 +118,22 @@
     if (!nic) { box.innerHTML = ''; return; }
     const phys = Array.isArray(nic.physical) ? nic.physical : [];
     const virt = Array.isArray(nic.virtual) ? nic.virtual : [];
+    // 后端 nicProps.physical 目前是空桩（驱动级高级属性枚举属 S2 未接入项）。
+    // 此时不能对物理网卡说「未枚举到」——那是把「没测」说成「没有」；
+    // 只有虚拟网卡是真实数据，单独列出并如实说明物理高级属性本版不提供。
+    if (!phys.length) {
+      if (!virt.length) { box.innerHTML = ''; return; }
+      box.innerHTML = '<div class="netcheck-item card" data-nic-readonly="1">' +
+        '<div class="netcheck-head">' +
+        '<div class="netcheck-copy"><strong>虚拟网卡（只读）</strong>' +
+        '<span>物理网卡高级属性本版暂不提供（后续版本接入驱动枚举），这里只列出虚拟网卡</span></div>' +
+        '<span class="netcheck-badge ok">只读</span>' +
+        '</div>' +
+        '<div class="netcheck-detail">虚拟网卡（VPN / 虚拟交换机等）' + virt.length +
+        ' 张：' + escapeHtml(virt.map(v => v.name).join('、')) + ' —— 只展示，不开放写入。</div>' +
+        '</div>';
+      return;
+    }
     const valLines = [];
     for (const a of phys) {
       const head = `${escapeHtml(a.name)}（${escapeHtml(NIC_KIND_TEXT[a.kind] || '物理网卡')}）` +
@@ -153,8 +169,7 @@
       '<span>按驱动真实枚举显示物理网卡的高级属性与 RSS / 校验卸载 / 电源管理状态，第一版不提供写入</span></div>' +
       '<span class="netcheck-badge ok">只读</span>' +
       '</div>' +
-      (phys.length ? '<div class="netcheck-evidence">' + valLines.join('') + '</div>'
-        : '<div class="netcheck-detail">未枚举到物理网卡（Get-NetAdapter -Physical）</div>') +
+      '<div class="netcheck-evidence">' + valLines.join('') + '</div>' +
       virtHtml +
       '</div>';
   }
