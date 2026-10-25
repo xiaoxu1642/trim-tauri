@@ -551,6 +551,13 @@ where
     Ok(RegBackupCheck { keys, seal, sections })
 }
 
+/// 删掉本进程写进 HKCU 的 scratch 键（真机探针的 Drop 守卫用；文件级，两个测试模块共用）。
+#[cfg(test)]
+fn drop_hkcu_scratch(sub: &str) {
+    let _ = crate::engine::native::reg_key_remove(crate::engine::native::hive_hkcu(), sub, true);
+}
+
+// ==================== 共享件测试 ====================
 #[cfg(test)]
 mod reg_backup_common_tests {
     use super::*;
@@ -1002,6 +1009,138 @@ mod reg_backup_common_tests {
         rm_sandbox(&root);
     }
 
+    /// P2-05 判红：导入失败的回执必须**带统计**，文案只陈述已发生的事实。
+    ///
+    /// 部分写回之后失败时，统计是用户唯一能判断「已经动了多少」的依据；
+    /// 文案只说「还原失败」等于让用户以为系统没被改过。
+    #[test]
+    fn 导入失败回执带统计且只陈述事实() {
+        let failure = RegImportFailure {
+            stat: RegImportStat {
+                values_written: 3,
+                values_deleted: 1,
+                keys_created: 1,
+                keys_deleted: 0,
+            },
+            reason: "写入值失败: HKCU\\Software\\X → a (type=4)".to_string(),
+        };
+        let msg = failure.user_message();
+        assert!(msg.contains("已写入 3 个值"), "必须点名写了多少: {msg}");
+        assert!(msg.contains("删除 1 个值"), "必须点名删了多少: {msg}");
+        assert!(msg.contains("不会回滚"), "必须说明已写入部分不会回滚: {msg}");
+        assert!(msg.contains("写入值失败"), "失败原因必须带出来: {msg}");
+        assert!(!msg.contains("可直接重试"), "不许承诺「可直接重试」: {msg}");
+    }
+
+    /// P2-06 判红：`Unknown` 不得当 `Absent`。
+    ///
+    /// 旧实现用 `is_none()`，把「读不出来」与「不存在」塌成同一个结果 ——
+    /// 一次访问拒绝就被当成「值本来就不存在」而放过永久删除。
+    #[test]
+    fn unknown不得当absent() {
+        use crate::engine::native::RegReadState;
+        // 确认不存在 ⇒ 放过（目标态已达成）
+        assert!(
+            delete_value_failed_verdict(&RegReadState::Absent).is_none(),
+            "Absent 必须放过"
+        );
+        // 读不出来 ⇒ 失败，且只带错误码名（不带值内容）
+        let v = delete_value_failed_verdict(&RegReadState::Unknown(
+            "ERROR_ACCESS_DENIED".to_string(),
+        ))
+        .expect("Unknown 必须失败");
+        assert!(v.contains("ERROR_ACCESS_DENIED"), "必须带错误码名: {v}");
+        assert!(!v.contains("内容"), "不得带值内容: {v}");
+        // 值还在 ⇒ 失败
+        let v = delete_value_failed_verdict(&RegReadState::Value("REG_SZ", "机密值".to_string()))
+            .expect("值还在必须失败");
+        assert!(!v.contains("机密值"), "失败原因不得回显值内容: {v}");
+    }
+
+    /// P2-06 正向：确实不存在的值读出来是 `Absent`（不是 `Unknown`）。
+    #[test]
+    fn 不存在的值读作absent() {
+        let state = crate::engine::native::read_reg_value_state(
+            crate::engine::native::hive_hkcu(),
+            r"Software\TrimP206AbsentProbe",
+            "no_such_value",
+            true,
+        );
+        assert!(
+            matches!(state, crate::engine::native::RegReadState::Absent),
+            "不存在的值必须读作 Absent: {state:?}"
+        );
+    }
+
+    /// P2-05/P2-06 真机探针：部分写回后失败时，**统计不丢**（已写入的值数要如实报）。
+    ///
+    /// 夹具：第一段写一个 HKCU scratch 值（成功 → values_written=1），
+    /// 第二段指向一个超长键名（建键必失败 → 整条失败）。
+    /// 断言失败回执里的 `values_written == 1` —— 丢了统计，用户就不知道系统已被改过。
+    #[test]
+    #[ignore = "真机：写 HKCU scratch 键（Drop 清理），发布前人工跑"]
+    fn live_部分写回失败时统计不丢() {
+        const SUB: &str = r"Software\TrimP205Probe";
+        struct Probe;
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                drop_hkcu_scratch(SUB);
+            }
+        }
+        let _probe = Probe;
+        let long_key = format!("{SUB}\\{}", "x".repeat(300));
+        let text = format!(
+            "Windows Registry Editor Version 5.00\r\n\r\n\
+             [HKEY_CURRENT_USER\\{SUB}]\r\n\"a\"=dword:00000001\r\n\
+             [HKEY_CURRENT_USER\\{long_key}]\r\n\"b\"=dword:00000002\r\n"
+        );
+        let secs = parse_reg_text(&text).expect("样本应可解析");
+        let failure = reg_import_apply_sections(&secs).expect_err("超长键名建键必失败");
+        assert_eq!(
+            failure.stat.values_written, 1,
+            "失败回执必须带上已写入的值数: {failure:?}"
+        );
+        assert!(
+            failure.reason.contains("打开/创建键失败"),
+            "失败原因要指名: {}",
+            failure.reason
+        );
+        let msg = failure.user_message();
+        assert!(msg.contains("已写入 1 个值"), "{msg}");
+    }
+
+    /// P2-06 真机探针：读不出来（这里用「未知值类型」触发解码失败）必须读作 `Unknown`，
+    /// 不能塌成 `Absent` —— 塌了就会把「读不到」当成「不存在」而放过永久删除。
+    #[test]
+    #[ignore = "真机：写 HKCU scratch 键（Drop 清理），发布前人工跑"]
+    fn live_未知类型值读作unknown() {
+        const SUB: &str = r"Software\TrimP206UnknownProbe";
+        struct Probe;
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                drop_hkcu_scratch(SUB);
+            }
+        }
+        let _probe = Probe;
+        let h = crate::engine::native::hive_hkcu();
+        assert!(crate::engine::native::reg_restore_write(
+            h,
+            SUB,
+            "weird",
+            REG_VALUE_TYPE(99),
+            &[1u8, 2, 3, 4]
+        ));
+        let state = crate::engine::native::read_reg_value_state(h, SUB, "weird", true);
+        assert!(
+            matches!(state, crate::engine::native::RegReadState::Unknown(_)),
+            "未知类型必须读作 Unknown: {state:?}"
+        );
+        assert!(
+            delete_value_failed_verdict(&state).is_some(),
+            "Unknown 不得被当成 Absent 放过"
+        );
+    }
+
     /// D2：严格 `.reg` 解析。还原前必须知道"这份文件会往哪些键里写"，    /// 所以宁可拒也不能宽松 —— 半截写入的备份尤其要拦。
     /// v5-K06 批次 3：闸与执行臂同吃 `parse_reg_text`（原物理行键枚举 `parse_reg_backup_text`
     /// 已删，它与本解析器存在续行合并差 = A6-K01），本用例改断同一解析器的键枚举语义。
@@ -1435,6 +1574,50 @@ pub struct RegImportStat {
     pub keys_created: usize,
 }
 
+/// 导入失败：**带着当前统计**的失败（P2-05）。
+///
+/// 部分写回之后失败时，这份统计是用户唯一能判断「已经动了多少」的依据 ——
+/// 丢掉它，用户只看到一句「还原失败」，不知道系统已经被改了一部分，
+/// 也不知道下一次重试会不会再动一遍。
+///
+/// `reason` 只陈述失败原因，**不承诺「重试就能成」** —— 部分写入后失败的原因
+/// （权限、并发占用、值被改坏）未必可恢复，承诺「可直接重试」是过度许诺。
+#[derive(Debug, Default, Clone)]
+pub struct RegImportFailure {
+    /// 失败时已完成的统计（已写入/已删除的值与键）
+    pub stat: RegImportStat,
+    /// 失败原因（只带原因与错误码名，不带值内容）
+    pub reason: String,
+}
+
+impl RegImportFailure {
+    /// 面向用户的稳定文案（P2-05）：陈述已发生的事实 + 失败原因 +
+    /// 「已写入部分不会回滚」；不写「可直接重试」。
+    pub fn user_message(&self) -> String {
+        format!(
+            "已写入 {} 个值、删除 {} 个值后失败：{}；已写入部分不会回滚。请先处理失败原因再重新还原",
+            self.stat.values_written, self.stat.values_deleted, self.reason
+        )
+    }
+}
+
+/// 删除值失败后的判定（P2-06）：**确认不存在（Absent）放过**，其它两态失败。
+///
+/// 旧实现用 `read_reg_value_faithful(..).is_none()` —— 它把「读不出来」与「不存在」
+/// 塌成同一个 `None`，于是**一次访问拒绝就被当成「值本来就不存在」而放过**，
+/// 等于把一次失败的永久删除当成了已完成。这里按三态判：`Unknown(code)` 只带
+/// 错误码名（不带值内容），值还在则按删除失败报。
+///
+/// 抽成纯函数：判据只有三态，不必真动注册表就能判红。
+fn delete_value_failed_verdict(state: &crate::engine::native::RegReadState) -> Option<String> {
+    use crate::engine::native::RegReadState;
+    match state {
+        RegReadState::Absent => None,
+        RegReadState::Unknown(code) => Some(format!("读不到现值，无法确认是否已不存在（{code}）")),
+        RegReadState::Value(..) => Some("值仍存在".to_string()),
+    }
+}
+
 /// 把一份已通过四道闸的 `.reg` 原生写进注册表（**执行臂本体，不做任何 IO**）。
 ///
 /// v5-K06 批次 3（A6-K01）：入参就是 `reg_backup_restore_guards` 回执里的
@@ -1443,16 +1626,26 @@ pub struct RegImportStat {
 /// 段会被直接执行；现在那种「校验一套、执行另一套」的形态在类型上就不存在了。
 /// 失败即停并带着「第几段/哪个值」的原因返回 —— 不做"跳过坏行继续写"，
 /// 那会把一次还原变成半截状态而回执仍然像成功。
-pub fn reg_import_apply_sections(sections: &[RegSection]) -> Result<RegImportStat, String> {
+///
+/// P2-05：失败回执**带统计**（[`RegImportFailure`]），所有早退都带当前统计。
+pub fn reg_import_apply_sections(sections: &[RegSection]) -> Result<RegImportStat, RegImportFailure> {
     let mut stat = RegImportStat::default();
     for sec in sections {
-        let hive = hive_of(&sec.hive)?;
+        let hive = match hive_of(&sec.hive) {
+            Ok(h) => h,
+            Err(reason) => {
+                return Err(RegImportFailure { stat, reason });
+            }
+        };
         let full = sec.full_key();
         if sec.delete_key {
             if crate::engine::native::reg_key_remove(hive, &sec.subkey, true) {
                 stat.keys_deleted += 1;
             } else {
-                return Err(format!("删除键失败: {full}"));
+                return Err(RegImportFailure {
+                    stat,
+                    reason: format!("删除键失败: {full}"),
+                });
             }
             continue;
         }
@@ -1460,7 +1653,10 @@ pub fn reg_import_apply_sections(sections: &[RegSection]) -> Result<RegImportSta
         if crate::engine::native::reg_key_ensure(hive, &sec.subkey) {
             stat.keys_created += 1;
         } else if !sec.writes.is_empty() {
-            return Err(format!("打开/创建键失败: {full}"));
+            return Err(RegImportFailure {
+                stat,
+                reason: format!("打开/创建键失败: {full}"),
+            });
         }
         for w in &sec.writes {
             match w {
@@ -1474,22 +1670,33 @@ pub fn reg_import_apply_sections(sections: &[RegSection]) -> Result<RegImportSta
                     );
                     if !ok {
                         let shown = if name.is_empty() { "@（默认值）".to_string() } else { name.clone() };
-                        return Err(format!("写入值失败: {full} → {shown} (type={kind})"));
+                        return Err(RegImportFailure {
+                            stat,
+                            reason: format!("写入值失败: {full} → {shown} (type={kind})"),
+                        });
                     }
                     stat.values_written += 1;
                 }
                 RegWrite::DeleteValue { name } => {
                     if crate::engine::native::reg_restore_delete(hive, &sec.subkey, name) {
                         stat.values_deleted += 1;
-                    } else if crate::engine::native::read_reg_value_faithful(hive, &sec.subkey, name)
-                        .is_none()
-                    {
-                        // 本来就没有这个值 = 目标态已达成。让一次还原因为"没东西可删"而失败，
-                        // 会把用户推向"那我不还原了"，方向更坏。
-                    } else {
-                        let shown = if name.is_empty() { "@（默认值）".to_string() } else { name.clone() };
-                        return Err(format!("删除值失败: {full} → {shown}"));
+                        continue;
                     }
+                    // 删不掉 → 读**三态**（P2-06）：确认不存在 ⇒ 目标态已达成（放过）；
+                    // 读不出来（访问拒绝/解码失败）⇒ 失败（只带错误码名，不带值内容）。
+                    // 旧实现用 `read_reg_value_faithful(..).is_none()`，把「读不出来」
+                    // 与「不存在」塌成同一个 None ⇒ 一次访问拒绝就被当成「值本来就不存在」
+                    // 而放过，等于把永久删除当成了已完成。
+                    let shown = if name.is_empty() { "@（默认值）".to_string() } else { name.clone() };
+                    let state = crate::engine::native::read_reg_value_state(hive, &sec.subkey, name, true);
+                    if let Some(reason) = delete_value_failed_verdict(&state) {
+                        return Err(RegImportFailure {
+                            stat,
+                            reason: format!("删除值失败（{reason}）: {full} → {shown}"),
+                        });
+                    }
+                    // Absent：本来就没有这个值 = 目标态已达成。让一次还原因为"没东西可删"
+                    // 而失败，会把用户推向"那我不还原了"，方向更坏。
                 }
             }
         }
@@ -1503,9 +1710,25 @@ pub fn reg_import_apply_sections(sections: &[RegSection]) -> Result<RegImportSta
 /// 白名单不套公共四道闸，也没有第二份判据可对拍）。还原闸链（cleanup/uninstall 的
 /// 备份还原）**不要**走本函数：那会退回「闸侧一套键枚举、执行侧另一套」的旧形态，
 /// 应改用 `reg_backup_restore_guards` 回执的 `sections` + [`reg_import_apply_sections`]。
-pub fn reg_import_apply(path: &std::path::Path) -> Result<RegImportStat, String> {
-    let text = read_reg_text_file(path)?;
-    let sections = parse_reg_text(&text)?;
+pub fn reg_import_apply(path: &std::path::Path) -> Result<RegImportStat, RegImportFailure> {
+    let text = match read_reg_text_file(path) {
+        Ok(t) => t,
+        Err(reason) => {
+            return Err(RegImportFailure {
+                stat: RegImportStat::default(),
+                reason,
+            })
+        }
+    };
+    let sections = match parse_reg_text(&text) {
+        Ok(s) => s,
+        Err(reason) => {
+            return Err(RegImportFailure {
+                stat: RegImportStat::default(),
+                reason,
+            })
+        }
+    };
     reg_import_apply_sections(&sections)
 }
 
@@ -1736,11 +1959,7 @@ mod reg_import_tests {
         struct Probe;
         impl Drop for Probe {
             fn drop(&mut self) {
-                let _ = crate::engine::native::reg_key_remove(
-                    crate::engine::native::hive_hkcu(),
-                    SUB,
-                    true,
-                );
+                drop_hkcu_scratch(SUB);
             }
         }
         let _probe = Probe;

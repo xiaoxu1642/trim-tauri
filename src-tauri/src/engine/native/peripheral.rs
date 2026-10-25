@@ -199,8 +199,16 @@ pub fn peripheral_restore() -> Result<Value, String> {
         };
         // A6（v2-R4）：原生 import。原先「路径非 UTF-8 就跳过」（审查 v3-L7）随 reg.exe
         // 一起消失 —— 那档跳过会让 imported 少计、回执变成 partial，而原因用户看不见。
-        if crate::engine::reg_backup::reg_import_apply_sections(&sections).is_ok() {
-            imported += 1;
+        // P2-05：导入失败也要带统计与原因（部分写入后失败，用户得知道动了多少）。
+        match crate::engine::reg_backup::reg_import_apply_sections(&sections) {
+            Ok(_) => imported += 1,
+            Err(e) => {
+                let file_name = f.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("外设备份导入失败: {file_name} -> {}", e.user_message()),
+                );
+            }
         }
     }
     let total = group.len() as i64;

@@ -321,8 +321,10 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
                     match crate::engine::reg_backup::reg_import_apply(std::path::Path::new(&reg_path)) {
                         Ok(_) => {}
                         Err(e) => {
+                            // P2-05：失败回执带统计（已写入/已删除多少），
+                            // 文案只陈述事实，不承诺「可直接重试」。
                             failed += 1;
-                            failed_reasons.push(format!("步骤「{label}」: {e}"));
+                            failed_reasons.push(format!("步骤「{label}」: {}", e.user_message()));
                         }
                     }
                     let _ = std::fs::remove_file(&reg_path);

@@ -180,8 +180,11 @@ pub fn uninstall_reg_backup_restore<R: tauri::Runtime>(
             }})
         }
         Err(e) => {
-            log::write_log("error", &format!("卸载域备份还原失败: {name} {e}"));
-            json!({ "success": false, "message": format!("还原写入失败: {e}") })
+            // P2-05：失败回执带统计，文案只陈述已发生的事实 + 失败原因，
+            // 不承诺「可直接重试」（部分写入后失败未必可恢复）。
+            let detail = e.user_message();
+            log::write_log("error", &format!("卸载域备份还原失败: {name} {detail}"));
+            json!({ "success": false, "message": detail })
         }
     }
 }
