@@ -12,6 +12,22 @@
 
   function escapeHtml(text) { return window.ds.esc(text); }
 
+  // 折叠头的键盘等价路径：div 头带 cursor:pointer 且只挂 click ⇒ 键盘既聚焦不了也按不动。
+  // 与 `pathbinding.js` / `cleanup.js` 各留一份：三处都是按需页，而 ds.js 在首屏 12 脚本内、
+  // 首屏预算 2026-10-22 已裁定不再上调（现算余量 48 B），不值得为它挤首屏字节；
+  // 接线是否还在由 check-a11y 的「折叠头键盘接线」判据钉住。
+  function bindCollapseKeys(el) {
+    if (!el || el.matches('button,a,input') || el.hasAttribute('tabindex')) return;
+    el.setAttribute('tabindex', '0');
+    if (!el.getAttribute('role')) el.setAttribute('role', 'button');
+    el.addEventListener('keydown', (e) => {
+      if ((e.key === 'Enter' || e.key === ' ') && e.target === el) {
+        e.preventDefault();
+        el.click();
+      }
+    });
+  }
+
   // 背景图/缩略图的 URL 构造：Tauri 下必须走 asset 协议（页源 http://tauri.localhost
   // 跨不到 file:），Electron 下 window.api.pathToUrl 不存在、退回原来的 file:/// 手拼。
   function toImgUrl(file) {
@@ -394,6 +410,12 @@
       document.getElementById('bgListToggle'),
       document.getElementById('bgListBody')
     );
+    // 键盘等价路径（A3-M03）：`ds.accordion.enhance` 只补 ARIA，不加 tabindex/keydown，
+    // 所以「用了 ds 件」不等于「键盘可达」——这个 div 头此前键盘走不到。
+    // 刻意写在本文件而不是塞进 ds.js：ds.js 在首屏 12 脚本内，而首屏预算 2026-10-22 已裁定
+    // 不再上调（现算余量 48 B），为一个只有按需页用的能力加字节不划算。两处调用点各留一份，
+    // 由 check-a11y 的「折叠头键盘接线」钉住，改回去会红。
+    bindCollapseKeys(document.getElementById('bgListToggle'));
 
     const presetBgSelect = document.getElementById('presetBgSelect');
     presetBgSelect?.addEventListener('change', () => {

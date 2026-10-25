@@ -149,6 +149,25 @@ const check = (ok, label, detail = '') => {
   if (!ok) fail++;
 };
 
+// ---------- ⑦ 折叠头 / 行点击头的键盘接线（A3-M03，2026-10-25 D 轮） ----------
+// 形状：div/span 当折叠开关，或「点击整行看详情」是唯一入口，却只挂 click ⇒ 键盘既
+// 聚焦不了也按不动。`ds.accordion.enhance` 只补 ARIA，**不算**键盘通路（A3 实测两个
+// 调用点都以为自己有护栏）。修法：绑定处补 tabindex + role + keydown(Enter/Space→click)。
+// 判据 = 「点名站点还在 + 同文件必须有键盘绑定」：站点被搬走 → 本条点名红；
+// 键盘绑定被删 → 本条红。为什么不塞进 ds.js 做通用件：ds.js 在首屏 12 脚本内，
+// 而首屏预算 2026-10-22 已裁定不再上调（现算余量 48 B），这条能力只有按需页用。
+const COLLAPSE_SITES = [
+  { file: 'src/scripts/cleanup.js', needle: '[data-group-toggle]', why: '磁盘清理一级分类折叠' },
+  { file: 'src/scripts/cleanup.js', needle: '[data-sub-toggle]', why: '磁盘清理二级分类折叠' },
+  { file: 'src/scripts/pathbinding.js', needle: 'systemInfoToggle', why: '设置页系统信息折叠头' },
+  { file: 'src/scripts/pathbinding-background.js', needle: 'bgListToggle', why: '已导入图片列表折叠头' },
+  { file: 'src/scripts/memoryclean.js', needle: '.mem-region-row', why: '内存清理区域行（点击查看简介是唯一入口）' },
+  { file: 'src/scripts/processes.js', needle: 'mem-group-row', why: '进程树分组行（aria-expanded 的展开/收起）' },
+];
+function collapseKeyWiring(text) {
+  return /addEventListener\(\s*['"]keydown['"]/.test(text) && /['"]Enter['"]/.test(text);
+}
+
 console.log('=== 可达性门禁（勾选框三属性 / aria-live 宿主 / data-tip 反 title）===\n');
 
 // ---- 正向对照自检：判定器必须能对违例样本判红、对合规样本放行 ----
@@ -188,6 +207,8 @@ console.log('=== 可达性门禁（勾选框三属性 / aria-live 宿主 / data-
   check(dupOptChainRegistrations(badDup).length === 1, '对照⑤a：同元素同事件的可选链重复注册必须判红');
   check(dupOptChainRegistrations(goodDup).length === 0, '对照⑤b：不同元素/循环内注册必须放行');
   check(windowAppViolations('const x = window.app?.toast?.(1);').length === 1, '对照⑥a：子窗代码依赖 window.app 必须判红');
+  check(!collapseKeyWiring("el.addEventListener('click', f);"), '对照⑦a：只有 click 绑定的折叠头样本必须判红');
+  check(collapseKeyWiring("el.addEventListener('keydown', e => { if (e.key === 'Enter') el.click(); });"), '对照⑦b：补了 Enter 键盘通路的样本必须放行');
 }
 
 // ---- 真仓扫描 ----
@@ -210,6 +231,29 @@ for (const [p, text, isJs] of sources) {
 
   for (const what of titleViolations(text, isJs)) g.fail(`${rel(p)}：${what}（提示一律走 data-tip，AGENTS §2）`);
   tipSites += [...text.matchAll(/data-tip/g)].length;
+}
+
+// ---- ⑦ 真仓扫描：折叠头键盘接线 ----
+{
+  const byRel = new Map(sources.map(([p, text]) => [rel(p).replace(/\\/g, '/'), text]));
+  let wired = 0;
+  for (const s of COLLAPSE_SITES) {
+    const text = byRel.get(s.file);
+    if (text === undefined) {
+      g.fail(`⑦ 站点文件 ${s.file} 不在扫描面里（改名/移出 ⇒ 清单与语料必须同步，本条不能静默跳过）`);
+      continue;
+    }
+    if (!text.includes(s.needle)) {
+      g.fail(`⑦ ${s.file} 找不到锚点 ${s.needle}（${s.why}）⇒ 站点被搬走或改名，键盘接线判据已失明`);
+      continue;
+    }
+    if (!collapseKeyWiring(text)) {
+      g.fail(`⑦ ${s.file} 的折叠头 ${s.needle} 缺键盘等价路径（${s.why}）：只挂 click ⇒ 键盘用户折叠不了、也打不开详情`);
+      continue;
+    }
+    wired++;
+  }
+  if (wired === COLLAPSE_SITES.length) g.ok(`⑦ 折叠头/行点击头键盘接线 ${wired}/${COLLAPSE_SITES.length} 站点全部在位`);
 }
 
 // ---- 扫描面地板（低于粗下界 ⇒ 疑似正则/目录失明，判红） ----

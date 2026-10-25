@@ -136,7 +136,7 @@
       const expanded = expandedPaths.has(key);
       const label = multi ? '结束全部' : '结束进程';
       return `
-        <div class="xtable-row mem-group-row" data-path="${escapeAttr(key)}" aria-expanded="${expanded}">
+        <div class="xtable-row mem-group-row" data-path="${escapeAttr(key)}" aria-expanded="${expanded}" tabindex="0" role="button">
           <div class="xtable-td" style="flex:1.4">
             <span class="mem-tree-toggle" data-tip="展开/收起该应用的 ${multi ? '多个进程' : '进程'}"><span class="mem-tree-toggle-icon">${toggleSvg}</span></span>
             <img class="pm-app-icon" data-icon-path="${escapeAttr(exePath)}" alt="" width="18" height="18" />
@@ -200,6 +200,20 @@
     if (root.__pmClick && root.__pmClick !== onClick) root.removeEventListener('click', root.__pmClick);
     root.__pmClick = onClick;
     root.addEventListener('click', onClick);
+    // 键盘等价路径（A3-M03）：分组行写了 `aria-expanded` 却不可聚焦，进程树展开/收起
+    // 键盘走不到。虚拟行随滚动反复重建 ⇒ 不能逐行绑，和 click 一样走容器委托；
+    // tabindex/role 在模板里给（`buildGroupRow`）。
+    const onKeyDown = (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      // 只有焦点落在分组行本身才转 click（焦点在行内按钮/勾选框时交回给它们自己处理）
+      const row = e.target;
+      if (!row.classList || !row.classList.contains('mem-group-row')) return;
+      e.preventDefault();
+      row.click();
+    };
+    if (root.__pmKey && root.__pmKey !== onKeyDown) root.removeEventListener('keydown', root.__pmKey);
+    root.__pmKey = onKeyDown;
+    root.addEventListener('keydown', onKeyDown);
 
     // 懒加载应用图标：优先取进程 exe 图标；提取失败回退到随包内置兜底图标（Trim.ico，
     // B2：统一走 icon-fallback 共享兜底）。用 MutationObserver 监听虚拟窗口，

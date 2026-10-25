@@ -223,6 +223,18 @@
     });
     // 点击条目主体（非按钮/勾选框）→ 弹窗展示详细简介（本地 + 联网 AI）
     root.querySelectorAll('.mem-region-row').forEach(row => {
+      // 键盘等价路径（A3-M03）：行本身带 cursor:pointer 且「点击查看简介」是唯一入口，
+      // 但 div 不可聚焦 ⇒ 键盘用户连详情都打不开。补 tabindex/role + Enter/Space 转 click。
+      if (!row.hasAttribute('tabindex')) {
+        row.setAttribute('tabindex', '0');
+        row.setAttribute('role', 'button');
+        row.addEventListener('keydown', (e) => {
+          if ((e.key === 'Enter' || e.key === ' ') && e.target === row) {
+            e.preventDefault();
+            row.click();
+          }
+        });
+      }
       row.addEventListener('click', (e) => {
         if (e.target.closest('button, input, label')) return;
         const r = REGIONS.find(x => x.id === row.dataset.id);

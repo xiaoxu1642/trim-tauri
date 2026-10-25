@@ -349,11 +349,13 @@ if (curveSites === 0) {
 // v7.2 P1 · U-F1a-L01 / U-F1b-L02（2026-10-22）整批退役 27 条：这些档位已从 `main.css`
 // 定义面删除，登记留在表里会被下一条 `staleDead` 判红 —— 而「判红」正是这条断言存在的意义
 // （登记必须与盘上现状同步，否则台账会变成一堆「理由」的化石）。
-// 仍保留的两条是 pathbinding 的交互态档：定义有意先落、消费方在渲染层后续接入，删了等于
+// 仍保留的一条是 pathbinding 的交互态档：定义有意先落、消费方在渲染层后续接入，删了等于
 // 把「等接入」这件事从台账里抹掉，下一任只能重新发现。
+// （2026-10-25 D 轮：`--accent-press` 已从本表摘掉 —— 它被 `.checkbox.checked` /
+//  `.checkbox.indeterminate` 消费了，P2-D 勾形对比度修复用它压出 4.14:1 / 8.24:1，
+//  真机 computed 实测 rgb(77,61,168)。留在表里会被 staleDead 判红，正是这条棘轮的意义。）
 const DEAD_TOKEN_ALLOW = new Map([
   ['--accent-glow', 'accent 发光态（当前未接入，保留交互态档）'],
-  ['--accent-press', 'accent 按下态（当前未接入，保留交互态档）'],
 ]);
 
 const deadTokens = [...defined].filter((n) => !refs.has(n) && !DEAD_TOKEN_ALLOW.has(n)).sort();

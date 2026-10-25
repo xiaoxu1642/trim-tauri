@@ -332,15 +332,16 @@ const PREVIEW_WINDOW_BASE = '#000000';
  *     刻意固定浅色不随主题联动），与主题 token 表无继承关系。
  *   - `.maint-admin-tag` / `.maint-status-warn`：前景写成 color-mix(...80%, #000)，
  *     门禁的 parseBg 只解 var() 起手的形态；这两条的对比度已由 B 组（正文前景 × 页面底）覆盖。
- *   - `.ctx-apply-bar`：底写 var(--warning-soft, rgba(...)) 带兜底值，静态按兜底算不出
- *     主题相关结果，实际两主题取值相同。
+ *   （2026-10-25 D 轮撤掉 `.ctx-apply-bar` 的豁免：它的底写 `var(--warning-soft, rgba(…))`，
+ *     而 parseColor 第 248 行**先查主题表、查不到才取兜底**，所以两主题都能真算——
+ *     现算 --fg-primary #292536 压在 warning-soft 与 --bg-app 的合成底上 = 11.54:1，
+ *     远高于正文 4.5:1。豁免理由「静态按兜底算不出主题相关结果」是 parseColor 修好之前的旧话。）
  */
 const UNKNOWN_BASE_ALLOW = [
   '.btn > .btn-ripple',
   '.splash-badge',
   '.splash-enter',
   '.maint-admin-tag',
-  '.ctx-apply-bar',
   'body.theme-light .nav-subdot',
   // 审查 L-28 连带：--splash-* 是开屏覆盖层的独立局部调色板（刻意固定、不随主题
   // 联动，见 UNKNOWN_BASE_ALLOW 上方说明），主主题变量表里根本没有这些 token。
@@ -1194,6 +1195,83 @@ check(
     if (tokenTypo.length === 0) ctrl.push('token 名写错时判定器静默返回 0 条（等于少算一层还不红）');
   }
   check(ctrl.length === 0, 'F6b. floor 栈合成断言的正向对照：空栈与只垫 floor 必判红、完整栈与 tint 双档放行、token 拼错必判红', ctrl.join('；'));
+}
+
+// ---------- G 组（P2-D 对比度，2026-10-25）：非文本控件「勾形 / 三态横杠」× 控件底色 ----------
+// 为什么单开一组：上面 458 组全部按「前景 color × 背景 background」配对，而勾选态的勾
+// 是 `.checkbox.checked::after` 的 **border 色**压在父规则的 **background** 上 —— 不是文本，
+// 也不在同一声明块里，所以这条组合在门禁里**根本没有工位**。A3 分报告实测它是
+// 白字（--knob-bg）压 `--accent` #8B8EE0 = 2.9815:1 < WCAG 1.4.11 非文本控件下限 3.0。
+// 只改 CSS 不补判据 = 谁都能改回去而没人红，所以判据与修复同批落地。
+const NONTEXT_MIN = 3.0;
+const NONTEXT_PARTS = [
+  { box: '.checkbox.checked', ink: '.checkbox.checked::after' },
+  { box: '.checkbox.indeterminate', ink: '.checkbox.indeterminate::after' },
+];
+function ruleBodyOf(css, selector) {
+  const i = css.indexOf(`${selector} {`);
+  if (i < 0) return null;
+  const s = css.indexOf('{', i);
+  const e = css.indexOf('}', s);
+  return e < 0 ? null : css.slice(s + 1, e);
+}
+function declOf(body, prop) {
+  const m = new RegExp(`(?:^|[;\\s])${prop}\\s*:\\s*([^;]+)`).exec(body);
+  return m ? m[1].trim() : null;
+}
+/** 从 shorthand 里取颜色段：`2px solid var(--knob-bg)` → `var(--knob-bg)`；纯值原样返回。 */
+function colorFromShorthand(v) {
+  if (!v) return null;
+  const m = /solid\s+(.+)$/.exec(v);
+  return (m ? m[1] : v).trim();
+}
+function judgeNontext(css) {
+  const bad = [];
+  const rows = [];
+  for (const { box, ink } of NONTEXT_PARTS) {
+    const boxBody = ruleBodyOf(css, box);
+    const inkBody = ruleBodyOf(css, ink);
+    if (!boxBody || !inkBody) {
+      bad.push(`${box} / ${ink} 规则被搬走或改名 ⇒ G 组失明（不是通过）`);
+      continue;
+    }
+    const fill = declOf(boxBody, 'background');
+    const inkRaw = declOf(inkBody, 'border-left') || declOf(inkBody, 'background');
+    const inkExpr = colorFromShorthand(inkRaw);
+    if (!fill || !inkExpr) {
+      bad.push(`${box} 取不到「底色 / 勾色」⇒ G 组失明（fill=${fill} ink=${inkRaw}）`);
+      continue;
+    }
+    for (const t of THEMES) {
+      const bg = flattenBg(parseColor(fill, t.vars), t.vars, box);
+      const fg = parseColor(inkExpr, t.vars);
+      if (!bg || !fg) {
+        bad.push(`${box} 在 ${t.name} 解析不出颜色 ⇒ G 组失明（底 ${fill} / 勾 ${inkExpr}）`);
+        continue;
+      }
+      const r = contrast(fg, bg);
+      rows.push(`${box} ${t.name} ${r.toFixed(2)}:1`);
+      if (r < NONTEXT_MIN) bad.push(`${box} 在 ${t.name} 只有 ${r.toFixed(2)}:1 < ${NONTEXT_MIN}（勾色 ${inkExpr} × 底色 ${fill}）`);
+    }
+  }
+  return { bad, rows };
+}
+{
+  const { bad, rows } = judgeNontext(MAIN.text);
+  check(bad.length === 0, `G. 勾形/三态横杠 × 控件底色 ≥ ${NONTEXT_MIN}:1（WCAG 1.4.11 非文本控件）`, bad.join('；') || rows.join(' · '));
+  // 正向对照：把底色退回修复前的 --accent（#8B8EE0 × 白 = 2.9815），同一判定器必须判红。
+  // 刻意用合成样本而不是改真文件：真文件改动会污染其它 458 组的行号棘轮。
+  const synth = [
+    '.checkbox.checked { background: var(--accent); border-color: var(--accent); }',
+    '.checkbox.checked::after { content: ""; border-left: 2px solid var(--knob-bg); }',
+    '.checkbox.indeterminate { background: var(--accent); border-color: var(--accent); }',
+    '.checkbox.indeterminate::after { content: ""; background: var(--knob-bg); }',
+  ].join('\n');
+  const ctrl = judgeNontext(synth);
+  check(ctrl.bad.length > 0, 'G-b. 正向对照：底色退回 --accent 必须判红（判据失灵＝这条修复随时能被改回去而没人说）', ctrl.bad.length ? '' : '退回旧色仍判绿 ⇒ G 组是假绿');
+  // 反向对照：规则被改名时必须是红，不能静默零对象放行
+  const ctrl2 = judgeNontext('.totally-other { background: var(--accent); }');
+  check(ctrl2.bad.length > 0, 'G-c. 正向对照：规则改名/搬走时 G 组判红（失明必须可见）', ctrl2.bad.length ? '' : '零对象却放行 ⇒ 判定器失明');
 }
 
 const worst = [...solidRows, ...textRows].sort((a, b) => a.ratio - b.ratio)[0];

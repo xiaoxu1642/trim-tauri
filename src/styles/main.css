@@ -1269,8 +1269,8 @@ body {
               border-radius var(--duration-fast) var(--ease-standard);
 }
 .checkbox.checked {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent-press);
+  border-color: var(--accent-press);
 }
 .checkbox.checked::after {
   content: '';
@@ -1281,8 +1281,8 @@ body {
   transform: rotate(-45deg) translate(1px, -1px);
 }
 .checkbox.indeterminate {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent-press);
+  border-color: var(--accent-press);
 }
 .checkbox.indeterminate::after {
   content: '';

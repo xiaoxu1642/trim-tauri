@@ -622,8 +622,25 @@
       xtable.bindHeader(tbl, state, () => renderCategoryList());
     });
 
+    // 折叠头的键盘等价路径（A3-M03）：这些 div 头带 `cursor:pointer` 且只挂 click ⇒
+    // 键盘用户既聚焦不了也按不动，磁盘清理页全部一级/二级分类折叠走不到。
+    // 同一张表的表头折叠本来就有键盘通路（`xtable.js:48` 给 role=columnheader tabindex=0、
+    // `:127` 挂 keydown），这里是同仓双口径的另一半，收在同一个局部函数里而不是两处各写。
+    const bindCollapseKeys = (el) => {
+      if (!el || el.matches('button,a,input') || el.hasAttribute('tabindex')) return;
+      el.setAttribute('tabindex', '0');
+      el.setAttribute('role', el.getAttribute('role') || 'button');
+      el.addEventListener('keydown', (e) => {
+        if ((e.key === 'Enter' || e.key === ' ') && e.target === el) {
+          e.preventDefault();
+          el.click();
+        }
+      });
+    };
+
     // 绑定折叠：顶层分组
     container.querySelectorAll('[data-group-toggle]').forEach(el => {
+      bindCollapseKeys(el);
       el.addEventListener('click', e => {
         if (e.target.closest('.checkbox') || e.target.closest('.xtable')) return;
         const group = el.closest('.category-group');
@@ -633,6 +650,7 @@
 
     // 绑定二级分类折叠
     container.querySelectorAll('[data-sub-toggle]').forEach(el => {
+      bindCollapseKeys(el);
       el.addEventListener('click', e => {
         if (e.target.closest('.checkbox') || e.target.closest('.xtable')) return;
         const sg = el.closest('.sub-group');
