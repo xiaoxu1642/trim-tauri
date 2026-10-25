@@ -205,6 +205,7 @@
   // 家族内五项的先后就是依赖序：外观层（镜像/真源口径）最先，入口 pathbinding.js 最后装配；
   // 入口若排前面，init 会在面板模块求值前跑，各面 init 全是 undefined。
   const IDLE_SCRIPTS = [
+    'scripts/a11y-live.js',
     'scripts/mouse-trail.js',
     'scripts/tilt.js',
     'scripts/spotlight.js',

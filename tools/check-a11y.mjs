@@ -18,7 +18,7 @@
 //
 // 用法：node tools/check-a11y.mjs
 'use strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -168,6 +168,90 @@ function collapseKeyWiring(text) {
   return /addEventListener\(\s*['"]keydown['"]/.test(text) && /['"]Enter['"]/.test(text);
 }
 
+// ---------- ⑧ 会变的状态面 live region 覆盖（A3-M01，2026-10-26） ----------
+// A3 报告的总数与它自己列出的坐标对不上：本门禁以**坐标清单**为准（进度块 / 计数与摘要 /
+// 实时数值 / 状态文字四类），不按报告总数凑数，差异记在台账。进度块的宿主挂容器 ——
+// label/value 是子节点，再挂一层会双重播报。
+// 主窗的坐标由 src/scripts/a11y-live.js 在首帧后挂（走 IDLE_SCRIPTS，字节不进首屏预算）；
+// 子窗 pmCount 与 maintBatchProgressText 直接写 HTML —— 后者本来就有宿主（文字节点），
+// 块本体不再挂。实时数值挂 off（2026-10-26 小旭拍板：每秒播报对读屏不可用）。
+const LIVE_MOUNT_FILE = join(SRC, 'scripts', 'a11y-live.js');
+const APP_JS_FILE = join(SRC, 'scripts', 'app.js');
+const LIVE_BASELINE = [
+  { id: 'dupProgressSection', mode: 'polite', where: 'idle' },
+  { id: 'emptyProgressSection', mode: 'polite', where: 'idle' },
+  { id: 'anProgressSection', mode: 'polite', where: 'idle' },
+  { id: 'totalSize', mode: 'polite', where: 'idle' },
+  { id: 'selectedCount', mode: 'polite', where: 'idle' },
+  { id: 'dupGroupCount', mode: 'polite', where: 'idle' },
+  { id: 'dupSize', mode: 'polite', where: 'idle' },
+  { id: 'emptyCount', mode: 'polite', where: 'idle' },
+  { id: 'emptyDirCount', mode: 'polite', where: 'idle' },
+  { id: 'anTotalSize', mode: 'polite', where: 'idle' },
+  { id: 'anCounts', mode: 'polite', where: 'idle' },
+  { id: 'anElapsed', mode: 'polite', where: 'idle' },
+  { id: 'memRegionCount', mode: 'polite', where: 'idle' },
+  { id: 'optimizerSummary', mode: 'polite', where: 'idle' },
+  { id: 'contextSummary', mode: 'polite', where: 'idle' },
+  { id: 'ovHealthCard', mode: 'polite', where: 'idle' },
+  { id: 'ovHealthAdvice', mode: 'polite', where: 'idle' },
+  { id: 'lockQueryResult', mode: 'polite', where: 'idle' },
+  { id: 'startupDefendState', mode: 'polite', where: 'idle' },
+  { id: 'qcCount', mode: 'polite', where: 'idle' },
+  { id: 'cleanupAgeHint', mode: 'polite', where: 'idle' },
+  { id: 'updaterCheckHint', mode: 'polite', where: 'idle' },
+  { id: 'infoCdpState', mode: 'polite', where: 'idle' },
+  { id: 'memUseValue', mode: 'off', where: 'idle' },
+  { id: 'memFreeValue', mode: 'off', where: 'idle' },
+  { id: 'memPagefileValue', mode: 'off', where: 'idle' },
+  { id: 'memCacheValue', mode: 'off', where: 'idle' },
+  { id: 'realtimeDown', mode: 'off', where: 'idle' },
+  { id: 'realtimeUp', mode: 'off', where: 'idle' },
+  { id: 'realtimeLossDetail', mode: 'off', where: 'idle' },
+  { id: 'contextSelectedCount', mode: 'off', where: 'idle' },
+  { id: 'maintBatchProgressText', mode: 'polite', where: 'html' },
+  { id: 'pmCount', mode: 'polite', where: 'html' },
+];
+function parseLiveMountTable(text) {
+  const grab = (name) => {
+    const m = text.match(new RegExp(name + '\\s*=\\s*\\[([\\s\\S]*?)\\]'));
+    return m ? [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]) : null;
+  };
+  return { polite: grab('POLITE_HOSTS'), off: grab('LIVE_OFF_HOSTS') };
+}
+function tagOfId(htmlText, id) {
+  const m = htmlText.match(new RegExp('id="' + id + '"'));
+  if (!m) return null;
+  const open = htmlText.lastIndexOf('<', m.index);
+  const close = htmlText.indexOf('>', m.index);
+  return open >= 0 && close > open ? htmlText.slice(open, close + 1) : null;
+}
+function liveCoverageProblems(table, baseline, findTag) {
+  const out = [];
+  if (!table || !table.polite || !table.off) return ['挂载表解析不到 POLITE_HOSTS / LIVE_OFF_HOSTS（判定失明）'];
+  const baseIds = new Set(baseline.map((b) => b.id));
+  for (const { id, mode, where } of baseline) {
+    if (where === 'idle') {
+      const list = mode === 'polite' ? table.polite : table.off;
+      if (!list.includes(id)) out.push(`${id} 未按 ${mode} 出现在 a11y-live.js（漏挂或挂错档）`);
+    } else {
+      const tag = findTag(id);
+      if (!tag) out.push(`${id} 在任何 HTML 里都找不到`);
+      else if (!new RegExp("aria-live\\s*=\\s*[\"']" + mode + "[\"']").test(tag)) {
+        out.push(`${id} 的 HTML 宿主缺 aria-live="${mode}"`);
+      }
+    }
+  }
+  for (const [mode, ids] of [['polite', table.polite], ['off', table.off]]) {
+    for (const id of ids) {
+      if (!baseIds.has(id)) out.push(`${id} 在挂载表（${mode}）里但不在门禁基线 —— 新增面必须同步基线`);
+    }
+  }
+  const dup = table.polite.filter((id) => table.off.includes(id));
+  if (dup.length) out.push(`同一 id 挂在两档：${dup.join('、')}`);
+  return out;
+}
+
 console.log('=== 可达性门禁（勾选框三属性 / aria-live 宿主 / data-tip 反 title）===\n');
 
 // ---- 正向对照自检：判定器必须能对违例样本判红、对合规样本放行 ----
@@ -209,6 +293,21 @@ console.log('=== 可达性门禁（勾选框三属性 / aria-live 宿主 / data-
   check(windowAppViolations('const x = window.app?.toast?.(1);').length === 1, '对照⑥a：子窗代码依赖 window.app 必须判红');
   check(!collapseKeyWiring("el.addEventListener('click', f);"), '对照⑦a：只有 click 绑定的折叠头样本必须判红');
   check(collapseKeyWiring("el.addEventListener('keydown', e => { if (e.key === 'Enter') el.click(); });"), '对照⑦b：补了 Enter 键盘通路的样本必须放行');
+
+  const base = [
+    { id: 'a', mode: 'polite', where: 'idle' },
+    { id: 'c', mode: 'off', where: 'idle' },
+    { id: 'p', mode: 'polite', where: 'html' },
+  ];
+  const goodTable = { polite: ['a'], off: ['c'] };
+  const goodTag = (id) => (id === 'p' ? '<span id="p" role="status" aria-live="polite">' : null);
+  check(liveCoverageProblems(goodTable, base, goodTag).length === 0, '对照⑧a：覆盖齐全的样本必须放行');
+  check(liveCoverageProblems({ polite: [], off: ['c'] }, base, goodTag).some((v) => v.includes('a ')), '对照⑧b：漏挂必须判红');
+  check(liveCoverageProblems({ polite: [], off: ['a', 'c'] }, base, goodTag).some((v) => v.includes('a ')), '对照⑧c：挂错档必须判红');
+  check(liveCoverageProblems(goodTable, base, () => '<span id="p">').some((v) => v.includes('aria-live')), '对照⑧d：HTML 宿主缺属性必须判红');
+  check(liveCoverageProblems({ polite: ['a', 'x'], off: ['c'] }, base, goodTag).some((v) => v.includes('x ')), '对照⑧e：表里多出未登记 id 必须判红');
+  check(liveCoverageProblems({ polite: ['a'], off: ['c', 'a'] }, base, goodTag).some((v) => v.includes('两档')), '对照⑧f：同 id 挂两档必须判红');
+  check(liveCoverageProblems(null, base, goodTag).length > 0, '对照⑧g：挂载表解析不到必须判红');
 }
 
 // ---- 真仓扫描 ----
@@ -254,6 +353,33 @@ for (const [p, text, isJs] of sources) {
     wired++;
   }
   if (wired === COLLAPSE_SITES.length) g.ok(`⑦ 折叠头/行点击头键盘接线 ${wired}/${COLLAPSE_SITES.length} 站点全部在位`);
+}
+
+// ---- ⑧ 真仓扫描：live region 覆盖（A3-M01） ----
+if (g.skipUnlessPresent(LIVE_MOUNT_FILE, 'src/scripts/a11y-live.js（A3-M01 挂载表）')) {
+  const appText = existsSync(APP_JS_FILE) ? read(APP_JS_FILE) : '';
+  const idleBlock = (appText.match(/IDLE_SCRIPTS\s*=\s*\[([\s\S]*?)\]/) || [])[1] || '';
+  if (!idleBlock.includes("'scripts/a11y-live.js'")) {
+    g.fail('⑧ a11y-live.js 没登记进 app.js 的 IDLE_SCRIPTS ⇒ 挂载表是死代码（页面永远不会挂上）');
+  } else if (appText) {
+    g.ok('⑧ a11y-live.js 已登记进 IDLE_SCRIPTS（首帧后挂载，不占首屏预算）');
+  }
+  const table = parseLiveMountTable(read(LIVE_MOUNT_FILE));
+  const htmlTexts = htmlFiles.map((p) => read(p));
+  const findTag = (id) => {
+    for (const t of htmlTexts) {
+      const tag = tagOfId(t, id);
+      if (tag) return tag;
+    }
+    return null;
+  };
+  for (const v of liveCoverageProblems(table, LIVE_BASELINE, findTag)) g.fail(`⑧ ${v}`);
+  if (table && table.polite && table.off) {
+    if (table.polite.length < 20) g.fail(`⑧ polite 表只解析到 ${table.polite.length} 条（< 20）⇒ 语料塌缩`);
+    if (table.off.length < 6) g.fail(`⑧ off 表只解析到 ${table.off.length} 条（< 6）⇒ 语料塌缩`);
+    const htmlHosts = LIVE_BASELINE.filter((b) => b.where === 'html').length;
+    g.ok(`⑧ live region 覆盖 ${LIVE_BASELINE.length} 个宿主（idle polite ${table.polite.length} / off ${table.off.length} + HTML 宿主 ${htmlHosts}）`);
+  }
 }
 
 // ---- 扫描面地板（低于粗下界 ⇒ 疑似正则/目录失明，判红） ----
