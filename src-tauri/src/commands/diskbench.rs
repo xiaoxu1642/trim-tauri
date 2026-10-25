@@ -116,7 +116,10 @@ fn free_bytes(path: &Path) -> Option<u64> {
 /// `residue_dir` 位于**用户在 UI 里自选的测速路径**下，若该目录被换成指向别处的 junction，
 /// 直接 `remove_dir_all` 会把链接目标一起处理掉；且这是本仓唯一一处「用户可设路径下的
 /// 递归删除」，此前恰好漏了这道闸。属性读不到同样按拒绝处理（fail-closed）。
-fn cleanup_residue(dir: &Path) {
+///
+/// `abnormal` 只改日志级别与措辞：成功分支现在**也**走这里（原生只删自己建的文件、
+/// 不删目录 ⇒ 由建目录的这一侧收干净），把正常收尾写成「异常结束」是假告警。
+fn cleanup_residue(dir: &Path, abnormal: bool) {
     if !dir.exists() {
         return;
     }
@@ -131,10 +134,17 @@ fn cleanup_residue(dir: &Path) {
     for _ in 0..3 {
         match std::fs::remove_dir_all(dir) {
             Ok(()) => {
-                log::write_log(
-                    "warn",
-                    &format!("磁盘测速异常结束，已清理残留测试目录: {}", dir.display()),
-                );
+                if abnormal {
+                    log::write_log(
+                        "warn",
+                        &format!("磁盘测速异常结束，已清理残留测试目录: {}", dir.display()),
+                    );
+                } else {
+                    log::write_log(
+                        "info",
+                        &format!("磁盘测速结束，已清理测试目录: {}", dir.display()),
+                    );
+                }
                 return;
             }
             Err(e) => last_err = Some(e),
@@ -209,12 +219,12 @@ fn bench_response(data: Value, mut warn: Vec<String>) -> Value {
 
 /// diskbench:run — 磁盘测速（原生引擎优先）
 ///
-/// R1d-M09 的世代号只解决「别去动别人正在写的目录」，**不解决盘上留残**：
-/// 成功分支（`measured == true`）刻意不清理，依赖原生引擎自删自己的测试目录。
-/// 真机复核项（本轮档位未验）：测成功后 `Trim-DiskBench-<n>` 是否真的消失——
-/// 若原生侧没删，应用侧就只会攒下一个空目录（世代号让每次运行换一个名字，
-/// 攒的是「一串空残留」而不是「一个空残留」）。复核方法：跑一次成功后列目录，
-/// 或让原生侧补一条自删断言（属 N1b 射程，不在本单元定罪）。
+/// R1d-M09 的世代号只解决「别去动别人正在写的目录」，**不解决盘上留残**。
+/// 真机复核（2026-10-25 CDP，跑成功一次后列目录）：留残成立——原生引擎写的是固定名
+/// `Trim-DiskBench`，只删自己建的文件、不删目录；而这里按 `Trim-DiskBench-<世代号>`
+/// 清理，两个名字不同名，所以异常路径的清理也一直落在空处。
+/// 现在目录名单源（本侧算、`--bench-dir` 交给原生），并且**成功分支也收尾**，
+/// 留残由 `#[ignore]` 探针 `u_r1d_diskbench_leaves_no_residue_on_success` 钉住。
 #[tauri::command]
 pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options: Option<Value>) -> Result<Value, String> {
     // 审查 v2-L17：测速要独占读盘、属"会动系统资源"的写侧通道，且唯一调用方是主窗的
@@ -306,6 +316,19 @@ pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options:
     };
     let bench_timeout = Duration::from_millis((dur as u64) * 1000 * 4 + 60_000);
 
+    // ② 世代号——超时只是 `recv_timeout` 返回，**工作线程不会被中断**（同文件头已如实
+    //    记录这个限制）。旧写法残留目录固定名 `Trim-DiskBench` ⇒ 超时后清理的是野线程
+    //    正在写的那个目录，而野线程随后又把它建回来：清理动作与写入者共用一个名字，
+    //    谁先谁后看运气。目录名带本次运行的世代号后，清理只针对自己那一份，
+    //    野线程留在盘上的那一份由**它自己**的收尾处理（清理失败会记日志，不静默）。
+    //
+    //    真机取证（2026-10-25 CDP）：加世代号那一批只改了**主进程这一侧**，原生引擎仍把
+    //    文件写进固定名 `Trim-DiskBench`（`native-scanner/src/perf.rs`），于是清理动作
+    //    落在一个根本不存在的目录上——残留一个没清、隔离也没生效，成功分支每次跑完都在
+    //    用户目录留一个空目录。现在目录名由这里唯一决定，并以 `--bench-dir` 交给原生。
+    let generation = DISKBENCH_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+    let residue_dir = resolved.join(format!("Trim-DiskBench-{generation}"));
+
     let args: Vec<String> = vec![
         "diskbench".to_string(),
         "--path".to_string(),
@@ -320,14 +343,9 @@ pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options:
         threads.to_string(),
         "--mode".to_string(),
         io_mode.to_string(),
+        "--bench-dir".to_string(),
+        residue_dir.to_string_lossy().to_string(),
     ];
-    // ② 世代号——超时只是 `recv_timeout` 返回，**工作线程不会被中断**（同文件头已如实
-    //    记录这个限制）。旧写法残留目录固定名 `Trim-DiskBench` ⇒ 超时后清理的是野线程
-    //    正在写的那个目录，而野线程随后又把它建回来：清理动作与写入者共用一个名字，
-    //    谁先谁后看运气。目录名带本次运行的世代号后，清理只针对自己那一份，
-    //    野线程留在盘上的那一份由**它自己**的收尾处理（清理失败会记日志，不静默）。
-    let generation = DISKBENCH_GEN.fetch_add(1, Ordering::Relaxed) + 1;
-    let residue_dir = resolved.join(format!("Trim-DiskBench-{generation}"));
 
     // 原生引擎在工作线程内执行：进度行 JSON → diskbench:progress 事件；
     // 主线程用 recv_timeout 模拟 Electron 的进程超时中止。
@@ -346,7 +364,7 @@ pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options:
     let out = match rx.recv_timeout(bench_timeout) {
         Ok(o) => o,
         Err(_) => {
-            cleanup_residue(&residue_dir);
+            cleanup_residue(&residue_dir, true);
             log::write_log("warn", "磁盘测速超时（原生引擎）");
             return Ok(json!({ "success": false, "message": "磁盘测速超时（原生引擎）" }));
         }
@@ -355,17 +373,16 @@ pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options:
     let data: Value = match serde_json::from_str(out.trim()) {
         Ok(v) => v,
         Err(e) => {
-            cleanup_residue(&residue_dir);
+            cleanup_residue(&residue_dir, true);
             log::write_log("warn", &format!("磁盘测速结果解析失败: {e}"));
             return Ok(json!({ "success": false, "message": format!("磁盘测速结果解析失败: {e}") }));
         }
     };
 
     let measured = data.get("measured").and_then(|v| v.as_bool()) == Some(true);
-    if !measured {
-        // 测量未完成也做残留清理（同异常路径口径）
-        cleanup_residue(&residue_dir);
-    }
+    // 目录是这里建的，收尾也归这里删：**成功分支同样要清**（原生只删自己建的文件，
+    // 旧写法把「原生会自删目录」当假设，实测每次成功都在用户目录下留一个空目录）。
+    cleanup_residue(&residue_dir, !measured);
     Ok(bench_response(data, param_warn))
 }
 

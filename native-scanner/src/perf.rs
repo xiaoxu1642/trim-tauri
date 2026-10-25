@@ -323,10 +323,10 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
     }
     // QD=每线程在途上限；受每线程 16MB 缓冲上限折算（guide 说明）
     let qd_eff = qd_req.max(1).min((BUF_CAP_PER_THREAD / block as usize).max(1));
+    let bench_dir = resolve_bench_dir(&dir, arg_value(args, "bench-dir"))?;
     bench_progress(on_progress, "seqwrite", 0);
 
     unsafe {
-        let bench_dir = format!("{}\\Trim-DiskBench", dir);
         let _ = std::fs::create_dir_all(&bench_dir);
         let seq_per = (SEQ_WINDOW_TOTAL / threads as u64 / block).max(8) * block;
         let rand_per = ((RAND_WINDOW_TOTAL / threads as u64) / 4096).max(8) * 4096;
@@ -460,6 +460,27 @@ fn bench_setup_verdict(opened: usize, requested: usize) -> Result<(), String> {
         return Err(format!("测试文件只建成 {opened}/{requested} 个，本轮测速作废"));
     }
     Ok(())
+}
+
+/// 测速目录名（真机取证 2026-10-25 CDP）。
+///
+/// 原生侧原先自己拼 `{}\Trim-DiskBench`，而主进程按 `Trim-DiskBench-<世代号>` 清理 ——
+/// 两个名字**从来不是同一个**：清理动作落在一个原生根本不创建的目录上，残留没清掉、
+/// 「按世代隔离」也没兑现，成功分支跑完就在用户目录下留一个空目录。
+/// 现在目录名只有调用方这一个来源，原生只做「必须确实在 `--path` 之下」的形状校验
+/// （原生只在这里建文件、删自己建的文件，不删目录，所以这不是删除面守卫，
+///  而是防止调用方把测速写到盘上任意位置）。
+fn resolve_bench_dir(dir: &str, raw: Option<&str>) -> Result<String, String> {
+    let base = dir.trim_end_matches('\\');
+    let got = match raw {
+        Some(s) => s.to_string(),
+        None => format!("{base}\\Trim-DiskBench"),
+    };
+    let (b, g) = (base.to_ascii_lowercase(), got.to_ascii_lowercase());
+    if !g.starts_with(&b) || g.len() <= b.len() + 1 {
+        return Err("非法参数（--bench-dir 必须位于 --path 之下）".to_string());
+    }
+    Ok(got)
 }
 
 /// 磁盘测速 **数据入口**（lib 直调）：args 与 CLI `diskbench` 参数一致；
@@ -1324,7 +1345,7 @@ mod tests {
 
 #[cfg(test)]
 mod p1_6e_arg_tests {
-    use super::{bench_warn_field, clamp_to_whitelist, parse_bench_arg};
+    use super::{bench_warn_field, clamp_to_whitelist, parse_bench_arg, resolve_bench_dir};
 
     /// 「没给参数」与「给了但不是数字」都回落默认，但只有后者留痕。
     /// 判红自证：把 `parse_bench_arg` 的 `Err(_) =>` 支并回 `unwrap_or(default)` ⇒ 第二条红。
@@ -1372,5 +1393,24 @@ mod p1_6e_arg_tests {
             ",\"warn\":[\"a\",\"b\\\"带引号\\\"\"]",
             "两条都要进数组，且内嵌引号必须转义（否则回执整段解析失败）"
         );
+    }
+
+    /// 目录名的唯一来源（真机取证发现的两侧不同名）：调用方给名，原生只验形状。
+    /// 判红自证：删掉前缀校验 ⇒ 第三条红；把分隔符拼错 ⇒ 第二条红。
+    #[test]
+    fn 测速目录名由调用方单源给定() {
+        assert_eq!(
+            resolve_bench_dir("C:\\Users\\me\\Downloads", Some("C:\\Users\\me\\Downloads\\Trim-DiskBench-7")).ok(),
+            Some("C:\\Users\\me\\Downloads\\Trim-DiskBench-7".to_string()),
+            "调用方给的名字必须原样采用（两侧同名是这条修复的全部意义）"
+        );
+        assert_eq!(
+            resolve_bench_dir("C:\\Users\\me\\Downloads\\", None).ok(),
+            Some("C:\\Users\\me\\Downloads\\Trim-DiskBench".to_string()),
+            "CLI 不给名时留在原位置，且末尾反斜杠不得拼出双分隔符"
+        );
+        assert!(resolve_bench_dir("C:\\base", Some("D:\\other\\Trim-DiskBench-1")).is_err(), "目录不在 --path 之下要拒");
+        assert!(resolve_bench_dir("C:\\base", Some("C:\\base")).is_err(), "目录等于根本身要拒（清理动作会指向用户的整个目录）");
+        assert!(resolve_bench_dir("C:\\base", Some("c:\\BASE\\Trim-DiskBench-1")).is_ok(), "Windows 路径大小写不敏感");
     }
 }
