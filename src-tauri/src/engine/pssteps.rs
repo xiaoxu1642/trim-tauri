@@ -1018,6 +1018,11 @@ pub fn compile(body: &str) -> Result<Vec<PsOp>, String> {
     match parse_block(body, &mut vars) {
         Ok(ops) => Ok(ops),
         Err(reason) => {
+            // A6-M04：PsInline 会被「BOM + 固定首行」改写，先拒三类会因此变语义的形态；
+            // 具名原因优先于通用解析失败，便于数据层一眼定位。
+            if let Some(hazard) = crate::pwsh::injection_hazard(body) {
+                return Err(format!("{reason}；PsInline 不可注入：{hazard}"));
+            }
             if ps_inline_eligible(body) {
                 Ok(vec![PsOp::PsInline { script: body.to_string() }])
             } else {
@@ -2206,5 +2211,16 @@ mod tests {
             "仍有 {} 条 pwsh 步骤不可编译（详见上方清单）：扩解释器或登记 PsInline 白名单",
             fallback.len()
         );
+    }
+
+    /// A6-M04：PsInline 在注入前拒掉会变语义的首语句；`#requires` 不误伤。
+    #[test]
+    fn ps_inline拒绝注入后会变语义的首语句() {
+        let err = compile("param([string]$x)\nWrite-Output $x").unwrap_err();
+        assert!(err.contains("param"), "{err}");
+        let err2 = compile("\u{FEFF}Write-Output 1").unwrap_err();
+        assert!(err2.contains("BOM") || err2.contains("FEFF"), "{err2}");
+        let ops = compile("#requires -Version 5.1\nGet-AppxPackage -Name 'X'").expect("requires 不应被拒");
+        assert!(matches!(ops.as_slice(), [PsOp::PsInline { .. }]), "{ops:?}");
     }
 }

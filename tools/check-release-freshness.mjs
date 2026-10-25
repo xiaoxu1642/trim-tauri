@@ -83,6 +83,8 @@ const SRC_ROOTS = [
   'native-scanner/Cargo.toml',
   'vendor',
   'tools',
+  'src-tauri/capabilities',
+  'src-tauri/icons',
 ];
 const EXCLUDE_DIRS = new Set(['target', 'node_modules', '.git', 'build-release', 'docs']);
 

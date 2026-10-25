@@ -386,6 +386,7 @@ export const UNITS = [
     id: 'T1f', owner: 'sub', name: '门禁·优化域数据契约（简介/子项/分组/写入/安全/动态）',
     files: ['tools/check-item-intro.mjs', 'tools/check-optimizer-subitem-contract.mjs',
       'tools/check-optimizer-groups-sidecar.mjs', 'tools/check-optimizer-schema-sync.mjs',
+      'tools/check-bcd-row-ids.mjs',
       'tools/check-optimizer-security.mjs', 'tools/check-optimizer-dynamic.mjs'],
     contract: '优化域侧表 ⇄ 运行目录 / 简介库 / 写入契约 / 安全面 / 动态判据的双源对拍',
     boundary: '审的是侧表与目录/词表的一致性，不重复审运行时行为；真机执行面归 R3b/R5*',

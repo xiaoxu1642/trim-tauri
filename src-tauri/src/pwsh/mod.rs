@@ -211,18 +211,44 @@ impl Drop for TempScript {
     }
 }
 
+/// 收件箱脚本的固定首行（55 B ASCII，`ps1落盘字节…` 测试钉死）：PS 5.1 把重定向到管道的 stdout 按 OEM
+/// 码页写，必须显式设 UTF-8，否则中文输出塌成 U+FFFD。
+pub const PS_ENCODING_PREFIX: &str = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n";
+
+/// `.ps1` 落盘字节的唯一构造：BOM + 固定首行 + 脚本体（A6-M04：判定字节 ⇄ 执行字节同源）。
+pub fn render_ps1_bytes(script: &str) -> Vec<u8> {
+    let mut v = vec![0xEF, 0xBB, 0xBF];
+    v.extend_from_slice(PS_ENCODING_PREFIX.as_bytes());
+    v.extend_from_slice(script.as_bytes());
+    v
+}
+
+/// 注入前置风险谓词：在「BOM + 固定首行」之后会改变语义的三种形态。
+/// `#requires` 刻意不拒——PS 5.1 允许它出现在任意行（A6-M04 复核结论）。
+pub fn injection_hazard(script: &str) -> Option<&'static str> {
+    if script.starts_with('\u{FEFF}') {
+        return Some("脚本体以 U+FEFF 开头，注入后会形成双 BOM");
+    }
+    for line in script.lines() {
+        let t = line.trim_start();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let lower = t.to_ascii_lowercase();
+        if lower.starts_with("param(") || lower.starts_with("param (") {
+            return Some("首条语句是 param(...)，注入首行后不再是脚本首语句");
+        }
+        if lower == "using" || lower.starts_with("using ") || lower.starts_with("using\t") {
+            return Some("首条语句是 using，注入首行后不再是脚本首语句");
+        }
+        break;
+    }
+    None
+}
+
 /// 写临时 PowerShell 脚本：返回**守卫**，脚本随作用域结束自动删除（审查 v2-L2）。
-fn write_temp_script(content: &str, suffix: &str) -> Result<TempScript, String> {
+fn write_temp_script_bytes(bytes: &[u8], suffix: &str) -> Result<TempScript, String> {
     let dir = paths::temp_script_dir()?;
-    // .ps1 写入带 BOM 的 UTF-8：PS 5.1 默认按系统 ANSI 读取无 BOM 脚本，
-    // 中文注释会乱码导致解析失败；PS7 亦兼容 BOM。
-    let bytes: Vec<u8> = if suffix.eq_ignore_ascii_case(".ps1") {
-        let mut v = vec![0xEF, 0xBB, 0xBF];
-        v.extend_from_slice(content.as_bytes());
-        v
-    } else {
-        content.as_bytes().to_vec()
-    };
     // 审查 L-19（2026-10-03 L4）：独占创建（CREATE_NEW 语义）而非 create+truncate。
     // 同名文件若被同用户进程预先放好（哪怕做成 reparse 点），truncate 写入会跟随它
     // 写进去；独占创建下名字碰撞直接报错重取（random_token 内含原子序号，重试必得
@@ -291,10 +317,11 @@ pub fn run_inbox_script(script: &str, timeout: Duration, diag_op: Option<&str>) 
     // 中文字节会塌成 U+FFFD，下游 `@@RECYCLE@@` 协议把不存在的路径送进回收站逻辑。
     // 此前 appx.rs 在脚本内容里手写前缀（既定做法），但每个调用点各自记得写 —— 漏一处就
     // 复现一次。现在在唯一入口强制注入，一次免疫全部 inbox 调用点。重复注入无害（幂等）。
-    let prefixed = format!(
-        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n{script}"
-    );
-    let path = write_temp_script(&prefixed, ".ps1")?;
+    // A6-M04：注入前先用同一谓词拦掉「BOM / 首语句 param / using」三类，再落盘。
+    if let Some(hazard) = injection_hazard(script) {
+        return Err(format!("拒绝注入 PowerShell：{hazard}"));
+    }
+    let path = write_temp_script_bytes(&render_ps1_bytes(script), ".ps1")?;
     run_inbox_ps(path.path(), timeout, diag_op)
 }
 
@@ -993,6 +1020,30 @@ mod tests {
             "超时点之后应立刻收树返回（旧实现会被 ping 拖到 ≈20s），实耗 {elapsed:?}"
         );
         assert_eq!(out.code, -1, "超时统一按 -1 回执");
+    }
+
+    /// A6-M04：`.ps1` 落盘字节固定为 BOM(3) + 固定首行(55) + 脚本体，body 偏移 58。
+    /// 判红自证：改前缀一个字符 / 删 BOM ⇒ 断言红。
+    #[test]
+    fn ps1落盘字节固定为bom加55字节首行() {
+        let body = "Write-Output 'x'";
+        let bytes = render_ps1_bytes(body);
+        assert_eq!(PS_ENCODING_PREFIX.len(), 55, "首行长度变了：{}", PS_ENCODING_PREFIX.len());
+        assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF], "必须带 UTF-8 BOM");
+        assert_eq!(&bytes[3..58], PS_ENCODING_PREFIX.as_bytes());
+        assert_eq!(&bytes[58..], body.as_bytes(), "body 必须从偏移 58 开始");
+        assert_eq!(bytes.len(), 3 + 55 + body.len());
+    }
+
+    /// A6-M04：注入前置谓词只拦「BOM / 首语句 param / using」，不误伤 #requires。
+    #[test]
+    fn 注入风险谓词拦住三类且不误伤requires() {
+        assert!(injection_hazard("\u{FEFF}Write-Output 1").is_some());
+        assert!(injection_hazard("param([string]$x)\nWrite-Output $x").is_some());
+        assert!(injection_hazard("param ([string]$x)\nWrite-Output $x").is_some());
+        assert!(injection_hazard("# c\nusing module X\nWrite-Output 1").is_some());
+        assert!(injection_hazard("#requires -Version 5.1\nGet-AppxPackage -Name 'X'").is_none());
+        assert!(injection_hazard("\n# c\nWrite-Output 1").is_none());
     }
 }
 
