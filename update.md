@@ -20,7 +20,7 @@
 
 ⑧ **删除值失败不把「读不到」当「不存在」** —— 症状：还原时删除某个注册表值失败，程序去读现值，读不出来（访问拒绝等）也会被当成「值本来就不存在」而放过，等于把一次失败的永久删除当成已完成。根因：判定用的是 `read_reg_value_faithful(..).is_none()`，它把「读不出来」与「不存在」塌成同一个 `None`。修法：改走三态读值口径 —— 确认不存在才放过，读不出来按失败上报且只带错误码名、不带值内容，值还在则按删除失败报。
 
-⑨ **本版验证（如实标注）** —— release 构建真实跑完（`cargo tauri build --bundles nsis`），按 `--app-version 0.8.7` 完成签名（trusted comment 含 `file:Trim_0.8.7_x64-setup.exe` 与 `version:0.8.7`）；src-tauri 全量测试 lib 856 + ipc_smoke 15 + module_smoke 61 + safestorage 1 = **933 条通过、0 失败、97 条 ignored**；native-scanner lib 98 + 集成 12 + 3 = **113 条通过、0 失败、10 条 ignored**；必跑 Node 门禁 **66 条全绿**（新增 `check-finder-scan-notes` 一条）。本版新增的 10 条判红断言逐条做过「故意破坏一次、确认退出非零、再恢复」。finder 前端提示在 dev 窗口用 CDP 打桩实测：丢根 2 个 + 根截断 ⇒ 一条 warning 且点名两项，零值回执 ⇒ 无额外提示。**未做的验证**：src-tauri 97 条 + native-scanner 10 条 `#[ignore]` 真机用例本轮未跑（本版新增的 3 条真机探针：任务缺失分类、HKLM 管理员摘要写入、部分写回统计，均已登记待发布前人工跑）；安装包升级安装与双击起窗未人工目检；P3 余下 19 条按方案只记账未施工。
+⑨ **本版验证（如实标注）** —— release 构建真实跑完（`cargo tauri build --bundles nsis`，3 分 30 秒），按 `--app-version 0.8.7` 完成签名（trusted comment 含 `file:Trim_0.8.7_x64-setup.exe` 与 `version:0.8.7`）；src-tauri 全量测试 lib 856 + ipc_smoke 15 + module_smoke 61 + safestorage 1 = **933 条通过、0 失败、97 条 ignored**；native-scanner lib 98 + 集成 12 + 3 = **113 条通过、0 失败、10 条 ignored**；必跑 Node 门禁 **66 条全绿**（新增 `check-finder-scan-notes` 一条）。本版新增的 10 条判红断言逐条做过「故意破坏一次、确认退出非零、再恢复」。finder 前端提示在 dev 窗口用 CDP 打桩实测：丢根 2 个 + 根截断 ⇒ 一条 warning 且点名两项，零值回执 ⇒ 无额外提示。本版新增的 5 条真机探针已实跑通过（任务缺失分类、任务被拒分类、HKLM 管理员摘要写入后放行、部分写回失败时统计不丢、未知类型值读作 Unknown）。发版产物：GitHub release 四资产与 AtomGit 三件均已上线并匿名回读验哈希一致，AtomGit raw 清单与仓根逐字节一致；桌面符号链接入口实测起窗（窗口标题 `Trim`）。**未做的验证**：src-tauri 余下 92 条 + native-scanner 10 条 `#[ignore]` 真机用例本轮未跑；安装包**升级安装**未人工目检（只验了便携/桌面入口起窗）；P3 余下 19 条按方案只记账未施工。
 
 ## 版本 0.8.6（2026-10-23 清理模块：扫描提速、回执瘦身与规则库收敛）
 
