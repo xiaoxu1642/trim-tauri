@@ -31,6 +31,7 @@
     'cleanupAgeHint',
     'updaterCheckHint',
     'infoCdpState',
+    'contextDisabledSummary',
   ];
   const LIVE_OFF_HOSTS = [
     'memUseValue',
@@ -40,7 +41,6 @@
     'realtimeDown',
     'realtimeUp',
     'realtimeLossDetail',
-    'contextSelectedCount',
   ];
   const mount = (ids, mode) => {
     for (const id of ids) {

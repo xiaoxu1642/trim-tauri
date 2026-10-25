@@ -208,7 +208,7 @@ const LIVE_BASELINE = [
   { id: 'realtimeDown', mode: 'off', where: 'idle' },
   { id: 'realtimeUp', mode: 'off', where: 'idle' },
   { id: 'realtimeLossDetail', mode: 'off', where: 'idle' },
-  { id: 'contextSelectedCount', mode: 'off', where: 'idle' },
+  { id: 'contextDisabledSummary', mode: 'polite', where: 'idle' },
   { id: 'maintBatchProgressText', mode: 'polite', where: 'html' },
   { id: 'pmCount', mode: 'polite', where: 'html' },
 ];

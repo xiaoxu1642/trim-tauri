@@ -202,7 +202,7 @@
       return await window.app.confirmDanger(
         '删除被拦截的启动项',
         `「${itemName}」${reason}\n\n删除后该项将不再随本次扫描保留；若程序再次自行创建，下次扫描将再次提示。是否删除？`,
-        '删除',
+        '仍然删除',
         '取消',
         '此操作将删除该启动项（不可恢复，删除前请确认无需再随系统启动）'
       );
@@ -689,9 +689,10 @@
     const act = enable ? '启用' : '禁用';
     const ok = await window.app.confirm(
       `${act}启动项`,
-      `将${act}以下 ${selItems.length} 个启动项：\n${selItems.map(i => '· ' + i.name).join('\n')}\n\n${enable ? '（启用后该项将随系统启动运行）' : '（禁用后可随时重新启用，操作可逆）'}`,
+      `将${act}以下 ${selItems.length} 个启动项。\n\n${enable ? '（启用后该项将随系统启动运行）' : '（禁用后可随时重新启用，操作可逆）'}`,
       act,
-      '取消'
+      '取消',
+      { consequences: selItems.map(i => ({ name: i.name, text: i.command || i.location || '' })) }
     );
     if (!ok) return;
     try {
@@ -759,10 +760,11 @@
     // 删除类操作：规范要求红色二次确认
     const ok = await window.app.confirmDanger(
       '删除启动项',
-      `将删除以下 ${selItems.length} 个启动项（删除前会自动备份）：\n${selItems.map(i => '· ' + i.name).join('\n')}`,
-      '删除',
+      `将删除以下 ${selItems.length} 个启动项（删除前会自动备份）。`,
+      '仍然删除',
       '取消',
-      '此操作不可逆，删除后需重新配置才能恢复。'
+      '此操作不可逆，删除后需重新配置才能恢复。',
+      selItems.map(i => ({ name: i.name, text: i.command || i.location || '' }))
     );
     if (!ok) return;
     try {

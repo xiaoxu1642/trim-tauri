@@ -609,7 +609,10 @@
     // 组头的「N 项 · M 个位置 · K 已禁用」由 renderOwnerColumn 直接写（每次重渲染重建 DOM），
     // 这里只留页面上那个常驻的已禁用总数。
     const countEl = document.getElementById('contextSelectedCount');
-    if (countEl) countEl.textContent = items.filter(it => it.enabled === false).length;
+    if (countEl) {
+      const next = String(items.filter(it => it.enabled === false).length);
+      if (countEl.textContent !== next) countEl.textContent = next;
+    }
   }
 
   // ==================== 启停切换（勾选=启用，取消=禁用） ====================
@@ -742,13 +745,16 @@
     try {
       const risky = payloads.filter(p => p.item && p.item.confirmRequired && p.enabled === false);
       if (risky.length && window.api?.contextmenu?.toggle) {
-        const lines = risky.map(p => '· ' + p.item.name + '：' + (p.item.confirmReason || '基础打开动词，禁用后双击与默认打开行为可能改变')).join('\n');
         const ok = await window.app?.confirmDanger(
           '禁用基础打开项',
-          `即将禁用 ${risky.length} 项：\n${lines}`,
-          '确认禁用',
+          `即将禁用 ${risky.length} 项。`,
+          '仍然禁用',
           '取消',
-          '这类项承载资源管理器的默认「打开/浏览」行为，禁用后可能出现双击无反应，需重新启用才能恢复。'
+          '这类项承载资源管理器的默认「打开/浏览」行为，禁用后可能出现双击无反应，需重新启用才能恢复。',
+          risky.map(p => ({
+            name: p.item.name,
+            text: p.item.confirmReason || '基础打开动词，禁用后双击与默认打开行为可能改变',
+          }))
         );
         if (!ok) return;
       }
@@ -949,7 +955,7 @@
       const ok = await window.app?.confirmDanger(
         '重启资源管理器',
         '将结束并重新打开当前会话的资源管理器（explorer.exe）。\n桌面与任务栏会短暂消失后自动恢复，已打开的文件夹窗口会被关闭。',
-        '确认重启',
+        '仍然重启',
         '取消',
         '只影响当前登录会话；其他用户与服务会话的资源管理器不受影响。'
       );

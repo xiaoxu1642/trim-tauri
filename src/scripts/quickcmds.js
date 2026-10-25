@@ -94,20 +94,27 @@
     }).join('');
 
     el.querySelectorAll('[data-qrun]').forEach(btn => {
-      btn.addEventListener('click', () => runCmd(btn.dataset.qrun));
+      btn.addEventListener('click', () => runCmd(btn.dataset.qrun, btn));
     });
     el.querySelectorAll('[data-qcopy]').forEach(btn => {
       btn.addEventListener('click', () => copyCmd(btn.dataset.qcopy));
     });
   }
 
-  async function runCmd(id) {
+  // 在途集合按命令 id 计数：同一条命令在途时按钮置灰、重复点击直接丢弃。
+  // 为什么需要：打开通道是含 runas 的 MAIN 档，双击会起两个 UAC / 两个实例。
+  const inFlight = new Set();
+
+  async function runCmd(id, btn) {
     const item = (window.QUICKCMDS_DATA?.CMDS || []).find(c => c.id === id);
     if (!item) return;
     if (!window.api?.quickCmds?.run) {
       window.app?.toast?.('warning', '浏览器预览模式不支持执行快捷指令');
       return;
     }
+    if (inFlight.has(id)) return;
+    inFlight.add(id);
+    if (btn) btn.disabled = true;
     try {
       const resp = await window.api.quickCmds.run(id);
       if (resp?.success) {
@@ -118,6 +125,9 @@
       }
     } catch (e) {
       window.app?.toast?.('error', '执行失败：' + e.message);
+    } finally {
+      inFlight.delete(id);
+      if (btn) btn.disabled = false;
     }
   }
 
