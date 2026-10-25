@@ -104,9 +104,20 @@ export const UNITS = [
     gates: ['check-delete-callsites', 'check-native-hygiene'],
   },
   {
-    id: 'R5b', owner: 'sub', name: 'native 其余（扫描/注册表/进程）',
+    // 必须排在 R5b 之前：R5b 用 engine/native 目录兜底认领，兜底只吃此前无人认领的文件
+    // （同 R6c 先例）。registry.rs 是高扇入底层（三态读器 / 枚举 / 写侧原语都在里面），
+    // 2026-10-25 P1-6G 给它加缓冲增长与 incomplete 档后，R5b 整包 8046 行越 U2 的 8000
+    // 上限；按本门禁自述口径「优先按执行链」把注册表读写单独切成一个单元，上限不放宽。
+    id: 'R5c', owner: 'sub', name: 'native 注册表读写（三态读器与枚举原语）',
+    files: [`${N}/registry.rs`],
+    contract: 'read_reg_value_state 三态 / 值名枚举的增长缓冲与 incomplete / reg_restore_write·delete 的幂等口径',
+    boundary: '红线口径一律引用 R6a 基线；「读不出来」不得折成「不存在」是本单元唯一真源，业务侧不许再抄一套',
+    gates: ['check-native-hygiene', 'check-delete-callsites'],
+  },
+  {
+    id: 'R5b', owner: 'sub', name: 'native 其余（扫描/进程/外设）',
     dirs: [{ dir: N, ext: ['.rs'] }],
-    contract: 'registry / process / runtimes_net / diagnostics / syspanel / paths_scan 等（bsod 与体检已于 2026-10-12 退役）',
+    contract: 'process / runtimes_net / diagnostics / syspanel / paths_scan 等（bsod 与体检已于 2026-10-12 退役；注册表读写已于 2026-10-25 切给 R5c）',
     boundary: '外部进程与句柄卫生与 A5 交叉，本单元只审域内逻辑',
     gates: ['check-native-hygiene', 'check-system-bin'],
   },

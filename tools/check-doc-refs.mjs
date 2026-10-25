@@ -259,31 +259,47 @@ if (agentsPresent) {
   console.log('⚠ AGENTS.md 缺席：3 白名单坐标存在性**未校验**（SKIP，不是通过）');
 }
 
-// ---- 4. U8（v5 批次 9 门禁候选 9）：本机审查文档的表值必须带可重跑取数命令 ----
-// 《方法论》等 docs/ 文档的表格数字是下一轮审查的派单依据；表值旁没有取数命令，
-// 数字漂移就无人能发现（X0-3 现算 14+12 处过期）。docs/ 是未跟踪本机资料区：
-// 缺席时显式 SKIP，**不是通过**。本批落地骨架（标记存在性 + 地板）；过期值全量
-// 修复按修复方案 §4 归后续批次，不冒充已修。
+// ---- 4. U8（v5 批次 9 门禁候选 9 / P2-A A-4）：审查文档的表值必须带可重跑取数命令 ----
+// 《方法论》的表格数字是下一轮审查的派单依据；表值旁没有取数命令，数字漂移就无人能发现
+// （X0-3 现算 14+12 处过期）。
+//
+// A-4（2026-10-24 拍板 D1）：文档已从仓库内 `docs/` 搬进 Obsidian 库，门禁**直接读同一份**，
+// 不复制第二份（两份必腐烂）。库根只从 `--vault-root <路径>` 或环境变量 `TRIM_VAULT_ROOT`
+// 传入 —— 本机绝对路径写进跟踪文件，换台机器就成了指向虚无的注释（AGENTS §2 红线）。
+// 三档语义：没给根且仓内副本也不在 ⇒ 显式 SKIP 并声明本节未校验；给了根却找不到文件 ⇒
+// **判红**（给根就是声明「语料该在这儿」，静默 SKIP 会把搬家做成永久失明）。
 {
-  const METH = join(DOCS_DIR, '本仓库审查规范', '本仓库审查方法论.md');
-  if (existsSync(METH)) {
+  const argOf = (name) => {
+    const i = process.argv.indexOf(name);
+    return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : '';
+  };
+  const vaultRoot = argOf('--vault-root') || process.env.TRIM_VAULT_ROOT || '';
+  const candidates = [
+    vaultRoot && join(vaultRoot, 'trim-tauri', '本仓库审查规范', '本仓库审查方法论.md'),
+    join(DOCS_DIR, '本仓库审查规范', '本仓库审查方法论.md'),
+  ].filter(Boolean);
+  const METH = candidates.find((p) => existsSync(p)) || '';
+  if (METH) {
     const text = readFileSync(METH, 'utf8');
     // 表值行（| 开头且含两位以上数字）粗数，作扫描面地板
     const tableRows = text.split('\n').filter((l) => /^\s*\|/.test(l) && /\d{2,}/.test(l)).length;
     check(
       tableRows >= 50,
-      `4. U8 语料自检：《方法论》表格行 ${tableRows}（≥ 50 地板，防解析失明）`,
+      `4. U8 语料自检：《方法论》表格行 ${tableRows}（≥ 50 地板，防解析失明）—— ${vaultRoot ? 'vault 根' : '仓内 docs/'}`,
       tableRows < 50 ? '表格行趋零 ⇒ 文件被搬/改名或解析失明' : '',
     );
     const withCmd = (text.match(/现算|取数命令|命令：/g) || []).length;
     check(
       withCmd >= 10,
-      `4b. U8 骨架：取数标记 ${withCmd} 处（≥ 10；**骨架版**——26 处过期值全量修复归后续批次，修复方案 §4）`,
+      `4b. U8 骨架：取数标记 ${withCmd} 处（≥ 10；**骨架版**——过期值全量修复归后续批次，修复方案 §4）`,
       withCmd < 10 ? '取数标记趋零 ⇒ U8 判据失明' : '',
     );
+  } else if (vaultRoot) {
+    check(false, '4. U8：给了 --vault-root / TRIM_VAULT_ROOT 却找不到《方法论》',
+      `两个候选都不在：${candidates.join(' ; ')} ⇒ 库根传错、文件改名或搬家未同步本门禁（判红，不静默 SKIP）`);
   } else {
     skipped++;
-    console.log('⚠ U8：《方法论》不在本机（未跟踪资料区）——表值取数命令检查**未校验**（SKIP，不是通过）');
+    console.log('⚠ U8：未给 --vault-root / TRIM_VAULT_ROOT，且仓内 docs/ 副本不在 —— 表值取数命令检查**未校验**（SKIP，不是通过）');
   }
 }
 

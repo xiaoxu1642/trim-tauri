@@ -512,8 +512,22 @@ for (const [rel, cs] of commentsByFile) {
       const p = join(ROOT, m[1]);
       if (!existsSync(p)) { rotFileLine.push(`${rel}:${c.line} 引用 ${m[1]}:${m[2]}，但文件不存在`); continue; }
       const lineNo = Number(m[2]);
-      const total = readFileSync(p, 'utf8').split('\n').length;
-      if (lineNo > total) rotFileLine.push(`${rel}:${c.line} 引用 ${m[1]}:${lineNo}，但该文件只有 ${total} 行`);
+      const lines = readFileSync(p, 'utf8').split('\n');
+      if (lineNo > lines.length) rotFileLine.push(`${rel}:${c.line} 引用 ${m[1]}:${lineNo}，但该文件只有 ${lines.length} 行`);
+      // R3e（P2-A/A-3）：R3c 只验「文件在、行号没越界」，这是**结构空转** ——
+      // 坐标可以指着完全无关的一行而照样绿。现在要求同一条注释里用反引号点名被指对象，
+      // 且该符号必须出现在引用行 ±2 行内。二者任一不成立即红：
+      //   · 只给坐标不给名字 ⇒ 行号一漂，没人知道这条引用原本指谁；
+      //   · 给了名字但 ±2 行找不到 ⇒ 要么坐标漂了、要么符号改名了，两种都是腐烂。
+      const syms = [...c.text.matchAll(/`([A-Za-z_][A-Za-z0-9_]{2,})`/g)].map((x) => x[1]);
+      if (syms.length === 0) {
+        rotFileLine.push(`${rel}:${c.line} ${m[1]}:${lineNo} 只给坐标、没点名对象 ⇒ 补一个反引号符号名（否则行号一漂这条引用就成了无人认领的坐标）`);
+        continue;
+      }
+      const win = lines.slice(Math.max(0, lineNo - 3), Math.min(lines.length, lineNo + 1)).join('\n');
+      if (!syms.some((s) => new RegExp(`\\b${s}\\b`).test(win))) {
+        rotFileLine.push(`${rel}:${c.line} 点名 ${syms.map((s) => `\`${s}\``).join(' / ')}，但 ${m[1]}:${lineNo} 的 ±2 行里没有它 ⇒ 坐标漂移或符号已改名`);
+      }
     }
     RE_KB_CLAIM.lastIndex = 0;
     while ((m = RE_KB_CLAIM.exec(c.text)) !== null) {
@@ -548,7 +562,7 @@ check(
 );
 check(
   rotFileLine.length === 0,
-  'R3c. 注释里的 `file:行` 坐标在盘上成立（文件存在且行号在范围内）',
+  'R3c+R3e. 注释里的 `file:行` 坐标在盘上成立（文件存在、行号在范围内），且点名被指符号（±2 行内必须命中）',
   rotFileLine.length ? rotFileLine.slice(0, 10).join('；') : '无腐烂',
 );
 check(
@@ -762,6 +776,36 @@ const POSITIVE_CONTROLS = (() => {
   const ghost = '`tools/no-such-file-xyz.mjs:9`';
   const g2 = /`((?:src|src-tauri|tools|native-scanner)\/[\w./-]+\.(?:rs|js|mjs|ps1|json|css|html)):(\d+)`/.exec(ghost);
   if (!g2 || existsSync(join(ROOT, g2[1]))) problems.push('R3c 失效：不存在的坐标未被抓到');
+
+  // R3e（P2-A/A-3）：坐标**存在但指错地方**必须被抓到 —— R3c 只验「文件在、行号没越界」，
+  // 这三条合成样本喂给同一个判定器（同一实现，不另抄一份判据）：
+  //   E1 只给坐标、不点名对象 ⇒ 红；E2 点了名但 ±2 行没有它 ⇒ 红；E3 名字与坐标都对 ⇒ 放行。
+  const r3eJudge = (comment, targetFile, targetLine) => {
+    const syms = [...comment.matchAll(/`([A-Za-z_][A-Za-z0-9_]{2,})`/g)].map((x) => x[1]);
+    if (syms.length === 0) return false;
+    const win = readFileSync(targetFile, 'utf8').split('\n')
+      .slice(Math.max(0, targetLine - 3), targetLine + 1).join('\n');
+    return syms.some((s) => new RegExp(`\\b${s}\\b`).test(win));
+  };
+  if (r3eJudge('见 `tools/check-comment-rot.mjs:1`', realPath, 1) !== false) {
+    problems.push('R3e 失效：只给坐标、没点名的引用竟被放行');
+  }
+  if (r3eJudge('点名 `no_such_symbol_qwerty` 于 `tools/check-comment-rot.mjs:1`', realPath, 1) !== false) {
+    problems.push('R3e 失效：±2 行里找不到被点名符号，竟被放行（坐标漂移或符号改名）');
+  }
+  // R3e 的样本共用**同一份注释文本**：两条唯一不同的是行号对不对。
+  // 锚点**现算**（不写死）：这条门禁自己的行号会随每次编辑漂移，写死数字等于
+  // 制造一条必然腐烂的注释 —— 正是本门禁要抓的形态。
+  const e3File = 'tools/check-comment-rot.mjs';
+  const e3Line = readFileSync(realPath, 'utf8').split('\n').findIndex((l) => l.startsWith('const RE_FILE_LINE')) + 1;
+  const e3Comment = `\`RE_FILE_LINE\` 的定义见 \`${e3File}:${e3Line}\``;
+  const e3Wrong = `\`RE_FILE_LINE\` 的定义见 \`${e3File}:1\``;
+  if (r3eJudge(e3Comment, realPath, e3Line) !== true) {
+    problems.push('R3e 失效：名字与坐标都对的真样本被误判红（判定器变成永远红）');
+  }
+  if (r3eJudge(e3Wrong, realPath, 1) !== false) {
+    problems.push('R3e 失效：同一条注释、坐标漂到第 1 行，却仍被放行（判定器对漂移不敏感）');
+  }
 
   // R3d：带「级」的量级措辞与登记常量必须放行；裸测量型 KB 必须命中
   if (RE_KB_CLAIM.test('规则 JSON 全文（60KB 级）')) problems.push('R3d 失效：量级措辞「60KB 级」被判红');

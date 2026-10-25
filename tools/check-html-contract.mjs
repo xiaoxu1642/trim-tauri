@@ -38,8 +38,10 @@ for (const f of jsFiles) {
 }
 const inlineHits = [];
 const missingDs = [];
-const orderHits = [];
+const spotOrderHits = [];
+const dsOrderHits = [];
 const idDups = [];
+let spotPairs = 0; // 同一份 HTML 里 spotlight 与 liquid-glass 都静态挂载的对数（本仓为 0）
 
 for (const f of htmlFiles) {
   const text = readFileSync(join(SRC, f), 'utf8');
@@ -58,13 +60,16 @@ for (const f of htmlFiles) {
   const dsIdx = srcs.findIndex((s) => /scripts\/ds\.js$/.test(s));
   const posGlass = clean.search(/src="[^"]*scripts\/liquid-glass\.js"/);
   const posSpot = clean.search(/src="[^"]*scripts\/spotlight\.js"/);
-  if (posGlass >= 0 && posSpot >= 0 && posSpot < posGlass) {
-    orderHits.push(`${f}: spotlight.js 未在 liquid-glass.js 之后`);
+  if (posGlass >= 0 && posSpot >= 0) {
+    spotPairs++;
+    if (posSpot < posGlass) {
+      spotOrderHits.push(`${f}: spotlight.js 未在 liquid-glass.js 之后`);
+    }
   }
   for (const [i, s] of srcs.entries()) {
     const name = s.split('/').pop();
     if (dsUsers.has(name) && dsIdx >= 0 && i < dsIdx) {
-      orderHits.push(`${f}: ${name}（ds 使用方）先于 ds.js 加载`);
+      dsOrderHits.push(`${f}: ${name}（ds 使用方）先于 ds.js 加载`);
     }
   }
   // 4. 同文档 id 唯一（P2-4 / F3-M05）：重复 id 会让 getElementById 恒取文档里第一个 ——
@@ -85,10 +90,33 @@ check(
   `2. ${htmlFiles.length} 个窗口 HTML 全部挂载 ds.css + ds.js`,
   missingDs.join(', '),
 );
+// ── 3a（P2-A/A-5）：spotlight ⇄ liquid-glass 的加载序，带**可判对象数下限** ──
+// 拆两条之前：spotlight 那一支与有对象的 ds 支共用一条 ✓，而它自己恒 0 对象 ——
+// 本仓 spotlight.js 只出现在 app.js 的 IDLE_SCRIPTS（首帧后注入），liquid-glass.js 才是
+// 静态 defer，「同一份 HTML 里两者都静态挂载」永不成立。0 对象的断言不是「通过」是「没测」，
+// 摘掉 spotlight 的按需入口这种回归不会留下任何信号。现在把可判对象算成
+// 「静态对 + 按需注入支」，掉到 0 即红。
+let appJs = '';
+try { appJs = readFileSync(join(SRC, 'scripts', 'app.js'), 'utf8'); } catch { /* 下面按未校验处理 */ }
+let indexHtml = '';
+try { indexHtml = readFileSync(join(SRC, 'index.html'), 'utf8'); } catch { /* 同上 */ }
+const idleList = (appJs.match(/const IDLE_SCRIPTS\s*=\s*\[([\s\S]*?)\]/) || ['', ''])[1];
+const spotInIdle = /'scripts\/spotlight\.js'/.test(appJs) && /spotlight\.js/.test(idleList);
+const liquidStatic = /scripts\/liquid-glass\.js/.test(indexHtml);
+const spotObjects = spotPairs + (spotInIdle && liquidStatic ? 1 : 0);
 check(
-  orderHits.length === 0,
-  '3. 加载序：spotlight 在 liquid-glass 之后；ds.js 先于全部现算 ds 使用方',
-  orderHits.join('；'),
+  !!appJs && spotOrderHits.length === 0 && spotObjects >= 1,
+  `3a. spotlight 在 liquid-glass 之后（可判对象 ${spotObjects}：静态对 ${spotPairs} + 按需注入支 ${spotInIdle && liquidStatic ? 1 : 0}）`,
+  !appJs ? 'app.js 读不到 ⇒ 本节未校验（按失败处理，不冒充通过）'
+    : spotOrderHits.length ? spotOrderHits.join('；')
+      : spotObjects === 0
+        ? '0 个可判对象：spotlight.js 既不在 IDLE_SCRIPTS、也没有静态对 ⇒ 判据已失明（摘掉按需入口正是这个形状），不是仓库变干净'
+        : '',
+);
+check(
+  dsOrderHits.length === 0,
+  `3b. ds.js 先于全部现算 ds 使用方（使用方 ${dsUsers.size} 个 / HTML ${htmlFiles.length} 份）`,
+  dsOrderHits.join('；'),
 );
 check(
   idDups.length === 0,

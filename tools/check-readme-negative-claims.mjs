@@ -38,12 +38,32 @@ const retired = new Set(JSON.parse(read('src-tauri/data/retired-optimizations.js
 // ---- 承诺真源（本机资料区，不入库）：缺失即 SKIP（红线口径），不崩也不打 ✓ ----
 // T1a-K01：本机资料区的真实路径不得写进跟踪文件（含门禁源码），用段拼接；
 // 「本机资料区」措辞本身是 AGENTS §2 认可的合法指代。
+//
+// A-4 / 拍板 D2（2026-10-25）：文档已从仓库内 `docs/` 搬进 Obsidian 库，本门禁**直接读
+// 同一份**，不复制第二份。库根只从 `--vault-root <路径>` 或 `TRIM_VAULT_ROOT` 传入。
+// 三档：没给根且仓内副本不在 ⇒ SKIP（未校验）；给了根 ⇒ 必须读得到，读不到判红并列出两个
+// 候选路径（给根就是声明「真源该在这儿」，静默 SKIP 会把搬家做成长期失明）。
 const CLAIMS_DOC_SEGMENTS = ['本仓库其他规范流程', '否定式承诺-不做的清单.md'];
-const claimsPath = path.join(ROOT, 'docs', ...CLAIMS_DOC_SEGMENTS);
-if (!fs.existsSync(claimsPath)) {
+const argOf = (name) => {
+  const i = process.argv.indexOf(name);
+  return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : '';
+};
+const vaultRoot = argOf('--vault-root') || process.env.TRIM_VAULT_ROOT || '';
+const claimsCandidates = [
+  vaultRoot && path.join(vaultRoot, 'trim-tauri', ...CLAIMS_DOC_SEGMENTS),
+  path.join(ROOT, 'docs', ...CLAIMS_DOC_SEGMENTS),
+].filter(Boolean);
+const claimsPath = claimsCandidates.find((p) => fs.existsSync(p)) || '';
+if (!claimsPath) {
   console.warn('=== 否定式承诺门禁 ===\n');
+  if (vaultRoot) {
+    console.error(`✗ 给了 --vault-root / TRIM_VAULT_ROOT 却找不到承诺真源：${claimsCandidates.join(' ; ')}`);
+    console.error('  ⇒ 库根传错、文件改名或搬家未同步本门禁 —— 按失败处理，不静默 SKIP');
+    process.exit(1);
+  }
   console.warn(`⚠ 承诺真源缺失（本机资料区·${CLAIMS_DOC_SEGMENTS.join('/')}）——本门禁全部**未校验**（SKIP，不是通过）`);
   console.warn('  · 该文件属本机资料区、不入库；干净克隆 / 他机下按 SKIP 处理是红线口径。');
+  console.warn('  · 本机要真实执行：node tools/check-readme-negative-claims.mjs --vault-root <Obsidian 库根>（或设 TRIM_VAULT_ROOT）。');
   process.exit(0);
 }
 const claimsDoc = fs.readFileSync(claimsPath, 'utf8');

@@ -189,7 +189,8 @@ const MUST_MAIN = [
   'uninstall_batch_restore',
   // R2b-L08（v7.2 P2，2026-10-22）：原先登记在只读档的理由是「疑点：写 logo 缓存文件」，
   // 与本命令的实现相反——它一个字节都不写，只读 `\WindowsApps\` 下的 .png 回 base64。
-  // 消费面现算只有主窗：唯一调用点 `src/scripts/uninstall.js:183`，而 uninstall.js 只由
+  // 消费面现算只有主窗：唯一调用点是 `appxLogo`（坐标 `src/scripts/uninstall.js:183`），
+  // 而 uninstall.js 只由
   // app.js 的 `uninstall: ['scripts/uninstall.js']` 按需加载、app.js 只出现在 index.html；
   // 三个副窗页面各挂自己的 *-window.js，`rg appxLogo src/*.html` 零命中
   // ⇒ 按 AGENTS §3「只有主窗会调的通道不给 readonly」收归 MAIN，改档不锁死任何副窗功能。
