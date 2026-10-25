@@ -79,7 +79,9 @@ pub enum PsOp {
 }
 
 /// 变量表（编译期逐语句就地更新；ForSubKey/ForDevKey 快照进算子供执行期延迟解析）
-pub type VarMap = std::collections::HashMap<String, Expr>;// REG_VALUE_TYPE 裸值（windows crate 的 REG_VALUE_TYPE(u32)）
+pub type VarMap = std::collections::HashMap<String, Expr>;
+
+/// REG_VALUE_TYPE 裸值（windows crate 的 REG_VALUE_TYPE(u32)）
 const KIND_SZ: u32 = 1;
 const KIND_EXPAND_SZ: u32 = 2;
 const KIND_BINARY: u32 = 3;
@@ -272,32 +274,89 @@ fn has_flag(cmd: &Cmd, k: &str) -> bool {
 ///
 /// 其余取值（`Inquire`、拼错、依赖变量展开）一律 **不识别** → 交回 PsInline 逐字
 /// 交给 PowerShell 自己解释，绝不猜一个相近语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ErrorAction {
     Silent,
     Loud,
     Unknown,
 }
 
+/// 取命名参数的值：`-Name Value` 与 `-Name:Value` 两种写法等价。
+///
+/// 返回：`None` = 该参数不存在；`Some(None)` = 存在但没带值；`Some(Some(v))` = 有值。
+fn named_param_value(cmd: &Cmd, base: &str) -> Option<Option<String>> {
+    for (n, v) in &cmd.named {
+        let (b, inline) = match n.split_once(':') {
+            Some((b, val)) => (b, Some(val.to_string())),
+            None => (n.as_str(), None),
+        };
+        if b.eq_ignore_ascii_case(base) {
+            return Some(inline.or_else(|| v.clone()));
+        }
+    }
+    None
+}
+
 /// 取命令的 `-ErrorAction` 语义；`None` = 语句里没有这个参数（PS 默认非静默）。
 ///
 /// 参数名大小写不敏感（PS 自身语义）；取值只认上表里的明确形态。
 fn error_action_of(cmd: &Cmd) -> Option<ErrorAction> {
-    let raw = cmd
-        .named
-        .iter()
-        .find(|(n, _)| n.eq_ignore_ascii_case("ErrorAction"))?;
-    let Some(v) = raw.1.as_deref() else {
+    match named_param_value(cmd, "ErrorAction") {
+        None => None,
         // `-ErrorAction` 不带值不是合法形态，不许当成「没写」
-        return Some(ErrorAction::Unknown);
-    };
-    let v = v.trim().trim_matches('"').trim_matches('\'');
-    if v.eq_ignore_ascii_case("SilentlyContinue") || v.eq_ignore_ascii_case("Ignore") {
-        Some(ErrorAction::Silent)
-    } else if v.eq_ignore_ascii_case("Stop") || v.eq_ignore_ascii_case("Continue") {
-        Some(ErrorAction::Loud)
-    } else {
-        Some(ErrorAction::Unknown)
+        Some(None) => Some(ErrorAction::Unknown),
+        Some(Some(v)) => {
+            let v = v.trim().trim_matches('"').trim_matches('\'');
+            if v.eq_ignore_ascii_case("SilentlyContinue") || v.eq_ignore_ascii_case("Ignore") {
+                Some(ErrorAction::Silent)
+            } else if v.eq_ignore_ascii_case("Stop") || v.eq_ignore_ascii_case("Continue") {
+                Some(ErrorAction::Loud)
+            } else {
+                Some(ErrorAction::Unknown)
+            }
+        }
     }
+}
+
+/// 分支参数契约：**分支允许参数 + 公共参数**。
+///
+/// 为什么要共用这一层（P2-03）：专用识别（任务管道、枚举管道）此前**先于**参数
+/// 检查返回算子，于是 `-WhatIf`（只预演不执行）与 `-Confirm`（弹确认框）会被当成
+/// 真写接管 —— 语义直接变了。参数契约必须放在**所有**原生接管入口的共同前置层。
+///
+/// 公共参数：
+/// - `-ErrorAction`：只接受已实现的明确语义（`SilentlyContinue`/`Ignore` 静默，
+///   `Stop`/`Continue` 非静默）；不认识的值交回 PsInline；
+/// - `-Confirm`：只接受明确 `$false` 的等价形态；其它值交回 PsInline；
+/// - `-WhatIf`：**永远**拒绝（只预演不执行 ≠ 真写，绝不许产出写操作）。
+///
+/// 未知参数一律 Err → 交回 PsInline 逐字执行（那里由 PowerShell 自己解释）。
+fn validate_branch_params(cmd: &Cmd, allowed: &[&str]) -> Result<ErrorAction, String> {
+    for (raw_name, _) in &cmd.named {
+        let base = raw_name.split_once(':').map(|(b, _)| b).unwrap_or(raw_name);
+        if base.eq_ignore_ascii_case("whatif") {
+            return Err(format!("-WhatIf 不许被原生接管（只预演不执行 ≠ 真写）: {raw_name}"));
+        }
+        if base.eq_ignore_ascii_case("confirm") {
+            let Some(Some(v)) = named_param_value(cmd, "Confirm") else {
+                return Err("-Confirm 必须给明确值（只接受 $false）".into());
+            };
+            if !v.trim().eq_ignore_ascii_case("$false") {
+                return Err(format!("-Confirm 只接受 $false，收到 {v}"));
+            }
+            continue;
+        }
+        if base.eq_ignore_ascii_case("erroraction") {
+            if matches!(error_action_of(cmd), Some(ErrorAction::Unknown)) {
+                return Err(format!("-ErrorAction 取值不认识: {raw_name}"));
+            }
+            continue;
+        }
+        if !allowed.iter().any(|a| a.eq_ignore_ascii_case(base)) {
+            return Err(format!("不支持的参数: {raw_name}"));
+        }
+    }
+    Ok(error_action_of(cmd).unwrap_or(ErrorAction::Loud))
 }
 
 /// 任务命令的静默语义：`-ErrorAction SilentlyContinue|Ignore` 或 `2>$null` / `*>$null`。
@@ -312,10 +371,8 @@ fn task_silent(cmd: &Cmd, redir_silent: bool) -> Result<bool, String> {
         Some(ErrorAction::Loud) => Ok(false),
         Some(ErrorAction::Unknown) => Err(format!(
             "-ErrorAction 取值不认识，交回 PowerShell 解释: {}",
-            cmd.named
-                .iter()
-                .find(|(n, _)| n.eq_ignore_ascii_case("ErrorAction"))
-                .and_then(|(_, v)| v.clone())
+            named_param_value(cmd, "ErrorAction")
+                .flatten()
                 .unwrap_or_default()
         )),
     }
@@ -344,6 +401,10 @@ fn parse_task_pipe(raw: &str) -> Option<Result<Vec<PsOp>, String>> {
     if !getter.name.eq_ignore_ascii_case("Get-ScheduledTask") {
         return None;
     }
+    // 参数契约：未知参数 / -WhatIf / 非 $false 的 -Confirm ⇒ 不接管（交回 PsInline）
+    if validate_branch_params(&getter, &["TaskName", "TaskPath"]).is_err() {
+        return None;
+    }
     let task_name = unquote(param(&getter, "TaskName")?)?;
     let task_path = match param(&getter, "TaskPath") {
         Some(p) => Some(unquote(p)?),
@@ -355,6 +416,10 @@ fn parse_task_pipe(raw: &str) -> Option<Result<Vec<PsOp>, String>> {
         "Enable-ScheduledTask" => false,
         _ => return None,
     };
+    // 参数契约：setter 侧的 -WhatIf 之类同样不许接管（P2-03：专用识别不许先于校验）
+    if validate_branch_params(&setter, &["TaskName", "TaskPath"]).is_err() {
+        return None;
+    }
     // 管道尾端若自带另一个 -TaskName/-TaskPath，身份就有两种说法，不猜
     if param(&setter, "TaskName").is_some() || param(&setter, "TaskPath").is_some() {
         return None;
@@ -833,6 +898,13 @@ fn parse_enum_pipe(raw: &str, vars: &VarMap) -> Result<Vec<PsOp>, String> {
         .collect();
     match parts.len() {
         2 => {
+            // 参数契约与普通分支同源（P2-03）
+            let getter = parse_cmd(parts[0].trim())
+                .ok_or_else(|| format!("枚举管道段解析失败: {}", parts[0]))?;
+            if !getter.name.eq_ignore_ascii_case("Get-ChildItem") {
+                return Err(format!("枚举管道只支持 Get-ChildItem: {}", parts[0]));
+            }
+            validate_branch_params(&getter, &["LiteralPath", "Path"])?;
             let root = child_item_root(parts[0], vars)?;
             let (hive, subkey) =
                 parse_ps_reg_path(&root).ok_or_else(|| format!("枚举根不可识别: {root}"))?;
@@ -849,6 +921,13 @@ fn parse_enum_pipe(raw: &str, vars: &VarMap) -> Result<Vec<PsOp>, String> {
             }])
         }
         3 => {
+            // 参数契约与普通分支同源（P2-03）
+            let getter = parse_cmd(parts[0].trim())
+                .ok_or_else(|| format!("枚举管道段解析失败: {}", parts[0]))?;
+            if !getter.name.eq_ignore_ascii_case("Get-CimInstance") {
+                return Err(format!("枚举管道只支持 Get-CimInstance: {}", parts[0]));
+            }
+            validate_branch_params(&getter, &[])?;
             let class = cim_class(parts[0])?;
             let cond = parts[1].trim();
             let cond_body = cond
@@ -976,17 +1055,41 @@ const PS_INLINE_ALLOW: &[&str] = &[
 /// `word_boundary=true` 时额外要求词边界（前：行首/空白/;/}；后：空白/{）——
 /// 供 eligible_scan 的 if/foreach/try 等单词关键字用；false 供
 /// "if (Test-Path"/"foreach (" 这类自带边界的短语用。
+///
+/// P2-02：引号外的 `#` 是注释，一律跳到行尾 —— 注释里的 `if (Test-Path…)` /
+/// `foreach (` 不得被当成顶层块（否则注释一句就能把语句解析带偏）。
+/// `#` 只有在**词首**（行首或前面是空白/;/{/}）时才是注释，词中间的 `#` 是普通字符。
 fn find_top_level(text: &str, kws: &[&str], word_boundary: bool) -> Option<usize> {
     let bytes = text.as_bytes();
     let mut depth = 0i32;
     let mut in_sq = false;
     let mut in_dq = false;
-    for (i, &c) in bytes.iter().enumerate() {
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i];
         match c {
-            b'\'' if !in_dq => in_sq = !in_sq,
-            b'"' if !in_sq => in_dq = !in_dq,
-            b'{' if !in_sq && !in_dq => depth += 1,
-            b'}' if !in_sq && !in_dq => depth -= 1,
+            b'\'' if !in_dq => {
+                in_sq = !in_sq;
+                i += 1;
+            }
+            b'"' if !in_sq => {
+                in_dq = !in_dq;
+                i += 1;
+            }
+            b'{' if !in_sq && !in_dq => {
+                depth += 1;
+                i += 1;
+            }
+            b'}' if !in_sq && !in_dq => {
+                depth -= 1;
+                i += 1;
+            }
+            b'#' if !in_sq && !in_dq && starts_token(bytes, i) => {
+                // 注释到行尾
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
             _ if !in_sq && !in_dq && depth == 0 => {
                 // 只在字符边界上做关键字匹配（注释里有中文多字节字符）
                 if text.is_char_boundary(i) {
@@ -1010,11 +1113,20 @@ fn find_top_level(text: &str, kws: &[&str], word_boundary: bool) -> Option<usize
                         }
                     }
                 }
+                i += 1;
             }
-            _ => {}
+            _ => {
+                i += 1;
+            }
         }
     }
     None
+}
+
+/// 该位置是否处于**词首**（前一个字符是空白/;/{/} 或已在开头）——
+/// 用来区分注释符 `#` 与词中间的普通 `#`。
+fn starts_token(bytes: &[u8], i: usize) -> bool {
+    i == 0 || matches!(bytes[i - 1], b' ' | b'\n' | b'\r' | b'\t' | b';' | b'{' | b'}')
 }
 
 /// PsInline 资格扫描：整段体的每个语句头要么在白名单、要么是控制流/表达式形态。
@@ -1133,25 +1245,13 @@ pub fn compile(body: &str) -> Result<Vec<PsOp>, String> {
 /// 识别 `Get-PnpDevice … | Where-Object { FriendlyName -eq $n -and Status -eq 'OK' }
 /// | Disable/Enable-PnpDevice` 模式（foreach + @(...) 名字数组）→ [`PsOp::PnpSetState`]。
 ///
-/// 必须同时含双条件（FriendlyName 精确匹配 + Status=OK），少任何一个都返回 None
-/// 交回通用解析/PsInline 兜底 fail-closed —— 没有 Status 守卫的设备操作不该被
-/// 当成 tf_dev_disable 那套"只动正常设备"的语义。
+/// P2-01：判定改为**逐条形态校验**（不再子串命中）。子串命中会把「脚本里恰好
+/// 提到过 Get-PnpDevice / FriendlyName / Status / Disable-PnpDevice」的任意形态
+/// 都接管成真禁用设备 —— 那是本项目最忌讳的假绿。
+/// 逐条要求见 [`pnp_standard_shape`]。
 fn recognize_pnp(body: &str) -> Option<PsOp> {
-    let low = body.to_ascii_lowercase();
-    if !low.contains("get-pnpdevice") {
-        return None;
-    }
-    let has_double_guard = low.contains("friendlyname") && low.contains("status");
-    if !has_double_guard {
-        return None;
-    }
-    let enable = if low.contains("enable-pnpdevice") {
-        true
-    } else if low.contains("disable-pnpdevice") {
-        false
-    } else {
-        return None;
-    };
+    // 标准形态判定（形不对就整条不接管，交回通用解析/PsInline 兜底）
+    let enable = pnp_standard_shape(body)?;
     // K08（v6）：带对账的解析——任何名字被丢弃（截断/展开串/未闭合）即 Err，
     // 交回通用解析/PsInline 兜底（脚本原文照跑，名单不会缺项）；绝不按部分名单执行
     // 还回执「全做了」（旧实现在名字含 `)` 时只解析出前 16/25 个，剩下 9 个静默没做）。
@@ -1160,6 +1260,126 @@ fn recognize_pnp(body: &str) -> Option<PsOp> {
         _ => return None,
     };
     Some(PsOp::PnpSetState { names, enable })
+}
+
+/// PnP 标准形态 → 是否启用。形态不符返回 `None`（不接管）。
+///
+/// 逐条要求（P2-01）：
+/// ① 拆句后（去空句与整行注释）**恰好一条**语句以 `foreach (` 开头；
+/// ② 其余语句只允许是赋值（`$var = …`）—— 不许夹带写/删/别的调用；
+/// ③ foreach 体内**恰好一条**语句（追加第二句即形态不认识）；
+/// ④ 该语句是标准三段管道：`Get-PnpDevice … | Where-Object { … } | Disable|Enable-PnpDevice …`；
+/// ⑤ `Where-Object` 条件 token **精确**等于现行标准形态
+///    （`$_.FriendlyName -eq $n -and $_.Status -eq "OK"`）——`-ne`、少一个守卫都不许。
+fn pnp_standard_shape(body: &str) -> Option<bool> {
+    let stmts: Vec<&str> = split_statements(body)
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.starts_with('#'))
+        .collect();
+    let mut foreach_stmt: Option<&str> = None;
+    for st in &stmts {
+        if st.starts_with("foreach (") {
+            if foreach_stmt.is_some() {
+                // 两条 foreach ⇒ 形态不认识
+                return None;
+            }
+            foreach_stmt = Some(st);
+        } else if !(st.starts_with('$') && st.contains('=')) {
+            // 其余语句只允许是赋值；夹带别的操作即形态不认识
+            return None;
+        }
+    }
+    let fe = foreach_stmt?;
+    // foreach 头：`foreach ($n in <列表>)`
+    let head_end = fe.find('{')?;
+    let head_txt = fe[..head_end].trim();
+    let open_paren = head_txt.find('(')?;
+    let close_paren = head_txt.rfind(')')?;
+    if close_paren <= open_paren {
+        return None;
+    }
+    let head = &head_txt[open_paren + 1..close_paren];
+    let (var, _list_src) = head.split_once(" in ")?;
+    let var = var.trim().strip_prefix('$')?.to_string();
+    if var.is_empty() || var.contains(char::is_whitespace) {
+        return None;
+    }
+    // foreach 体：恰好一条语句
+    let body_part = &fe[head_end..];
+    let open = body_part.find('{')?;
+    let close = find_matching_brace(body_part, open)?;
+    let inner = &body_part[open + 1..close];
+    let inner_stmts: Vec<&str> = split_statements(inner)
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.starts_with('#'))
+        .collect();
+    if inner_stmts.len() != 1 {
+        return None;
+    }
+    // 标准三段管道
+    let parts = split_pipes(inner_stmts[0]);
+    if parts.len() != 3 {
+        return None;
+    }
+    // ① Get-PnpDevice
+    let getter = parse_cmd(parts[0].trim())?;
+    if !getter.name.eq_ignore_ascii_case("Get-PnpDevice") || !getter.positional.is_empty() {
+        return None;
+    }
+    validate_branch_params(&getter, &[]).ok()?;
+    // ② Where-Object { 标准条件 }
+    //    条件块**不走** parse_cmd：块里的 `-eq` 会被当成参数名拆散，
+    //    这里按文本取整块再 token 化（块内必须是标准形态的 token 序列）。
+    let where_raw = parts[1].trim();
+    let where_name = where_raw.split_whitespace().next().unwrap_or("");
+    if !where_name.eq_ignore_ascii_case("Where-Object") {
+        return None;
+    }
+    let cond_rest = where_raw[where_name.len()..].trim();
+    let inner_cond = cond_rest.strip_prefix('{')?.strip_suffix('}')?.trim();
+    let toks = tokenize(inner_cond)?;
+    let want = [
+        "$_.FriendlyName".to_string(),
+        "-eq".to_string(),
+        format!("${var}"),
+        "-and".to_string(),
+        "$_.Status".to_string(),
+        "-eq".to_string(),
+        "\"OK\"".to_string(),
+    ];
+    if toks.len() != want.len() {
+        return None;
+    }
+    for (got, w) in toks.iter().zip(want.iter()) {
+        if !pnp_token_eq(got, w) {
+            return None;
+        }
+    }
+    // ③ Disable/Enable-PnpDevice（双动词不在这里 —— 三段管道已排除多出一段）
+    let setter = parse_cmd(parts[2].trim())?;
+    let enable = match setter.name.as_str() {
+        "Disable-PnpDevice" => false,
+        "Enable-PnpDevice" => true,
+        _ => return None,
+    };
+    if !setter.positional.is_empty() {
+        return None;
+    }
+    validate_branch_params(&setter, &[]).ok()?;
+    Some(enable)
+}
+
+/// token 比较：引号写法等价（`"OK"` 与 `'OK'` 同义），其余逐字（大小写不敏感）。
+fn pnp_token_eq(got: &str, want: &str) -> bool {
+    if got.eq_ignore_ascii_case(want) {
+        return true;
+    }
+    fn strip(s: &str) -> &str {
+        s.trim_matches('"').trim_matches('\'')
+    }
+    strip(got).eq_ignore_ascii_case(strip(want))
 }
 
 /// 解析一段语句序列（可含 if/foreach 块）；`vars` 会被语句内的赋值**就地更新**
@@ -1459,6 +1679,7 @@ fn parse_statement(
 
     match cmd.name.as_str() {
         "New-ItemProperty" | "Set-ItemProperty" => {
+            validate_branch_params(&cmd, &["Path", "Name", "Value", "PropertyType", "Force"])?;
             let path = path_arg(param(&cmd, "Path").ok_or("缺 -Path")?)?;
             let name = lit(param(&cmd, "Name").ok_or("缺 -Name")?, "-Name")?;
             let value = param(&cmd, "Value").unwrap_or_default().to_string();
@@ -1471,12 +1692,14 @@ fn parse_statement(
             Ok(vec![PsOp::ValueWrite { hive, subkey, name, kind, data }])
         }
         "Remove-ItemProperty" => {
+            validate_branch_params(&cmd, &["Path", "Name", "Force"])?;
             let path = path_arg(param(&cmd, "Path").ok_or("缺 -Path")?)?;
             let name = lit(param(&cmd, "Name").ok_or("缺 -Name")?, "-Name")?;
             let (hive, subkey) = parse_ps_reg_path(&path).ok_or_else(|| format!("路径不可识别: {path}"))?;
             Ok(vec![PsOp::ValueRemove { hive, subkey, name }])
         }
         "New-Item" => {
+            validate_branch_params(&cmd, &["Path", "Force"])?;
             let path = path_arg(param(&cmd, "Path").ok_or("缺 -Path")?)?;
             if !has_flag(&cmd, "Force") {
                 return Err("New-Item 必须带 -Force".into());
@@ -1485,6 +1708,7 @@ fn parse_statement(
             Ok(vec![PsOp::KeyCreate { hive, subkey }])
         }
         "Remove-Item" => {
+            validate_branch_params(&cmd, &["Path", "Recurse", "Force"])?;
             let path = path_arg(param(&cmd, "Path").ok_or("缺 -Path")?)?;
             let recurse = has_flag(&cmd, "Recurse");
             if !has_flag(&cmd, "Force") {
@@ -1494,10 +1718,12 @@ fn parse_statement(
             Ok(vec![PsOp::KeyRemove { hive, subkey, recurse }])
         }
         "Stop-Service" => {
+            validate_branch_params(&cmd, &["Name", "Force"])?;
             let name = lit(param(&cmd, "Name").ok_or("缺 -Name")?, "-Name")?;
             Ok(vec![PsOp::SvcStop { name }])
         }
         "Set-Service" => {
+            validate_branch_params(&cmd, &["Name", "StartupType"])?;
             // v0.4.9 D 批 3（RAINZ 对标 §3.5）：优化项「服务改 Manual 而非 Disabled」走这条。
             // JS 模板 `vendor/upstream-js/src/scripts-powershell/optimizer-scripts.js:2124` 起会生成
             //   `Set-Service -Name '<svc>' -StartupType <Manual|Automatic|Disabled> ...`
@@ -1516,6 +1742,7 @@ fn parse_statement(
             Ok(vec![PsOp::SvcSetStart { name, start }])
         }
         "Disable-ScheduledTask" | "Enable-ScheduledTask" => {
+            validate_branch_params(&cmd, &["TaskName", "TaskPath"])?;
             let name = lit(param(&cmd, "TaskName").ok_or("缺 -TaskName")?, "-TaskName")?;
             let path = match param(&cmd, "TaskPath") {
                 Some(p) => Some(lit(p, "-TaskPath")?),
@@ -1530,6 +1757,7 @@ fn parse_statement(
             }])
         }
         "sc.exe" => {
+            validate_branch_params(&cmd, &[])?;
             // `sc.exe config <svc> start= <n>`：位置参数 [config, <svc>, start=, <n>]
             if cmd.positional.len() != 4 || cmd.positional[0] != "config" {
                 return Err(format!("sc.exe 只支持 `config <svc> start= <n>`: {raw}"));
@@ -1548,6 +1776,7 @@ fn parse_statement(
             Ok(vec![PsOp::SvcSetStart { name: svc, start: n }])
         }
         "schtasks" => {
+            validate_branch_params(&cmd, &[])?;
             // 位置式 `schtasks /change /tn <name> /disable|/enable`
             // （telemetry_optimize / tf_nvidia_telemetry 的形态，v3-K1）
             if cmd.positional.len() != 4
@@ -1555,11 +1784,6 @@ fn parse_statement(
                 || !cmd.positional[1].eq_ignore_ascii_case("/tn")
             {
                 return Err(format!("schtasks 只支持 /change /tn <name> /disable|/enable: {raw}"));
-            }
-            // schtasks.exe 不接受命名参数：出现即形态不认识（否则 -ErrorAction 会被
-            // 悄悄吞掉，把「静默」语义算错）
-            if !cmd.named.is_empty() {
-                return Err(format!("schtasks 不接受命名参数: {raw}"));
             }
             let name = unquote(&cmd.positional[2]).unwrap_or_else(|| cmd.positional[2].clone());
             let disable = match cmd.positional[3].as_str() {
@@ -2064,8 +2288,12 @@ mod tests {
         // 未知值（大小写严格，防"猜相近值"）
         let err = compile("Set-Service -Name W32Time -StartupType FooBar").unwrap_err();
         assert!(err.contains("不支持"), "错因文案漂了：{err}");
-        // 只识别 Set-Service 的 -StartupType；-DisplayName 之类的分支不走这里，本项也不承诺支持
-        assert!(compile("Set-Service -Name W32Time -DisplayName X -StartupType Manual").is_ok());
+        // 未知参数（P2-03）：-DisplayName 之类的分支本项不承诺支持，**不许被悄悄忽略** ——
+        // 忽略它等于原生面改了启动类型却没改显示名，回执却报成功。
+        // Set-Service 不在 PsInline 白名单（缺 -StartupType 必须硬拒），故此处是 Err。
+        let err = compile("Set-Service -Name W32Time -DisplayName X -StartupType Manual")
+            .expect_err("未知参数必须被拒（不许被静默忽略）");
+        assert!(err.contains("不支持的参数"), "错因文案漂了：{err}");
     }
 
     #[test]
@@ -2157,6 +2385,108 @@ mod tests {
         let ops = compile("Get-ScheduledTask -TaskName \"A\" | Where-Object { $_ } | Disable-ScheduledTask")
             .unwrap();
         assert!(matches!(&ops[0], PsOp::PsInline { .. }), "三段管道必须交回 PsInline: {ops:?}");
+    }
+
+    /// P2-01 判红：PnP 只接管**精确单语句形态**。
+    ///
+    /// 正向对照用数据层 `tf_dev_disable` 的**真实原文**（不是构造样例）——
+    /// 构造样例只能证明解析器自洽，证明不了它接住了数据层。
+    #[test]
+    fn pnp只接管精确单语句形态() {
+        /// 编译并判断是否产出了 PnPSetState（编译失败也算「没接管」）。
+        fn produces_pnp(src: &str) -> bool {
+            match compile(src) {
+                Ok(ops) => ops.iter().any(|o| matches!(o, PsOp::PnpSetState { .. })),
+                Err(_) => false,
+            }
+        }
+        // 正向：真实原文（数据层 tf_dev_disable 的结构）必须仍被接管
+        let real = "$names = @(\"Dev A\",\"Dev B\")\nforeach ($n in $names) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq $n -and $_.Status -eq \"OK\" } | Disable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue }";
+        let ops = compile(real).expect("真实形态必须仍被接管");
+        assert!(
+            matches!(&ops[0], PsOp::PnpSetState { names, enable: false }
+                if names == &["Dev A".to_string(), "Dev B".to_string()]),
+            "真实 tf_dev_disable 形态必须产出 PnpSetState: {ops:?}"
+        );
+        // 负例①：foreach 体内追加第二语句（夹带删键）
+        let extra = "$names = @(\"Dev A\")\nforeach ($n in $names) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq $n -and $_.Status -eq \"OK\" } | Disable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue; Remove-Item -Path \"HKCU:\\X\" -Recurse -Force }";
+        assert!(!produces_pnp(extra), "foreach 体内追加第二语句不得被接管");
+        // 负例②：条件用 -ne（不是标准形态）
+        let ne = "$names = @(\"Dev A\")\nforeach ($n in $names) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -ne $n -and $_.Status -eq \"OK\" } | Disable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue }";
+        assert!(!produces_pnp(ne), "-ne 条件不得被接管");
+        // 负例③：双动词（管道多出一段）
+        let two_verbs = "$names = @(\"Dev A\")\nforeach ($n in $names) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq $n -and $_.Status -eq \"OK\" } | Disable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue | Enable-PnpDevice }";
+        assert!(!produces_pnp(two_verbs), "双动词不得被接管");
+        // 负例④：少一个守卫（只有 FriendlyName，没有 Status）
+        let one_guard = "$names = @(\"Dev A\")\nforeach ($n in $names) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq $n } | Disable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue }";
+        assert!(!produces_pnp(one_guard), "少一个守卫不得被接管");
+    }
+
+    /// P2-02 判红：注释不参与顶层块识别。
+    ///
+    /// 注释里的 `if (Test-Path…)` / `foreach (` 不得产出写删操作；
+    /// 注释前后的真实语句仍必须产出原操作（正向对照）。
+    #[test]
+    fn 注释不参与顶层块识别() {
+        for commented in [
+            "# if (Test-Path $p) { Remove-Item -Path \"HKCU:\\X\" -Recurse -Force }\nNew-ItemProperty -Path \"HKCU:\\Y\" -Name A -Value 1 -PropertyType DWord -Force | Out-Null",
+            "# foreach ($n in @(\"a\")) { Remove-Item -Path \"HKCU:\\X\" -Recurse -Force }\nNew-ItemProperty -Path \"HKCU:\\Y\" -Name A -Value 1 -PropertyType DWord -Force | Out-Null",
+        ] {
+            let ops = compile(commented).expect("注释形态必须能编译");
+            assert!(
+                ops.iter().all(|o| !matches!(o, PsOp::KeyRemove { .. })),
+                "注释里的块不得产出删键: {ops:?}"
+            );
+            assert!(
+                matches!(&ops[0], PsOp::ValueWrite { .. }),
+                "注释前后的真实语句仍必须产出原操作: {ops:?}"
+            );
+        }
+    }
+
+    /// P2-03 判红：`-WhatIf` 永远不得产出写操作；未知参数交回 PsInline。
+    #[test]
+    fn whatif与未知参数不得产出写操作() {
+        // Remove-Item -WhatIf（只预演不执行）
+        let ops = compile("Remove-Item -Path \"HKCU:\\X\" -Recurse -Force -WhatIf").unwrap();
+        assert!(
+            ops.iter().all(|o| !matches!(o, PsOp::KeyRemove { .. })),
+            "-WhatIf 不得产出删键: {ops:?}"
+        );
+        assert!(matches!(&ops[0], PsOp::PsInline { .. }), "-WhatIf 形态应交回 PsInline: {ops:?}");
+        // Disable-ScheduledTask -WhatIf
+        let ops = compile("Disable-ScheduledTask -TaskName \"T\" -WhatIf").unwrap();
+        assert!(
+            ops.iter().all(|o| !matches!(o, PsOp::TaskChange { .. })),
+            "-WhatIf 不得产出任务变更: {ops:?}"
+        );
+        // 任务管道 setter 带 -WhatIf（专用识别不许先于参数校验）
+        let ops = compile("Get-ScheduledTask -TaskName \"T\" | Disable-ScheduledTask -WhatIf").unwrap();
+        assert!(
+            ops.iter().all(|o| !matches!(o, PsOp::TaskChange { .. })),
+            "任务管道的 -WhatIf 不得被接管: {ops:?}"
+        );
+        // 未知参数
+        let ops = compile("Remove-Item -Path \"HKCU:\\X\" -Recurse -Force -Bogus 1").unwrap();
+        assert!(
+            ops.iter().all(|o| !matches!(o, PsOp::KeyRemove { .. })),
+            "未知参数不得被接管: {ops:?}"
+        );
+        // -Confirm 只接受 $false
+        let ops = compile("Disable-ScheduledTask -TaskName \"T\" -Confirm").unwrap();
+        assert!(
+            ops.iter().all(|o| !matches!(o, PsOp::TaskChange { .. })),
+            "-Confirm 不带值不得被接管: {ops:?}"
+        );
+        // 校验器层：-WhatIf 有**自己的**拒因（不能只落进「未知参数」那句，
+        // 否则诊断时看不出「只预演不执行」这条语义）
+        let cmd = parse_cmd("Remove-Item -Path \"HKCU:\\X\" -Recurse -Force -WhatIf").unwrap();
+        let err = validate_branch_params(&cmd, &["Path", "Recurse", "Force"])
+            .expect_err("-WhatIf 必须被拒");
+        assert!(
+            err.contains("不许被原生接管"),
+            "-WhatIf 的拒因必须点名「只预演不执行」: {err}"
+        );
     }
 
     /// P1-01 判红：静默语义**只**吞「命令确实跑起来并返回非零」这一类。
