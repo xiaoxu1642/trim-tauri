@@ -6,7 +6,7 @@
 //! 注册表先 export 备份再删，备份失败整项跳过。
 
 use crate::engine::{delete_manifest, guard, log, protect, sysinfo};
-use crate::engine::reg_backup::{reconcile_admin_seals, write_admin_seal, write_reg_backup_seal};
+use crate::engine::reg_backup::{reconcile_admin_seals, write_reg_backup_seals};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -1411,9 +1411,9 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 continue;
             }
             // D2：备份写成后落封条（此后列表/还原才对得上这份文件）
-            write_reg_backup_seal(&file, target);
             // P0-01：提权窗口补 HKLM 管理员摘要（非提权写失败仅日志）
-            write_admin_seal("uninstall", &file);
+            // P1-02：两份锚共用一次哈希快照（两次重读可能分叉）
+            write_reg_backup_seals("uninstall", &file, target);
             // N3：写完裁一次保留上限。只裁新根，封条随主文件同删（paths::prune_backups）；
             // 刚写的这份是最新项，不会被自己裁掉。
             crate::engine::paths::prune_backups(&backup_dir, crate::engine::paths::BACKUP_KEEP);
@@ -1478,9 +1478,8 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 continue;
             }
             // D2：封条记的是**被备份的父键**（删单值前整父键导出，还原粒度也是父键）
-            write_reg_backup_seal(&file, key_part);
-            // P0-01：同 reg_key 分支补管理员摘要
-            write_admin_seal("uninstall", &file);
+            // P0-01：同 reg_key 分支补管理员摘要；P1-02：两份锚共用一次哈希快照
+            write_reg_backup_seals("uninstall", &file, key_part);
             // N3：与 reg_key 分支同一口径裁保留上限（同一目录，两处都要裁，漏一处
             // 就等于"删值的备份不参与限额"，盘上照样无限涨）
             crate::engine::paths::prune_backups(&backup_dir, crate::engine::paths::BACKUP_KEEP);

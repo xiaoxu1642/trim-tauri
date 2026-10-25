@@ -22,16 +22,9 @@ pub fn reg_seal_path_for(file: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// 写封条：目标键 + SHA-256 + 时间。失败只在日志留痕，**不阻断删除**——
-/// 封条是备份的增强，不是删除的前提（备份本身已写成，这时回滚删除反而更糟）。
-pub fn write_reg_backup_seal(file: &Path, target: &str) {
-    let sum = match crate::engine::hash::sha256_file(file) {
-        Ok(s) => s,
-        Err(e) => {
-            crate::engine::log::write_log("warn", &format!("注册表备份封条计算失败（不阻断删除）: {e}"));
-            return;
-        }
-    };
+/// 写封条（用给定的摘要快照）：目标键 + SHA-256 + 时间。失败只在日志留痕，
+/// **不阻断删除**——封条是备份的增强，不是删除的前提（备份本身已写成，这时回滚删除反而更糟）。
+fn write_reg_backup_seal_with_digest(file: &Path, target: &str, sum: &str) {
     let payload = json!({
         "file": file.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
         "target": target,
@@ -43,8 +36,72 @@ pub fn write_reg_backup_seal(file: &Path, target: &str) {
     }
 }
 
+/// 写边车封条（自己算摘要）：**单锚**场景用（外设备份域没有管理员摘要）。
+pub fn write_reg_backup_seal(file: &Path, target: &str) {
+    let sum = match crate::engine::hash::sha256_file(file) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::engine::log::write_log("warn", &format!("注册表备份封条计算失败（不阻断删除）: {e}"));
+            return;
+        }
+    };
+    write_reg_backup_seal_with_digest(file, target, &sum);
+}
+
+/// 写侧入口：一次哈希快照 → **边车封条与管理员摘要共用同一份摘要**。
+///
+/// 旧写法是两个入口各读一次文件（`write_reg_backup_seal` 与 `write_admin_seal`），
+/// 两次读之间文件若被改，两份锚就分叉：边车说 A、管理员摘要说 B。
+/// 分叉的后果是这份备份**永远还原不了**（闸会拿管理员摘要比对当前文件），
+/// 而用户看到的回执只会说「摘要不符」，指向不了真正的原因。
+pub fn write_reg_backup_seals(domain: &str, file: &Path, target: &str) {
+    write_reg_backup_seals_with(domain, file, target, || {
+        crate::engine::hash::sha256_file(file).ok()
+    });
+}
+
+/// [`write_reg_backup_seals`] 的可注入实现：摘要来源由调用方给。
+///
+/// 摘要来源做成参数，是为了单测能钉住「只算一次」——若实现退回两次重读，
+/// 摘要来源会被调用两次，两份锚就可能取到不同内容。
+fn write_reg_backup_seals_with<F>(domain: &str, file: &Path, target: &str, mut digest_of: F)
+where
+    F: FnMut() -> Option<String>,
+{
+    let Some(sum) = digest_of() else {
+        crate::engine::log::write_log(
+            "warn",
+            &format!("注册表备份摘要计算失败（不阻断删除）: {}", file.display()),
+        );
+        return;
+    };
+    write_reg_backup_seal_with_digest(file, target, &sum);
+    write_admin_seal_with_digest(domain, file, &sum);
+}
+
 /// 封条核对：ok / missing（旧备份没封条）/ mismatch（内容与封条不符）/ corrupt / unreadable
 pub fn reg_backup_seal_state(file: &Path) -> (&'static str, Value) {
+    match crate::engine::hash::sha256_file(file) {
+        Ok(digest) => reg_backup_seal_state_with_digest(file, &digest),
+        Err(_) => {
+            // 备份文件读不到：旧口径是「先看封条、再看文件」，这里保持同一顺序
+            let meta_path = reg_seal_path_for(file);
+            let Ok(text) = std::fs::read_to_string(&meta_path) else {
+                return ("missing", Value::Null);
+            };
+            let Ok(meta) = serde_json::from_str::<Value>(&text) else {
+                return ("corrupt", Value::Null);
+            };
+            ("unreadable", meta)
+        }
+    }
+}
+
+/// 封条核对（**给定实测摘要**）：闸侧用同一次读盘产出的摘要做判定，不重新读盘。
+///
+/// 这是「校验字节与执行解析同源」的落点：封条比对的必须是**被解析的那份字节**
+/// 的摘要，而不是稍后再读一次盘得到的另一份。
+pub fn reg_backup_seal_state_with_digest(file: &Path, digest: &str) -> (&'static str, Value) {
     let meta_path = reg_seal_path_for(file);
     let Ok(text) = std::fs::read_to_string(&meta_path) else {
         return ("missing", Value::Null);
@@ -56,11 +113,16 @@ pub fn reg_backup_seal_state(file: &Path) -> (&'static str, Value) {
     if want.is_empty() {
         return ("corrupt", meta);
     }
-    match crate::engine::hash::sha256_file(file) {
-        Ok(got) if got.eq_ignore_ascii_case(want) => ("ok", meta),
-        Ok(_) => ("mismatch", meta),
-        Err(_) => ("unreadable", meta),
+    if digest_matches(want, digest) {
+        ("ok", meta)
+    } else {
+        ("mismatch", meta)
     }
+}
+
+/// 摘要比对（纯函数）：大小写不敏感；期望为空一律**不算通过**。
+fn digest_matches(expected: &str, actual: &str) -> bool {
+    !expected.is_empty() && expected.eq_ignore_ascii_case(actual)
 }
 
 // ==================== P0-01：HKLM 管理员摘要（2026-10-10） ====================
@@ -81,17 +143,17 @@ fn admin_seal_value_name(domain: &str, file: &Path) -> Option<String> {
     Some(format!("{domain}/{leaf}"))
 }
 
-/// 在已提权执行窗口补写管理员摘要。非提权时写 HKLM 失败：只留日志、不影响删除主链，
+/// 在已提权执行窗口补写管理员摘要（摘要由调用方给出 —— 与边车封条共用同一快照）。
+/// 非提权时写 HKLM 失败：只留日志、不影响删除主链，
 /// 但这份 HKLM 备份此后不能通过还原闸（fail-closed 是刻意的）。
-pub fn write_admin_seal(domain: &str, file: &Path) {
-    let Some(value_name) = admin_seal_value_name(domain, file) else { return };
-    let Ok(sum) = crate::engine::hash::sha256_file(file) else { return };
+pub fn write_admin_seal_with_digest(domain: &str, file: &Path, sum: &str) -> bool {
+    let Some(value_name) = admin_seal_value_name(domain, file) else { return false };
     let ok = crate::engine::native::reg_restore_write(
         crate::engine::native::hive_hklm(),
         ADMIN_SEAL_SUBKEY,
         &value_name,
         REG_VALUE_TYPE(RK_SZ),
-        &utf16_with_nul(&sum),
+        &utf16_with_nul(sum),
     );
     if !ok {
         crate::engine::log::write_log(
@@ -101,6 +163,7 @@ pub fn write_admin_seal(domain: &str, file: &Path) {
             ),
         );
     }
+    ok
 }
 
 /// 读管理员摘要；无记录返回 None（备份生成于非提权会话，或早于本安全版本）。
@@ -188,6 +251,27 @@ pub fn decode_reg_bytes(bytes: &[u8]) -> Result<String, String> {
     }
 }
 
+/// 一次读盘的**同源产物**：解码文本 + 同一份字节的 SHA-256 摘要。
+///
+/// 为什么必须同源（P1-02）：还原闸此前分三次读同一个文件 —— 解析文本一次、
+/// 边车封条核对一次、HKLM 管理员摘要核对一次。每次读到的内容都可能不同 ⇒
+/// 「被解析的内容」与「被校验的内容」可以不是同一份（本地 TOCTOU 窗口）。
+/// 这里一次读完，文本与摘要来自同一份字节。
+pub struct RegBackupContent {
+    /// 解码后的 `.reg` 文本
+    pub text: String,
+    /// 同一份字节的 SHA-256（小写十六进制）
+    pub digest: String,
+}
+
+/// 一次 `fs::read`，用同一份字节同时得到解码文本与摘要。
+pub fn read_reg_content(file: &Path) -> Result<RegBackupContent, String> {
+    let bytes = std::fs::read(file).map_err(|e| format!("读取 .reg 失败: {e}"))?;
+    let text = decode_reg_bytes(&bytes)?;
+    let digest = crate::engine::hash::sha256_bytes(&bytes);
+    Ok(RegBackupContent { text, digest })
+}
+
 /// 读文件并按编码解码（闸侧与原生 import 共用同一份，避免两套口径）。
 ///
 /// v5-K06 批次 3（A6-K01）：本文件此前的第二份键枚举（`parse_reg_backup` /
@@ -195,9 +279,11 @@ pub fn decode_reg_bytes(bytes: &[u8]) -> Result<String, String> {
 /// `parse_reg_text` 对同一份 `.reg` 的键集存在续行合并差（`[-HKEY…\Cla\` +
 /// `sses]`：闸侧只看到良性行、执行侧合并出 `SOFTWARE\Classes` 删除臂，探针三样本
 /// 实测），还原四道闸因此建在键子集上。现在闸与执行臂同吃 `parse_reg_text` 一份。
+///
+/// P1-02：这是**非闸路径的兼容包装**（只取文本）。闸侧与外设备份闸必须走
+/// [`read_reg_content`]，好让「校验的字节」与「解析的字节」是同一份。
 pub fn read_reg_text_file(file: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(file).map_err(|e| format!("读取 .reg 失败: {e}"))?;
-    decode_reg_bytes(&bytes)
+    Ok(read_reg_content(file)?.text)
 }
 
 /// 过了四道闸后带回来的信息：会写到哪些键 + 封条当时是什么状态 + **闸侧解析出的
@@ -238,10 +324,40 @@ pub fn reg_backup_restore_guards(
     domain: &str,
     is_admin: bool,
 ) -> Result<RegBackupCheck, String> {
-    let text = read_reg_text_file(file).map_err(|_| {
+    // P1-02：一次读盘，文本与摘要同源。闸里所有比对（边车封条、HKLM 管理员摘要）
+    // 都用这一份摘要，不再重新读盘 —— 否则「被解析的内容」与「被校验的内容」
+    // 可能不是同一份。
+    let content = read_reg_content(file).map_err(|_| {
         "备份文件不是合法的 .reg（读不到或编码不可识别），已拒绝还原".to_string()
     })?;
-    let sections = parse_reg_text(&text).map_err(|_| {
+    reg_backup_restore_guards_with(
+        file,
+        &content,
+        name,
+        is_admin,
+        || read_admin_seal(domain, file),
+    )
+}
+
+/// 还原闸的判定部分：**内容与摘要由调用方给**（同源一次读盘的产物）。
+///
+/// 抽出这一层是为了让「判决跟随传入的内容与摘要，而不是磁盘当前状态」可测：
+/// 夹具能造出「磁盘上是 A、传入的是 B」这组样本；旧实现（重新读盘算摘要）
+/// 在这组样本上会判成跟随磁盘而红。
+///
+/// `admin_seal` 是闭包而不是值：只有目标含 HKLM 时才需要读管理员摘要，
+/// 保持「HKCU 备份不碰 HKLM」的原口径；单测则用它注入固定值。
+fn reg_backup_restore_guards_with<F>(
+    file: &Path,
+    content: &RegBackupContent,
+    name: &str,
+    is_admin: bool,
+    admin_seal: F,
+) -> Result<RegBackupCheck, String>
+where
+    F: FnOnce() -> Option<String>,
+{
+    let sections = parse_reg_text(&content.text).map_err(|_| {
         "备份文件不是合法的 .reg（缺版本头或没有任何键段），已拒绝还原".to_string()
     })?;
     // 键枚举（回执/日志用）从 sections 推导——与执行臂同一份解析产物，不可能再分叉
@@ -273,7 +389,7 @@ pub fn reg_backup_restore_guards(
             ));
         }
     }
-    let (seal, _) = reg_backup_seal_state(file);
+    let (seal, _) = reg_backup_seal_state_with_digest(file, &content.digest);
     // v5-S1 批次 6（①）：目标含 HKLM 时边车封条 **missing 也拒**——只有 ok 放行。
     // HKLM 备份的两份锚里，管理员摘要（HKLM 受限键）本就不可被同用户改写（⑤ 兜底），
     // 但「边车缺失」若放行，内容核验就只剩摘要一路；拍板裁定 HKLM 目标必须两份交叉
@@ -305,25 +421,22 @@ pub fn reg_backup_restore_guards(
     if needs_admin {
         // P0-01：HKLM 还原的信任根是 HKLM 管理员摘要（非提权进程写不了的位置），
         // 边车封条只作第二意见；由本提权实例自行重算当前文件哈希与其比对。
-        let Some(want) = read_admin_seal(domain, file) else {
+        // P1-02：比对用的是**同一次读盘**产出的摘要，不再重读盘。
+        let Some(want) = admin_seal() else {
             return Err(
                 "该系统级（HKLM）备份没有管理员摘要：它生成于非管理员会话或早于安全版本，\
                  无法验证内容完整性，已拒绝还原（HKCU 备份不受此限）".to_string(),
             );
         };
-        match crate::engine::hash::sha256_file(file) {
-            Ok(got) if got.eq_ignore_ascii_case(&want) => {}
-            Ok(_) => {
-                crate::engine::log::write_log(
-                    "warn",
-                    &format!("备份 {name} 与管理员摘要不一致，已拒绝还原"),
-                );
-                return Err(
-                    "备份内容与管理员摘要不符，已拒绝还原——请改用导出时间更早的一份，或重新安装该程序"
-                        .to_string(),
-                );
-            }
-            Err(e) => return Err(format!("备份不可读，已拒绝还原：{e}")),
+        if !digest_matches(&want, &content.digest) {
+            crate::engine::log::write_log(
+                "warn",
+                &format!("备份 {name} 与管理员摘要不一致，已拒绝还原"),
+            );
+            return Err(
+                "备份内容与管理员摘要不符，已拒绝还原——请改用导出时间更早的一份，或重新安装该程序"
+                    .to_string(),
+            );
         }
     }
     Ok(RegBackupCheck { keys, seal, sections })
@@ -338,6 +451,21 @@ mod reg_backup_common_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// 沙箱目录清理（只删本用例自己建的目录）。
+    fn rm_sandbox(root: &Path) {
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// 删掉本进程写进 HKLM 的管理员摘要值；返回是否删成功（提权会话下才有值可删）。
+    fn drop_admin_seal(domain: &str, file: &Path) -> bool {
+        let Some(value_name) = admin_seal_value_name(domain, file) else { return false };
+        crate::engine::native::reg_restore_delete(
+            crate::engine::native::hive_hklm(),
+            ADMIN_SEAL_SUBKEY,
+            &value_name,
+        )
     }
 
     /// 缺版本头 / 半截写入 / 根本没有键段：三类形状都必须拒，且回执说清是哪一类
@@ -428,8 +556,7 @@ mod reg_backup_common_tests {
             "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\Software\\TrimS1LiveProbe]\r\n\"a\"=dword:1\r\n",
         )
         .unwrap();
-        write_reg_backup_seal(&f, r"HKLM\Software\TrimS1LiveProbe");
-        write_admin_seal("cleanup", &f);
+        write_reg_backup_seals("cleanup", &f, r"HKLM\Software\TrimS1LiveProbe");
         // 基线：两份都在且匹配 ⇒ 放行（摘要写入失败时这里先红，探针前置条件不满足）
         assert!(
             reg_backup_restore_guards(&f, "live-s1.reg", "cleanup", true).is_ok(),
@@ -468,14 +595,10 @@ mod reg_backup_common_tests {
         );
         // 清理：HKLM 摘要值 + 沙箱
         assert!(
-            crate::engine::native::reg_restore_delete(
-                crate::engine::native::hive_hklm(),
-                ADMIN_SEAL_SUBKEY,
-                &admin_seal_value_name("cleanup", &f).unwrap(),
-            ),
+            drop_admin_seal("cleanup", &f),
             "清理 HKLM 摘要失败（确认在提权窗口跑）"
         );
-        let _ = std::fs::remove_dir_all(&root);
+        rm_sandbox(&root);
     }
 
     /// 手工改成受保护容器（整棵 SOFTWARE）必须被禁删面挡住 —— 这是"是备份文件就能 import"
@@ -551,6 +674,111 @@ mod reg_backup_common_tests {
         assert_eq!(reg_backup_seal_state(&p).0, "missing");
         assert!(reg_backup_restore_guards(&p, "1_acme.reg", "cleanup", true).is_ok());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// P1-02 判红：闸的判决必须**跟随传入的文本与摘要**，而不是磁盘当前状态。
+    ///
+    /// 夹具刻意造出「磁盘上是 A、传入的是 B」：封条里记的是 B 的摘要。
+    /// 若实现重新读盘算摘要（改前的样子），封条会判成 mismatch ⇒ 本用例红。
+    #[test]
+    fn 闸判决跟随传入内容而非磁盘当前状态() {
+        let root = sandbox("same-source");
+        let file = root.join("a.reg");
+        let disk_a = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\Software\\DiskA]\r\n\"X\"=dword:1\r\n";
+        std::fs::write(&file, disk_a).unwrap();
+        // 传入内容 B：与磁盘上的 A 完全不同
+        let b_bytes =
+            b"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\Software\\PassedB]\r\n\"Y\"=dword:2\r\n";
+        let content = RegBackupContent {
+            text: String::from_utf8(b_bytes.to_vec()).unwrap(),
+            digest: crate::engine::hash::sha256_bytes(b_bytes),
+        };
+        // 封条记 B 的摘要（与传入内容同源，与磁盘上的 A 不同）
+        let payload = json!({
+            "file": "a.reg",
+            "target": "HKCU\\Software\\PassedB",
+            "sha256": content.digest.clone(),
+            "createdAt": 0,
+        });
+        std::fs::write(reg_seal_path_for(&file), payload.to_string()).unwrap();
+        let chk = reg_backup_restore_guards_with(&file, &content, "a.reg", false, || None)
+            .expect("传入内容与封条同源时必须放行");
+        assert_eq!(
+            chk.seal, "ok",
+            "封条比对必须用传入的摘要（重新读盘会判成 mismatch）"
+        );
+        assert_eq!(
+            chk.keys,
+            vec!["HKEY_CURRENT_USER\\Software\\PassedB".to_string()],
+            "键集必须来自传入的文本"
+        );
+        rm_sandbox(&root);
+    }
+
+    /// P1-02 判红：写侧两份锚必须共用**一次**哈希快照。
+    ///
+    /// 夹具：摘要来源每次调用返回**不同**的值（模拟「两次读盘之间文件被改」）。
+    /// 若写侧算两次摘要，两份锚就会分叉（边车记第一次、管理员摘要记第二次）；
+    /// 只算一次时两份锚必然同值。
+    #[test]
+    fn 写侧两份锚共用一次哈希快照() {
+        let root = sandbox("write-once");
+        let file = root.join(format!("pair-{}.reg", std::process::id()));
+        std::fs::write(
+            &file,
+            "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\Software\\Acme]\r\n\"X\"=dword:1\r\n",
+        )
+        .unwrap();
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        let mut calls = 0u32;
+        write_reg_backup_seals_with("cleanup", &file, "HKCU\\Software\\Acme", || {
+            calls += 1;
+            Some(if calls == 1 { first.clone() } else { second.clone() })
+        });
+        assert_eq!(calls, 1, "写侧只允许算一次摘要（两次重读会让两份锚分叉）");
+        let meta_text = std::fs::read_to_string(reg_seal_path_for(&file)).unwrap();
+        let meta: Value = serde_json::from_str(&meta_text).unwrap();
+        assert_eq!(
+            meta.get("sha256").and_then(Value::as_str),
+            Some(first.as_str()),
+            "边车封条必须是第一次算出的摘要"
+        );
+        // 管理员摘要那份：非提权会话写不进 HKLM，提权时才有值 —— 有值就必须同值
+        if let Some(admin) = read_admin_seal("cleanup", &file) {
+            assert_eq!(admin, first, "管理员摘要必须与边车封条同源（同一份快照）");
+        } else {
+            eprintln!("SKIP：当前非提权会话，HKLM 管理员摘要未落盘，管理员侧未校验");
+        }
+        // 清理：提权会话真的写进了 HKLM，这里收掉
+        let _ = drop_admin_seal("cleanup", &file);
+        rm_sandbox(&root);
+    }
+
+    /// P1-02 真机探针：正常 HKLM 还原的放行路径未变（两份锚同源时必须放行）。
+    ///
+    /// 真实竞态（两次读之间文件被改）**不做复现声称** —— 同源性由上面的
+    /// 「判决跟随传入摘要」证明，这里只确认放行路径没被改坏。
+    #[test]
+    #[ignore = "真机：需提权窗口写 HKLM 管理员摘要（发布前人工跑）"]
+    fn live_hklm正常还原放行路径未变() {
+        if !crate::engine::sysinfo::is_admin() {
+            eprintln!("SKIP：探针需在管理员会话运行，当前非提权，未校验");
+            return;
+        }
+        let root = sandbox("p102-live");
+        let f = root.join("p102-live.reg");
+        let body = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\Software\\TrimP102Probe\\App]\r\n\"X\"=dword:1\r\n";
+        std::fs::write(&f, body).unwrap();
+        write_reg_backup_seals("cleanup", &f, r"HKLM\Software\TrimP102Probe\App");
+        let passed = reg_backup_restore_guards(&f, "p102-live.reg", "cleanup", true)
+            .expect("两份锚同源时 HKLM 还原必须放行");
+        assert_eq!(
+            passed.keys,
+            vec![r"HKEY_LOCAL_MACHINE\Software\TrimP102Probe\App".to_string()]
+        );
+        let _ = drop_admin_seal("cleanup", &f);
+        rm_sandbox(&root);
     }
 
     /// D2：严格 `.reg` 解析。还原前必须知道"这份文件会往哪些键里写"，    /// 所以宁可拒也不能宽松 —— 半截写入的备份尤其要拦。
@@ -679,7 +907,7 @@ mod reg_backup_common_tests {
         // 摘要写入前：提权也拒
         assert!(reg_backup_restore_guards(&p, "liveprobe.reg", "cleanup", true)
             .unwrap_err().contains("管理员摘要"));
-        write_admin_seal("cleanup", &p);
+        write_reg_backup_seals("cleanup", &p, r"HKLM\Software\TrimProbe\App");
         let sum = read_admin_seal("cleanup", &p).expect("管理员摘要应可读");
         assert_eq!(sum.len(), 64, "SHA-256 摘要长度应为 64: {sum}");
         // 摘要一致：放行（正向点名 reached 键）
@@ -697,7 +925,7 @@ mod reg_backup_common_tests {
         // 对账：第二个备份写摘要后删文件，reconcile 只删孤立那份
         let q = root.join("liveprobe2.reg");
         std::fs::write(&q, body.replace("TrimProbe", "TrimProbe2")).unwrap();
-        write_admin_seal("cleanup", &q);
+        write_reg_backup_seals("cleanup", &q, r"HKLM\Software\TrimProbe\App");
         std::fs::remove_file(&q).unwrap();
         reconcile_admin_seals("cleanup", &root);
         let (names, incomplete) = crate::engine::native::reg_enum_value_names_pub(

@@ -130,7 +130,11 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
 fn peripheral_restore_admit(
     f: &std::path::Path,
 ) -> Result<Vec<crate::engine::reg_backup::RegSection>, String> {
-    let (seal, _) = crate::engine::reg_backup::reg_backup_seal_state(f);
+    // P1-02：一次读盘，文本与摘要同源 —— 封条比对用的必须是**被解析的那份字节**，
+    // 不能稍后再读一次盘拿另一份摘要（那样「校验的内容」与「导入的内容」可能不同）。
+    let content = crate::engine::reg_backup::read_reg_content(f)
+        .map_err(|_| "备份文件不是合法的 .reg（读不到或编码不可识别）".to_string())?;
+    let (seal, _) = crate::engine::reg_backup::reg_backup_seal_state_with_digest(f, &content.digest);
     if seal != "ok" {
         return Err(match seal {
             "missing" => "该备份不是 Trim 可验证备份（无封条：可能来自旧版本或外部投放），已拒绝导入".to_string(),
@@ -139,9 +143,7 @@ fn peripheral_restore_admit(
             other => format!("备份封条状态异常（{other}），已拒绝导入"),
         });
     }
-    let text = crate::engine::reg_backup::read_reg_text_file(f)
-        .map_err(|_| "备份文件不是合法的 .reg（读不到或编码不可识别）".to_string())?;
-    let sections = crate::engine::reg_backup::parse_reg_text(&text)
+    let sections = crate::engine::reg_backup::parse_reg_text(&content.text)
         .map_err(|_| "备份文件不是合法的 .reg（缺版本头或没有任何键段）".to_string())?;
     if let Some(sec) = sections.iter().find(|s| s.delete_key) {
         return Err(format!("备份含删除键段（[-{}]），已拒绝导入", sec.full_key()));

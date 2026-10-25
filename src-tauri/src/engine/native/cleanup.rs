@@ -979,9 +979,9 @@ fn cleanup_execute_with_backup_root(
                             // N9：清理域此前**根本不产封条**，于是还原链那道"封条核对"对本域
                             // 永远只能走 missing 分支（等于没闸）。与卸载域同口径落一份，
                             // 半截写入与手工误改才有可发现性。写封条失败不阻断删除（增强而非前提）。
-                            crate::engine::reg_backup::write_reg_backup_seal(&file, &export_path);
-                            // P0-01：提权执行窗口补 HKLM 管理员摘要；非提权写失败仅日志
-                            crate::engine::reg_backup::write_admin_seal("cleanup", &file);
+                            // P0-01：提权执行窗口补 HKLM 管理员摘要；非提权写失败仅日志。
+                            // P1-02：两份锚共用一次哈希快照（两次重读可能分叉）。
+                            crate::engine::reg_backup::write_reg_backup_seals("cleanup", &file, &export_path);
                         }
                         _ => { backup_failed = true; break; }
                     }
