@@ -41,6 +41,8 @@ pub use services::{
     SVC_START_AUTO, SVC_START_DISABLED, SVC_START_MANUAL, service_stop_pub, service_set_start_pub,
 };
 pub(crate) use services::win32_of;
+mod shortcut;
+pub(crate) use shortcut::resolve_lnk;
 mod startup;
 pub use startup::{input_chain_guard_reason, startup_scan, startup_toggle, startup_delete, startup_add};
 mod syspanel;

@@ -570,17 +570,18 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                 if fname.eq_ignore_ascii_case("desktop.ini") { continue; }
                 let full_path = entry.path().to_string_lossy().to_string();
                 let name_stem = entry.path().file_stem().and_then(|s| s.to_str()).unwrap_or(&fname).to_string();
-                // 简化实现：.lnk 目标解析暂用文件路径（未做 IShellLink 深解析）
-                let resolved = full_path.clone();
+                // .lnk 目标解析：显示与发布者判定都用真实目标；解析失败保留原路径。
+                let resolved = super::resolve_lnk(entry.path().as_path())
+                    .unwrap_or_else(|| full_path.clone());
                 // StartupApproved\StartupFolder：先按全名找，再按无扩展名找
                 let sa_disabled = read_startup_approved(sa_hive, "StartupFolder", &fname)
                     .or_else(|| read_startup_approved(sa_hive, "StartupFolder", &name_stem));
                 let enabled = sa_disabled.map(|d| !d).unwrap_or(true);
                 let disabled_by = if !enabled && sa_disabled.is_some() { "system" } else { "" };
+                let command = resolved.clone();
                 let mut row = json!({
                     "id": format!("folder|{full_path}"),
                     "name": name_stem,
-                    "command": full_path,
                     "source": "folder",
                     "hive": scope,
                     "regPath": "",
@@ -598,6 +599,7 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                     "disabledBy": disabled_by,
                     "publisher": get_publisher(&resolved),
                     "resolvedPath": resolved,
+                    "command": command,
                     // 启动文件夹的项是 read_dir 当场枚举出来的，文件必然在 —— 恒空，但三个来源同形状
                     "missingTarget": "",
                 });
