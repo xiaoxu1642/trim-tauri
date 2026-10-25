@@ -90,6 +90,9 @@ const MUST_RUN = [
   'check-ignored-isolation',      // #[ignore] 真机探针必须先定隔离数据根（X1-K01🔴）
   'check-async-exits',            // 置 busy 后 try 前的 await / 裸 async handler 无 reject 出口（F4a1-M12、F4c-M01、A2 族）
   'check-degraded-consumption',   // 后端已分态的 degraded 前端不得折回单态（F4a2-K02🔴 + A1 族）
+  // D 轮（2026-10-25 操作日志复盘）：测试沙箱建在用户 %TEMP%，而 `tempFiles` 清理条目的
+  // 扫描根就是 %TEMP% —— 失败即留残的写法会把测试垃圾喂给被测对象自己扫。
+  'check-test-sandbox',           // 沙箱必须走自删守卫；未守卫建点按文件计数只减不增
 ];
 
 // 少数门禁需要非默认参数；登记在这里，`--run` 会照实传。

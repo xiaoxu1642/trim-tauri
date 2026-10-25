@@ -432,7 +432,10 @@ for (const s of WALK_DEPTH_SITES) {
 // 实现唯一性，测试区与 N10 同口径在首个 #[cfg(test)] 处切割。
 const NEWEST_FN = /fn\s+\w*(?:newest|latest)\w*\s*\(/g;
 function stripRustProduction(src) {
-  const cut = src.search(/^\s*#\s*\[cfg\(test\)\]/m);
+  // 内层属性 `#![cfg(test)]` 也算切割点：整文件都是测试代码（如 src-tauri/src/testutil.rs），
+  // 只认外层 `#[cfg(test)]` 会把这种文件当成全生产面，于是测试守卫里的 `.expect()`
+  // 被 N10 记成「生产面 panic」——那是判据失明，不是缺陷。
+  const cut = src.search(/^\s*#!?\s*\[cfg\(test\)\]/m);
   return stripRust(cut === -1 ? src : src.slice(0, cut));
 }
 let n7sites = 0;
@@ -511,7 +514,10 @@ function panicViolations(src) {
   const lines = src.split('\n');
   let inTest = false;
   lines.forEach((l, i) => {
-    if (/^\s*#\s*\[cfg\(test\)\]/.test(l)) inTest = true;
+    // `#![cfg(test)]`（内层属性）与 `#[cfg(test)]` 同等对待：前者表示**整文件**都是测试代码
+    // （如 src-tauri/src/testutil.rs 的沙箱守卫），只认外层属性会把这种文件当全生产面，
+    // 于是测试基建里的 `.expect()` 被记成「生产面 panic」——那是判据失明，不是缺陷。
+    if (/^\s*#!?\s*\[cfg\(test\)\]/.test(l)) inTest = true;
     if (inTest) return;
     if (PANIC_RE.test(l)) out.push({ line: i + 1, snippet: l.trim().slice(0, 80) });
   });
@@ -530,6 +536,18 @@ function panicViolations(src) {
   if (!/unwrap/.test(vs[0]?.snippet || '')) g.fail(`N10 对照a：命中的应是生产区那行（实得 ${JSON.stringify(vs[0])}）`);
   if (panicViolations('fn c(r: Result<u8, E>) -> Option<u8> { r.ok() }').length !== 0) {
     g.fail('N10 对照b：干净样本不得误报');
+  }
+  // 对照c：内层 `#![cfg(test)]` 必须同样切测试区（整文件测试模块不是生产面），
+  // 且**没有**该属性时同一行必须照旧命中——两个方向都钉住，免得把豁免改成万能逃逸口。
+  {
+    const inner = ['#![cfg(test)]', 'fn s() { std::fs::create_dir_all(&d).expect("x"); }'].join('\n');
+    if (panicViolations(inner).length !== 0) {
+      g.fail(`N10 对照c：整文件 #![cfg(test)] 的测试基建不得算生产面（实得 ${panicViolations(inner).length} 处）`);
+    }
+    const sameWithoutAttr = 'fn s() { std::fs::create_dir_all(&d).expect("x"); }';
+    if (panicViolations(sameWithoutAttr).length !== 1) {
+      g.fail('N10 对照c：去掉内层属性后同一行必须照旧命中（豁免不能变成逃逸口）');
+    }
   }
 }
 const PANIC_ALLOW = [

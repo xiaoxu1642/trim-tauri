@@ -16,6 +16,12 @@ pub mod engine;
 pub mod pwsh;
 pub mod safestorage;
 pub mod security;
+/// 测试基建（沙箱自删守卫）。整文件由内层 cfg(test) 属性收掉，非测试构建下是空模块。
+/// 刻意**不在这里挂 cfg(test) 属性**，也不把该属性的字面形态写进本注释：
+/// lib.rs 里有 9 条源码形状用例与 N7/N10 两条门禁按「文件中首个 cfg(test) 标记」切生产面，
+/// 在文件顶部出现那个字面量会把生产段截到第 19 行，判据集体失明（本轮实测踩过）。
+pub mod testutil;
+
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

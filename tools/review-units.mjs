@@ -401,9 +401,10 @@ export const UNITS = [
   {
     id: 'X1', owner: 'sub', name: '测试底座',
     dirs: [{ dir: 'src-tauri/tests' }],
-    contract: 'common/mod.rs helper 单一真源 / ipc_smoke 回归网 / module_smoke',
-    boundary: '只含主仓 tests/；域内 contract_tests.rs 归各域单元',
-    gates: ['check-gate-roster'],
+    files: ['src-tauri/src/testutil.rs'],
+    contract: 'common/mod.rs helper 单一真源 / ipc_smoke 回归网 / module_smoke / src 侧沙箱自删守卫（testutil::Sandbox，与 native-scanner util::sandbox、tests/common TempRoot 同一口径）',
+    boundary: '主仓 tests/ + src/testutil.rs（整文件 #![cfg(test)]）；域内 contract_tests.rs 归各域单元',
+    gates: ['check-gate-roster', 'check-test-sandbox'],
   },
 ];
 

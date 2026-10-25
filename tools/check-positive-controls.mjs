@@ -51,6 +51,7 @@ const REGISTRY = [
   // T1b-M02（v7.2 C09）：三条其实已带对照块、却因理由句写「缺合成样本」滞留 PENDING——
   // 对照块坏了没人红。迁入 REGISTRY 后受第 1/2 组实跑核验。
   { file: 'check-item-intro.mjs', reason: '对拍型：item-intro.json 多形态 ⇄ 前端消费口径（内置对照块随跑随验，2026-10-20 从 PENDING 迁入）' },
+  { file: 'check-test-sandbox.mjs', reason: 'D 轮（2026-10-25）新增：测试沙箱必须走自删守卫。判定器 judge() 与门禁共用同一实现，内置三向合成对照——未登记新文件 / 计数上升 / 守卫实现整体消失，任一失效即红；另钉守卫本体活性（impl Drop + remove_dir_all 缺一即红，防「①全绿而守卫已被掏空」）' },
   { file: 'check-optimizer-security.mjs', reason: '找违规型：扩库夹带关闭安全组件即红（内置对照块随跑随验，2026-10-20 从 PENDING 迁入）' },
   { file: 'check-optimizer-groups-sidecar.mjs', reason: '对拍型：分类侧表 ⇄ 渲染层兜底常量（内置 6 条对照样本随跑随验，2026-10-20 从 PENDING 迁入）' },
   // T1c-M02 / T1c-M05（v7.2 C09）两条新门禁：
