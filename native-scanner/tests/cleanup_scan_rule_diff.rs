@@ -11,28 +11,15 @@
 //! 3. 本 crate 不依赖 serde_json（自带 JSON 解析器），**不为测试新增依赖**（AGENTS §2），
 //!    因此这里用最小手写解析，只认 `@@PLANFILE@@` 这一种行。
 
+mod common;
+
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::os::windows::process::CommandExt;
 
-fn temp_root(tag: &str) -> PathBuf {
-    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let base = std::env::temp_dir().join(format!("trim-rule-diff-{tag}-{}-{n}", std::process::id()));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).expect("建临时树失败");
-    // temp_dir() 在 8.3 短名环境下给的是 `ADMINI~1`，而扫描器枚举出的是长名 —— 不拉齐
-    // 就 strip_prefix 全失败、命中集变成绝对路径，"差分"断言会以假阳性过掉。
-    // canonicalize 后手工剥 `\\?\` 前缀（不为测试引 dunce，且只服务本机临时目录）。
-    let mut real = fs::canonicalize(&base)
-        .expect("canonicalize 临时目录失败")
-        .to_string_lossy()
-        .into_owned();
-    if let Some(s) = real.strip_prefix(r"\\?\") {
-        real = s.to_string();
-    }
-    PathBuf::from(real)
+fn temp_root(tag: &str) -> common::TempRoot {
+    common::TempRoot::new("rule-diff", tag)
 }
 
 fn plant(root: &Path, files: &[(&str, usize)]) {

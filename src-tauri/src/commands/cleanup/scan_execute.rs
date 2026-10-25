@@ -288,7 +288,7 @@ fn run_cleanup_scan_core<E: FnMut(&Value, usize, usize) + 'static>(cats: Vec<Str
     // 刻意记 `warn` 而不是 `error`：这些不是失败，是「已按规则降级并留痕」。
     // 空 stderr 是绝大多数扫描的常态，不要为它写一行日志。
     if !stderr.trim().is_empty() {
-        log::write_log("warn", &format!("清理扫描留痕（已降级处理，非失败）:\n{}", stderr.trim()));
+        log::write_log("warn", &format!("清理扫描留痕（已降级处理，非失败）: {}", summarize_scan_stderr(&stderr)));
     }
     // 把可删文件清单并进条目（无清单的条目补空数组，执行/明细侧统一按数组消费）
     // mut data：P2-06 注入 postAction 需要二次可变遍历（§P2-06 派生字段）
@@ -1204,7 +1204,67 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
     locked_receipt(parsed, scanned, truncated, None)
 }
 
-/// P1-6C：占用两回执的**唯一构造处**（`cleanup:check-locked` / `cleanup:query-locked` 共用）。
+/// 引擎 stderr 留痕 → 一条能读完的日志（真机反馈 2026-10-25）。
+///
+/// 旧写法把整段 stderr 原样拼进一条日志，而扫描引擎的留痕是**逐目录**打的：一次
+/// `%TEMP%` 扫描撞上深度上限就打一行，每行还带完整路径（实测最长 70 段、250+ 字符），
+/// 结果一条 WARN 日志刷满整屏，真正需要看的「哪几类降级发生了」被淹掉。
+/// 口径：① 同族留痕（` at ` 之前的骨架相同）归并成 `×N` 并只留一条示例；
+/// ② 单行过长只保首尾（中间用 `…`，路径的盘符头与最深段才是有用信息）；
+/// ③ 整条上限 600 字符，被挤掉的数量如实写进「另有 N 条未列出」——
+///    收敛的是排版，**不删任何一类留痕事实**（stderr 仍是引擎唯一的 fail-closed 通道）。
+fn summarize_scan_stderr(raw: &str) -> String {
+    const LINE_CAP: usize = 160;
+    const TOTAL_CAP: usize = 600;
+    let mut groups: Vec<(String, usize, String)> = Vec::new(); // (骨架, 次数, 首条示例)
+    for line in raw.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let key = match line.find(" at ") {
+            Some(i) => line[..i].to_string(),
+            None => line.to_string(),
+        };
+        match groups.iter_mut().find(|(k, _, _)| *k == key) {
+            Some((_, n, _)) => *n += 1,
+            None => groups.push((key, 1, line.to_string())),
+        }
+    }
+    let mut out = String::new();
+    let mut omitted = 0usize;
+    for (idx, (_key, count, sample)) in groups.iter().enumerate() {
+        // 同族只留首条示例 + 次数；单条也照旧整句（只是过长时中间省略）
+        let piece = if *count > 1 {
+            format!("{} ×{count}", ellide_middle(sample, LINE_CAP))
+        } else {
+            ellide_middle(sample, LINE_CAP)
+        };
+        let sep = if idx == 0 { "" } else { "；" };
+        let cost = piece.chars().count() + if idx == 0 { 0 } else { 1 };
+        if out.chars().count() + cost > TOTAL_CAP {
+            omitted = groups[idx..].iter().map(|(_, c, _)| *c).sum();
+            break;
+        }
+        out.push_str(sep);
+        out.push_str(&piece);
+    }
+    if omitted > 0 {
+        out.push_str(&format!("…（另有 {omitted} 条同族留痕未列出）"));
+    }
+    out
+}
+
+/// 中间省略：保头 60 + `…` + 保尾 40（路径两端的盘符与最深段都有信息量，中段没有）。
+fn ellide_middle(s: &str, cap: usize) -> String {
+    let n = s.chars().count();
+    if n <= cap {
+        return s.to_string();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(cap + 8);
+    out.extend(chars.iter().take(60));
+    out.push('…');
+    out.extend(chars.iter().skip(n - 40));
+    out
+}
+
 ///
 /// 两条链原先各写一份字段表，且畸形行计数**只进日志**——于是 `locked` 为空同时兼容
 /// 「真没被占用」与「@@LOCKED@@ 协议被打断、根本没查全」两种事实，用户按前者直接去清理，
@@ -1716,3 +1776,57 @@ mod p1_6c_malformed_tests {
         assert!(clean.get("path").is_none(), "检测侧没有单一 path，不得凭空造一个");
     }
 }
+
+#[cfg(test)]
+mod 留痕排版测试 {
+    use super::{ellide_middle, summarize_scan_stderr};
+
+    /// 同族留痕必须归并成一条 + 次数（真机那条 WARN 就是被 70 段路径的 depth cap 行刷爆的）。
+    /// 样本刻意用**两条不同路径**：真实场景是每个撞限目录各打一行，路径必然不同；
+    /// 用同一路径做样本的话，连「按整行去重」都能过，钉不住归族这件事本身。
+    /// 判红自证：把归族键从「` at ` 之前」改成整行 ⇒ `×2` 断言红。
+    #[test]
+    fn 同族留痕归并且保留次数与一条示例() {
+        let tail = "d0\\d1\\".repeat(35);
+        let raw = format!(
+            "[trim-scanner] depth cap reached at C:\\Users\\me\\AppData\\Local\\Temp\\trim-a-{tail}\n\
+             [trim-scanner] depth cap reached at C:\\Users\\me\\AppData\\Local\\Temp\\trim-b-{tail}\n\
+             [cleanup-scan] 慢条目 tempFiles: 1311ms\n\
+             [cleanup-scan] 慢条目 npmCache: 1343ms\n"
+        );
+        let one = summarize_scan_stderr(&raw);
+        assert!(one.contains("×2"), "两条**不同路径**的同族 depth cap 必须归并成一行：{one}");
+        assert!(one.contains("慢条目 tempFiles") && one.contains("慢条目 npmCache"), "不同族各留一句：{one}");
+        assert!(one.chars().count() <= 600 + 40, "整条必须能读完，实得 {} 字符", one.chars().count());
+        assert!(one.contains('…'), "超长路径必须中间省略，实得 {one}");
+        // 收敛的是排版，不是事实：每一段都不得超过单行上限（160 + 省略号开销）
+        for piece in one.split('；') {
+            assert!(piece.chars().count() <= 210, "单段留痕仍过长（{}）：{piece}", piece.chars().count());
+        }
+        assert_eq!(one.matches('×').count(), 1, "只有一个归并族");
+    }
+
+    /// 单行过长时保头保尾、中间省略；短行原样通过（不得把有用信息也吃掉）。
+    #[test]
+    fn 长行中间省略而短行原样() {
+        let short = "[cleanup-scan] 规则变量未解析: HOME";
+        assert_eq!(summarize_scan_stderr(short), short, "单条短留痕必须原样，排版收敛不等于改内容");
+        let long = "x".repeat(300);
+        let got = ellide_middle(&long, 160);
+        assert!(got.chars().count() < 300 && got.contains('…'), "超长行必须中间省略：{}", got.chars().count());
+        assert!(got.starts_with("xxxx") && got.ends_with("xxxx"), "头尾都要留（路径两端才有信息量）");
+    }
+
+    /// 挤掉多少条要如实写出来 —— 只说「已截断」不说数字，等于把留痕通道又关上一半。
+    #[test]
+    fn 超出总长必须报未列出条数() {
+        // 20 个互不同族的长行（每族 count=1，无法归并）→ 必然超 600 字符上限
+        let raw: Vec<String> = (0..20)
+            .map(|i| format!("[cleanup-scan] 慢条目 item{i}: {}ms 说明文字说明文字说明文字说明文字说明文字说明文字", i * 7))
+            .collect();
+        let one = summarize_scan_stderr(&raw.join("\n"));
+        assert!(one.contains("另有") && one.contains("未列出"), "被挤掉的数量必须点名：{one}");
+        assert!(one.chars().count() <= 700, "总长仍要有界，实得 {}", one.chars().count());
+    }
+}
+

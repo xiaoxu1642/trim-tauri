@@ -10,6 +10,8 @@
 //! 3. 端到端 `duplicates`：`a.ext` + `a (1).ext`（同内容）→ artifact 组且 kept = 较新者；
 //!    同名同内容仍按 name 组输出（改造不破坏既有分组）。
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -50,21 +52,8 @@ impl Sink for Collect {
     fn warn(&self, _msg: &str) {}
 }
 
-fn temp_root(tag: &str) -> PathBuf {
-    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let base = std::env::temp_dir().join(format!("trim-dup-artifact-{tag}-{}-{n}", std::process::id()));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).expect("建临时目录失败");
-    // 8.3 短名环境下 temp_dir() 给 `ADMINI~1` 而扫描器枚举长名——拉齐后再供 roots。
-    let mut real = fs::canonicalize(&base)
-        .expect("canonicalize 失败")
-        .to_string_lossy()
-        .into_owned();
-    if let Some(s) = real.strip_prefix(r"\\?\") {
-        real = s.to_string();
-    }
-    PathBuf::from(real)
+fn temp_root(tag: &str) -> common::TempRoot {
+    common::TempRoot::new("dup-artifact", tag)
 }
 
 /// 写文件并显式设置 mtime（`File::set_modified`，std 自带，不引测试依赖）。

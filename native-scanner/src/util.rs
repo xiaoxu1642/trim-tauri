@@ -484,6 +484,53 @@ pub fn expand_short_path(p: &str) -> Option<String> {
     None
 }
 
+// ==================== 测试沙箱（唯一入口） ====================
+// 为什么要它：清理条目 `tempFiles` 的扫描根**就是用户 %TEMP%**（`cleanup-rules.json`
+// 里 `pathPs: "$env:TEMP"`），而本仓测试一直在同一个地方建沙箱。旧写法把
+// `remove_dir_all` 手写在用例最后一行，于是**任何一次断言失败 / panic / 早退都在盘上
+// 留一份**：本机实测攒了 224 个 `trim-*` 目录，其中两条深度上限用例留下的是 70 层嵌套，
+// 结果清理扫描常年在这种垃圾上命中 `MAX_WALK_DEPTH` 并打 depth cap 留痕 ——
+// 测试垃圾反过来污染了被测产品看到的世界。
+// 口径：Drop 兜底（离开作用域就删，失败路径一样删）；`Deref<Target=Path>` 让
+// `root.join(...)` / `root.display()` / `&root` 全部照旧，用例正文不必为守卫改一行。
+#[cfg(test)]
+pub struct Sandbox(std::path::PathBuf);
+
+#[cfg(test)]
+impl Sandbox {
+    pub fn path(&self) -> &std::path::Path { &self.0 }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for Sandbox {
+    type Target = std::path::Path;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
+#[cfg(test)]
+impl AsRef<std::path::Path> for Sandbox {
+    fn as_ref(&self) -> &std::path::Path { &self.0 }
+}
+
+#[cfg(test)]
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        // 删失败不改判：测试结论已经由断言给出，收尾再 panic 会把一条红变成两条噪声
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// 在 `%TEMP%\trim-<tag>` 建一个自删沙箱。`tag` 由调用方带上 pid（并行用例互不撞名）。
+/// 只给 `#[cfg(test)]` 用；集成测试链的是不含 test 配置的 lib，那里另立同款。
+#[cfg(test)]
+pub fn sandbox(tag: &str) -> Sandbox {
+    let dir = std::env::temp_dir().join(format!("trim-{tag}"));
+    // 同一 pid 被复用、或上一次被强杀留下的同名目录：先清干净再建，保证用例从空盘开始
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("测试沙箱可创建");
+    Sandbox(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,8 +593,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn expand_short_path_字面波浪号采信而真短名展不开才拒绝() {
-        let dir = std::env::temp_dir().join(format!("trim-expand-~~26100-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _sb = sandbox(&format!("expand-~~26100-{}", std::process::id()));
+        let dir = _sb.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         let real = dir.join("a.txt");
         std::fs::write(&real, b"x").unwrap();

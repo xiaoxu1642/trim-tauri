@@ -25,6 +25,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
+#[cfg(test)]
+use crate::util::sandbox;
 
 // ==================== 输出汇聚：数据返回式入口（Tauri 进程内直调） ====================
 // CLI 形态沿用「写 stdout/stderr + 进程退出」；Tauri 侧需要「一次调用拿回数据」的入口：
@@ -3937,8 +3939,8 @@ mod tests {
     /// 造 70 层嵌套、最深处放匹配文件：扫描必须正常返回，且只收浅层文件。
     #[test]
     fn walk_deletable_深度超限不再下钻() {
-        let root = std::env::temp_dir().join(format!("trim-depth-del-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("depth-del-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         let mut deep = root.clone();
         for i in 0..70 {
             deep = deep.join(format!("d{i}"));
@@ -3973,8 +3975,8 @@ mod tests {
     /// 会被读成扫描漏项 —— 而这正是审计里那条「静默失效」的同族。
     #[test]
     fn 统计口径与列表口径逐项恒等() {
-        let root = std::env::temp_dir().join(format!("trim-stats-parity-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("stats-parity-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         fs::create_dir_all(root.join("sub")).unwrap();
         for (name, body) in [
             ("a.tmp", b"aaaa".as_slice()),
@@ -4027,8 +4029,8 @@ mod tests {
     /// ② 把 `cap` 去掉 ⇒ 截断断言红；③ 出生时间改成再读一次 metadata 之外的口径 ⇒ 第三条红。
     #[test]
     fn 目录型收集模式出清单与身份证基线() {
-        let root = std::env::temp_dir().join(format!("trim-ps-collect-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("ps-collect-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         fs::create_dir_all(root.join("sub")).unwrap();
         for (name, body) in [
             ("a.bin", b"aaaa".as_slice()),
@@ -4085,8 +4087,8 @@ mod tests {
     /// ② 把候选档放宽成「有候选就命中」⇒ 第二条红（不许假复活成「恒显示、执行 0 删」）。
     #[test]
     fn detect_空路径条目改走候选存在性回退() {
-        let root = std::env::temp_dir().join(format!("trim-detect-cand-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("detect-cand-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         fs::create_dir_all(&root).unwrap();
         let here = root.to_str().unwrap().to_string();
         let q = |s: &str| Json::Str(format!("'{}'", s));
@@ -4141,8 +4143,8 @@ mod tests {
     }
     #[test]
     fn walk_fk_dll_深度超限不再下钻() {
-        let root = std::env::temp_dir().join(format!("trim-depth-fk-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("depth-fk-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         let mut deep = root.clone();
         for i in 0..70 {
             deep = deep.join(format!("d{i}"));
@@ -4174,8 +4176,8 @@ mod tests {
     #[test]
     fn 遍历预算耗尽后不再下钻() {
         // 造一棵够深够宽的树：3 层 × 每层 8 个子目录 × 每个 4 个文件
-        let root = std::env::temp_dir().join(format!("trim-walk-budget-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("walk-budget-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         let mut dirs = vec![root.clone()];
         for level in 0..3 {
             let mut next = Vec::new();
@@ -4232,8 +4234,8 @@ mod tests {
     /// 本条钉三态语义本身——含「不存在两表都进」这个集成用例造不出来的形态。
     #[test]
     fn exclude_paths_分类器按实况分三态() {
-        let root = std::env::temp_dir().join(format!("trim-excl-class-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("excl-class-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         fs::create_dir_all(root.join("Vendor.Tool")).unwrap();
         fs::write(root.join("plain.log"), b"x").unwrap();
 
@@ -4351,8 +4353,8 @@ mod tests {
     fn file_deletable_独占打开成本实测() {
         use std::time::Instant;
         const N: usize = 3000;
-        let root = std::env::temp_dir().join(format!("trim-fd-probe-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("fd-probe-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         fs::create_dir_all(&root).unwrap();
         let mut paths = Vec::with_capacity(N);
         for i in 0..N {
@@ -4437,8 +4439,8 @@ mod tests {
     /// 判红自证：删掉 `get_file_key_deletable` 里的单文件分支，count 立刻变 0。
     #[test]
     fn filekeys_单文件根必须进清单() {
-        let root = std::env::temp_dir().join(format!("trim-fk-single-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("fk-single-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         fs::create_dir_all(&root).unwrap();
         let f = root.join("setupapi.dev.log");
         fs::write(&f, vec![b'x'; 1024]).unwrap();
@@ -4469,8 +4471,8 @@ mod tests {
     /// 一致（数量、字节和、清单条数）。这里正向点名「全部命中」而不是「没报错」。
     #[test]
     fn 并行探测保持清单全集() {
-        let root = std::env::temp_dir().join(format!("trim-par-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("par-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         fs::create_dir_all(&root).unwrap();
         const N: usize = 64;
         for i in 0..N {
@@ -4497,8 +4499,8 @@ mod tests {
     /// 用例自己就会假红。
     #[test]
     fn 扫描侧保护过滤按注入清单生效() {
-        let tmp = std::env::temp_dir().join(format!("trim-r10-inject-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&tmp);
+        let _sb = sandbox(&format!("r10-inject-{}", std::process::id()));
+        let tmp = _sb.path().to_path_buf();
         fs::create_dir_all(&tmp).unwrap();
         let f = tmp.join("probe.log");
         fs::write(&f, b"x").unwrap();
@@ -4532,8 +4534,8 @@ mod tests {
             !scan_deletable(Path::new(&victim), None),
             "System32\\config 子树必须被扫描侧判不可删（R10：此前零过滤、体积照报）: {victim}"
         );
-        let tmp = std::env::temp_dir().join(format!("trim-r10-probe-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&tmp);
+        let _sb = sandbox(&format!("r10-probe-{}", std::process::id()));
+        let tmp = _sb.path().to_path_buf();
         fs::create_dir_all(&tmp).unwrap();
         let f = tmp.join("probe.log");
         fs::write(&f, b"x").unwrap();
@@ -4619,8 +4621,8 @@ mod tests {
     ///（保护判据被整条旁路）⇒ deletable_count 变 1 ⇒ 本用例红。
     #[test]
     fn filekeys_skip_lock_不豁免保护闸() {
-        let root = std::env::temp_dir().join(format!("trim-fk-prot-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("fk-prot-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("victim.tmp"), b"x").unwrap();
         let root_s = root.to_string_lossy().replace('/', "\\");
@@ -4652,8 +4654,8 @@ mod tests {
     /// [`occupied_report_warranted`] 里的保护早退 ⇒ 第一条断言红。
     #[test]
     fn checklocked_受保护文件不进占用报告() {
-        let root = std::env::temp_dir().join(format!("trim-locked-prot-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("locked-prot-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         fs::create_dir_all(&root).unwrap();
         let f = root.join("busy.tmp");
         fs::write(&f, b"x").unwrap();
@@ -4875,8 +4877,8 @@ mod tests {
     #[test]
     #[ignore = "真机顺序/截断 golden：落盘小树，发布前手动跑"]
     fn 遍历顺序与截断golden_三遍历器() {
-        let root = std::env::temp_dir().join(format!("trim-order-golden-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("order-golden-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         fs::create_dir_all(root.join("s1").join("deep")).unwrap();
         fs::create_dir_all(root.join("s2")).unwrap();
         for (dir, name, size) in [

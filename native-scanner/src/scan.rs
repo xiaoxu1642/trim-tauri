@@ -26,6 +26,8 @@ use std::sync::Mutex;
 
 use crate::cleanup_scan::{parse_json, Json};
 use crate::util::{has_lossy_path, unix_path};
+#[cfg(test)]
+use crate::util::sandbox;
 use crate::{is_reparse, json_escape, to_long_path};
 
 /// 输出汇聚器：CLI 写 stdout/stderr，Tauri 侧可换成事件发射。
@@ -3153,8 +3155,8 @@ mod tests {
             all.into_iter().filter(|l| l.contains("delresult")).collect()
         }
 
-        let dir = std::env::temp_dir().join(format!("trim-j12-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _sb = sandbox(&format!("j12-{}", std::process::id()));
+        let dir = _sb.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         struct Clean(std::path::PathBuf);
         impl Drop for Clean {
@@ -3224,8 +3226,8 @@ mod tests {
             all.into_iter().filter(|l| l.contains("delresult")).collect()
         }
 
-        let dir = std::env::temp_dir().join(format!("trim-s2-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let _sb = sandbox(&format!("s2-{}", std::process::id()));
+        let dir = _sb.path().to_path_buf();
         std::fs::create_dir_all(&dir).unwrap();
         struct Clean(std::path::PathBuf);
         impl Drop for Clean {
@@ -3284,8 +3286,8 @@ mod tests {
     /// 建不出 junction 的受限环境显式声明未校验后返回，不假绿。
     #[test]
     fn p0_2c_祖先复检深度到文件系统根不设第二上限() {
-        let base = std::env::temp_dir().join(format!("trim-p02c-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
+        let _sb = sandbox(&format!("p02c-{}", std::process::id()));
+        let base = _sb.path().to_path_buf();
         std::fs::create_dir_all(&base).unwrap();
         struct Clean(std::path::PathBuf);
         impl Drop for Clean {
@@ -3366,8 +3368,8 @@ mod tests {
     #[test]
     fn walk_level_跳过非目录reparse条目并计数() {
         use std::os::windows::fs::{symlink_dir, symlink_file};
-        let root = std::env::temp_dir().join(format!("trim-reparse-walk-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("reparse-walk-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         seed_samples(&root);
         symlink_file(root.join("plain.txt"), root.join("file-link.txt")).unwrap();
         symlink_dir(root.join("real"), root.join("dir-link")).unwrap();
@@ -3384,8 +3386,8 @@ mod tests {
     /// 前必须被跳过并计数；样本不可构造时 skip 声明，不假绿。自建自清、只读判定。
     #[test]    #[ignore = "真机：mklink /J junction 与文件链接穿越 walk_level（自建自清，发布前人工跑）"]
     fn live_non_dir_reparse_entries_are_skipped_with_trace() {
-        let root = std::env::temp_dir().join(format!("trim-reparse-live-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("reparse-live-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         seed_samples(&root);
         let mut expect = 0u64;
         for (flag, link, target) in [("/J", "junc-link", "real"), ("", "mklink-file.txt", "plain.txt")] {
@@ -3575,8 +3577,8 @@ mod tests {
     /// 阈值注入见 [`ScanBeat::with_every`]（生产构造恒为 `HEARTBEAT_EVERY`）。
     #[test]
     fn 心跳_磁盘分析器按目录结算且数值逐条递增() {
-        let root = std::env::temp_dir().join(format!("trim-beat-analyze-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("beat-analyze-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         // 12 个文件分 4 个目录（根层 2 + s1 3 + s1/n1 4 + s2 3）；阈值 2 ⇒ 逐目录结算必跨 ≥4 次
         let made = seed_beat_tree(
             &root,
@@ -3632,8 +3634,8 @@ mod tests {
     /// 留 Option 等于再留一条「忘了接」的路径（§5.6 的确证缺陷就是这么来的）。
     #[test]
     fn 心跳_应用数据du通道按目录结算() {
-        let root = std::env::temp_dir().join(format!("trim-beat-appdata-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("beat-appdata-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         // 3 个一级子目录各 3 个文件（du 只走子目录，根层文件不归 child_dir_sizes 计）
         let made = seed_beat_tree(&root, &[("c1", 3), ("c2", 3), ("c3", 3)]);
         assert_eq!(made, 9);
@@ -3672,8 +3674,8 @@ mod tests {
     /// 新形态 ≥4 行，旧形态恒 1 行 —— 判红面是行数，不是「有没有报错」。
     #[test]
     fn 心跳_大文件按目录结算而非整任务一次() {
-        let root = std::env::temp_dir().join(format!("trim-beat-bigfiles-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("beat-bigfiles-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         // 根层 1 + 四个子目录各 2 = 9 个文件；min_size=0 ⇒ 全部计入（心跳不看体积门槛）
         let made = seed_beat_tree(&root, &[("", 1), ("d1", 2), ("d2", 2), ("d3", 2), ("d4", 2)]);
         assert_eq!(made, 9);
@@ -3870,8 +3872,8 @@ mod tests {
     /// `progress(sink, 100)` ⇒ 第四段红；把 `dir_errors` 那句 warn 去掉 ⇒ 第三段红。
     #[test]
     fn 大文件扫描三态留痕与终值信号() {
-        let root = std::env::temp_dir().join(format!("trim-bigfiles-trace-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("bigfiles-trace-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         fs::create_dir_all(&root).unwrap();
         // 5 个够格文件（min_size=1、创建时间就是现在 ⇒ 必过今年门槛）
         for i in 1..=5u64 {
@@ -4205,8 +4207,8 @@ mod tests {
     /// 两条方向都要点名抓手（正向放行 + 反向拦截），否则「恒 false」也能骗过一条断言。
     #[test]
     fn prune_tree_effectively_empty_allows_only_empty_trees() {
-        let base = std::env::temp_dir().join(format!("trim-prune-empty-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
+        let _sb = sandbox(&format!("prune-empty-{}", std::process::id()));
+        let base = _sb.path().to_path_buf();
         fs::create_dir_all(base.join("a")).unwrap();
         fs::create_dir_all(base.join("b").join("c")).unwrap();
         // 只有空子目录 ⇒ 整体为空（折叠父目录的正常形态，必须放行）
@@ -4376,8 +4378,8 @@ mod tests {
     /// 否则 ①② 在只有一种形态时也能绿（本机文件系统把亚秒抹平则如实打印未判定）。
     #[test]
     fn 枚举mtime与stat同值且重复组输出逐字节一致() {
-        let base = std::env::temp_dir().join(format!("trim-perf-mtime-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
+        let _sb = sandbox(&format!("perf-mtime-{}", std::process::id()));
+        let base = _sb.path().to_path_buf();
         fs::create_dir_all(base.join("sub1")).expect("建 sub1 失败");
         fs::create_dir_all(base.join("sub2")).expect("建 sub2 失败");
         // 根层：同名不同名都要有，且每个 size 桶恰好只含一对（内容全 'x' ⇒ 同 size 即同内容）
@@ -4689,8 +4691,8 @@ mod depth_cap_tests {
     /// 护栏（created_too_new），单测造不出老目录，新建目录本就不进候选。
     #[test]
     fn collect_empty_fast_深度超限判非空且不炸() {
-        let root = std::env::temp_dir().join(format!("trim-depth-empty-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let _sb = sandbox(&format!("depth-empty-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
         let mut deep = root.clone();
         for i in 0..70 {
             deep = deep.join(format!("d{i}"));
@@ -4792,8 +4794,8 @@ mod depth_cap_tests {
             fn scanned(&self, _n: u64) {}
             fn warn(&self, _m: &str) {}
         }
-        let base = std::env::temp_dir().join(format!("trim-e3-synth-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
+        let _sb = sandbox(&format!("e3-synth-{}", std::process::id()));
+        let base = _sb.path().to_path_buf();
         // 合成「用户目录」= <base>\Users\Me：它下面的空树都不得进候选
         let fake_profile = base.join("Users").join("Me");
         fs::create_dir_all(fake_profile.join("older").join("deep")).unwrap();
@@ -4856,8 +4858,8 @@ mod depth_cap_tests {
         // 必须过 canonical 再喂进去 —— 生产上候选来自 `empty()`（根过 `canonical(r)`），
         // 而 %TEMP% 的原始串在本机是 `C:\Users\ADMINI~1\...` 这种**短名**形态，
         // 与 canonical 后的 `%USERPROFILE%` 前缀对不上（形态陷阱，见函数注释）。
-        let raw = std::env::temp_dir().join(format!("trim-e3-prune-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&raw);
+        let _sb = sandbox(&format!("e3-prune-{}", std::process::id()));
+        let raw = _sb.path().to_path_buf();
         fs::create_dir_all(raw.join("a").join("b")).unwrap();
         let base = raw.canonicalize().expect("临时目录应可 canonical");
         let got = prune_tree_effectively_empty(&base);
@@ -4979,8 +4981,8 @@ mod depth_cap_tests {
             fn scanned(&self, _: u64) {}
             fn warn(&self, _: &str) {}
         }
-        let base = std::env::temp_dir().join(format!("trim-dup-root-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
+        let _sb = sandbox(&format!("dup-root-{}", std::process::id()));
+        let base = _sb.path().to_path_buf();
         fs::create_dir_all(base.join("sub")).unwrap();
         let content = vec![b'x'; 64];
         fs::write(base.join("sub").join("only_one.dat"), &content).unwrap();
