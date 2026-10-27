@@ -2376,15 +2376,24 @@ fn normalize_plain(s: &str) -> String {
         }
         comps.push(c);
     }
+    // A6-M01：尾部点号/空白裁剪必须**逐组件**（对齐 protect.rs::trim_tail 的 trim_tail 语义）
+    // —— Win32 逐分量剥尾点：`C:\Windows.\System32\config` 在主进程折成
+    // `c:\windows\system32\config`（命中保护根），只裁整串末端会让扫描器保留
+    // `c:\windows.\…`，`same_or_under` 的分隔符边界判据就漏过去（放行删除）。
+    // 裁空且原非空的组件保留原样（protect.rs 同款防塌并：宁可不匹配走可见失败，
+    // 也不让两个不同路径塌成同一个键）。
+    let trimmed_comps: Vec<String> = comps
+        .iter()
+        .map(|c| {
+            let t = c.trim_end_matches([' ', '.']);
+            if t.is_empty() { c.to_string() } else { t.to_string() }
+        })
+        .collect();
     let joined = if prefix.is_empty() {
-        comps.join("\\")
+        trimmed_comps.join("\\")
     } else {
-        format!(r"{}\{}", prefix, comps.join("\\"))
+        format!(r"{}\{}", prefix, trimmed_comps.join("\\"))
     };
-    // 2026-10-04 审计 §5.7：尾部点号/空白裁剪对齐 protect.rs::normalize（Win32
-    // 忽略路径尾部的点与空格，`Test-Path "$env:TEMP."` 为 True）——不裁的话
-    // `c:\foo\bar.` 与 `c:\foo\bar` 词法错开一位，前缀比对漏判（纵深层分叉）。
-    // 与 protect.rs 同口径：只在**整条路径末端**裁，不做逐组件裁剪。
     joined.trim_end_matches([' ', '.']).to_lowercase()
 }
 
@@ -3106,8 +3115,16 @@ mod tests {
             lexically_normalize(r"C:\Foo\Bar"),
             "混合尾点/空白必须全折叠"
         );
-        // 非尾部组件的点不得受影响（逐组件裁剪是另一个语义，刻意不做）
-        assert_eq!(lexically_normalize(r"C:\Foo.\Bar"), r"c:\foo.\bar");
+        // 非尾部组件的点号也必须逐组件裁掉（A6-M01：与主进程 trim_tail 同口径，
+        // Win32 逐分量剥尾点 —— 旧断言「逐组件裁剪是另一个语义，刻意不做」把分叉钉成了期望值）
+        assert_eq!(lexically_normalize(r"C:\Foo.\Bar"), r"c:\foo\bar");
+        assert_eq!(
+            lexically_normalize(r"C:\Windows.\System32\config"),
+            r"c:\windows\system32\config",
+            "中间组件带尾点必须折叠（否则保护根比对被分隔符边界漏过）"
+        );
+        // 裁空且原非空的组件保留原样（防塌并：不同路径不得折成同一个键）
+        assert_eq!(lexically_normalize(r"C:\...\Bar"), r"c:\...\bar");
     }
 
     /// R4（2026-10-15）：删除结果行的 mode 字面量与共享夹具一致——本文件 ↔ src-tauri 的

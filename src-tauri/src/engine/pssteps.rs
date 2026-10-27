@@ -168,8 +168,21 @@ fn split_statements(s: &str) -> Vec<&str> {
     let mut in_sq = false;
     let mut in_dq = false;
     let mut start = 0usize;
+    // A6-M06：行注释必须对状态机免疫 —— 注释里的引号会把后续整段算作「串内」，
+    // 整段塌成一条语句，白名单只判到第一个头。现库样本为零，属机制级缺口。
+    let mut skip_until = 0usize;
     for (i, &c) in s.as_bytes().iter().enumerate() {
+        if i < skip_until {
+            continue;
+        }
         match c {
+            b'#' if !in_sq && !in_dq => {
+                let mut j = i;
+                while j < s.len() && s.as_bytes()[j] != b'\n' {
+                    j += 1;
+                }
+                skip_until = j; // 换行符本身仍按语句边界处理
+            }
             b'\'' if !in_dq => in_sq = !in_sq,
             b'"' if !in_sq => in_dq = !in_dq,
             b'(' if !in_sq && !in_dq => depth_paren += 1,
@@ -177,6 +190,38 @@ fn split_statements(s: &str) -> Vec<&str> {
             b'{' if !in_sq && !in_dq => depth_brace += 1,
             b'}' if !in_sq && !in_dq => depth_brace -= 1,
             b';' | b'\n' if !in_sq && !in_dq && depth_paren == 0 && depth_brace == 0 => {
+                out.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
+}
+
+/// 顶层管道段切分（A6-M06）：引号内与括号 / 花括号内的 `|` 不算段边界。
+///
+/// 白名单判据必须看到**每个**段头 —— PS 按自己的语法解析整段原文，只判第一个
+/// token 时，管道下游段（现算步骤体里未登记段头全部是 `Out-Null`）从未被
+/// 白名单看过，登记职责（「数据层新增任何构造必须在这里有意识放行」）落空。
+fn split_pipeline_tops(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth_paren = 0i32;
+    let mut depth_brace = 0i32;
+    let mut in_sq = false;
+    let mut in_dq = false;
+    let mut start = 0usize;
+    let bytes = s.as_bytes();
+    for (i, &c) in bytes.iter().enumerate() {
+        match c {
+            b'\'' if !in_dq => in_sq = !in_sq,
+            b'"' if !in_sq => in_dq = !in_dq,
+            b'(' if !in_sq && !in_dq => depth_paren += 1,
+            b')' if !in_sq && !in_dq => depth_paren -= 1,
+            b'{' if !in_sq && !in_dq => depth_brace += 1,
+            b'}' if !in_sq && !in_dq => depth_brace -= 1,
+            b'|' if !in_sq && !in_dq && depth_paren <= 0 && depth_brace <= 0 => {
                 out.push(&s[start..i]);
                 start = i + 1;
             }
@@ -1053,6 +1098,11 @@ const PS_INLINE_ALLOW: &[&str] = &[
     "New-Item",
     "New-ItemProperty",
     "Set-ItemProperty",
+    // A6-M06：管道消音段头 —— 现算步骤体里未登记的管道段头全部是它
+    // （tf_svc_bulk / tf_defender / tf_privacy / tf_usb_power / mouse_optimize /
+    //  audio_disable_comm_ducking / audio_disable_narrator_ducking / peripheral_winkey_off），
+    // 白名单判据改为逐段头后必须显式登记
+    "Out-Null",
     // 启动外部进程（tf_onedrive 的服务操作）；tf_oosu 退役后
     // Invoke-WebRequest / Get-FileHash / Get-AuthenticodeSignature 已无使用者，同步收紧
     "Start-Process",
@@ -1224,9 +1274,15 @@ fn eligible_stmt(st: &str) -> bool {
     if matches!(head, "return" | "break" | "continue") {
         return true;
     }
-    PS_INLINE_ALLOW
-        .iter()
-        .any(|a| a.eq_ignore_ascii_case(head))
+    // A6-M06：白名单必须覆盖**每个管道段头** —— PS 吃整段原文，只判第一个 token
+    // 时管道下游段从未被看过（现算步骤体的未登记段头全部是 Out-Null）。
+    split_pipeline_tops(s).iter().all(|seg| {
+        let seg_head = seg.trim().split_whitespace().next().unwrap_or("");
+        if seg_head.is_empty() {
+            return true;
+        }
+        PS_INLINE_ALLOW.iter().any(|a| a.eq_ignore_ascii_case(seg_head))
+    })
 }
 
 /// 解析一个 pwsh 步骤体 → 操作列表。
@@ -2890,5 +2946,31 @@ mod tests {
         assert!(src.contains(needle), "ForSubKey 必须走带 incomplete 的枚举出口");
         let marker = concat!("注册表子键清", "单不完整");
         assert!(src.contains(marker), "清单不完整时必须如实上报，不得当成功");
+    }
+
+    /// A6-M06 回归钉：白名单判据必须覆盖**每个管道段头**（PS 吃整段原文）。
+    ///
+    /// 旧判据只取每条语句的第一个 token：`New-ItemProperty X | Invoke-Expression Y`
+    /// 这种形态只有第一段进过白名单，管道下游段从未被登记过 —— 现算步骤体的
+    /// 未登记段头全部是 Out-Null（已显式登记），但「下一段不在白名单必须拦」
+    /// 这条语义要用一条探针钉住，防止判据退回单 token。
+    #[test]
+    fn 管道段头必须逐个进白名单() {
+        // 第二段头不在白名单 ⇒ 整段不得走逐字通道（fail-closed）
+        let r = compile("New-Item -Path \"HKCU:\\TrimPipeProbe\" -Force | Invoke-Expression X");
+        assert!(r.is_err(), "未登记的管道段头必须拦，不得借第一段放行逐字执行");
+        // 已登记段头（Out-Null）⇒ 逐字通道正常放行
+        let ops = compile("New-Item -Path \"HKCU:\\TrimPipeProbe\" -Force | Out-Null").unwrap();
+        assert_eq!(ops.len(), 1);
+    }
+
+    /// A6-M06 回归钉：行注释对切分器免疫 —— 注释里的引号不得把后续整段算作「串内」。
+    #[test]
+    fn 注释里的引号不得干扰切分() {
+        let ops = compile(
+            "# 用户备注：它说 \"hello\" 就当没说\nNew-Item -Path \"HKCU:\\TrimCommentProbe\" -Force",
+        )
+        .unwrap();
+        assert_eq!(ops.len(), 1, "注释（含引号）之后的新语句必须仍被识别");
     }
 }

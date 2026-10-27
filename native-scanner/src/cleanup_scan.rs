@@ -804,11 +804,25 @@ pub fn resolve_rule_path(expr: &str) -> Option<String> {
 /// `\` 在注册表面是 hive 相对形态，两码事）。
 pub fn is_drive_relative(p: &str) -> bool {
     let b = p.as_bytes();
-    if b.is_empty() || (b[0] != b'\\' && b[0] != b'/') {
+    if b.is_empty() {
+        return false; // 空串由调用方各自的空值分支处理
+    }
+    // 真正的绝对形态：盘符根（`X:\…`）或 UNC（`\\…`）—— 不属于盘符相对
+    let drive_root = b.len() >= 3 && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/');
+    let unc = b.len() >= 2 && b[0] == b'\\' && b[1] == b'\\';
+    if drive_root || unc {
         return false;
     }
-    // `\\` 开头是 UNC / verbatim 前缀（`\\?\`、`\\.\`），不属于盘符相对
-    !(b.len() >= 2 && (b[1] == b'\\' || b[1] == b'/'))
+    // 前导单 `\` / `/`：当前盘根相对形态（既有判据；`\\` 开头已在上面归 UNC）
+    if b[0] == b'\\' || b[0] == b'/' {
+        return true;
+    }
+    // N1a-M11：「无根即拒」并入判据体 —— 裸盘符（`C:`）、盘符相对（`C:Foo`）与
+    // 无根相对串按 OS 语义解析到「该盘的当前目录 / 进程 CWD」（实测
+    // readdirSync('C:') 返回进程 CWD 内容），子路径无根 ⇒ 保护判据 fail-closed
+    // 全拦 ⇒「体积 0 + locked=全部 + 零留痕」。旧判据只认前导单 `\`/`/`，
+    // 这三种形态全部放行。
+    true
 }
 
 // %NAME% → 环境变量值；未定义或定义为空串时保持原文（便于在路径列直接看出配置问题）。
@@ -5009,5 +5023,25 @@ mod tests {
             "fk_snapshot 预取与回退路径的计数/截断必须一致"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod n1a_m11_tests {
+    use super::is_drive_relative;
+
+    /// N1a-M11 回归钉：裸盘符 / 盘符相对 / 无根相对串必须判「无根」——
+    /// 旧判据只认前导单 `\`/`/`，`C:` 会按 OS 语义解析到该盘当前目录
+    /// （实测 readdirSync('C:') 返回进程 CWD 内容），保护判据全拦 ⇒ 零留痕。
+    #[test]
+    fn 无根形态必须全判不可展开() {
+        assert!(is_drive_relative("C:"), "裸盘符必须拒");
+        assert!(is_drive_relative("C:Foo"), "盘符相对形态必须拒");
+        assert!(is_drive_relative(r"Foo\Bar"), "无根相对串必须拒");
+        assert!(is_drive_relative(r"\Foo"), "当前盘根相对形态（既有判据）");
+        assert!(!is_drive_relative(r"C:\Foo"), "盘符根放行");
+        assert!(!is_drive_relative(r"\\server\share"), "UNC 放行");
+        assert!(!is_drive_relative(r"\\?\C:\Foo"), "verbatim 前缀放行（另行 fail-closed）");
+        assert!(!is_drive_relative(""), "空串由调用方空值分支处理");
     }
 }
