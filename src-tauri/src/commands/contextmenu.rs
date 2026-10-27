@@ -418,22 +418,43 @@ pub async fn contextmenu_icons<R: Runtime>(
     let Some(snap) = snapshot::get(&snapshot::domain_key(window.label(), "contextmenu")) else {
         return json!({ "success": true, "data": {} });
     };
-    let known: std::collections::HashSet<String> = snap
-        .values()
-        .filter_map(|it| it.get("clsid").and_then(|v| v.as_str()).map(|s| s.trim().to_uppercase()))
-        .filter(|s| !s.is_empty())
-        .collect();
+    // 两类已知项都从快照收（前端传值不作为提取依据——伪造请求拿不到额外解析面）：
+    //   known_clsid —— shellex COM 项，走 InprocServer32 → DLL 提图；
+    //   known_shell —— 经典 shell 项（`Directory\shell\*`、`Applications\*` 等）没有
+    //                  CLSID，command 直写目标 exe。图标统一（2026-10-28）：此前这类
+    //                  项被整条滤掉，前端恒显示占位图标（WorkBuddy / Git 等全中招），
+    //                  而卸载页对同一批 exe 走 paths:app-icon（shellicon 真源）有图。
+    //                  现按快照内 command 解析目标 exe 补一条兜底腿，与卸载页同源。
+    let mut known_clsid: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut known_shell: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for it in snap.values() {
+        let clsid = it.get("clsid").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if !clsid.is_empty() {
+            known_clsid.insert(clsid.to_uppercase());
+            continue;
+        }
+        if let (Some(rp), Some(cmd)) = (
+            it.get("regPath").and_then(|v| v.as_str()),
+            it.get("command").and_then(|v| v.as_str()),
+        ) {
+            let rp = rp.trim();
+            if !rp.is_empty() {
+                known_shell.insert(rp.to_lowercase(), cmd.to_string());
+            }
+        }
+    }
     let icon_items: Vec<Value> = items
         .unwrap_or_default()
         .into_iter()
         .filter(|it| {
-            it.get("clsid")
+            let clsid = it.get("clsid").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if clsid.starts_with('{') {
+                return known_clsid.contains(&clsid.to_uppercase());
+            }
+            it.get("regPath")
                 .and_then(|v| v.as_str())
-                .map(|c| c.trim().starts_with('{') && known.contains(c.trim().to_uppercase().as_str()))
+                .map(|rp| known_shell.contains_key(&rp.trim().to_lowercase()))
                 .unwrap_or(false)
-        })
-        .filter_map(|it| {
-            it.get("clsid").and_then(|v| v.as_str()).map(|c| json!({ "clsid": c.trim() }))
         })
         .collect();
     if icon_items.is_empty() {
@@ -445,14 +466,43 @@ pub async fn contextmenu_icons<R: Runtime>(
     // 图标提取失败不影响主流程，恒返回 success（与旧行为一致：缺图只是没图）。
     let mut data = serde_json::Map::new();
     for it in &icon_items {
-        let Some(clsid) = it.get("clsid").and_then(|v| v.as_str()) else {
+        let clsid = it.get("clsid").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if clsid.starts_with('{') {
+            let Some(server) = clsid_inproc_server(clsid) else {
+                continue;
+            };
+            if let Ok(url) = shellicon::first_icon_data_url(&server) {
+                data.insert(clsid.to_string(), json!(url));
+            }
+            continue;
+        }
+        // 兜底腿（经典 shell 项）：command 一律以快照为准。`exe_from_command` 是纯形状
+        // 解析，返回的路径形态必然盘符开头含反斜杠；裸名（`cmd.exe` 这类）没有可靠落点，
+        // 保持占位不猜。提取前过 paths 域那份来源命名空间白名单（R6b-M11 同判据，
+        // 不留第二份）——「让外壳去解析这个路径」的副作用面与 InprocServer32 链一致。
+        let reg_path = it
+            .get("regPath")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let Some(cmd) = known_shell.get(&reg_path.to_lowercase()) else {
             continue;
         };
-        let Some(server) = clsid_inproc_server(clsid) else {
+        let Some(exe) = crate::engine::native::exe_from_command(cmd) else {
             continue;
         };
-        if let Ok(url) = shellicon::first_icon_data_url(&server) {
-            data.insert(clsid.to_string(), json!(url));
+        if !exe.contains('\\') {
+            continue;
+        }
+        let exe_path = std::path::PathBuf::from(&exe);
+        if let Some(reason) = crate::commands::paths::icon_source_reject_reason(&exe_path) {
+            log::write_log("warn", &format!("右键项图标来源不受信，跳过: {reason}"));
+            continue;
+        }
+        if let Ok(url) = shellicon::first_icon_data_url(&exe_path) {
+            // 返回键与前端 iconKey 的无 CLSID 分支逐字一致（`reg:` 前缀 + regPath 原文）
+            data.insert(format!("reg:{reg_path}"), json!(url));
         }
     }
     json!({ "success": true, "data": Value::Object(data) })

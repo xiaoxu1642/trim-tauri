@@ -14,7 +14,7 @@ pub(crate) use common::to_wide;
 pub(crate) use common::wide_str;
 pub(crate) use common::{classify_delete_error, DeleteFailureKind};
 mod contextmenu;
-pub use contextmenu::{cm_restart_explorer, cm_scan, cm_toggle};
+pub use contextmenu::{cm_restart_explorer, cm_scan, cm_toggle, exe_from_command};
 mod diagnostics;
 pub use diagnostics::{sysdisk, device_info};
 mod maintenance;

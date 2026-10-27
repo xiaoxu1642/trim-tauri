@@ -12,7 +12,7 @@
   // 「看到的是演示数据、勾选不写系统」——旧实现照常播「扫描完成」，勾选静默改本地状态。
   let demoMode = false;
   let demoToggleWarned = false;
-  let iconMap = {};        // clsid -> dataUrl
+  let iconMap = {};        // clsid 或 reg:regPath -> dataUrl（iconKey 规则见下）
   let detailItem = null;   // 当前详情弹窗展示的条目
   let ctxModalCtrl = null; // v3.2.0：详情弹窗工厂 ctrl（焦点陷阱/Esc 由工厂统一管理）
   let kanbanMasonry = null; // 瀑布流布局引擎（resize 防抖 + FLIP）
@@ -235,13 +235,24 @@
     return `<span class="ctx-item-icon-placeholder" data-icon-fallback data-icon-size="${s}"><svg viewBox="0 0 24 24" width="${s}" height="${s}" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/></svg></span>`;
   }
 
-  // 条目程序图标（有则展示提取的 DLL 图标，无则占位）
+  // 图标键与后端 contextmenu_icons 的返回键逐字一致：CLSID 项（shellex COM）走
+  // clsid 原文；经典 shell 项（`Directory\shell\*`、`Applications\*` 等，无 CLSID）
+  // 走 `reg:` + regPath —— 后端按快照内同项 command 解析目标 exe 提图（与卸载页
+  // paths:app-icon 同一 shellicon 真源）。图标统一（2026-10-28）：此前这类项在两端
+  // 都没有键，恒显示占位图标（WorkBuddy / Git 等全中招）。
+  function iconKey(it) {
+    const c = String((it && it.clsid) || '').trim();
+    return c || 'reg:' + String((it && it.regPath) || '').trim();
+  }
+
+  // 条目程序图标（有则展示提取到的程序图标，无则占位）
   function itemIconHtml(item, size) {
-    if (item.clsid && iconMap[item.clsid]) {
+    const key = iconKey(item);
+    if (key && iconMap[key]) {
       // 审查 v2-F14：同源的另一处（pathbinding.js groupIconHtml）写了 `escapeAttr` 而这里没写。
       // 该值不可注入（唯一产出口是「固定前缀 + 标准 base64」，字符集不含引号），
       // 但两处写法分裂会在下一次改动时踩雷 —— 统一走 `ds.escAttr` 这一唯一真源。
-      return `<img class="ctx-item-icon" src="${window.ds.escAttr(iconMap[item.clsid])}" alt="" width="${size || 28}" height="${size || 28}" />`;
+      return `<img class="ctx-item-icon" src="${window.ds.escAttr(iconMap[key])}" alt="" width="${size || 28}" height="${size || 28}" />`;
     }
     return placeholderIconHtml(size);
   }
@@ -410,9 +421,9 @@
    * 一个都没有才退占位。
    */
   function ownerIconHtml(g) {
-    const hit = g.items.find(it => it.clsid && iconMap[it.clsid]);
+    const hit = g.items.find(it => iconMap[iconKey(it)]);
     if (hit) {
-      return `<img class="ctx-col-icon" src="${window.ds.escAttr(iconMap[hit.clsid])}" alt="" width="20" height="20" />`;
+      return `<img class="ctx-col-icon" src="${window.ds.escAttr(iconMap[iconKey(hit)])}" alt="" width="20" height="20" />`;
     }
     return `<span class="ctx-col-icon">${placeholderIconHtml(20)}</span>`;
   }
