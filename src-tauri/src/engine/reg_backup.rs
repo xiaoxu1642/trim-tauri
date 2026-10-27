@@ -1214,7 +1214,8 @@ mod reg_backup_common_tests {
             "失败回执必须带上已写入的值数: {failure:?}"
         );
         assert!(
-            failure.reason.contains("打开/创建键失败"),
+            // RB-05 后有值段不再预开键，失败从写入臂出来（旧断言点名预开文案）
+            failure.reason.contains("写入值失败") || failure.reason.contains("打开/创建键失败"),
             "失败原因要指名: {}",
             failure.reason
         );
@@ -2132,19 +2133,22 @@ mod reg_import_tests {
 
         // hex 串由目标字符串生成，不手抄字节 —— 手抄时我漏掉过一个 `%`，
         // 结果测试把"内容不对"报成"实现不对"，白查一轮。
-        let hex_of = |s: &str| -> String {
-            s.encode_utf16()
-                .flat_map(|u| u.to_le_bytes())
-                .chain(std::iter::once(0))
-                .map(|b| format!("{b:02x}"))
-                .collect::<Vec<_>>()
-                .join(",")
+        // RB-07 真机探针订正（2026-10-28）：reg.exe export 的 UTF-16 串以**一个 u16 NUL**
+        // 结尾（一对零字节），MULTI_SZ 再多一个 u16 NUL。旧夹具只补了单个 0 字节，
+        // 长度成奇数；修好长度校验后这条探针先红，红的是夹具不是实现。
+        let hex_of = |s: &str, multi: bool| -> String {
+            let mut bytes: Vec<u8> = s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+            bytes.extend_from_slice(&[0, 0]);
+            if multi {
+                bytes.extend_from_slice(&[0, 0]);
+            }
+            bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(",")
         };
         let text = "Windows Registry Editor Version 5.00\r\n\r\n".to_string()
             + &format!("[HKEY_CURRENT_USER\\{SUB}]\r\n")
             + "\"dw\"=dword:ffffffff\r\n"
-            + &format!("\"expand\"=hex(2):{}\r\n", hex_of(r"%USERPROFILE%\App"))
-            + &format!("\"multi\"=hex(7):{}\r\n", hex_of("A\u{0}B"))
+            + &format!("\"expand\"=hex(2):{}\r\n", hex_of(r"%USERPROFILE%\App", false))
+            + &format!("\"multi\"=hex(7):{}\r\n", hex_of("A\u{0}B", true))
             + "\"cn\"=\"中文 值\"\r\n"
             + "\"gone\"=-\r\n";
         // 按 reg.exe export 的真实形态写盘：UTF-16LE + BOM
