@@ -1962,9 +1962,16 @@ fn checklocked_body(input: &str) -> i32 {
     let protect = parsed.get("protect").and_then(|v| v.as_str());
     let mut scanned: u64 = 0;
     let mut locked: u64 = 0;
+    // N1a-M09：缺 path / 空 path 的输入项只让 scanned 分母变小（「请求几项、回来几项」
+    // 不构成异常）—— 计数并上终止行，让「输入畸形」可见。
+    let mut skipped: u64 = 0;
     for f in files {
-        let Some(path) = f.get("path").and_then(|v| v.as_str()) else { continue };
+        let Some(path) = f.get("path").and_then(|v| v.as_str()) else {
+            skipped += 1;
+            continue;
+        };
         if path.is_empty() {
+            skipped += 1;
             continue;
         }
         scanned += 1;
@@ -1997,7 +2004,11 @@ fn checklocked_body(input: &str) -> i32 {
         locked += 1;
         flush_stdout();
     }
-    out_line(&format!("@@LOCKED_DONE@@{{\"scanned\":{},\"locked\":{}}}", scanned, locked));
+    // N1a-M09：skipped 上终止行（全仓现无消费方，先让形状活着，主进程对账时可直接取）
+    out_line(&format!(
+        "@@LOCKED_DONE@@{{\"scanned\":{},\"locked\":{},\"skipped\":{}}}",
+        scanned, locked, skipped
+    ));
     flush_stdout();
     0
 }
@@ -2017,11 +2028,23 @@ fn checklocked_body(input: &str) -> i32 {
 fn detect_by_candidates(rule: &Json) -> Option<bool> {
     let rid = rule.get("id").and_then(|v| v.as_str()).unwrap_or("?");
     let mut saw_candidate = false;
+    // N1a-M09：候选项畸形（非字符串 / 求值失败）必须留痕 —— 静默跳过会让「候选自动发现」
+    // 的命中面缩水且不可见（本文件纪律：畸形必须被 REPORTED）。
     for key in ["candidatesPs", "globCandidatesPs"] {
         let Some(arr) = rule.get(key).and_then(|v| v.as_arr()) else { continue };
         for c in arr {
-            let Some(ce) = c.as_str() else { continue };
-            let Some(cp) = resolve_rule_path(ce) else { continue };
+            let Some(ce) = c.as_str() else {
+                err_line(&format!(
+                    "[cleanup-scan] 规则 {rid} {key} 存在非字符串候选项，已跳过（N1a-M09）"
+                ));
+                continue;
+            };
+            let Some(cp) = resolve_rule_path(ce) else {
+                err_line(&format!(
+                    "[cleanup-scan] 规则 {rid} {key} 候选求值失败（{ce}），已跳过（N1a-M09）"
+                ));
+                continue;
+            };
             saw_candidate = true;
             if cp.is_empty() {
                 continue;
@@ -2048,8 +2071,15 @@ fn test_rule_detect(rule: &Json) -> bool {
     let rid = rule.get("id").and_then(|v| v.as_str()).unwrap_or("?");
     if let Some(d) = rule.get("detect") {
         if d.ps_count() > 0 {
-            if let Some(arr) = d.as_arr() {
-                for c in arr {
+            // N1a-M09：detect **已声明但不是数组**（如 `{}`）时，旧写法落到 `return false`
+            // —— 整条规则静默隐身且零留痕。必须 REPORTED。
+            let Some(arr) = d.as_arr() else {
+                err_line(&format!(
+                    "[cleanup-scan] 规则 {rid} detect 已声明但不是数组，整条规则按不存在处理（N1a-M09）"
+                ));
+                return false;
+            };
+            for c in arr {
                     let path = match c.get("path").and_then(|p| p.as_str()) {
                         Some(p) if !p.is_empty() => p,
                         _ => continue,
@@ -2079,7 +2109,6 @@ fn test_rule_detect(rule: &Json) -> bool {
                         }
                     }
                 }
-            }
             return false;
         }
     }
@@ -2826,9 +2855,16 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_d
     if let Some(arr) = rule.get("fileKeys").and_then(|v| v.as_arr()) {
         for fk in arr {
             let Some(fp) = fk.get("path").and_then(|v| v.as_str()) else {
+                // N1a-M09：fk 项缺 path ⇒ 该项静默消失，清单面缩水不可见
+                err_line(&format!(
+                    "[cleanup-scan] 规则 {rid} fileKeys 存在缺 path 的条目，已跳过（N1a-M09）"
+                ));
                 continue;
             };
             if fp.is_empty() {
+                err_line(&format!(
+                    "[cleanup-scan] 规则 {rid} fileKeys 存在空 path 条目，已跳过（N1a-M09）"
+                ));
                 continue;
             }
             // P0 fail-closed（规则库最终优化方案 2026-09-27）：无法展开的路径不得进入
@@ -3028,6 +3064,10 @@ fn measure_reg_rule(rule: &Json) -> (bool, i64) {
             .unwrap_or_default();
         for rk in arr {
             let Some(path) = rk.get("path").and_then(|v| v.as_str()) else {
+                // N1a-M09：regKey 缺 path ⇒ 该项静默消失，命中面缩水不可见
+                err_line(&format!(
+                    "[cleanup-scan] 规则 {rid} regKeys 存在缺 path 的条目，已跳过（N1a-M09）"
+                ));
                 continue;
             };
             let p = expand_env_path(path);
@@ -3271,15 +3311,20 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
     // PLAN_CAP 全扫描计数（跨条目累计，D13 防呆上限）
     let mut plan_global_rows: usize = 0;
 
+    // N1a-M09：请求项与返回项的差额必须可对账 —— 宿主以 cats.len() 做分母，
+    // 「请求的项数与实际回来的项数」静默发生时没人看得见（未知 id / 畸形条目必须留痕）。
     for cat in &categories {
-        let cat_id = match cat.as_str() {
-            Some(s) => s,
-            None => continue,
+        let Some(cat_id) = cat.as_str() else {
+            err_line("[cleanup-scan] categories 存在非字符串条目，已跳过（N1a-M09）");
+            continue;
         };
-        let rule = match rule_map.get(cat_id) {
-            Some(r) => *r,
-            None => continue,
+        let Some(rule) = rule_map.get(cat_id) else {
+            err_line(&format!(
+                "[cleanup-scan] 分类 {cat_id} 不在规则库内，已跳过（N1a-M09）"
+            ));
+            continue;
         };
+        let rule = *rule;
         let _slow = SlowRuleTimer { id: cat_id.to_string(), t0: std::time::Instant::now() };
 
         // special 分流（非路径型条目，方案 v2 §2.2 G-4 / §2.3）：
@@ -4572,7 +4617,7 @@ mod tests {
         let lines = [
             "@@ITEM@@{\"id\":\"a\",\"files\":[]}",
             "@@PLANFILE@@{\"id\":\"a\",\"path\":\"C:\\\\tmp\",\"size\":1}",
-            "@@LOCKED_DONE@@{\"scanned\":2,\"locked\":0}",
+            "@@LOCKED_DONE@@{\"scanned\":2,\"locked\":0,\"skipped\":0}",
         ];
         let want: String = lines.iter().fold(String::new(), |mut acc, l| {
             acc.push_str(l);
@@ -5028,20 +5073,61 @@ mod tests {
 
 #[cfg(test)]
 mod n1a_m11_tests {
-    use super::is_drive_relative;
+    // E11a 钉的是「is_drive_relative 在本文件的接线计数」（定义 + 生产接线），
+    // 直测用例借用别名调用，不把测试调用算进接线计数。
+    use super::is_drive_relative as idr;
 
     /// N1a-M11 回归钉：裸盘符 / 盘符相对 / 无根相对串必须判「无根」——
     /// 旧判据只认前导单 `\`/`/`，`C:` 会按 OS 语义解析到该盘当前目录
     /// （实测 readdirSync('C:') 返回进程 CWD 内容），保护判据全拦 ⇒ 零留痕。
     #[test]
     fn 无根形态必须全判不可展开() {
-        assert!(is_drive_relative("C:"), "裸盘符必须拒");
-        assert!(is_drive_relative("C:Foo"), "盘符相对形态必须拒");
-        assert!(is_drive_relative(r"Foo\Bar"), "无根相对串必须拒");
-        assert!(is_drive_relative(r"\Foo"), "当前盘根相对形态（既有判据）");
-        assert!(!is_drive_relative(r"C:\Foo"), "盘符根放行");
-        assert!(!is_drive_relative(r"\\server\share"), "UNC 放行");
-        assert!(!is_drive_relative(r"\\?\C:\Foo"), "verbatim 前缀放行（另行 fail-closed）");
-        assert!(!is_drive_relative(""), "空串由调用方空值分支处理");
+        assert!(idr("C:"), "裸盘符必须拒");
+        assert!(idr("C:Foo"), "盘符相对形态必须拒");
+        assert!(idr(r"Foo\Bar"), "无根相对串必须拒");
+        assert!(idr(r"\Foo"), "当前盘根相对形态（既有判据）");
+        assert!(!idr(r"C:\Foo"), "盘符根放行");
+        assert!(!idr(r"\\server\share"), "UNC 放行");
+        assert!(!idr(r"\\?\C:\Foo"), "verbatim 前缀放行（另行 fail-closed）");
+        assert!(!idr(""), "空串由调用方空值分支处理");
+    }
+}
+
+#[cfg(test)]
+mod n1a_m09_tests {
+    use super::*;
+
+    /// N1a-M09 回归钉：缺 path / 空 path 的输入项必须进 skipped 计数并上终止行 ——
+    /// 旧写法只让 scanned 分母变小，「输入畸形」与「本来就没几条」不可分。
+    #[test]
+    fn 占用检测skipped计数上终止行() {
+        let input = concat!(
+            "{\"files\":[{\"path\":\"Z:\\\\TrimMissingProbe\\\\a.log\",\"id\":\"a\"},",
+            "{\"id\":\"no-path\"},{\"path\":\"\",\"id\":\"empty\"}]}"
+        );
+        let (_code, out, _err) = capture(None, || checklocked_body(&input));
+        assert!(
+            out.contains(concat!("\"skipped\":", "2")),
+            "畸形输入项必须进 skipped 计数: {out}"
+        );
+        assert!(out.contains("@@LOCKED_DONE@@"));
+    }
+
+    /// N1a-M09 回归钉：六族站点的畸形输入必须 REPORTED（err_line 留痕在场）。
+    /// 形态断言用 concat! 拼两半 —— include_str! 读到的是源码文本，整串字面量会自命中。
+    #[test]
+    fn 六族站点畸形输入必须留痕() {
+        let src = include_str!("cleanup_scan.rs");
+        for marker in [
+            concat!("存在非字符串候选项", "，已跳过"),
+            concat!("候选求值失败", "（"),
+            concat!("detect 已声明但不是数组", "，整条规则按不存在处理"),
+            concat!("fileKeys 存在缺 path 的条目", "，已跳过"),
+            concat!("regKeys 存在缺 path 的条目", "，已跳过"),
+            concat!("不在规则库内", "，已跳过"),
+            concat!("categories 存在非字符串条目", "，已跳过"),
+        ] {
+            assert!(src.contains(marker), "畸形留痕缺失: {marker}");
+        }
     }
 }

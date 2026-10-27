@@ -251,26 +251,57 @@ mod tests {
         }
     }
 
-    /// 真机探针：只读扫描本机、打印命中项（不改任何键；本机预期命中 SEHOP/SEH 链/快速启动/网络限流 数项）。
+    /// 真机探针：只读扫描本机账外 tweak，走**生产读取路径**（`read_ext_dword` 四态）。
+    ///
+    /// R3b-M16：旧探针走 `read_reg_dword_opt`（`None` 把「不存在/类型不符/无权限」折成一档，
+    /// 正是 P1-6B 要修的形态）且只打印不判红 —— 发布门禁真跑它时三态分流零实测覆盖。
+    /// 现在断言三件事：计数守恒（scanned + unreadable == 表长）、unreadable 必须点名错误码、
+    /// 至少读出一档非 Unreadable（证明本机真的开得动 HKLM 那几个子键）。
     #[test]
-    #[ignore = "真机探针：只读扫描本机账外 tweak 命中项"]
+    #[ignore = "真机探针：只读扫描本机账外 tweak 命中项（走生产读取路径 + 三态断言）"]
     fn 真机账外扫描探针() {
         let hive = hive_hklm();
         let mut hits: Vec<String> = Vec::new();
+        let mut scanned = 0usize;
+        let mut unreadable: Vec<(String, String)> = Vec::new();
+        let mut readable = 0usize;
         for t in EXTERNAL_TWEAKS {
-            let cur = crate::engine::native::read_reg_dword_opt(hive, t.subkey, t.value_name);
-            if let Some(shape) = judge_external(cur, t.hits) {
-                hits.push(format!(
-                    "{}({}) = {:?} → {}",
-                    t.title, t.value_name, cur, shape
-                ));
+            let read = read_ext_dword(hive, t.subkey, t.value_name);
+            match &read {
+                ExtRead::Unreadable(reason) => {
+                    unreadable.push((t.title.to_string(), reason.clone()));
+                }
+                ExtRead::Absent | ExtRead::NotDWord | ExtRead::DWord(_) => {
+                    scanned += 1;
+                    readable += 1;
+                }
+            }
+            if let ExtRead::DWord(v) = read {
+                if let Some(shape) = judge_external(Some(v), t.hits) {
+                    hits.push(format!("{}({}) = {:?} → {}", t.title, t.value_name, v, shape));
+                }
             }
         }
         eprintln!(
-            "账外扫描：{}/{} 项命中：{}",
+            "账外扫描：{}/{} 项命中；可读 {}、读不出 {}：{}",
             hits.len(),
             EXTERNAL_TWEAKS.len(),
+            readable,
+            unreadable.len(),
             if hits.is_empty() { "（无）".to_string() } else { hits.join("；") }
+        );
+        for (title, reason) in &unreadable {
+            eprintln!("  读不出：{title} → {reason}");
+        }
+        assert_eq!(
+            scanned + unreadable.len(),
+            EXTERNAL_TWEAKS.len(),
+            "四态计数不守恒（每项必须落进 scanned 或 unreadable）"
+        );
+        assert!(
+            readable > 0,
+            "全部 {} 项都读不出 ⇒ 读器在本机没开成 HKLM 子键，探针数据无效",
+            EXTERNAL_TWEAKS.len()
         );
     }
 }

@@ -2466,36 +2466,38 @@ fn u_r5a_same_name_run_and_runonce_no_cross_account() {
 /// 另外修了一个次序隐患：`join_data` 会首次定死 `app_data_dir()` 的 OnceLock，
 /// 必须先建窗注入测试根再取路径（与 reg_backup 真机用例同一条纪律）。
 #[test]
+#[ignore = "自播种写盘（往隔离测试根播 JSON 夹具），按快组纪律挪真机组；形状腿由 ipc_smoke 钉"]
 fn bench_history_list_matches_file_truth() {
+    // 真机组纪律：先定根（隔离测试根），播种才不落在真实数据目录上
+    let _data = probe_guard();
     let w = main_window();
     let f = trim_tauri_lib::engine::paths::join_data("bench-history.json");
-    let raw = std::fs::read_to_string(&f);
+    // X1-M10：自播种 —— 旧写法依赖「本机恰好有该文件」，而建窗即清根 ⇒ Ok(text) 分支
+    // 恒不可达（整体 skip 计 passed，用例名承诺的条数对拍从未跑过）。现在自己播一个
+    // 裸数组，「裸数组读器被判损坏 → 列表恒空」这个立项目的从此真的被测；
+    // 播种触盘 ⇒ 按快组纪律整体挪 #[ignore]。
+    let seed = serde_json::json!([
+        { "id": "probe-1", "mode": "os", "path": "C:\\trim-probe-1", "size": 1, "recycled": false },
+        { "id": "probe-2", "mode": "os", "path": "C:\\trim-probe-2", "size": 2, "recycled": false }
+    ]);
+    std::fs::write(&f, serde_json::to_string_pretty(&seed).unwrap())
+        .expect("往隔离测试根播种 bench-history.json 失败");
+    let raw = std::fs::read_to_string(&f).expect("播种后读回失败（测试自身写坏）");
     let res = invoke(&w, "bench_history_list", json!({}));
     assert_eq!(res["success"], json!(true), "列表应成功: {res}");
     // X1-L03：`data` 是数组这条形状契约由 ipc_smoke 的 `bench_history_list_shape` 钉，
     // 本用例不再逐字重复一遍——这里只把 data 取成数组用于条数对拍，取不到记 MAX，
     // 与磁盘真值一比即判红（重复断言只会让同一处漂移在两个文件里各红一次）。
     let n_cmd = res["data"].as_array().map(|a| a.len()).unwrap_or(usize::MAX);
-    match raw {
-        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
-            Ok(v) => {
-                let n_file = v.as_array().map(|a| a.len()).unwrap_or(0);
-                assert_eq!(
-                    n_cmd, n_file,
-                    "回执条数必须与磁盘真值一致（数组读器回归时命令恒 0）: file={n_file} cmd={n_cmd}"
-                );
-            }
-            // 合法损坏态（§5.26）：降级是设计行为，不当代码缺陷判红
-            Err(e) => {
-                skip_and_record(&format!(
-                    "bench_history：本机历史文件存在但非合法 JSON（{e}）——按 §5.26 属合法降级态，条数对拍不判红"
-                ));
-            }
-        },
-        // 缺样本：条数对拍无对象——明示跳过而非静默绿（形状契约由 ipc_smoke 钉，见上）
-        Err(_) => {
-            skip_and_record("bench_history：本机无 bench-history.json，条数对拍无对象（形状契约见 ipc_smoke）");
+    match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(v) => {
+            let n_file = v.as_array().map(|a| a.len()).unwrap_or(0);
+            assert_eq!(
+                n_cmd, n_file,
+                "回执条数必须与磁盘真值一致（数组读器回归时命令恒 0）: file={n_file} cmd={n_cmd}"
+            );
         }
+        Err(e) => panic!("播种样本必须可解析（写坏了测试自己）: {e}"),
     }
 }
 

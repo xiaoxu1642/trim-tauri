@@ -42,13 +42,25 @@ fn cleanup_rules_success() {
     assert_ne!(res["success"], json!(false), "规则库验签加载链不应失败: {res}");
 }
 
-/// settings:load 密钥掩码语义：返回体里**不得**出现 `dpapi:v1:` 密文。
-/// 防的是：密钥经 IPC 明文回渲染层（掩码绕过 = 凭据外泄）。
+/// settings:load 密钥掩码语义：**在场密钥必须被掩码**，且返回体里**不得**出现 `dpapi:v1:` 密文。
+/// X1-M02：旧版在清空后的测试根上断「不含 dpapi:v1:」—— 没有密钥在场 ⇒ 反向断言必然成立，
+/// 把 `SECRET_MASK` 换成明文回显这条也不会红。现在自播种一个密钥夹具做双向断言；
+/// 播种触盘 ⇒ 按快组纪律挪真机组（`#[ignore]`，发布前门禁跑）。
 #[test]
+#[ignore = "自播种写盘（往隔离测试根播密钥夹具），按快组纪律挪真机组"]
 fn settings_load_masks_dpapi_secrets() {
+    // 真机组纪律：先定根（隔离测试根），播种才不落在真实数据目录上
+    let _data = probe_guard();
     let w = main_window();
+    let f = trim_tauri_lib::engine::paths::join_data("settings.json");
+    std::fs::write(&f, "{\"baiduApiKey\": \"dpapi:v1:AAAAprobe\"}")
+        .expect("往隔离测试根播种 settings.json 失败");
     let res = invoke(&w, "settings_load", json!({}));
     assert_eq!(res["success"], json!(true), "settings:load 应成功: {res}");
+    assert!(
+        res.to_string().contains(trim_tauri_lib::security::SECRET_MASK),
+        "在场密钥未被掩码（掩码语义正向失效）: {res}"
+    );
     assert!(
         !res.to_string().contains("dpapi:v1:"),
         "settings:load 返回体外泄了 dpapi:v1: 密文（掩码语义被破坏）"
