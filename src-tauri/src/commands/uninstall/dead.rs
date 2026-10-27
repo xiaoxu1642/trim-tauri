@@ -73,12 +73,45 @@ pub(super) fn expand_pct(s: &str) -> Option<String> {
     Some(out)
 }
 
+/// 无引号串里「可执行段」的切点：**只认段尾扩展名**（返回切点字节下标）。
+///
+/// 病根（R2a-M07）：旧写法取「第一个出现的扩展名子串」的位置切，切出来的前缀**不是这条
+/// 注册表值记录过的落点**，分两支都错：
+/// - 切在中间目录段上（`C:\Program Files\acme.exe\bin\tool.dll` → `…\acme.exe`）：
+///   这个前缀从来不是文件，`exists()` 恒假 ⇒ 把用户没见过的路径写进「落点已不存在」的证据文案；
+/// - 切在末段内部（`…\app.dll.host.exe` → `…\app.dll`）：`app.dll` 不存在而 `app.dll.host.exe`
+///   照样存在 ⇒ **真落点还在却判成残留**，删的是「证据其实还在」的键（不安全方向）。
+///
+/// 现在只认「扩展名后面是结尾 / 空白 / 引号」的命中 —— 那才是可执行段真正结束的位置；
+/// 后面紧跟 `\`、`/`、`.` 的都说明这是目录名或文件名中段，跳过。同一扩展名可能有多次出现，
+/// 取**最靠前且边界成立**的那个。切点因此恒为原串的一个「段边界前缀」，不会凭空造出新落点。
+fn cut_at_segment_end(low: &str) -> Option<usize> {
+    let b = low.as_bytes();
+    let mut best: Option<usize> = None;
+    for ext in [".exe", ".dll", ".sys"] {
+        let mut from = 0usize;
+        while let Some(i) = low[from..].find(ext) {
+            let end = from + i + ext.len();
+            let boundary = match b.get(end) {
+                None => true,
+                Some(c) => c.is_ascii_whitespace() || *c == b'"',
+            };
+            if boundary {
+                best = Some(best.map_or(end, |cur| cur.min(end)));
+                break;
+            }
+            from = end;
+        }
+    }
+    best
+}
+
 /// 从 `UninstallString` / 服务 `ImagePath` / App Paths 默认值里取出「它记着哪个文件」。
 ///
 /// `None` = 判不出来（相对名、无扩展名、`Device\` 形态、变量展开不了），
 /// 调用方必须把 None 当**无证据**而不是"不存在"。
-/// 截参数的口径：带引号取引号内；不带引号就在第一个 `.exe/.dll/.sys` 之后切断
-/// （注册表里没引号的路径只能靠扩展名边界分参数），且结果必须以这三种扩展名结尾。
+/// 截参数的口径：带引号取引号内；不带引号就在**段尾**的 `.exe/.dll/.sys` 之后切断
+/// （注册表里没引号的路径只能靠段尾扩展名分参数），且结果必须以这三种扩展名结尾。
 pub(super) fn dead_landing(raw: &str) -> Option<String> {
     let s = raw.trim();
     if s.is_empty() {
@@ -104,11 +137,10 @@ pub(super) fn dead_landing(raw: &str) -> Option<String> {
             // U-A5-M07：切成两半的偏移必须同源。to_lowercase 是 full mapping（İ→i̇ 会变长），
             // 拿它的字节下标去切原串会错位；这里只做 ASCII 小写，长度/边界与原串一致。
             let low = expanded.to_ascii_lowercase();
-            let cut = [".exe", ".dll", ".sys"]
-                .iter()
-                .filter_map(|e| low.find(e).map(|i| i + e.len()))
-                .min();
-            match cut {
+            // 切点是「段尾扩展名」的结束位置 ⇒ 落点恒为原串的段边界前缀。这条不变量由
+            // `dead_landing_landing_is_always_a_prefix_of_the_recorded_value` 机检（R2a-M07
+            // 的要害是「造出值里从未记录过的落点」，光靠人读不出这件事）。
+            match cut_at_segment_end(&low) {
                 Some(end) => expanded[..end].to_string(),
                 None => expanded.clone(),
             }

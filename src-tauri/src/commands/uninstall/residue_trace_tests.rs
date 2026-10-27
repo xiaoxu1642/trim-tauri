@@ -1095,6 +1095,60 @@ use super::residue_update::*;
         assert_eq!(dead_landing(r#""C:\Program Files\Foo\unins000.exe /S"#), None);
     }
 
+    /// B2-6（R2a-M07）：无引号分支只认**段尾**扩展名，不许按「第一个出现的扩展名子串」切。
+    ///
+    /// 两支错法各一条正例：
+    /// ① 目录段里的 `.exe`（`…\acme.exe\bin\tool.dll`）—— 旧写法切成 `…\acme.exe`，这个前缀
+    ///    从来不是文件，却会被写进「ImagePath 指向的落点已不存在」的证据文案；
+    /// ② 末段内部（`…\app.dll.host.exe`）—— 旧写法切成 `…\app.dll`，真文件还在却判成残留
+    ///    （不安全方向：删的是「证据其实还在」的键）。
+    ///
+    /// 判红自证：把 `cut_at_segment_end` 的边界判定改成恒真 ⇒ 前两条当场红。
+    #[test]
+    fn dead_landing_only_cuts_at_segment_end_extension() {
+        let cases: &[(&str, Option<&str>)] = &[
+            (r"C:\Program Files\acme.exe\bin\tool.dll", Some(r"C:\Program Files\acme.exe\bin\tool.dll")),
+            (r"C:\Tools\app.dll.host.exe /run", Some(r"C:\Tools\app.dll.host.exe")),
+            // 参数里带 `.exe` 也不许吃进落点（切点在空白之前）
+            (r"C:\Tools\launcher.exe /log=C:\x.exe", Some(r"C:\Tools\launcher.exe")),
+            // 验收两形态：带引号拿完整路径；无引号的同一条不许被切成 `C:\A`
+            (r#""C:\A B\app.exe" /x"#, Some(r"C:\A B\app.exe")),
+            (r"C:\A B\app.exe", Some(r"C:\A B\app.exe")),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(dead_landing(raw).as_deref(), *want, "落点解析不符: {raw:?}");
+        }
+    }
+
+    /// B2-6 的不变量：无引号形态下，落点必须是**原串的前缀** —— 造不出这条注册表值里
+    /// 从未记录过的路径。这条不能靠人读代码保证，必须机检（R2a-M07 的要害正是「凭空造落点」）。
+    ///
+    /// 判红自证：把切点改成拼接（如 `format!("{expanded}\\x")`）⇒ 本用例红。
+    #[test]
+    fn dead_landing_landing_is_always_a_prefix_of_the_recorded_value() {
+        let samples = [
+            r"C:\Program Files\AntiCheatExpert\ACE-CORE102706.sys",
+            r"C:\Windows\System32\svchost.exe -k netsvcs",
+            r"\??\C:\Windows\System32\drivers\ACEX.sys",
+            r"\\server\share\unins000.exe /S",
+            r"C:\Program Files\acme.exe\bin\tool.dll",
+            r"C:\Tools\app.dll.host.exe /run",
+            r"C:\A B\app.exe",
+        ];
+        for raw in samples {
+            let Some(landing) = dead_landing(raw) else { continue };
+            // `\??\` 前缀会被剥掉，按剥前缀后的串比；引号形态的落点不在原串里（取引号内）
+            let body = raw.strip_prefix(r"\??\").unwrap_or(raw);
+            if body.starts_with('"') {
+                continue;
+            }
+            assert!(
+                body.starts_with(&landing),
+                "落点不是原串前缀（造出了值里没记录过的路径）: {raw} → {landing}"
+            );
+        }
+    }
+
     /// 快照分桶：面板现在同时展示多组候选，整槽覆盖会让先扫那组在执行时被快照闸判过期。
     /// v4 P2-F（R2-M02）：输入**刻意不写 origin** —— 打标由 `residue_snapshot_put` 入口
     /// 统一完成（生产侧曾 0 处赋值，分桶过滤恒不命中、重扫只累加且触顶保旧砍新）。
