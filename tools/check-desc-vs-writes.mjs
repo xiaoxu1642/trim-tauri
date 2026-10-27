@@ -43,10 +43,22 @@ function unscopedDefaultClaims(desc) {
   return out;
 }
 
-/** 该步骤体是否对 Services 下的键写 Start 值（两信号同体）。 */
-function writesServiceStart(pwsh) {
-  const t = String(pwsh || '');
-  return t.includes('CurrentControlSet\\Services') && /-Name\s+Start\s+-Value/.test(t);
+/**
+ * 该步骤体是否对 Services 下的键写 Start 值（两信号同体）。
+ * T1b-M08：三种步骤形态全覆盖 —— pwsh（-Name Start -Value）、.reg（Services 段下的
+ * "Start"= 值行）、cmd（sc config … start=）。此前只认 pwsh：同数据层现算多处 .reg
+ * 形态服务写入（tf_gamebar / tf_defender / tf_privacy）在判定面外，「文案说不动服务」
+ * 的承诺对它们全部失效。
+ */
+function writesServiceStart(stepText) {
+  const t = String(stepText || '');
+  const inServices = t.includes('CurrentControlSet\\Services') || /Services\\[^\r\n"']+/i.test(t);
+  const pwshStart = /-Name\s+Start\s+-Value/.test(t);
+  const regStart = /^"Start"=/m.test(t);
+  const cmdStart = /sc\s+config\s+\S+\s+start=/i.test(t);
+  // cmd 的 `sc config <svc>` 本身就点名了服务 ⇒ 不需要再找 Services 路径。
+  if (cmdStart) return true;
+  return inServices && (pwshStart || regStart);
 }
 
 let flagged = 0;
@@ -56,7 +68,8 @@ for (const o of OPTIONS) {
   const bodies = [];
   for (const key of ['steps', 'restore']) {
     for (const s of o[key] || []) {
-      if (s.pwsh) bodies.push(s.pwsh);
+      // T1b-M08：三形态全收 —— pwsh / cmd / reg，漏一个形态判据就少守一路。
+      for (const k of ['pwsh', 'cmd', 'reg']) if (s[k]) bodies.push(s[k]);
     }
   }
   if (bodies.some(writesServiceStart)) {
@@ -78,6 +91,15 @@ if (flagged === 0) {
   const svcBody =
     'foreach ($n in $disabled) { $p = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$n"; ' +
     'if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 4 -Force } }';
+  // T1b-M08：对照补形态档 —— .reg 与 cmd 形态的违例必红、同形态的 Services 外写入放行。
+  // 判红能力此前只在 pwsh 一向上被测过（红线①第三条的「形态维度」缺口）。
+  const regBody =
+    'Windows Registry Editor Version 5.00\r\n\r\n' +
+    '[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\FakeSvc]\r\n' +
+    '"Start"=dword:00000004\r\n';
+  const regOutside = 'Windows Registry Editor Version 5.00\r\n\r\n' +
+    '[HKEY_LOCAL_MACHINE\\SOFTWARE\\Vendor\\Key]\r\n"Start"=dword:00000001\r\n';
+  const cmdBody = 'sc config FakeSvc start= disabled';
   const cases = [
     {
       label: '原缺陷（未限定保持默认 + 服务写入）',
@@ -94,16 +116,36 @@ if (flagged === 0) {
       item: { id: 'fake_plain', desc: '批量禁用非必要服务 Start=4。', steps: [{ pwsh: svcBody }] },
       wantHit: false,
     },
+    {
+      label: 'T1b-M08（.reg 形态服务写入）',
+      item: { id: 'fake_reg', desc: '商店与同步相关服务保持系统默认（不再修改）。', steps: [{ reg: regBody }] },
+      wantHit: true,
+    },
+    {
+      label: 'T1b-M08（.reg 写在 Services 之外）',
+      item: { id: 'fake_reg_out', desc: '商店与同步相关服务保持系统默认（不再修改）。', steps: [{ reg: regOutside }] },
+      wantHit: false,
+    },
+    {
+      label: 'T1b-M08（cmd sc config 形态）',
+      item: { id: 'fake_cmd', desc: '商店与同步相关服务保持系统默认（不再修改）。', steps: [{ cmd: cmdBody }] },
+      wantHit: true,
+    },
   ];
   for (const c of cases) {
     const claims = unscopedDefaultClaims(c.item.desc);
-    const bodies = c.item.steps.filter((s) => s.pwsh).map((s) => s.pwsh);
+    const bodies = [];
+    for (const key of ['steps', 'restore']) {
+      for (const s of c.item[key] || []) {
+        for (const k of ['pwsh', 'cmd', 'reg']) if (s[k]) bodies.push(s[k]);
+      }
+    }
     const hit = claims.length > 0 && bodies.some(writesServiceStart);
     if (hit !== c.wantHit) {
       g.fail(`正向对照「${c.label}」：期望${c.wantHit ? '判红' : '放行'}，实测${hit ? '判红' : '放行'}`);
     }
   }
-  g.ok(`POSITIVE_CONTROLS：${cases.length} 条判定器样本（红/放行）结论正确`);
+  g.ok(`POSITIVE_CONTROLS：${cases.length} 条判定器样本（红/放行，含 .reg 与 cmd 形态档）结论正确`);
 }
 
 g.finish('check-desc-vs-writes: 全部通过');

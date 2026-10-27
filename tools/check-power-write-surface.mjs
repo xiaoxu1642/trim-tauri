@@ -217,9 +217,13 @@ try {
 
 // 4b) 数据层 JSON 全量 + 前端 js 全量 + src-tauri/src 全量 .rs（T1b-M03）：
 // 旧实现是硬编码 5 路清单——新增 data/*.json、src/scripts/*.js、commands/uninstall/*.rs
-// 里的 powercfg 写入不会自动进入判定（A1 地板钉的是 5 路的数量，不是路数完备性）。
+// 里的 powercfg 写入不会自动进入判定（A1 地板现在钉的是**逐路**数量，见下方 A1）。
 // 改为 walkFiles 派生：四个已知焦点文件仍单列（地板不变），其余文件进入漫游面，
-// 命中即红（除非登记进 ALLOW）——新增写点不再可能静默绕过。
+// 命中即红（除非登记进 ALLOW）。覆盖目录集合（T1b-c 逐路地板钉住，新增一路必须
+// 同步补地板，否则该路整片塌陷不可见）：
+//   src-tauri/src(.rs) / src-tauri/data(.json) / src/scripts(.js) /
+//   native-scanner/src(.rs) / src 根(.html) —— 取数命令：node tools/check-power-write-surface.mjs
+//   （A1 行的逐路计数即现算值）。
 {
   const walkAll = (base, exts) => {
     const out = [];
@@ -242,18 +246,28 @@ try {
     join(REPO_ROOT, 'src-tauri', 'src', 'engine', 'pssteps.rs'),
     join(REPO_ROOT, 'src-tauri', 'src', 'engine', 'systembin.rs'),
   ]);
-  const extra = [
-    ...walkAll(join(REPO_ROOT, 'src-tauri', 'src'), ['.rs']),
-    ...walkAll(join(REPO_ROOT, 'src-tauri', 'data'), ['.json']),
-    ...walkAll(join(REPO_ROOT, 'src', 'scripts'), ['.js']),
-  ].filter((p) => !FOCUS.has(p) && !p.replace(/\\/g, '/').endsWith('optimizer-runtime.json') && !p.replace(/\\/g, '/').endsWith('optimizer-nara-panel.json'));
+  const extraWithRoute = [
+    ...walkAll(join(REPO_ROOT, 'src-tauri', 'src'), ['.rs']).map((p) => [p, 'roamSrcRs']),
+    ...walkAll(join(REPO_ROOT, 'src-tauri', 'data'), ['.json']).map((p) => [p, 'roamDataJson']),
+    ...walkAll(join(REPO_ROOT, 'src', 'scripts'), ['.js']).map((p) => [p, 'roamScriptsJs']),
+    // T1b-c（最小改法①）：补 native-scanner/src（.rs）与 src 根（.html）两路 —— 此前
+    // 这两路整片缺席，「新增写点不再可能静默绕过」的声称比实现射程大。
+    ...walkAll(join(REPO_ROOT, 'native-scanner', 'src'), ['.rs']).map((p) => [p, 'roamNativeRs']),
+    ...walkAll(join(REPO_ROOT, 'src'), ['.html']).map((p) => [p, 'roamHtml']),
+  ];
+  const routeOf = new Map(extraWithRoute);
+  const extra = extraWithRoute
+    .map(([p]) => p)
+    .filter((p) => !FOCUS.has(p) && !p.replace(/\\/g, '/').endsWith('optimizer-runtime.json') && !p.replace(/\\/g, '/').endsWith('optimizer-nara-panel.json'));
   stats.roam = 0;
+  for (const k of ['roamSrcRs', 'roamDataJson', 'roamScriptsJs', 'roamNativeRs', 'roamHtml']) stats[k] = 0;
   for (const abs of extra) {
     const rel = abs.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
     // 生成副本/只读基线由 P1/P2 路判定（cleanup-fallback 是 cleanup-rules 的派生件）
     const text = stripComments(readFileSync(abs, 'utf8'));
     const hs = [...powercfgHits(text), ...powerNsHits({ text })];
     stats.roam++;
+    stats[routeOf.get(abs)]++;
     for (const h of hs) hits.push({ file: rel, ...h });
   }
 }
@@ -279,9 +293,14 @@ try {
 
 // A1. 扫描面地板：任何一路塌缩（目录改名/数组读空）都会让下面的「0 命中」变成假绿
 check(
-  stats.runtime >= 100 && stats.vendorOpts >= 100 && stats.vendorJs >= 15 && stats.nara === 1 && stats.src === 4 && stats.roam >= 100,
-  `A1. 扫描面完整（runtime ${stats.runtime} 项 / vendor OPTIONS ${stats.vendorOpts} 项 / vendor js ${stats.vendorJs} 个 / 面板 1 / 源码 4 / 漫游面 ${stats.roam} 文件）`,
-  stats.runtime < 100 || stats.vendorOpts < 100 || stats.roam < 100 ? '数据层或漫游面读空 —— 判定器在读错对象，先修本门禁' : '',
+  stats.runtime >= 100 && stats.vendorOpts >= 100 && stats.vendorJs >= 15 && stats.nara === 1 && stats.src === 4
+    && stats.roamSrcRs >= 100 && stats.roamDataJson >= 12 && stats.roamScriptsJs >= 40
+    && stats.roamNativeRs >= 5 && stats.roamHtml >= 3 && stats.roam >= 100,
+  `A1. 扫描面完整（runtime ${stats.runtime} / vendor OPTIONS ${stats.vendorOpts} / vendor js ${stats.vendorJs} / 面板 ${stats.nara} / 源码 ${stats.src} / 漫游 ${stats.roam} = srcRs ${stats.roamSrcRs} + dataJson ${stats.roamDataJson} + scriptsJs ${stats.roamScriptsJs} + nativeRs ${stats.roamNativeRs} + html ${stats.roamHtml}）`,
+  stats.runtime < 100 || stats.vendorOpts < 100 || stats.roam < 100
+    || stats.roamSrcRs < 100 || stats.roamDataJson < 12 || stats.roamScriptsJs < 40
+    || stats.roamNativeRs < 5 || stats.roamHtml < 3
+    ? '某一路读空或塌陷 —— 判定器在读错对象，先修本门禁（T1b-c：逐路地板，单路塌陷不再被合计数掩盖）' : '',
 );
 
 // A2. 命中 ⇄ ALLOW 逐条对拍（双棘轮）

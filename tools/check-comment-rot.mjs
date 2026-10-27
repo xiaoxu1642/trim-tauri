@@ -592,38 +592,21 @@ check(
   `R3 扫描面地板（数字断言对象 ${r3Objects} 处 ≥ 3）`,
   r3Objects < 3 ? '断言对象趋零 ⇒ 语料或模式失明' : '',
 );
-// T1b-K01：逐形态盲区核对。真语料 0 对象的形态必须有合成对照（下方自检块），
+// T1b-K01 + T1b-M01：逐形态盲区核对。真语料 0 对象的形态必须有合成对照，
 // 否则判红——「0 对象 + 无对照」= 判据死了没人知道。
-const CONTROLLED_R3_FORMS = new Set([
-  0, // .ps1 脚本数：自检块有 99999 合成样本（正反向）
-  1, // 门禁条数：本批补的合成对照
-  2, // 注册命令条数：自检块有合成样本
-  3, // NAME=NUM（RE_CONST_EQ）：自检块 THROTTLE_MS / NO_SUCH_CONST 两向
-  4, // file:行（RE_FILE_LINE）：自检块真坐标 / 幽灵坐标两向
-  5, // KB 体积（RE_KB_CLAIM）：自检块量级措辞 / 测量型两向
+// T1b-M01 修正：活性证明不再是静态下标集合（`Set.has(下标)` 的写法恒真——就算
+// 对照样本被整段删掉，它照样说「有对照」），改成**执行时回填**：每个形态的合成
+// 对照在下方自检块里真跑通过一次才记名；核对断言（自检块之后发出）查的是
+// 「本轮真的跑过」，不是「登记过」。
+const R3_FORM_CONTROL_PROVEN = new Set();
+const R3_FORM_CONTROL_EXPECT = new Map([
+  ['.ps1 脚本数', 'R3a.ps1'],
+  ['门禁条数', 'R3a.gate'],
+  ['注册命令条数', 'R3a.cmd'],
+  ['NAME=NUM', 'R3b'],
+  ['file:行', 'R3c'],
+  ['KB 体积', 'R3d'],
 ]);
-const zeroForms = [
-  ...r3FormCounts.filter((f) => f.n === 0).map((f) => f.label),
-  ...(constEqObjects === 0 ? ['NAME=NUM'] : []),
-  ...(fileLineObjects === 0 ? ['file:行'] : []),
-  ...(kbObjects === 0 ? ['KB 体积'] : []),
-];
-const uncontrolledZeros = zeroForms.filter((l) => {
-  if (l === '.ps1 脚本数') return !CONTROLLED_R3_FORMS.has(0);
-  if (l === '门禁条数') return !CONTROLLED_R3_FORMS.has(1);
-  if (l === '注册命令条数') return !CONTROLLED_R3_FORMS.has(2);
-  if (l === 'NAME=NUM') return !CONTROLLED_R3_FORMS.has(3);
-  if (l === 'file:行') return !CONTROLLED_R3_FORMS.has(4);
-  if (l === 'KB 体积') return !CONTROLLED_R3_FORMS.has(5);
-  return true;
-});
-check(
-  uncontrolledZeros.length === 0,
-  `R3 逐形态盲区核对（.ps1 ${r3FormCounts[0].n} / 门禁 ${r3FormCounts[1].n} / 命令 ${r3FormCounts[2].n} / NAME=NUM ${constEqObjects} / file:行 ${fileLineObjects} / KB ${kbObjects}）`,
-  uncontrolledZeros.length
-    ? `这些形态真语料 0 对象且无合成对照：${uncontrolledZeros.join('、')}——补对照样本或登记 CONTROLLED_R3_FORMS`
-    : '0 对象形态均有合成对照，其余形态对象数 > 0',
-);
 
 // ────────────────────────────────────────────────────────────────────
 // 收尾
@@ -731,6 +714,7 @@ const POSITIVE_CONTROLS = (() => {
   R3_PATTERNS[0].re.lastIndex = 0;
   while ((mm = R3_PATTERNS[0].re.exec(good)) !== null) if (Number(mm[1]) !== ps1Count) falseRed = true;
   if (falseRed) problems.push('R3 失效：与现算一致的数字被判红');
+  if (hit && !falseRed) R3_FORM_CONTROL_PROVEN.add('R3a.ps1'); // T1b-M01：对照真跑通才记活性
 
   // R3a 命令条数：合成错数必须命中；现算数必须放行
   R3_PATTERNS[2].re.lastIndex = 0;
@@ -740,6 +724,7 @@ const POSITIVE_CONTROLS = (() => {
   R3_PATTERNS[2].re.lastIndex = 0;
   const gm = R3_PATTERNS[2].re.exec(cmdGood);
   if (!gm || Number(gm[1]) !== registeredCmdCount) problems.push('R3a 失效：现算命令条数被判红');
+  else R3_FORM_CONTROL_PROVEN.add('R3a.cmd'); // T1b-M01
 
   // R3a 门禁条数（T1b-K01 补）：该形态真语料 0 对象，判据活性只能靠合成样本证明
   R3_PATTERNS[1].re.lastIndex = 0;
@@ -749,6 +734,7 @@ const POSITIVE_CONTROLS = (() => {
   R3_PATTERNS[1].re.lastIndex = 0;
   const gGood = R3_PATTERNS[1].re.exec(gateGood);
   if (!gGood || Number(gGood[1]) !== gateCount) problems.push('R3a 失效：现算门禁条数被判红');
+  else R3_FORM_CONTROL_PROVEN.add('R3a.gate'); // T1b-M01
 
   // R3f（T1b-K03）：盘上不存在的 .ps1 必须被抓；盘上真名必须放行
   {
@@ -771,6 +757,9 @@ const POSITIVE_CONTROLS = (() => {
   // R3b：不存在的常量必须现算 null；真实常量（mouse-trail.js THROTTLE_MS=22）必须现算到
   if (constValueOf('NO_SUCH_CONST_XYZ') !== null) problems.push('R3b 失效：不存在的常量现算不为 null');
   if (constValueOf('THROTTLE_MS') !== 22) problems.push('R3b 失效：真实常量 THROTTLE_MS 现算不到 22');
+  if (constValueOf('NO_SUCH_CONST_XYZ') === null && constValueOf('THROTTLE_MS') === 22) {
+    R3_FORM_CONTROL_PROVEN.add('R3b'); // T1b-M01：对照真跑通才记活性
+  }
 
   // R3c：真实存在的 file:行 不得假红；不存在的文件必须命中
   const realRef = '`tools/check-comment-rot.mjs:1`';
@@ -779,6 +768,9 @@ const POSITIVE_CONTROLS = (() => {
   const ghost = '`tools/no-such-file-xyz.mjs:9`';
   const g2 = /`((?:src|src-tauri|tools|native-scanner)\/[\w./-]+\.(?:rs|js|mjs|ps1|json|css|html)):(\d+)`/.exec(ghost);
   if (!g2 || existsSync(join(ROOT, g2[1]))) problems.push('R3c 失效：不存在的坐标未被抓到');
+  if (existsSync(realPath) && g2 && !existsSync(join(ROOT, g2[1]))) {
+    R3_FORM_CONTROL_PROVEN.add('R3c'); // T1b-M01：对照真跑通才记活性
+  }
 
   // R3e（P2-A/A-3）：坐标**存在但指错地方**必须被抓到 —— R3c 只验「文件在、行号没越界」，
   // 这三条合成样本喂给同一个判定器（同一实现，不另抄一份判据）：
@@ -811,17 +803,39 @@ const POSITIVE_CONTROLS = (() => {
   }
 
   // R3d：带「级」的量级措辞与登记常量必须放行；裸测量型 KB 必须命中
-  if (RE_KB_CLAIM.test('规则 JSON 全文（60KB 级）')) problems.push('R3d 失效：量级措辞「60KB 级」被判红');
+  const kbLevelOk = !RE_KB_CLAIM.test('规则 JSON 全文（60KB 级）');
   RE_KB_CLAIM.lastIndex = 0;
-  if (!RE_KB_CLAIM.test('首屏解析 ~813 KB')) problems.push('R3d 失效：测量型 KB 未被抓到');
+  const kbMeasureOk = RE_KB_CLAIM.test('首屏解析 ~813 KB');
+  if (!kbLevelOk) problems.push('R3d 失效：量级措辞「60KB 级」被判红');
+  if (!kbMeasureOk) problems.push('R3d 失效：测量型 KB 未被抓到');
+  if (kbLevelOk && kbMeasureOk) R3_FORM_CONTROL_PROVEN.add('R3d'); // T1b-M01：对照真跑通才记活性
 
   if (problems.length) {
     for (const p of problems) console.error(`✗ ${p}`);
     process.exit(1);
   }
-  console.log('✓ 正向对照自检通过（六形态判据均可判红，且真样本不假红；0 对象形态由合成对照证明活性）');
+  console.log('✓ 正向对照自检通过（六形态判据均可判红，且真样本不假红；0 对象形态的对照本轮真跑通过）');
   return true;
 })();
+
+// T1b-M01：逐形态盲区核对断言（延后到自检块之后发出——活性证明是执行时回填的，
+// 放在自检之前查恒为空集，等于没查）。零对象形态的对照本轮没真跑通即红。
+const zeroForms = [
+  ...r3FormCounts.filter((f) => f.n === 0).map((f) => f.label),
+  ...(constEqObjects === 0 ? ['NAME=NUM'] : []),
+  ...(fileLineObjects === 0 ? ['file:行'] : []),
+  ...(kbObjects === 0 ? ['KB 体积'] : []),
+];
+const uncontrolledZeros = zeroForms.filter(
+  (l) => !R3_FORM_CONTROL_PROVEN.has(R3_FORM_CONTROL_EXPECT.get(l) ?? ''),
+);
+check(
+  uncontrolledZeros.length === 0,
+  `R3 逐形态盲区核对（.ps1 ${r3FormCounts[0].n} / 门禁 ${r3FormCounts[1].n} / 命令 ${r3FormCounts[2].n} / NAME=NUM ${constEqObjects} / file:行 ${fileLineObjects} / KB ${kbObjects}）`,
+  uncontrolledZeros.length
+    ? `这些形态真语料 0 对象、且合成对照本轮未跑通：${uncontrolledZeros.join('、')}——自检块被删/改名或对照失效`
+    : '零对象形态的合成对照本轮全部真跑通过，其余形态对象数 > 0',
+);
 
 // ---------- R3g（P2-B 阶段2，2026-10-25 D 轮）：注释里的「数字声明」必须旁有取数命令 ----------
 // 判据的来处：《方法论》U8 与修复方案 P2-B 阶段2 —— 表格与注释里的数字是下一轮审查的
@@ -833,7 +847,10 @@ const POSITIVE_CONTROLS = (() => {
 // 所以：基线落 `tools/fixtures/comment-number-baseline.json`（按文件计数），
 // **任一文件计数上升或新文件进场即红**，下降则提示同步收紧 —— 只减不增，逐批清零。
 const RE_NUM_CLAIM = /\d+\s*(处|条|个|行|字节|KB|MB|ms|%|组|站点|文件|窗|键|项|步)/;
-const RE_FETCH_MARK = /现算|取数命令|命令[:：]|node tools\/|node --|cargo |rg |grep |readdir|统计自|由.+生成/;
+// A4-M01（T1b 承接）：「现算」二字从入口标记中**除名** —— 35 行只写「现算」的假入口
+// 实测 9 行数字已错（入口率 0.34%），把措辞当入口等于让门禁的 ✓ 冒充「这些数字被复核过」。
+// 收紧后 R3g 债务数上升是诚实化的结果：随本次 --write-r3g 重算基线，之后继续只减不增。
+const RE_FETCH_MARK = /取数命令|命令[:：]|node tools\/|node --|cargo |rg |grep |readdir|统计自|由.+生成/;
 function numberClaimsWithoutSource(cs) {
   const out = [];
   for (const c of cs) {
