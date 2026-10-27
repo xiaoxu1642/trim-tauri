@@ -30,6 +30,12 @@
 //     是**启发式**（CSS 真实级联更复杂），命中数计入 C 组但结论强度弱于 A/B；
 //   - 运行时写入的色值（`pathbinding.js` 的自定义强调色、JS 内联 style）不在扫描面。
 //
+// 已覆盖（T1d-K03 起）：
+//   - 元素级 opacity：0 = 隐藏态豁免（可见性语义等同 display:none）；
+//     0<op<1 把前景与底一起压暗（source-over 合成到父底）后照算 —— 压暗模型
+//     见 A 组内注释，G 组同款。`opacity: var(--x)` 的变量形态解析不出数字，
+//     按 1 处理（保守不压暗）—— 这是本判据的已知限界，不是「已覆盖」。
+//
 // 用法：node tools/check-contrast.mjs
 
 import { readFileSync, readdirSync } from 'node:fs';
@@ -427,12 +433,18 @@ for (const part of CSS_PARTS) {
     const fgs = [...body.matchAll(/(?:^|;)\s*color\s*:\s*([^;]+)/g)].map((x) => x[1].trim())
       .filter((x) => x !== "inherit" && x !== "transparent");
     if (!bgRaw.length && !fgs.length) continue;
+    // T1d-K03：元素级 opacity 会把前景与底一起压暗（source-over 合成到父底），
+    // 是对比度模型的一个独立维度。数值形态直接 parseFloat；var() 形态解析不出
+    // 数字 ⇒ 按 1 处理（保守：不压暗，该限界在文件头清单里如实登记）。
+    const opRaw = (body.match(/(?:^|;)\s*opacity\s*:\s*([^;]+)/) || [])[1];
+    const opNum = opRaw !== undefined ? parseFloat(opRaw) : NaN;
     rules.push({
       selector: mm[1].trim().replace(/\s+/g, ' '),
       file: part.label,
       lineNo: part.text.slice(0, mm.index).split('\n').length,
       bgRaw,
       fgs,
+      opacity: Number.isFinite(opNum) ? opNum : 1,
     });
   }
 }
@@ -514,6 +526,10 @@ const SKIPPED_MAX = 4;
 const SKIPPED = [];
 for (const r of rules) {
   if (!r.bgRaw.length) continue;
+  // T1d-K03：opacity:0 = 隐藏态（可见性语义等同 display:none），不可见内容不适用
+  // 对比度判据（.ds-tooltip 默认隐藏即此形态）；0<op<1 的部分可见态照算（压暗模型
+  // 见 A 组内注释），隐藏态豁免在这里做一次、A 组/G 组共用。
+  if (r.opacity === 0) continue;
   // 伪元素一律装饰件，不承载文本 → 不适用文本对比度，跳过（否则全是误报）
   if (/::(before|after)\b/.test(r.selector)) continue;
   const fgs = r.fgs.length ? r.fgs : inheritedFg(r.selector, r.file) || [];
@@ -533,9 +549,24 @@ for (const r of rules) {
           if (!UNKNOWN_BASE_ALLOW.includes(r.selector)) SKIPPED.push(`${r.selector} :: ${raw} / ${fg}`);
           continue;
         }
+        // T1d-K03：元素级 opacity 把「文字与底」作为一个整体压到父底（source-over）。
+        // 实现 = 把 opacity 乘进两者的 alpha，再走同一 flattenBg 合成到父底 —— 与
+        // 「先元素内合成、再整体混入父底」的渲染语义等价（flattenBg 对 a=1 直通，
+        // 所以已经合成过的 b/fFlat 再压暗不会被双重混合）。
+        let bEff = b;
+        let fEff = fFlat;
+        if ((r.opacity ?? 1) < 1) {
+          bEff = flattenBg({ ...b, a: r.opacity }, t.vars, r.selector);
+          fEff = flattenBg({ ...fFlat, a: r.opacity }, t.vars, r.selector);
+          if (!bEff || !fEff) {
+            if (!UNKNOWN_BASE_ALLOW.includes(r.selector)) SKIPPED.push(`${r.selector} :: opacity=${r.opacity} / ${raw} / ${fg}`);
+            continue;
+          }
+        }
         solidRows.push({
           theme: t.name, selector: r.selector, file: r.file, lineNo: r.lineNo,
-          bgExpr: raw.replace(/\s+/g, ' '), fg, ratio: contrast(b, fFlat), bgHex: hex(b), fgHex: hex(fFlat),
+          bgExpr: raw.replace(/\s+/g, ' ') + ((r.opacity ?? 1) < 1 ? ` [opacity:${r.opacity}]` : ''),
+          fg, ratio: contrast(bEff, fEff), bgHex: hex(bEff), fgHex: hex(fEff),
           // 浅染底与实底分开判定：见 TINT_WEAK_ALLOW 的说明。
           // 审查 L-28：判据从「写法是不是 color-mix(」扩成「**合成前有没有透明度**」——
           // 前者只认字面写法，于是 `var(--accent-soft)`（rgba(...,0.08)）这种更常见的
@@ -1242,13 +1273,29 @@ function judgeNontext(css) {
       bad.push(`${box} 取不到「底色 / 勾色」⇒ G 组失明（fill=${fill} ink=${inkRaw}）`);
       continue;
     }
+    // T1d-K03：G 组同样受元素级压暗影响（勾形控件的 disabled/locked 态）：
+    // 底与勾各自把所在规则的 opacity 乘进 alpha 后再合成（与 A 组同一模型）。
+    const boxOp = (() => {
+      const raw = ruleBodyOf(css, box);
+      const v = raw && (raw.match(/(?:^|;)\s*opacity\s*:\s*([^;]+)/) || [])[1];
+      const n = v !== undefined ? parseFloat(v) : NaN;
+      return Number.isFinite(n) ? n : 1;
+    })();
+    const inkOp = (() => {
+      const raw = ruleBodyOf(css, ink);
+      const v = raw && (raw.match(/(?:^|;)\s*opacity\s*:\s*([^;]+)/) || [])[1];
+      const n = v !== undefined ? parseFloat(v) : NaN;
+      return Number.isFinite(n) ? n : 1;
+    })();
     for (const t of THEMES) {
-      const bg = flattenBg(parseColor(fill, t.vars), t.vars, box);
-      const fg = parseColor(inkExpr, t.vars);
-      if (!bg || !fg) {
+      const bg0 = flattenBg(parseColor(fill, t.vars), t.vars, box);
+      const fg0 = parseColor(inkExpr, t.vars);
+      if (!bg0 || !fg0) {
         bad.push(`${box} 在 ${t.name} 解析不出颜色 ⇒ G 组失明（底 ${fill} / 勾 ${inkExpr}）`);
         continue;
       }
+      const bg = boxOp < 1 ? flattenBg({ ...bg0, a: boxOp }, t.vars, box) : bg0;
+      const fg = inkOp < 1 ? flattenBg({ ...fg0, a: inkOp }, t.vars, box) : fg0;
       const r = contrast(fg, bg);
       rows.push(`${box} ${t.name} ${r.toFixed(2)}:1`);
       if (r < NONTEXT_MIN) bad.push(`${box} 在 ${t.name} 只有 ${r.toFixed(2)}:1 < ${NONTEXT_MIN}（勾色 ${inkExpr} × 底色 ${fill}）`);

@@ -60,12 +60,8 @@ for (const f of htmlFiles) {
   const dsIdx = srcs.findIndex((s) => /scripts\/ds\.js$/.test(s));
   const posGlass = clean.search(/src="[^"]*scripts\/liquid-glass\.js"/);
   const posSpot = clean.search(/src="[^"]*scripts\/spotlight\.js"/);
-  if (posGlass >= 0 && posSpot >= 0) {
-    spotPairs++;
-    if (posSpot < posGlass) {
-      spotOrderHits.push(`${f}: spotlight.js 未在 liquid-glass.js 之后`);
-    }
-  }
+  if (posGlass >= 0 && posSpot >= 0) spotPairs++;
+  spotOrderHits.push(...spotOrderViolations(text, f));
   for (const [i, s] of srcs.entries()) {
     const name = s.split('/').pop();
     if (dsUsers.has(name) && dsIdx >= 0 && i < dsIdx) {
@@ -96,6 +92,34 @@ check(
 // 静态 defer，「同一份 HTML 里两者都静态挂载」永不成立。0 对象的断言不是「通过」是「没测」，
 // 摘掉 spotlight 的按需入口这种回归不会留下任何信号。现在把可判对象算成
 // 「静态对 + 按需注入支」，掉到 0 即红。
+//
+// T1d-M31：两类计数**分开印**——「静态可比对」才是真正的序判定对象（比较同一份
+// HTML 里两份静态挂载的位置）；「按需注入支」只是**存在性代理**（spotlight 在
+// IDLE_SCRIPTS 且 index.html 有 liquid-glass），它的「1」不随真实序对象数变
+//（E1h 反例：把 spotlight 静态挂进没有 liquid-glass 的窗口，仍印 1）。代理成立的
+// 前提「IDLE 注入晚于首帧」由 check-idle-scripts 钉住，本件不重复判。
+function spotOrderViolations(html, label) {
+  const clean = stripHtmlComments(html);
+  const posGlass = clean.search(/src="[^"]*scripts\/liquid-glass\.js"/);
+  const posSpot = clean.search(/src="[^"]*scripts\/spotlight\.js"/);
+  if (posGlass >= 0 && posSpot >= 0 && posSpot < posGlass) {
+    return [`${label}: spotlight.js 未在 liquid-glass.js 之后`];
+  }
+  return [];
+}
+// 合成对照（T1d-M31）：「静态对且序反」必红、「序正」放行 —— 判定器与真仓扫描共用同一实现。
+check(
+  spotOrderViolations('<script src="scripts/spotlight.js" defer></script><script src="scripts/liquid-glass.js" defer></script>', 't').length === 1,
+  '3a 对照a：静态对且序反的样本必须判红',
+);
+check(
+  spotOrderViolations('<script src="scripts/liquid-glass.js" defer></script><script src="scripts/spotlight.js" defer></script>', 't').length === 0,
+  '3a 对照b：序正的样本必须放行',
+);
+check(
+  spotOrderViolations('<script src="scripts/spotlight.js" defer></script>', 't').length === 0,
+  '3a 对照c：只有 spotlight 没有 liquid-glass 的样本不得误报',
+);
 let appJs = '';
 try { appJs = readFileSync(join(SRC, 'scripts', 'app.js'), 'utf8'); } catch { /* 下面按未校验处理 */ }
 let indexHtml = '';
@@ -106,7 +130,7 @@ const liquidStatic = /scripts\/liquid-glass\.js/.test(indexHtml);
 const spotObjects = spotPairs + (spotInIdle && liquidStatic ? 1 : 0);
 check(
   !!appJs && spotOrderHits.length === 0 && spotObjects >= 1,
-  `3a. spotlight 在 liquid-glass 之后（可判对象 ${spotObjects}：静态对 ${spotPairs} + 按需注入支 ${spotInIdle && liquidStatic ? 1 : 0}）`,
+  `3a. spotlight 在 liquid-glass 之后（静态可比对 ${spotPairs} 对；按需注入支 ${spotInIdle && liquidStatic ? 1 : 0} = 存在性代理，前提「IDLE 晚于首帧」由 check-idle-scripts 钉）`,
   !appJs ? 'app.js 读不到 ⇒ 本节未校验（按失败处理，不冒充通过）'
     : spotOrderHits.length ? spotOrderHits.join('；')
       : spotObjects === 0
