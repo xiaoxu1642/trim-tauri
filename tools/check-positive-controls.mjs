@@ -157,8 +157,12 @@ for (const e of REGISTRY) {
   // ① check(/g.fail( 调用窗口内含「对照/正向/判红」（check 常跨行 ⇒ 起点后 400 字符窗口）；
   // ② fail-closed 对照串（`正向对照失败` 等 console.error+exit 形态，如
   //    check-escape-delegation / check-html-contract——字符串字面量在代码里，剥注释后仍在）。
+  // T1a-M12：魔法词分支要求同文件存在「对照失败的失败载体」——g.fail / check(false) /
+  // process.exit(1) 三者之一。纯 console.error 的恒真桩（探针 P8 形态：对照失败只打印、
+  // 退出码恒 0）不再被认成有对照；g.fail 委托形态（failed++ ⇒ finish 收口）认可。
   const hasRealControl =
-    /正向对照失败|本门禁失效|必须判红|必须放行|永远不会被测坏|坏成永远放行|判定器没抓住|判定器误红|判据失灵/.test(clean) ||
+    (/正向对照失败|本门禁失效|必须判红|必须放行|永远不会被测坏|坏成永远放行|判定器没抓住|判定器误红|判据失灵/.test(clean) &&
+      /\bg\.fail\s*\(|process\.exit\(\s*1\s*\)|process\.exit\(main\(\)\)|check\(\s*false/.test(clean)) ||
     [...clean.matchAll(/(?:^|\n)\s*(?:check|g\.fail)\s*\(/g)].some(
       (m) => /对照|正向|判红/.test(clean.slice(m.index, m.index + 400)),
     );

@@ -196,7 +196,9 @@ const CONTROLS = [
     const hit = c.probe(c.code).length > 0;
     if (hit !== c.expect) {
       ctrlBad++;
-      console.error(`✗ 正向对照失败：${c.label}（实得判红=${hit}，应为=${c.expect}）`);
+      // T1a-M12：对照失败必须走 g.fail（failed++ ⇒ finish exit 1）——只 console.error
+      // 的话对照失败时门禁照样 exit 0（真假绿，被 positive-controls 的非零收口判据当场抓出）。
+      g.fail(`正向对照失败：${c.label}（实得判红=${hit}，应为=${c.expect}）`);
     }
   }
   if (ctrlBad === 0) {

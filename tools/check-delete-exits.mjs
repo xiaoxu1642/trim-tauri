@@ -97,7 +97,7 @@ const MUST_PROTECT = [
 ];
 // T1a-M19：正向清单本身无地板 ——「新出口默认红」只拦添加方向、不拦拆台账方向
 //（探针 P6：清单清空 ⇒ 1b/1c/2 三组计数全 0 仍绿）。钉住规模，拆台账即红。
-check(MUST_PROTECT.length >= 6, `1a. 正向清单 MUST_PROTECT 规模地板（现算 ${MUST_PROTECT.length} 条 ≥ 6；T1a-M19）`,
+  check(MUST_PROTECT.length >= 6, `1a. 正向清单 MUST_PROTECT 规模地板（现算 ${MUST_PROTECT.length} 条 ≥ 6；T1a-M19）`,
   MUST_PROTECT.length < 6 ? '清单被拆 ⇒ 1b/1c/2 三组判定对象一起消失（假绿），拆动必须逐条给理由' : '');
 
 // C01（v7.2）：保护闸的两种在位形态。v7.2 之后出口闸收口到
@@ -239,25 +239,40 @@ function stripRustComments(src) {
 }
 
 function extractBody(name) {
+  // T1a-M20：同名 fn 跨文件（现算多条命令同名，如 cleanup_execute 在命令层与引擎层）
+  // 且 readdir 原生序 ≠ 排序序 ⇒ 取首个命中是机器相关行为。先按 #[tauri::command]
+  // 属性收敛到命令层；过滤后仍歧义即红，不许静默选一个（引擎体里被删的 protect 看不见）。
+  const hits = [];
   for (const file of srcFiles) {
-    const src = fs.readFileSync(file, 'utf8');
-    const re = new RegExp(`\\bfn\\s+${name}\\s*[<(]`);
-    const m = src.match(re);
-    if (!m) continue;
-    // 从 fn 起始做花括号配平（在剥离注释/字符串后的文本上做，防止字符串里的
-    // 花括号截断函数体——E-6 的判绿方向风险）
-    const clean = stripRustComments(src);
-    const mc = clean.match(re);
-    let i = mc ? clean.indexOf('{', mc.index) : -1;
-    if (i < 0) continue;
-    let depth = 0, end = -1;
-    for (; i < clean.length; i++) {
-      if (clean[i] === '{') depth++;
-      else if (clean[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
-    }
-    return { file: path.relative(ROOT, file).replace(/\\/g, '/'), body: end > 0 ? clean.slice(mc.index, end) : '' };
+    if (new RegExp(`\\bfn\\s+${name}\\s*[<(]`).test(fs.readFileSync(file, 'utf8'))) hits.push(file);
   }
-  return null;
+  if (hits.length > 1) {
+    const cmdHits = hits.filter((f) => /#\[tauri::command\]/.test(fs.readFileSync(f, 'utf8')));
+    if (cmdHits.length !== 1) {
+      check(false, `extractBody 歧义：fn ${name} 同名 ${hits.length} 处且属性过滤后 ${cmdHits.length} 处（T1a-M20）`,
+        hits.map((f) => path.relative(ROOT, f).replace(/\\/g, '/')).join('、'));
+      return null;
+    }
+    hits.length = 0;
+    hits.push(cmdHits[0]);
+  }
+  const file = hits[0];
+  if (!file) return null;
+  const src = fs.readFileSync(file, 'utf8');
+  const re = new RegExp(`\\bfn\\s+${name}\\s*[<(]`);
+  const m = src.match(re);
+  // 从 fn 起始做花括号配平（在剥离注释/字符串后的文本上做，防止字符串里的
+  // 花括号截断函数体——E-6 的判绿方向风险）
+  const clean = stripRustComments(src);
+  const mc = clean.match(re);
+  let i = mc ? clean.indexOf('{', mc.index) : -1;
+  if (i < 0) return null;
+  let depth = 0, end = -1;
+  for (; i < clean.length; i++) {
+    if (clean[i] === '{') depth++;
+    else if (clean[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+  }
+  return { file: path.relative(ROOT, file).replace(/\\/g, '/'), body: end > 0 ? clean.slice(mc.index, end) : '' };
 }
 
 // 二跳登记表可带第三段 `file`（相对 src-tauri）。**同名函数必须指名**：
@@ -419,6 +434,13 @@ if (missing.length > missingCmds.length) {
   }
   check(pairIssues.length === 0, `C01-c. 删除产源/出口两闸成对（is_path_protected ⇄ is_system_namespace，扫 ${pairFiles.length} 个文件）`,
     pairIssues.length ? pairIssues.join('；') : '全部成对');
+  // T1a-M27：扫描对象按目录名派生且此前无地板 —— residue/pending_delete 改名或搬走
+  // 时「扫不到任何文件，全部成对」照样打 ✓。地板取现算值（与 check-layering 同纪律）。
+  check(
+    pairFiles.length >= 4,
+    `C01-c 扫描面对象地板（residue/pending_delete 现算 ${pairFiles.length} 个 ≥ 4）`,
+    pairFiles.length < 4 ? '目录改名或搬走 ⇒ 成对断言不再对任何文件生效（0 文件也打 ✓ 的假绿）' : '',
+  );
 }
 
 console.log('');

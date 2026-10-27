@@ -248,12 +248,27 @@ console.log('=== PowerShell 调用点门禁（v2 R0）===\n');
 // ---- A. 裸 PS 进程构造（零容忍，不配登记表）----
 let spawnScanned = 0;
 const bareHits = [];
+// T1a-M17：同文件 const 别名两跳 —— `const PS_EXE = "powershell.exe"` 后按别名调用，
+// 直连正则看不见。先收别名定义，再按别名补扫一轮。
+const aliasDefs = [];
+for (const [file, text] of texts) {
+  for (const m of text.matchAll(/const\s+([A-Z_][A-Z0-9_]{2,})\s*[:=][^;\n]*?(?:powershell|pwsh)\.exe/gi)) {
+    aliasDefs.push([file, m[1]]);
+  }
+}
 for (const [file, text] of texts) {
   for (const token of ['Command::new(', 'quiet_cmd(', 'system_tool(']) {
     for (const h of collect(text, file, token)) {
       spawnScanned++;
-      if (/"(?:r#)?"?(powershell|pwsh)\.exe/i.test(`${h.args} ${h.raw}`)) {
+      // T1a-M17：去掉引号紧邻要求（`\b` 锚定）—— 全路径字面量
+      // `"C:\Windows\…\powershell.exe"` 与 `r#"…"#` 形态此前整类漏检。
+      if (/\b(?:r#)?"?(powershell|pwsh)\.exe/i.test(`${h.args} ${h.raw}`)) {
         bareHits.push(`${file}:${h.line} ${cut(h.raw)}`);
+      }
+      for (const [aFile, alias] of aliasDefs) {
+        if (file === aFile && new RegExp(`\\b${alias}\\b`).test(`${h.args} ${h.raw}`)) {
+          bareHits.push(`${file}:${h.line} ${cut(h.raw)}（经别名 ${alias}）`);
+        }
       }
     }
   }
@@ -261,7 +276,7 @@ for (const [file, text] of texts) {
 const bareOutsideThroat = bareHits.filter((s) => !s.startsWith(`${THROAT}:`));
 check(
   bareOutsideThroat.length === 0,
-  `A. 扫描 ${spawnScanned} 处 spawn 实参链，咽喉（${THROAT}）外零裸 PS 进程构造`,
+  `A. 扫描 ${spawnScanned} 处 spawn 实参链，咽喉（${THROAT}）外三个字面量入口（直连 / 全路径 / 别名两跳）零命中`,
   bareOutsideThroat.join('；'),
 );
 
@@ -273,7 +288,7 @@ for (const [file, text] of texts) {
   if (file === THROAT) continue; // 执行层内部自调不是「调用点」
   for (const t of ['run_inbox_ps(', 'run_file(', 'run_file_streaming(']) execPool.push(...collect(text, file, t));
   callPool.push(...collect(text, file, 'run_inbox_script('));
-  if (file.endsWith('commands/optimizer/restore_point.rs')) inlinePool.push(...collect(text, file, 'run_inline_ps('));
+  if (file.includes('commands/optimizer/')) inlinePool.push(...collect(text, file, 'run_inline_ps(')); // T1a-M26：pub(super) 对整模块可见，采池按模块不按单文件
 }
 // 定义行不是调用点。可见性前缀要一并剥掉再看 `fn`：D 批拆模块后跨文件 helper 降成
 // `pub(super) fn`，只判 `startsWith('fn ')` 会把定义数成第 N 个调用点（登记表随之假红）。
@@ -284,10 +299,17 @@ const rB = resolve(PS_EXEC_SITES, execPool);
 const rC = resolve(PS_CALL_SITES, callPool);
 const rD = resolve(RUN_INLINE_PS_SITES.map((e) => ({ ...e, file: 'src-tauri/src/commands/optimizer/restore_point.rs' })), inlineCalls);
 
+// T1a-M25：B 组「0 对象 + 空表」双零时打 ✓ 无意义（真收敛与 token 失明同形，假绿四律①④）。
+// 活性对照 = 咽喉定义仍被 token 扫到（与 check-layering 同姿势）；双零时对照失明即列问题。
+const throatOk = /fn\s+run_inbox_ps\s*\(/.test(texts.get(THROAT) ?? '');
 check(
-  rB.problems.length === 0 && rB.uncovered.length === 0,
-  `B. ${execPool.length} 处低层执行器调用点均已登记（登记表 ${PS_EXEC_SITES.length} 条）`,
-  [...rB.problems, ...rB.uncovered.map((h) => `未登记：${h.file}:${h.line} ${h.desc}`)].join('；'),
+  rB.problems.length === 0 && rB.uncovered.length === 0 && (execPool.length > 0 ? PS_EXEC_SITES.length > 0 : throatOk),
+  `B. 低层执行器调用点对账（池 ${execPool.length} 处 / 登记表 ${PS_EXEC_SITES.length} 条${execPool.length === 0 ? `；咽喉定义活性对照${throatOk ? '在' : '失'}` : ''}）`,
+  [
+    ...rB.problems,
+    ...rB.uncovered.map((h) => `未登记：${h.file}:${h.line} ${h.desc}`),
+    ...(execPool.length === 0 && !throatOk ? ['B 组双零且咽喉定义 token 失明 ⇒ 真收敛与判据失明不可区分（T1a-M25）'] : []),
+  ].join('；'),
 );
 
 const timeoutProblems = [];

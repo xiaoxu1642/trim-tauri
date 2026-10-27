@@ -10,9 +10,9 @@
 //   ② 行为层：同一台机器上分别用 pwsh 跑「JS 原脚本」与「.ps1」，JSON 输出深比对
 //      （只对确定性字段比对，抖动字段见 TOLERANT 说明）。
 //
-// 审查 v2-M18（本文件默认语义的反转）：行为层要**真起 PowerShell**，66 条映射里 15 条
-// 不带 noRun（sysdisk/overview_*/memory_*/netcheck_*/runtimes_*/netspeed_*/cm_*/
-// startup_scan/peripheral_query 等采集类），每条还要跑两遍（JS 版 + .ps1 版）。
+// 审查 v2-M18（本文件默认语义的反转）：行为层要**真起 PowerShell**，条数以
+// `ps-mapping.mjs` 现算为准（T1a-M28：头注不再写死规模数字——旧头注与现算差两个数量级，
+// 与现算差两个数量级而地板只防 0），每条还要跑两遍（JS 版 + .ps1 版）。
 // 本门禁在 AGENTS.md §4 里是「改完必做」的静态门禁，默认真跑等于让每次验收都扫盘+发网络探测；
 // 更要紧的是旧实现「找不到 pwsh 只打一句 ⚠ 跳过」后照样输出「全部门禁通过」= 静默判绿。
 // 现在：默认**只做文本层**，行为层必须显式 `--run`；`--run` 而 pwsh 缺席 → 判红（不许降级成跳过）；
@@ -27,7 +27,7 @@
 // 退出码：0 = 文本层全一致（--strict 时还须行为层已覆盖）；1 = 有不一致或未按要求执行
 
 import { createRequire } from 'node:module';
-import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -137,6 +137,14 @@ console.log('');
 // 扫描面地板（P0-4）：MAPPING 为空时循环 0 次、fail 恒 0 ⇒「✓ 文本层门禁通过」是空集假绿。
 // 真源 ps-mapping.mjs 已有 throw 兜底（审查 F2）；这里加二道保险，防真源那条被改/删后
 // 空表静默通过。
+// 扫描面地板（P0-4 + T1a-M28）：MAPPING 为空是空集假绿；且 MAPPING 条数 ⇄ 盘上
+// .ps1 条数必须**相等** —— 盘上多一个 .ps1 不进映射（或映射指了不存在的脚本）
+// 即红，把「覆盖率今天不亏」从巧合钉成机检。
+const psOnDisk = readdirSync(PSDIR).filter((f) => f.endsWith('.ps1'));
+if (MAPPING.length !== psOnDisk.length) {
+  console.error(`✗ MAPPING ${MAPPING.length} 条 ⇄ 盘上 .ps1 ${psOnDisk.length} 个不相等：新增脚本未进映射（或映射指了不存在的脚本）⇒ 对拍面失真，拒绝判绿`);
+  process.exit(1);
+}
 if (MAPPING.length === 0) {
   console.error('✗ MAPPING 为空：逐字搬运对拍 0 条对象 ⇒ 扫描面失效，拒绝判绿');
   process.exit(1);

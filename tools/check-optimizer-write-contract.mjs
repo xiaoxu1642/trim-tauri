@@ -54,7 +54,9 @@ const JUNK = new Set(['W32Time', 'Services', 'CurrentControlSet']);
 function parseGroups(o) {
   const blob = (o.steps || []).map((s) => s.pwsh || '').join('\n');
   const marks = [];
-  for (const m of blob.matchAll(/\$(?:disabled|svcs|drv|services|storeSvc)\s*=\s*@\(/g)) {
+  // T1a-M23：数组名白名单扩到现算全集（apps/keys/names/paths/tasks 曾在判据外）（apps/keys/names/paths/tasks 曾在判据外，
+  // telemetry_optimize 的 $tasks 整段不进 want ⇒ 侧表对拍空转）。
+  for (const m of blob.matchAll(/\$(?:disabled|svcs|drv|services|storeSvc|apps|keys|names|paths|tasks)\s*=\s*@\(/g)) {
     marks.push({ at: m.index, kind: 'array' });
   }
   for (const m of blob.matchAll(/\$p\d*\s*=\s*"[^"]*Services\\([A-Za-z0-9_.\-]+)"/g)) {
@@ -105,8 +107,15 @@ function writesServiceStart(o) {
 // 现在五组判据收成下面这些纯函数：生产侧与 G 组喂同一份实现（G 只造样本）。
 
 /** B 组：侧表 want（服务→期望值）⇄ 侧表 groups 的服务集/期望值差异。返回问题数组。 */
-function judgeSideTableDiff({ want, gotGroups, storeSet = new Set(), regWriteKeys = new Set() }) {
+function judgeSideTableDiff({ want, gotGroups, storeSet = new Set(), regWriteKeys = new Set(), hasArray = true }) {
   const problems = [];
+  // T1a-M23：want 空集时 missing/extra 全空 ⇒ 侧表对拍整体空转还打 ✓（合成反例实测：
+  // $svcs 换成 $extra，want 塌成空集、侧表少列也绿）。带数组段的项空集必须显式红；
+  // 本来就不写服务数组的项（如纯注册表形态）不适用本判据，直接放行。
+  if (want.size === 0) {
+    if (hasArray) problems.push('pwsh 文本未解析出任何服务 Start 期望（want 空集）——数组名不在白名单或形态变了，侧表对拍空转');
+    return problems;
+  }
   const allWant = new Set([...want.values()].flatMap((s) => [...s]));
   const allGot = new Set(gotGroups.flatMap((g) => [...g.set]));
   const extra = [...allGot].filter((n) => !allWant.has(n) && !storeSet.has(n)).sort();
@@ -549,8 +558,11 @@ for (const [id, spec] of Object.entries(items)) {
   // （tf_svc_bulk 的基础 65 个 Start=4 + 商店 5 个 Start=4），
   // 用 Map.set 会让后者**覆盖**前者 ⇒ 基础组整段判成「少列」（踩过一次）。
   const gotGroups = (spec.groups || []).map((g) => ({ expect: g.expectStart, set: new Set(g.services || []) }));
-  // v6-K20：判据本体是 judgeSideTableDiff（与 G 组共用同一实现）
-  for (const p of judgeSideTableDiff({ want, gotGroups, storeSet, regWriteKeys: inRegWrites })) {
+  // v6-K20：判据本体是 judgeSideTableDiff（与 G 组共用同一实现）。
+  // hasArray 由本项的 steps 重算（A 组的 marks 是块局部量）。
+  const bBlob = (spec.steps || []).map((s) => s.pwsh || '').join('\n');
+  const bHasArray = /\$(?:disabled|svcs|drv|services|storeSvc|apps|keys|names|paths|tasks)\s*=\s*@\(/.test(bBlob);
+  for (const p of judgeSideTableDiff({ want, gotGroups, storeSet, regWriteKeys: inRegWrites, hasArray: bHasArray })) {
     drift.push(`${id}: ${p}`);
   }
 }
@@ -586,9 +598,9 @@ for (const [id, spec] of Object.entries(items)) {
   }
 }
 check(
-  startProblems.length === 0,
-  `C. expectStart 是合法 win32 启动类型（${nGroups} 组 / ${nAsserts} 个断言）`,
-  startProblems.join('; '),
+  startProblems.length === 0 && nAsserts >= 20,
+  `C. expectStart 是合法 win32 启动类型（${nGroups} 组 / ${nAsserts} 个断言；地板 ≥ 20，T1a-M23）`,
+  startProblems.length ? startProblems.join('; ') : (nAsserts < 20 ? '断言数塌陷 ⇒ 识别正则或语料失明（现算基准 100）' : ''),
 );
 
 // ---- D. storeServices == apply.rs 的 STORE_SERVICES，且未混进 groups ----

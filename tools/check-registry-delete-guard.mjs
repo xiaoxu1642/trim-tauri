@@ -290,7 +290,8 @@ const CONTROLS = [
     const viol = fns.some((f) => f.treeRemoves && !denyFaceReached(fns, byName, f));
     if (viol !== c.expectViolation) {
       ctrlBad++;
-      console.error(`✗ 正向对照失败：${c.label}（实得 viol=${viol}）`);
+      // T1a-M12：对照失败走 g.fail（failed++ ⇒ exit 1），不冒充通过。
+      g.fail(`正向对照失败：${c.label}（实得 viol=${viol}）`);
     }
   }
   if (ctrlBad === 0) {

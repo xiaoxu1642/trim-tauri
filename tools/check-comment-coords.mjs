@@ -134,7 +134,8 @@ const CONTROLS = [
     }
     if (total !== c.expect) {
       bad++;
-      console.error(`✗ 正向对照失败：${c.label}（实得 ${total}，应为 ${c.expect}）`);
+      // T1a-M12：对照失败走 g.fail（failed++ ⇒ exit 1），不冒充通过。
+      g.fail(`正向对照失败：${c.label}（实得 ${total}，应为 ${c.expect}）`);
     }
   }
   if (bad === 0) g.ok(`正向对照 ${CONTROLS.length} 组通过（含「歧义路径判红」与「有效坐标放行」两组）`);

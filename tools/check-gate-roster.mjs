@@ -119,6 +119,11 @@ const MUST_RUN = [
 // 少数门禁需要非默认参数；登记在这里，`--run` 会照实传。
 const GATE_ARGS = {
   'check-channel-map': ['--strict'],
+  // T1a-M21：doc-refs 的 U8 节在必跑链路里曾永远 SKIP（库根刻意不写默认值，AGENTS §2）。
+  // 环境变量存在时透传给子门禁（不写死库根）；没给则维持 SKIP，由 selfReported 单列点名。
+  ...(process.env.TRIM_VAULT_ROOT
+    ? { 'check-doc-refs': ['--vault-root', process.env.TRIM_VAULT_ROOT] }
+    : {}),
 };
 
 // T1b-L09：副作用档。`--run --tier=readonly` 跳过会 spawn 外部进程/写盘的门禁；
