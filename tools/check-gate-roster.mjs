@@ -11,7 +11,7 @@
 //       node tools/check-gate-roster.mjs --run    # 对拍后按 MUST_RUN 顺序跑完全部必跑门禁
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join, dirname } from 'node:path';
+import { join, dirname, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { blankNonCode } from './lib/src-scan.mjs';
 
@@ -162,7 +162,17 @@ let failed = 0;
 const fail = (msg) => { console.error(`✗ ${msg}`); failed++; };
 const ok = (msg) => console.log(`✓ ${msg}`);
 
-const diskAll = readdirSync(TOOLS).filter((f) => f.endsWith('.mjs'));
+// T1a-M11：递归收集（readdirSync 原不递归，tools/lib 与子目录形态的点名不在判定面）；fixtures 不算门禁本体。
+const walkMjs = (dir, out) => {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (e.name === 'fixtures' || e.name === 'node_modules' || e.name.startsWith('.')) continue;
+    const p = join(dir, e.name);
+    if (e.isDirectory()) walkMjs(p, out);
+    else if (e.name.endsWith('.mjs')) out.push(relative(TOOLS, p).split(sep).join('/'));
+  }
+  return out;
+};
+const diskAll = walkMjs(TOOLS, []);
 const diskCheck = diskAll.filter((f) => /^check-.*\.mjs$/.test(f)).map((f) => f.replace(/\.mjs$/, ''));
 const optionalNames = OPTIONAL.map((o) => o.name);
 const retiredNames = RETIRED.map((o) => o.name);
@@ -290,4 +300,5 @@ if (selfReported.length > 0) {
     console.log(`  · ${s.name}: ✗${s.x} / SKIP·未校验${s.skip} / 0 对象${s.zero}`);
   }
 }
-console.log(`check-gate-roster --run: ${MUST_RUN.length} 条必跑门禁全部通过${runSkipped ? `（SKIP ${runSkipped} 条副作用门禁，未校验）` : ''}`);
+// T1a-M10：终态行并入 selfReported（原只在上文单列，只看最后一行会把「没测」读成「全绿」）。
+console.log(`check-gate-roster --run: ${MUST_RUN.length} 条必跑门禁全部通过${runSkipped ? `（SKIP ${runSkipped} 条副作用门禁，未校验）` : ''}${selfReported.length ? `（另有 ${selfReported.length} 个子门禁自报未校验/0 对象，逐条见上行单列——这些不是通过）` : ''}`);

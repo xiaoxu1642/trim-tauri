@@ -223,7 +223,7 @@ try {
 // 同步补地板，否则该路整片塌陷不可见）：
 //   src-tauri/src(.rs) / src-tauri/data(.json) / src/scripts(.js) /
 //   native-scanner/src(.rs) / src 根(.html) —— 取数命令：node tools/check-power-write-surface.mjs
-//   （A1 行的逐路计数即现算值）。
+//   （A1 那一行的逐路计数即现算值）。
 {
   const walkAll = (base, exts) => {
     const out = [];

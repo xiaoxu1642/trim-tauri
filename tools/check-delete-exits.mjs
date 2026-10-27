@@ -95,6 +95,10 @@ const MUST_PROTECT = [
   // 2026-10-09（D3）：contextmenu_remove 随右键删除链整链退役，从正向清单摘除
   // （cm_remove 与其 RegDeleteTreeW/回收站出口一并删除；toggle 不删文件）。
 ];
+// T1a-M19：正向清单本身无地板 ——「新出口默认红」只拦添加方向、不拦拆台账方向
+//（探针 P6：清单清空 ⇒ 1b/1c/2 三组计数全 0 仍绿）。钉住规模，拆台账即红。
+check(MUST_PROTECT.length >= 6, `1a. 正向清单 MUST_PROTECT 规模地板（现算 ${MUST_PROTECT.length} 条 ≥ 6；T1a-M19）`,
+  MUST_PROTECT.length < 6 ? '清单被拆 ⇒ 1b/1c/2 三组判定对象一起消失（假绿），拆动必须逐条给理由' : '');
 
 // C01（v7.2）：保护闸的两种在位形态。v7.2 之后出口闸收口到
 // `protect::validate_mutation_target`（组合闸：受保护面→别名面→系统面→reparse），

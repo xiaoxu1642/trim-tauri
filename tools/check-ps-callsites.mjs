@@ -492,7 +492,7 @@ check(
 console.log('');
 console.log('PS 调用点台账（现算，引用这些数字的地方必须重跑本门禁）：');
 console.log(`  数据层 PsInline 执行器 : ${callPool.filter((h) => h.file.endsWith('pssteps.rs')).length} 处`);
-console.log(`  命令层直调 inbox PS    : ${inlineCalls.length} 处 → 收敛到薄封装 ${callPool.filter((h) => h.file.endsWith('optimizer.rs')).length} 处`);
+console.log(`  命令层直调 inbox PS    : ${inlineCalls.length} 处 → 收敛到薄封装 ${callPool.filter((h) => h.file.endsWith('restore_point.rs')).length} 处（T1a-M18：薄封装真身，原名 optimizer.rs 全仓 0 文件、该行恒 0）`);
 console.log(`  Appx 命令层直调        : ${callPool.filter((h) => h.file.includes('commands/uninstall/')).length} 处`);
 console.log(`  外部 PowerShell 7 通道 : ${execPool.filter((h) => h.raw.includes('run_file')).length} 处（R1 归零目标）`);
 console.log(`  合计 inbox PS 生产入口 : ${callPool.length} 处（登记表 ${PS_CALL_SITES.length} 条）`);

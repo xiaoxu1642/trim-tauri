@@ -111,7 +111,8 @@ const PENDING_CONTROLS = [
   { name: 'check-data-parity', reason: '对拍型：data/*.json 派生副本 ⇄ 真源（6+1 个），缺「改一侧必须红」样本' },
   { name: 'check-optimizer-dynamic', reason: '对拍型：dynamic 标记 ⇄ 后端分支要求，缺合成样本；R3-L06（v7.2 P2）把参数校验合并进 dynamic_steps 后，A2/A3 的解析面已扩成「分派分支 + match 臂」两处来源（只找 `option_id ==` 会同时瞎两条），并经真破坏验证——把 svc_mem_gb 臂里的 `p.gb` 读取摘掉 ⇒ A3 判红且点名「判断体（match 臂）没读 p.gb」，恢复回绿' },
   { name: 'check-optimizer-subitem-contract', reason: '对拍型：可自选目标契约 ⇄ 侧表，缺合成样本' },
-  { name: 'check-optimizer-subitem-contract', reason: '对拍型：可自选目标契约 ⇄ 侧表，缺合成样本' },
+  // T1a-M13：上面这条曾逐字重复登记（PENDING 计数虚高、条数等式对不上 MUST_RUN
+  // 且 Set 差集看不见重复）。重复行已删，dup 断言见下方断言 4b。
   { name: 'check-version-sync', reason: '对拍型：版本号四处一致，缺「单处漂移必须红」样本' },
   { name: 'check-updater-pubkey', reason: '对拍型：pubkey 形状（base64(minisign)），缺合成样本' },
   { name: 'check-readme-claims', reason: '对拍型：readme 数字 ⇄ 数据真源，缺合成样本' },
@@ -206,6 +207,16 @@ check(
   uncovered.length
     ? `未登记：${uncovered.join('；')}`
     : `REGISTRY ${REGISTRY.length} 条 + PENDING ${PENDING_CONTROLS.length} 条 = MUST_RUN ${mustRun.length} 条`,
+);
+// T1a-M13（断言 4b）：dup 断言 —— 逐字重复登记会让条数等式与 Set 差集同时失真。
+const dupP = PENDING_CONTROLS.map((e) => e.name)
+  .filter((n, i, arr) => arr.indexOf(n) !== i);
+const dupR = REGISTRY.map((e) => e.file)
+  .filter((n, i, arr) => arr.indexOf(n) !== i);
+check(
+  dupP.length === 0 && dupR.length === 0,
+  '4b. PENDING / REGISTRY 无逐字重复登记（T1a-M13）',
+  [...dupP.map((n) => `PENDING 重复：${n}`), ...dupR.map((n) => `REGISTRY 重复：${n}`)].join('；'),
 );
 const stalePending = PENDING_CONTROLS.filter(
   (e) => !mustRun.includes(e.name) || registeredNames.has(e.name),

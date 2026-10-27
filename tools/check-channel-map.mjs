@@ -391,14 +391,21 @@ function parseApiPaths(text) {
     // 所以这里的方括号前缀是可选的（写死 `api.x[` 会漏认，把在用的 modal 域误判成孤儿）。
     for (const m of text.matchAll(/window\.api\.(\w+)\s*\.?\s*\[/g)) dynamic.add(m[1]);
   }
-  const used = (ch) => {
-    const path = apiPaths.get(ch);
-    if (!path) return false;
-    const [domain, ...rest] = path.split('.');
+  // T1a-M15：used 与 usedIn 同构，共用一份实现；needle 命中处必须止于非标识符
+  // 字符才算真接线 —— includes 无前缀边界，`.optimizer.list` 会命中
+  // `.optimizer.listRestore`（严格前缀碰撞实测在案，sysrestore.js 曾整批假命中）。
+  const usedIn = (ch, pool) => {
+    const path_ = apiPaths.get(ch);
+    if (!path_) return false;
+    const [domain, ...rest] = path_.split('.');
     const method = rest.join('.');
-    const needle = `.${path}`;
-    for (const [, text] of sources) {
-      if (text.includes(needle)) return true;
+    const needle = `.${path_}`;
+    for (const [, text] of pool) {
+      let idx = text.indexOf(needle);
+      while (idx >= 0) {
+        if (!/[\w$]/.test(text[idx + needle.length] || '')) return true;
+        idx = text.indexOf(needle, idx + 1);
+      }
       if (dynamic.has(domain) && new RegExp(`window\\.api\\.${domain}\\s*\\.?\\s*\\[`).test(text)) return true;
       for (const v of aliases.get(domain) ?? []) {
         if (new RegExp(`\\b${v}\\.${method}\\b`).test(text)) return true;
@@ -406,9 +413,9 @@ function parseApiPaths(text) {
     }
     return false;
   };
+  const used = (ch) => usedIn(ch, sources);
   const unmappedPath = [...allChannels.keys()].filter(c => !apiPaths.has(c));
-  const orphans = [...allChannels.keys()].filter(c => apiPaths.has(c) && !used(c)).sort();
-  const dead = [...orphans].filter(o => !D4_ORPHANS.has(o));
+  const orphans = [...allChannels.keys()].filter(c => apiPaths.has(c) && !used(c)).sort();  const dead = [...orphans].filter(o => !D4_ORPHANS.has(o));
   const stale = [...D4_ORPHANS.keys()].filter(o => !orphans.includes(o));
   check(
     unmappedPath.length === 0 && dead.length === 0 && stale.length === 0,
@@ -562,21 +569,6 @@ const d5MissingWhy = [...D5_READONLY_WITHOUT_SUB_CONSUMER].filter((c) => d5Why(c
     // *.html 只认子窗那四个；js 按脚本基名
     return rel.endsWith('.html') ? !rel.endsWith(MAIN_HTML) : subScriptNames.has(base);
   });
-  const usedIn = (ch, pool) => {
-    const path_ = apiPaths.get(ch);
-    if (!path_) return false;
-    const [domain, ...rest] = path_.split('.');
-    const method = rest.join('.');
-    const needle = `.${path_}`;
-    for (const [, text] of pool) {
-      if (text.includes(needle)) return true;
-      if (dynamic.has(domain) && new RegExp(`window\\.api\\.${domain}\\s*\\.?\\s*\\[`).test(text)) return true;
-      for (const v of aliases.get(domain) ?? []) {
-        if (new RegExp(`\\b${v}\\.${method}\\b`).test(text)) return true;
-      }
-    }
-    return false;
-  };
 
   // 档位由 guard-tiers 门禁管；这里从 Rust 侧现算 readonly / MAIN 两条命令集合。
   // 不读 check-guard-tiers.mjs 的清单（那就是 D 组，被本组取代的原因）。
