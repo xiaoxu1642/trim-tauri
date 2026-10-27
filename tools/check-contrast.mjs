@@ -34,7 +34,7 @@
 //   - 元素级 opacity：0 = 隐藏态豁免（可见性语义等同 display:none）；
 //     0<op<1 把前景与底一起压暗（source-over 合成到父底）后照算 —— 压暗模型
 //     见 A 组内注释，G 组同款。`opacity: var(--x)` 的变量形态解析不出数字，
-//     按 1 处理（保守不压暗）—— 这是本判据的已知限界，不是「已覆盖」。
+//     按不压暗处理（保守）—— 这是本判据的已知限界，不是「已覆盖」。
 //
 // 用法：node tools/check-contrast.mjs
 
@@ -435,7 +435,7 @@ for (const part of CSS_PARTS) {
     if (!bgRaw.length && !fgs.length) continue;
     // T1d-K03：元素级 opacity 会把前景与底一起压暗（source-over 合成到父底），
     // 是对比度模型的一个独立维度。数值形态直接 parseFloat；var() 形态解析不出
-    // 数字 ⇒ 按 1 处理（保守：不压暗，该限界在文件头清单里如实登记）。
+    // 数字 ⇒ 按不压暗处理（保守，该限界在文件头清单里如实登记）。
     const opRaw = (body.match(/(?:^|;)\s*opacity\s*:\s*([^;]+)/) || [])[1];
     const opNum = opRaw !== undefined ? parseFloat(opRaw) : NaN;
     rules.push({
