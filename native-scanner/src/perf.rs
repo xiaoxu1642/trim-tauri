@@ -213,7 +213,7 @@ unsafe fn bench_phase(
     qd: usize,
     seq_size: u64,
     offsets: &[u64],
-) -> (u64, u64, u128) {
+) -> Result<(u64, u64, u128), String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, WAIT_OBJECT_0};
     use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
     use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
@@ -229,6 +229,14 @@ unsafe fn bench_phase(
     for _ in 0..qd {
         let mut o: OVERLAPPED = std::mem::zeroed();
         let ev = CreateEventW(std::ptr::null(), 0, 0, std::ptr::null());
+        // 事件句柄创建失败必须早退：NULL 投进 `WaitForMultipleObjects` 会让等待返回 WAIT_FAILED，
+        // 落到下面 `wait < WAIT_OBJECT_0 || wait >= ... ⇒ continue` 的空转分支 ⇒ 该阶段测出 0 ops
+        // 却仍报「测速完成」。早退前先把已建的关掉，避免留下半开的事件集。
+        if ev.is_null() {
+            let err = GetLastError();
+            for e in events { let _ = CloseHandle(e); }
+            return Err(format!("CreateEventW 失败（GetLastError={err}）"));
+        }
         o.hEvent = ev;
         events.push(ev);
         ovl.push(o);
@@ -290,7 +298,7 @@ unsafe fn bench_phase(
         }
     }
     for ev in events { let _ = CloseHandle(ev); }
-    (bytes_done, ops_done, lat_total)
+    Ok((bytes_done, ops_done, lat_total))
 }
 
 unsafe fn open_bench_file(path: &str, size: u64, nobuf: bool) -> *mut core::ffi::c_void {
@@ -405,7 +413,7 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
         let half_ms = duration * 500;
         // HANDLE 是 *mut c_void 不满足 Send；edition2021 精确捕获会连字段位置一起抓，
         // 包装体也绕不开 → 跨线程一律先转 usize（Send），闭包内再转回 HANDLE（同进程内安全）
-        let run_stage = |kind: u8, io: usize, ms: u64, seq: u64, offs: &[u64]| -> (u64, u64, u128) {
+        let run_stage = |kind: u8, io: usize, ms: u64, seq: u64, offs: &[u64]| -> Result<(u64, u64, u128), String> {
             let start = mono_ms();
             let hs: Vec<usize> = handles.iter().map(|h| *h as usize).collect();
             std::thread::scope(|s| {
@@ -415,20 +423,25 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
                 }
                 let mut acc = (0u64, 0u64, 0u128);
                 for j in js {
-                    let (b, o, l) = j.join().unwrap_or((0, 0, 0));
-                    acc.0 += b; acc.1 += o; acc.2 += l;
+                    // 三层结果：join 失败（panic）/ 阶段判错（Err）/ 正常。旧写法把前两种一并
+                    // 折成 (0,0,0)，于是「事件句柄没建起来」与「这盘本来就慢」在回执上同形。
+                    match j.join() {
+                        Ok(Ok((b, o, l))) => { acc.0 += b; acc.1 += o; acc.2 += l; }
+                        Ok(Err(e)) => return Err(e),
+                        Err(_) => return Err("测速线程 panic".to_string()),
+                    }
                 }
-                acc
+                Ok(acc)
             })
         };
-        let seq_w = run_stage(0, block as usize, phase_ms, seq_per, &[]);
+        let seq_w = run_stage(0, block as usize, phase_ms, seq_per, &[])?;
         bench_progress(on_progress, "seqwrite", 40);
-        let seq_r = run_stage(1, block as usize, phase_ms, seq_per, &[]);
+        let seq_r = run_stage(1, block as usize, phase_ms, seq_per, &[])?;
         bench_progress(on_progress, "seqread", 80);
         let offsets = build_offset_map(rand_per, 4096);
-        let rd_r = run_stage(2, 4096, half_ms, rand_per, &offsets);
+        let rd_r = run_stage(2, 4096, half_ms, rand_per, &offsets)?;
         bench_progress(on_progress, "randread", 90);
-        let wr_r = run_stage(3, 4096, half_ms, rand_per, &offsets);
+        let wr_r = run_stage(3, 4096, half_ms, rand_per, &offsets)?;
         bench_progress(on_progress, "randwrite", 100);
         let elapsed = mono_ms().saturating_sub(t0);
 

@@ -37,6 +37,7 @@ const MUST_RUN = [
   'check-csp-consistency',
   'check-a11y',
   'check-native-hygiene',
+  'check-handle-lifecycle',
   'check-css-tokens',
   'check-css-hygiene',
   'check-assets-used',

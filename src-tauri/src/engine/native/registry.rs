@@ -837,9 +837,9 @@ pub fn reg_restore_write_checked(hive: HKEY, subkey: &str, value_name: &str, kin
 /// 不该让一次体积估算整体失败。
 pub fn file_ads_bytes(path: &std::path::Path) -> (u64, usize) {
     use windows::Win32::Storage::FileSystem::{
-        FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard, WIN32_FIND_STREAM_DATA,
+        FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard,
+        WIN32_FIND_STREAM_DATA,
     };
-    use windows::Win32::Foundation::CloseHandle;
 
     let mut buf = WIN32_FIND_STREAM_DATA::default();
     let wide = to_wide(&path.to_string_lossy());
@@ -866,7 +866,9 @@ pub fn file_ads_bytes(path: &std::path::Path) -> (u64, usize) {
                 break;
             }
         }
-        let _ = CloseHandle(handle);
+        // 搜索句柄的收尾 API 是 `FindClose`，不是 `CloseHandle`：后者能释放对象，
+        // 但不会拆掉内核侧这次枚举挂的 change-notification 上下文 ⇒ 与 Win32 契约不符。
+        let _ = FindClose(handle);
     }
     (bytes, count)
 }

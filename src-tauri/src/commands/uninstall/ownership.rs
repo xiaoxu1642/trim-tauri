@@ -65,7 +65,11 @@ pub(super) fn running_process_dirs() -> Option<HashSet<String>> {
                 }
             }
         }
-        let _ = snap;
+        // 快照句柄必须显式关：这里的 `let _ = snap;` 只是消 unused 警告、不产生任何 syscall。
+        // 同域另两处快照（`list_run.rs:899` / `:1081`）都是 `let _ = CloseHandle(snap);`，
+        // 这一处是唯一的漏网。本函数当前带 `#[allow(dead_code)]`（生产无调用方），
+        // 一旦接线即每次调用泄漏一个内核句柄 ⇒ 先按同域形状收口。
+        let _ = windows::Win32::Foundation::CloseHandle(snap);
         Some(out)
     }
 }

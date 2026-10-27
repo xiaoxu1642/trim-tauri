@@ -33,6 +33,7 @@ import { fileURLToPath } from 'node:url';
 
 import { walkRs } from './lib/fs-walk.mjs';
 import { gate } from './lib/gate.mjs';
+import { handleApiRe } from './lib/rust-parse.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ROOTS = [join(ROOT, 'src-tauri', 'src'), join(ROOT, 'native-scanner', 'src')];
@@ -107,7 +108,9 @@ function balanced(text, openIdx) {
 // ---------- 判定器（合成样本可直接对拍） ----------
 // v5 批次 9 门禁候选 2：N3 名单补 OpenServiceW / OpenSCManagerW / CreateJobObjectW
 // （服务/SCM/作业对象同属「返回句柄、is_ok 判定即泄漏」的家族；服务残留域在用）。
-const HANDLE_APIS = /(?:FindFirstFileW|FindFirstVolumeW|CreateFileW|OpenProcess|CreateToolhelp32Snapshot|CreateEventW|CreateMutexW|CreateProcessW|OpenServiceW|OpenSCManagerW|CreateJobObjectW)\s*\(/g;
+// 名单真源在 `./lib/rust-parse.mjs` —— 与 `check-handle-lifecycle` 的 L2 共用同一份，
+// 两处各写一份会让「新增一个句柄 API 只补一边」永远不被发现（§4.1）。
+const HANDLE_APIS = handleApiRe();
 
 /** @returns {string[]} 违规描述 */
 function hygieneViolations(clean) {

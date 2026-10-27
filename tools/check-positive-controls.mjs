@@ -33,6 +33,7 @@ const REGISTRY = [
   { file: 'check-a11y.mjs', reason: '可达性四断言：勾选框三属性 / aria-live 宿主 / data-tip 反 title / RM 归零覆盖面各配正反样本自检 + 三类扫描面地板' },
   { file: 'check-contrast.mjs', reason: 'F 组玻璃面 floor 断言配正反向样本自检（P3-2）；F1a~F6b 操作面登记台账七类反例（裸 --bg-card / 后级覆写 / 修饰类另写底 / 台账过期 / background-image 绕开 floor / 语义实底被中性降级 / 折射白名单含未登记类）+ F3b 锚点对照（抹掉 wantRefract 的按钮排除必判红）+ floor 栈合成对照（空栈与只垫 floor 必红、完整栈放行）；A1/B/C 与 token 表等既有组仍缺合成样本' },
   { file: 'check-native-hygiene.mjs', reason: 'N1–N9 各配正反样本自检（裸 output / 定长解码 / 句柄丢弃 / .reg 读取 / 深度护栏 / 取最新 / 快照域 / origin 字面量闸 / 取用点登记闸），+ 模块可达性与扫描面地板' },
+  { file: 'check-handle-lifecycle.mjs', reason: 'P2-c 句柄生命周期三闸各配正反向合成样本（搜索句柄 FindClose 收尾 / 句柄绑定后必判 / Toolhelp 快照必关，含「注释里写判定不算通过」「多行实参」「match 解包别名」四组边界），每条另带语料地板（任一侧归零即判红，防判据失明假绿）' },
   { file: 'check-confirm-danger.mjs', reason: 'confirmedHighRisk 字面量判定器配正反样本自检（P3-5）；调用形态两组仍靠扫描面塌陷地板兜底' },
   { file: 'check-idle-scripts.mjs', manual: true, reason: 'loadScript 三态 + 数组序 init 断言配「违例 4 条全命中 / 合规放行」样本自检（P3-4；2026-10-23 加第 4 条：逐条挂 .then 的完成序形状必判红）；守卫与启动名单两组仍靠扫描面地板兜底' },
   { file: 'check-comment-rot.mjs', manual: true, reason: '注释腐烂：三条断言各配正反向对照（不存在路径/章节号/数字必判红 + 真实样本不假红）；另经真破坏验证——关掉待修豁免表后 8 处真实腐烂全被抓到，exit 1' },
