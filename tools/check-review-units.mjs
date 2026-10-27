@@ -209,7 +209,7 @@ function judgeCoverageLedger(ledger, knownIds, unitsWithClaims) {
   const overclaims = [];
   const noCommands = [];
   const noCounts = [];
-  // T1a-M14：covered 条目是「src/…（1905 行，全读）」这种**带注解的字符串**——与认领
+  // T1a-M14：covered 条目是带注解的字符串（路径后跟括号说明）——与认领
   // 路径精确相等会 19/19 恒假红。两侧都归一成「路径前缀」再比对。
   const pathOf = (s) => (String(s).match(/[\w./\\-]+/) || [''])[0].replace(/\\/g, '/').replace(/\/+$/, '');
   for (const [id, rec] of Object.entries(ledger)) {
@@ -217,7 +217,7 @@ function judgeCoverageLedger(ledger, knownIds, unitsWithClaims) {
     const unit = unitsWithClaims.find((u) => u.id === id);
     if (!unit) continue;
     // T1a-M14：coverage 契约把 counts 写成必填，但本判定器从不校验 ⇒ 「必填」只有文字
-    // 纪律（现算 19 份里 9 份缺）。缺失/非对象即进 noCounts。
+    // 纪律（现算半数以上缺）。缺失/非对象即进 noCounts。
     if (!rec.counts || typeof rec.counts !== 'object' || Array.isArray(rec.counts)) noCounts.push(id);
     const covered = new Set((rec.covered ?? []).map(pathOf));
     const claimed = new Set((unit.claimed || []).map(pathOf));
