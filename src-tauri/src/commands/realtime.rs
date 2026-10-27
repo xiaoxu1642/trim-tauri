@@ -231,6 +231,11 @@ pub fn prune_reports() -> usize {
     let Ok(dir) = ensure_report_dir() else { return 0 };
     // P0-2A：报告根被换成 junction 时，TTL 裁剪会在链接另一头删掉同形态的 `.json`。
     // 这一道放在入口而不是执行体：`prune_reports_in` 要保持「只吃入参目录」的沙箱可测性。
+    //
+    // B2-4 未把这里并进 `report_root_gate`，理由不是「懒得改」：`check-delete-root-guard`
+    // 的判据是「根入口函数体内**看得见** `inspect_root(`」（注释里写不算，见该门禁 C3 自检）。
+    // 套一层 `report_root_verdict` 会让它对 `prune_reports_in` 失明 —— 那等于把唯一能盯住
+    // 这条的机检关掉，换来的只是少一行重复。判据本体仍然是同一个 `protect::inspect_root`。
     let verdict = crate::engine::protect::inspect_root(&dir, crate::engine::paths::data_root_base(&dir).as_deref());
     if !verdict.is_trusted() {
         crate::engine::protect::note_root_skipped("网速报告 TTL 裁剪", &dir, &verdict);
@@ -546,11 +551,47 @@ fn report_path(name: &str) -> Option<std::path::PathBuf> {
     Some(paths::realtime_report_dir().join(base))
 }
 
+/// B2-4：报告目录被拒时的**回执口径唯一出口**（`report-delete` 与 `report-clear` 共用）。
+///
+/// 病根：删除侧只判 `fp.is_file()` 就 `remove_file`，而 `is_file()` 会**跟随链接** ——
+/// 报告目录被换成 junction 时「是文件」照样成立，删掉的是链接另一头那份，既不进回收站
+/// 也不过受保护判定；清空侧早就补了根判定（P0-2A），删除侧一直没补。
+/// 两个入口动的是**同一个根**，判据各写一份的必然结果就是「一个入口拒收、另一个入口穿透」。
+///
+/// 分工：`inspect_root` 本身留在各入口函数体内**可见**（`check-delete-root-guard` 的判据
+/// 就是「根入口体内看得见判据」，套一层间接会让它对这两个根入口失明），本函数只统一
+/// 「判出不可信之后怎么回话」。两种结局：
+/// - `SkipMissing`（根不存在）⇒ **幂等成功**，且**不带** `skippedReparse` ——
+///   报告目录都没了，报告必然也不在，这与「删一份本来就没有的报告」同义；
+///   这时候报「被安全判定拒掉」反而是假话。
+/// - `Rejected`（自身/祖先 reparse、不是目录、元数据读不出）⇒ `success:false` +
+///   `skippedReparse:true`。**禁回 `success:true + removed:0`**：那与「本来就没有」同形，
+///   正是 P1-6「失败被伪装成空结果」那一族。
+fn report_root_receipt(
+    caller: &str,
+    dir: &std::path::Path,
+    verdict: &crate::engine::protect::RootVerdict,
+) -> Value {
+    if matches!(verdict, crate::engine::protect::RootVerdict::SkipMissing) {
+        return serde_json::json!({
+            "success": true, "removed": 0, "failed": 0,
+            "message": "报告目录不存在，报告已不在",
+        });
+    }
+    crate::engine::protect::note_root_skipped(caller, dir, verdict);
+    serde_json::json!({
+        "success": false, "removed": 0, "failed": 0, "skippedReparse": true,
+        "message": format!("报告目录未通过安全判定，本次未删除：{}", verdict.reason()),
+    })
+}
+
 /// realtime:report-delete（basename 化 + `.json` 后缀，防路径穿越）
 ///
 /// v7.2 `R1d-L11`：`is_file` + `remove_file` 是磁盘 I/O，同步命令体里做就占住主线程
 /// ⇒ 改 async + `spawn_blocking`（同文件 v2-F13 口径），并在删除前补 `flush_sync`，
 /// 让「删了哪一份」这条日志先落盘再动文件。
+///
+/// B2-4：动文件之前先过 `report_root_gate`（与 `report-clear` 同一道根判定、同一句回执）。
 #[tauri::command]
 pub async fn realtime_report_delete<R: tauri::Runtime>(
     window: WebviewWindow<R>,
@@ -564,6 +605,18 @@ pub async fn realtime_report_delete<R: tauri::Runtime>(
         log::write_log("warn", &format!("拒绝删除网速报告（名称非法）: {name}"));
         return Ok(serde_json::json!({ "success": false, "removed": 0, "message": "报告名称非法，未删除" }));
     };
+    // 名称闸在前（不碰盘、且能给出更准的错因），根判据在后（这时才真正要知道目录可信不可信）。
+    // `fp` 与判定的根来自同一个 `paths::realtime_report_dir()`，不存在「判 A 删 B」。
+    let report_dir = paths::realtime_report_dir();
+    let verdict = crate::engine::protect::inspect_root(
+        &report_dir,
+        crate::engine::paths::data_root_base(&report_dir).as_deref(),
+    );
+    if !verdict.is_trusted() {
+        // B2-4：不可信根回 `success:false + skippedReparse:true`，**不回** `success:true
+        // + removed:0`（那与「本来就没有」同形）。回执措辞与清空侧共用 `report_root_receipt`。
+        return Ok(report_root_receipt("删除网速报告", &report_dir, &verdict));
+    }
     let target_name = name.clone();
     let job = tauri::async_runtime::spawn_blocking(move || {
         if !fp.is_file() {
@@ -602,13 +655,13 @@ pub async fn realtime_report_clear<R: tauri::Runtime>(
     let dir = ensure_report_dir()?;
     // P0-2A：清空是「全部删完」的强断言，根不可信时一条都不许删，而且**不能回 success:true
     // + removed:0** —— 那与「本来就没有报告」同形（方案 P1-6 的「失败被伪装成空结果」族）。
-    let verdict = crate::engine::protect::inspect_root(&dir, crate::engine::paths::data_root_base(&dir).as_deref());
+    // B2-4：回执措辞收进 `report_root_receipt`，删除侧改用它同一份 —— 两处不再是各写一句。
+    let verdict = crate::engine::protect::inspect_root(
+        &dir,
+        crate::engine::paths::data_root_base(&dir).as_deref(),
+    );
     if !verdict.is_trusted() {
-        crate::engine::protect::note_root_skipped("清空网速报告", &dir, &verdict);
-        return Ok(serde_json::json!({
-            "success": false, "removed": 0, "failed": 0, "skippedReparse": true,
-            "message": format!("报告目录未通过安全判定，本次一条都没删：{}", verdict.reason()),
-        }));
+        return Ok(report_root_receipt("清空网速报告", &dir, &verdict));
     }
     let counted = tauri::async_runtime::spawn_blocking(move || {
         let mut removed = 0usize;
@@ -713,6 +766,100 @@ mod tests {
         assert!(!old.exists(), "超过 7 天的报告必须被回收");
         assert!(fresh.exists() && other.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// B2-4：报告目录根不可信时，两个删除入口必须回「失败 + `skippedReparse`」，
+    /// 且**不允许**回 `success:true + removed:0`（那与「本来就没有」同形，P1-6 族）。
+    ///
+    /// 夹具走目录符号链接（`symlink_dir`）。造不出来就显式 SKIP 并打印 —— 不假绿：
+    /// 本机开不开开发者模式是环境属性，硬判红等于让这条判据随机器红绿。
+    /// 判红自证：把 `report_root_receipt` 的 `Rejected` 分支改成回
+    /// `{"success": true, "removed": 0}` ⇒ 本用例第一条断言当场红。
+    #[test]
+    fn 报告根是链接时删除必须拒且连接另一头零改动() {
+        // 走自删守卫而不是本地 `sandbox()` + 手写收尾：本文件的删除原语调用点已按文件
+        // 计数进了棘轮（现算见 `node tools/check-delete-callsites.mjs`），多一处就要 review。
+        let sb = crate::testutil::Sandbox::new(&format!("realtime-junction-{}", std::process::id()));
+        let root = sb.path();
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        put(&real, "realtime-a.json");
+        let link = root.join("link");
+        if std::os::windows::fs::symlink_dir(&real, &link).is_err() {
+            println!("SKIP：本机 symlink_dir 失败（需开发者模式/提权），报告根 reparse 一面未校验");
+            return;
+        }
+        // 走与命令体同一条路：先判根，再按判据取回执
+        let verdict = crate::engine::protect::inspect_root(
+            &link,
+            crate::engine::paths::data_root_base(&link).as_deref(),
+        );
+        assert!(!verdict.is_trusted(), "目录符号链接必须判不可信: {verdict:?}");
+        let receipt = report_root_receipt("测试删除网速报告", &link, &verdict);
+        assert_eq!(
+            receipt["success"],
+            serde_json::json!(false),
+            "不可信根禁回 success:true（那与「本来就没有」同形）: {receipt}"
+        );
+        assert_eq!(
+            receipt["skippedReparse"],
+            serde_json::json!(true),
+            "必须点名「是被安全判定拒掉」，否则回执与真实原因脱钩: {receipt}"
+        );
+        assert_eq!(receipt["removed"], serde_json::json!(0));
+        // 判定档只判定、不删：链接另一头一个文件都不许动
+        assert!(real.join("realtime-a.json").exists(), "根判定期间不得动链接另一头的文件");
+        // 正向对照：可信根必须放行 —— 否则「恒判不可信」也能让上面三条全绿（假绿形态）
+        let ok = crate::engine::protect::inspect_root(
+            &real,
+            crate::engine::paths::data_root_base(&real).as_deref(),
+        );
+        assert!(ok.is_trusted(), "普通目录必须判可信: {ok:?}");
+        // 根不存在 ⇒ 幂等成功，但**不许**冒充 skippedReparse（那不是被安全判定拒掉）
+        let nope = root.join("nope");
+        let gone_v = crate::engine::protect::inspect_root(
+            &nope,
+            crate::engine::paths::data_root_base(&nope).as_deref(),
+        );
+        assert!(!gone_v.is_trusted(), "根不存在也不是「可信」");
+        let gone = report_root_receipt("测试删除网速报告", &nope, &gone_v);
+        assert_eq!(gone["success"], serde_json::json!(true), "根不存在是幂等成功: {gone}");
+        assert_eq!(gone["removed"], serde_json::json!(0));
+        assert!(
+            gone.get("skippedReparse").is_none(),
+            "根不存在不许冒充被安全判定拒掉: {gone}"
+        );
+    }
+
+    /// B2-4：两个删除入口必须共用**同一道**根判定与同一句回执措辞 ——
+    /// 「一个入口拒收、另一个入口穿透」正是这条病的形态，各写一份就会复发。
+    /// 判红自证：把删除侧的 `inspect_root` 判定块删掉 ⇒ `inspect_root(` 从 3 掉到 2，当场红。
+    ///
+    /// 期望每个根入口体内各自看得见 `inspect_root(`（`prune_reports` / `report-delete` /
+    /// `report-clear`），而不是抽成一个公共函数：
+    /// `check-delete-root-guard` 的判据是「根入口**函数体内**看得见 `inspect_root(`」，
+    /// 套一层间接会让它对这些根入口全部失明 —— 不许为了少写两行去关掉那道机检。
+    /// 判据本体仍是同一个 `protect::inspect_root`，措辞由 `report_root_receipt` 单点给。
+    #[test]
+    fn 报告删除与清空共用同一道根判定() {
+        let src = include_str!("realtime.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or("");
+        assert_eq!(
+            prod.matches("fn report_root_receipt(").count(),
+            1,
+            "拒收回执的口径只许有这一个实现"
+        );
+        assert_eq!(
+            prod.matches("report_root_receipt(\"删除网速报告\"").count()
+                + prod.matches("report_root_receipt(\"清空网速报告\"").count(),
+            2,
+            "report-delete 与 report-clear 被判不可信时必须回同一份回执"
+        );
+        assert_eq!(
+            prod.matches("protect::inspect_root(").count(),
+            3,
+            "三处根入口（TTL 裁剪 / 删除 / 清空）各自体内都要看得见判据，不许被间接层藏起来"
+        );
     }
 
     /// R1d-M14：空闲停机只在超过阈值时成立（边界两侧各测一次）。
