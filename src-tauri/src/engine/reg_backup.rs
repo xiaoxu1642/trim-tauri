@@ -15,6 +15,18 @@
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+/// `.reg` 与边车单文件读取上限（RB-08）。
+///
+/// 备份目录是用户可写目录：构造一份数 GB 的 `.reg`（或把边车做成大文件）
+/// 就能让还原闸在解析前把整份内容读进内存。32 MiB 远超任何真实注册表导出，
+/// 超限一律按「不是合法的 .reg」拒绝，不尝试流式解析。
+const MAX_REG_BACKUP_BYTES: u64 = 32 * 1024 * 1024;
+
+/// 读盘上限的纯判据（RB-08）：单测不造大文件，只判边界。
+fn within_reg_file_cap(len: u64) -> bool {
+    len <= MAX_REG_BACKUP_BYTES
+}
+
 /// `a_1.reg` → `a_1.reg.meta.json`（同目录放封条，便于人工核对；列表按 .reg 收尾过滤，不会自纳）
 pub fn reg_seal_path_for(file: &Path) -> PathBuf {
     let mut s = file.as_os_str().to_os_string();
@@ -76,7 +88,20 @@ where
         return;
     };
     write_reg_backup_seal_with_digest(file, target, &sum);
-    write_admin_seal_with_digest(domain, file, &sum);
+    // RB-10：只有 HKLM 目标才需要管理员摘要。HKCU 备份没有提权边界，
+    // 非提权会话里那条 HKLM 写入必然失败并留下与事实不符的「该 HKLM 备份」日志。
+    if needs_admin_seal(target) {
+        write_admin_seal_with_digest(domain, file, &sum);
+    }
+}
+
+/// 管理员摘要只对 HKLM 目标有意义（RB-10/RB-11）。
+///
+/// `target` 是导出目标字符串（`HKLM\…` / `HKEY_LOCAL_MACHINE\…` 等）。
+/// 纯函数：写侧分流与列表可还原判据共用同一份口径。
+pub fn needs_admin_seal(target: &str) -> bool {
+    let head = target.split('\\').next().unwrap_or("").trim();
+    head.eq_ignore_ascii_case("HKLM") || head.eq_ignore_ascii_case("HKEY_LOCAL_MACHINE")
 }
 
 /// 封条核对：ok / missing（旧备份没封条）/ mismatch（内容与封条不符）/ corrupt / unreadable
@@ -86,6 +111,12 @@ pub fn reg_backup_seal_state(file: &Path) -> (&'static str, Value) {
         Err(_) => {
             // 备份文件读不到：旧口径是「先看封条、再看文件」，这里保持同一顺序
             let meta_path = reg_seal_path_for(file);
+            let Ok(md) = std::fs::metadata(&meta_path) else {
+                return ("missing", Value::Null);
+            };
+            if !within_reg_file_cap(md.len()) {
+                return ("corrupt", Value::Null);
+            }
             let Ok(text) = std::fs::read_to_string(&meta_path) else {
                 return ("missing", Value::Null);
             };
@@ -103,6 +134,12 @@ pub fn reg_backup_seal_state(file: &Path) -> (&'static str, Value) {
 /// 的摘要，而不是稍后再读一次盘得到的另一份。
 pub fn reg_backup_seal_state_with_digest(file: &Path, digest: &str) -> (&'static str, Value) {
     let meta_path = reg_seal_path_for(file);
+    let Ok(md) = std::fs::metadata(&meta_path) else {
+        return ("missing", Value::Null);
+    };
+    if !within_reg_file_cap(md.len()) {
+        return ("corrupt", Value::Null);
+    }
     let Ok(text) = std::fs::read_to_string(&meta_path) else {
         return ("missing", Value::Null);
     };
@@ -159,11 +196,39 @@ pub fn write_admin_seal_with_digest(domain: &str, file: &Path, sum: &str) -> boo
         crate::engine::log::write_log(
             "warn",
             &format!(
-                "管理员摘要写入失败（当前可能非管理员会话，该 HKLM 备份将不能用于还原）: {value_name}"
+                "管理员摘要写入失败（非提权会话或该键不可写，该 HKLM 备份将不能用于还原）: {value_name}"
             ),
         );
     }
     ok
+}
+
+/// 管理员摘要状态的纯判据（RB-11）：`ok / missing / mismatch / unreadable`。
+///
+/// `digest = None` 表示备份文件本身读不到（列表侧算哈希失败）；此时管理员摘要
+/// 无从比对，如实回 `unreadable`，不与 `missing` 混同。
+fn admin_seal_verdict(expected: Option<&str>, digest: Option<&str>) -> &'static str {
+    match (digest, expected) {
+        (None, _) => "unreadable",
+        (Some(_), None) => "missing",
+        (Some(d), Some(want)) if digest_matches(want, d) => "ok",
+        (Some(_), Some(_)) => "mismatch",
+    }
+}
+
+/// 列表/回执用的管理员摘要状态（读 HKLM 摘要值，与给定摘要比对）。
+pub fn reg_backup_admin_seal_state(domain: &str, file: &Path, digest: Option<&str>) -> &'static str {
+    admin_seal_verdict(read_admin_seal(domain, file).as_deref(), digest)
+}
+
+/// 列表的「可还原」合成判据（RB-11）：边车封条 × 目标是否 HKLM × 管理员摘要。
+///
+/// 与还原闸口径对齐：
+/// - HKLM：边车必须 `ok`（missing 也拒）+ 管理员摘要必须 `ok`；
+/// - HKCU：边车 `ok` 或 `missing`（旧备份依据），不要求管理员摘要。
+pub fn backup_restorable(seal: &str, needs_admin: bool, admin_seal: &str) -> bool {
+    let seal_ok = seal == "ok" || (seal == "missing" && !needs_admin);
+    seal_ok && (!needs_admin || admin_seal == "ok")
 }
 
 /// 读管理员摘要；无记录返回 None（备份生成于非提权会话，或早于本安全版本）。
@@ -375,6 +440,12 @@ pub struct RegBackupContent {
 
 /// 一次 `fs::read`，用同一份字节同时得到解码文本与摘要。
 pub fn read_reg_content(file: &Path) -> Result<RegBackupContent, String> {
+    let meta = std::fs::metadata(file).map_err(|e| format!("读取 .reg 失败: {e}"))?;
+    if !within_reg_file_cap(meta.len()) {
+        return Err(format!(
+            ".reg 文件超过 {MAX_REG_BACKUP_BYTES} 字节上限，已拒绝读取"
+        ));
+    }
     let bytes = std::fs::read(file).map_err(|e| format!("读取 .reg 失败: {e}"))?;
     let text = decode_reg_bytes(&bytes)?;
     let digest = crate::engine::hash::sha256_bytes(&bytes);
@@ -469,15 +540,33 @@ where
     let sections = parse_reg_text(&content.text).map_err(|_| {
         "备份文件不是合法的 .reg（缺版本头或没有任何键段），已拒绝还原".to_string()
     })?;
-    // 键枚举（回执/日志用）从 sections 推导——与执行臂同一份解析产物，不可能再分叉
+    // 键枚举（回执/日志用）从 sections 推导——与执行臂同一份解析产物，不可能再分叉。
+    // RB-08：去重改 HashSet（小写键），几十万段不再退化成 O(n²)。
     let mut keys: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for sec in &sections {
         let full = sec.full_key();
-        if !keys.iter().any(|x| x.eq_ignore_ascii_case(&full)) {
+        if seen.insert(full.to_lowercase()) {
             keys.push(full);
         }
     }
     for sec in &sections {
+        // RB-06：先按根分流。HKCR/HKU（以及 PERF/DYN）不在本工具的还原支持面内，
+        // 旧实现把它们交给 `reg_target_block_reason`，被包成「含受保护的注册表容器」——
+        // 用户会以为是导错了键。这里点名「不支持的根」，方向仍然是拒（fail-closed）。
+        if !matches!(
+            sec.hive.as_str(),
+            "HKEY_LOCAL_MACHINE" | "HKEY_CURRENT_USER"
+        ) {
+            crate::engine::log::write_log(
+                "warn",
+                &format!("备份 {name} 含不支持的注册表根，已拒绝还原: {}", sec.hive),
+            );
+            return Err(format!(
+                "备份包含本工具不支持的注册表根（{}），已拒绝还原；只支持 HKLM/HKCU",
+                sec.hive
+            ));
+        }
         // `[-HKEY...]` 是「删除键段」（parse_reg_text 的 delete_key 标记）。它既不是
         // Trim 的导出形态，也没有对应的保护面判定。单独报「不支持删除段」，别让用户从
         // 「含受保护的注册表容器」这句误以为是自己导错了键。
@@ -562,11 +651,34 @@ fn drop_hkcu_scratch(sub: &str) {
 mod reg_backup_common_tests {
     use super::*;
 
-    fn sandbox(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("trim-regbackup-{tag}-{}", std::process::id()));
+    /// 测试沙箱（RB-12）：放在 `target/test-data-root/lib` 下，不在全局可写的 `%TEMP%`；
+    /// `Drop` 回收，任何断言提前返回都不会留下目录。
+    struct Sandbox(PathBuf);
+
+    impl std::ops::Deref for Sandbox {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for Sandbox {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn sandbox(tag: &str) -> Sandbox {
+        let dir = crate::engine::paths::lib_test_data_root().join(format!("regbackup-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        Sandbox(dir)
     }
 
     /// 沙箱目录清理（只删本用例自己建的目录）。
@@ -960,7 +1072,9 @@ mod reg_backup_common_tests {
         let first = "a".repeat(64);
         let second = "b".repeat(64);
         let mut calls = 0u32;
-        write_reg_backup_seals_with("cleanup", &file, "HKCU\\Software\\Acme", || {
+        // RB-10 后只有 HKLM 目标才写管理员摘要：本用例用 HKLM 目标，
+        // 提权会话下管理员侧仍参与「同源摘要」断言；非提权会话按 SKIP 如实说明。
+        write_reg_backup_seals_with("cleanup", &file, r"HKLM\Software\Acme", || {
             calls += 1;
             Some(if calls == 1 { first.clone() } else { second.clone() })
         });
@@ -977,8 +1091,7 @@ mod reg_backup_common_tests {
             assert_eq!(admin, first, "管理员摘要必须与边车封条同源（同一份快照）");
         } else {
             eprintln!("SKIP：当前非提权会话，HKLM 管理员摘要未落盘，管理员侧未校验");
-        }
-        // 清理：提权会话真的写进了 HKLM，这里收掉
+        }        // 清理：提权会话真的写进了 HKLM，这里收掉
         let _ = drop_admin_seal("cleanup", &file);
         rm_sandbox(&root);
     }
@@ -1201,9 +1314,7 @@ mod reg_backup_common_tests {
     /// `unreadable` 要的是「文本读得动但摘要算不出」的窗口，单测造不出来，如实留作未验证。
     #[test]
     fn reg_backup_seal_states_are_distinguishable() {
-        let dir = std::env::temp_dir().join(format!("trim-seal-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("临时目录应可建");
+        let dir = sandbox("seal-states");
         let bak = dir.join("1790561031234_Acme.reg");
         std::fs::write(
             &bak,
@@ -1287,7 +1398,7 @@ mod reg_backup_common_tests {
         std::fs::write(&q, body.replace("TrimProbe", "TrimProbe2")).unwrap();
         write_reg_backup_seals("cleanup", &q, r"HKLM\Software\TrimProbe\App");
         std::fs::remove_file(&q).unwrap();
-        reconcile_admin_seals("cleanup", &seal_read_roots(&[root.clone()]));
+        reconcile_admin_seals("cleanup", &seal_read_roots(&[root.0.clone()]));
         let (names, incomplete) = crate::engine::native::reg_enum_value_names_pub(
             crate::engine::native::hive_hklm(),
             ADMIN_SEAL_SUBKEY,
@@ -1379,9 +1490,11 @@ pub fn parse_reg_text(text: &str) -> Result<Vec<RegSection>, String> {
     // 「键段之前的值行」而把整份合法备份判死。trim 链与上方头判定同口径：
     // BOM 与头之间夹空白（手工编辑过的备份实测形态）也要能识别成头行。
     const HEADER: &str = "Windows Registry Editor Version 5.00";
-    let mut logical: Vec<String> = Vec::new();
+    let mut logical: Vec<(usize, String)> = Vec::new();
     let mut pending = String::new();
-    for raw in text.lines() {
+    let mut pending_line = 0usize;
+    for (idx, raw) in text.lines().enumerate() {
+        let line_no = idx + 1;
         let t = raw.trim_end_matches('\r').trim();
         if t.is_empty() || t.starts_with(';') {
             continue;
@@ -1390,14 +1503,17 @@ pub fn parse_reg_text(text: &str) -> Result<Vec<RegSection>, String> {
             continue;
         }
         if let Some(cont) = t.strip_suffix('\\') {
+            if pending.is_empty() {
+                pending_line = line_no;
+            }
             pending.push_str(cont.trim_end());
             continue;
         }
         if pending.is_empty() {
-            logical.push(t.to_string());
+            logical.push((line_no, t.to_string()));
         } else {
             pending.push_str(t);
-            logical.push(std::mem::take(&mut pending));
+            logical.push((pending_line, std::mem::take(&mut pending)));
         }
     }
     // 末尾悬空的续行标记 = 文件被截断
@@ -1406,31 +1522,32 @@ pub fn parse_reg_text(text: &str) -> Result<Vec<RegSection>, String> {
     }
 
     let mut sections: Vec<RegSection> = Vec::new();
-    for t in logical {
+    for (line_no, t) in logical {
         if t.starts_with('[') {
             let inner = t
                 .strip_suffix(']')
-                .ok_or_else(|| format!("键段行不完整: {t}"))?
-                .strip_prefix('[')
-                .ok_or_else(|| format!("键段行不完整: {t}"))?
+                .and_then(|s| s.strip_prefix('['))
+                .ok_or_else(|| format!("第 {line_no} 行：键段行不完整"))?
                 .trim()
                 .trim_matches('"')
                 .to_string();
             if inner.is_empty() {
-                return Err("键段为空".into());
+                return Err(format!("第 {line_no} 行：键段为空"));
             }
             let (body, delete_key) = match inner.strip_prefix('-') {
                 Some(rest) => (rest.to_string(), true),
                 None => (inner.clone(), false),
             };
-            let (hive, subkey) = split_hive(&body)?;
+            // RB-09：解析错误只带行号与类别，不回显值名/值内容/键路径。
+            let (hive, subkey) =
+                split_hive(&body).map_err(|e| format!("第 {line_no} 行：{e}"))?;
             sections.push(RegSection { hive, subkey, delete_key, writes: Vec::new() });
             continue;
         }
         let Some(sec) = sections.last_mut() else {
-            return Err(format!("值行出现在任何键段之前: {t}"));
+            return Err(format!("第 {line_no} 行：值行出现在任何键段之前"));
         };
-        sec.writes.push(parse_value_line(&t)?);
+        sec.writes.push(parse_value_line(&t, line_no)?);
     }
     if sections.is_empty() {
         return Err(".reg 没有任何键段".into());
@@ -1441,7 +1558,7 @@ pub fn parse_reg_text(text: &str) -> Result<Vec<RegSection>, String> {
 fn split_hive(body: &str) -> Result<(String, String), String> {
     let (hive, rest) = body
         .split_once('\\')
-        .ok_or_else(|| format!("键名缺少子键部分: {body}"))?;
+        .ok_or_else(|| "键名缺少子键部分".to_string())?;
     let hive_up = hive.to_uppercase();
     if !matches!(
         hive_up.as_str(),
@@ -1474,14 +1591,15 @@ fn normalize_hive_name(hive_up: &str) -> String {
     }
 }
 
-fn parse_value_line(t: &str) -> Result<RegWrite, String> {
-    let (lhs, rhs) = t
-        .split_once('=')
-        .ok_or_else(|| format!("值行缺 '=': {t}"))?;
+fn parse_value_line(t: &str, line_no: usize) -> Result<RegWrite, String> {
+    // RB-09：错误只带行号与类别，不带值名/值内容 —— 畸形 .reg 的原文可能含
+    // 凭据或路径，旧实现会把它经 reg_import_apply 带进回执与日志。
+    let at = |what: &str| format!("第 {line_no} 行：{what}");
+    let (lhs, rhs) = t.split_once('=').ok_or_else(|| at("值行缺 '='"))?;
     let name = if lhs.trim() == "@" {
         String::new() // 默认值
     } else {
-        unquote_reg(lhs.trim()).ok_or_else(|| format!("值名不是带引号字符串: {lhs}"))?
+        unquote_reg(lhs.trim()).ok_or_else(|| at("值名不是带引号字符串"))?
     };
     let rhs = rhs.trim();
     if rhs == "-" {
@@ -1489,12 +1607,15 @@ fn parse_value_line(t: &str) -> Result<RegWrite, String> {
     }
     if let Some(hexpart) = rhs.strip_prefix("dword:") {
         let v = u32::from_str_radix(hexpart.trim(), 16)
-            .map_err(|_| format!("dword 非 hex: {hexpart}"))?;
+            .map_err(|_| at("dword 值不是十六进制"))?;
         return Ok(RegWrite::Set { name, kind: RK_DWORD, data: v.to_le_bytes().to_vec() });
     }
     if let Some(hexpart) = rhs.strip_prefix("qword:") {
-        let v = u64::from_str_radix(hexpart.trim().replace(',', "").as_str(), 16)
-            .map_err(|_| format!("qword 非 hex: {hexpart}"))?;
+        let clean = hexpart.trim().replace(',', "");
+        if clean.len() != 16 || !clean.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(at("qword 值必须恰好 16 位十六进制"));
+        }
+        let v = u64::from_str_radix(&clean, 16).map_err(|_| at("qword 值不是十六进制"))?;
         return Ok(RegWrite::Set { name, kind: RK_QWORD, data: v.to_le_bytes().to_vec() });
     }
     if let Some(rest) = rhs.strip_prefix("hex") {
@@ -1502,9 +1623,9 @@ fn parse_value_line(t: &str) -> Result<RegWrite, String> {
         let (kind, bytes) = if let Some(paren) = rest.strip_prefix('(') {
             let (code, tail) = paren
                 .split_once(')')
-                .ok_or_else(|| format!("hex(...) 括号不完整: {rhs}"))?;
+                .ok_or_else(|| at("hex(...) 括号不完整"))?;
             let k = u32::from_str_radix(code.trim(), 16)
-                .map_err(|_| format!("hex(...) 类型号非 hex: {code}"))?;
+                .map_err(|_| at("hex(...) 类型号非十六进制"))?;
             (k, tail.strip_prefix(':').unwrap_or(tail))
         } else {
             (RK_BINARY, rest.strip_prefix(':').unwrap_or(rest))
@@ -1516,8 +1637,7 @@ fn parse_value_line(t: &str) -> Result<RegWrite, String> {
             clean
                 .split(',')
                 .map(|b| {
-                    let b = b.trim();
-                    u8::from_str_radix(b, 16).map_err(|_| format!("hex 字节非法: {b:?}"))
+                    u8::from_str_radix(b.trim(), 16).map_err(|_| at("hex 字节非法"))
                 })
                 .collect::<Result<_, String>>()?
         };
@@ -1525,16 +1645,38 @@ fn parse_value_line(t: &str) -> Result<RegWrite, String> {
         // 它们不是「一段字节」而是结构化的资源描述符（ResourceRequested 等），
         // 照字节写进去会得到一个类型对、内容错的值，比失败更难发现。
         if !matches!(kind, RK_SZ | RK_EXPAND_SZ | RK_BINARY | RK_DWORD | RK_MULTI_SZ | RK_QWORD) {
-            return Err(format!("未支持的注册表类型: hex({kind:x})"));
+            return Err(at(&format!("未支持的注册表类型: hex({kind:x})")));
+        }
+        // RB-07：类型对、长度错的值读取侧会判读失败，必须在写入前拒绝。
+        // SZ/EXPAND/MULTI 必须是 UTF-16LE 串（偶数长 + 双 NUL 结尾）；
+        // DWORD 恰好四字节、QWORD 恰好八字节；BINARY 不限。
+        if !hex_length_matches_kind(kind, &data) {
+            return Err(at(&format!("hex({kind:x}) 数据长度与类型不符")));
         }
         return Ok(RegWrite::Set { name, kind, data });
     }
     // 普通字符串 → REG_SZ
-    let s = unquote_reg(rhs).ok_or_else(|| format!("未支持的值形态: {rhs}"))?;
+    let s = unquote_reg(rhs).ok_or_else(|| at("未支持的值形态"))?;
     Ok(RegWrite::Set { name, kind: RK_SZ, data: utf16_with_nul(&s) })
 }
 
+/// `hex(…)` 数据的长度必须与类型匹配（RB-07）。纯函数，便于单测边界。
+fn hex_length_matches_kind(kind: u32, data: &[u8]) -> bool {
+    match kind {
+        // 字符串类型：偶数长且以双 NUL 结尾（空串也是「双 NUL」形态）
+        RK_SZ | RK_EXPAND_SZ | RK_MULTI_SZ => {
+            data.len() >= 2 && data.len() % 2 == 0 && data.ends_with(&[0, 0])
+        }
+        RK_DWORD => data.len() == 4,
+        RK_QWORD => data.len() == 8,
+        _ => true,
+    }
+}
+
 /// `.reg` 里的带引号字符串：`\"` 与 `\\` 是两个转义，其余按字面。
+///
+/// RB-07：`\n` / `\t` **不是** `.reg` 定义的转义 —— 旧实现把它们变成真换行/制表符，
+/// 于是手写备份里的 `"C:\notepad"` 会被写成 `C:<TAB>otepad`。未知转义按字面保留。
 fn unquote_reg(t: &str) -> Option<String> {
     let inner = t.strip_prefix('"')?.strip_suffix('"')?;
     let mut out = String::with_capacity(inner.len());
@@ -1542,8 +1684,6 @@ fn unquote_reg(t: &str) -> Option<String> {
     while let Some(c) = it.next() {
         if c == '\\' {
             match it.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
                 Some('\\') => out.push('\\'),
                 Some('"') => out.push('"'),
                 Some(other) => {
@@ -1665,14 +1805,19 @@ pub fn reg_import_apply_sections(sections: &[RegSection]) -> Result<RegImportSta
             }
             continue;
         }
-        // 只有值要写、或段本身要存在时才建键（reg.exe 对空段也会建键，这里保持同形）
-        if crate::engine::native::reg_key_ensure(hive, &sec.subkey) {
-            stat.keys_created += 1;
-        } else if !sec.writes.is_empty() {
-            return Err(RegImportFailure {
-                stat,
-                reason: format!("打开/创建键失败: {full}"),
-            });
+        // RB-05：有值段不预开键 —— 写入臂 `reg_restore_write` 用 KEY_SET_VALUE 自己建键；
+        // 预开走 KEY_READ，极少数「可写不可读」的 ACL 形状会假失败。
+        // 空段（reg.exe 对无值键也会产出）仍要确保键存在，且失败必须如实上报：
+        // 旧实现把失败吞掉并继续报成功，等于空键段根本没建成也没人知道。
+        if sec.writes.is_empty() {
+            if crate::engine::native::reg_key_ensure(hive, &sec.subkey) {
+                stat.keys_created += 1;
+            } else {
+                return Err(RegImportFailure {
+                    stat,
+                    reason: format!("打开/创建键失败: {full}"),
+                });
+            }
         }
         for w in &sec.writes {
             match w {
@@ -2007,7 +2152,8 @@ mod reg_import_tests {
         for u in text.encode_utf16() {
             bytes.extend_from_slice(&u.to_le_bytes());
         }
-        let file = std::env::temp_dir().join(format!("trim-a6-probe-{}.reg", crate::engine::now_ms()));
+        let file = crate::engine::paths::lib_test_data_root()
+            .join(format!("a6-probe-{}.reg", crate::engine::now_ms()));
         std::fs::write(&file, &bytes).expect("临时 .reg 应可写");
 
         let stat = reg_import_apply(&file).expect("原生 import 应成功");
@@ -2032,5 +2178,191 @@ mod reg_import_tests {
         assert_eq!(cn_t, "REG_SZ");
         assert_eq!(bare(cn_v), "中文 值", "中文值在 UTF-16 往返后必须原样");
         assert!(back("gone").is_none(), "`\"gone\"=-` 没删掉那个值");
+    }
+}
+
+/// P3-B 判据（RB-05..12）：纯函数与不需要真实注册表的文件级夹具。
+#[cfg(test)]
+mod p3b_tests {
+    use super::*;
+
+    struct Dir(PathBuf);
+
+    impl std::ops::Deref for Dir {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn dir(tag: &str) -> Dir {
+        let d = crate::engine::paths::lib_test_data_root().join(format!("p3b-{tag}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        Dir(d)
+    }
+
+    const HDR: &str = "Windows Registry Editor Version 5.00\r\n\r\n";
+
+    #[test]
+    fn 空段建键失败必须报错() {
+        let sec = RegSection {
+            hive: "HKEY_CURRENT_USER".into(),
+            subkey: "Trim\0Bad".into(),
+            delete_key: false,
+            writes: Vec::new(),
+        };
+        let err = reg_import_apply_sections(&[sec]).expect_err("NUL 子键建键必须失败");
+        assert!(err.reason.contains("打开/创建键失败"), "{err:?}");
+    }
+
+    #[test]
+    fn 不支持的根单独报不支持而不是受保护() {
+        let root = dir("hive");
+        let body = |hive: &str| {
+            format!("{HDR}[{hive}\\Software\\Acme]\r\n\"a\"=dword:1\r\n")
+        };
+        for (hive, name) in [
+            ("HKEY_CLASSES_ROOT", "hkcr.reg"),
+            ("HKEY_USERS", "hku.reg"),
+            ("HKEY_PERFORMANCE_DATA", "perf.reg"),
+        ] {
+            let p = root.join(name);
+            std::fs::write(&p, body(hive)).unwrap();
+            let err = reg_backup_restore_guards(&p, name, "cleanup", true).unwrap_err();
+            assert!(err.contains("不支持"), "{hive} 必须报不支持的根: {err}");
+            assert!(!err.contains("受保护"), "{hive} 不该被说成受保护容器: {err}");
+        }
+        // HKCC 在解析期按形状拒（闸把它包成「不是合法的 .reg」）
+        let p = root.join("hkcc.reg");
+        std::fs::write(&p, body("HKEY_CURRENT_CONFIG")).unwrap();
+        let err = reg_backup_restore_guards(&p, "hkcc.reg", "cleanup", true).unwrap_err();
+        assert!(err.contains("合法的 .reg"), "{err}");
+    }
+
+    #[test]
+    fn reg转义只认反斜杠与引号_hex按类型验长() {
+        let text = format!("{HDR}[HKEY_CURRENT_USER\\T]\r\n\"a\"=\"C:\\notepad\"\r\n");
+        let secs = parse_reg_text(&text).unwrap();
+        assert_eq!(
+            secs[0].writes[0],
+            RegWrite::Set {
+                name: "a".into(),
+                kind: RK_SZ,
+                data: utf16_with_nul("C:\\notepad"),
+            },
+            "\\n 必须按字面（反斜杠 + n），不是换行"
+        );
+        for bad in [r#""a"=hex(4):01"#, r#""a"=hex(b):01,00"#, r#""a"=hex(2):41,00"#] {
+            let body = format!("{HDR}[HKEY_CURRENT_USER\\T]\r\n{bad}\r\n");
+            assert!(parse_reg_text(&body).is_err(), "{bad} 必须按长度拒绝");
+        }
+        let good = format!(
+            "{HDR}[HKEY_CURRENT_USER\\T]\r\n\"e\"=hex(2):41,00,00,00\r\n\"q\"=hex(b):01,00,00,00,00,00,00,00\r\n"
+        );
+        assert!(parse_reg_text(&good).is_ok(), "合法长度不能被误伤");
+        let short_qword = format!("{HDR}[HKEY_CURRENT_USER\\T]\r\n\"q\"=qword:1\r\n");
+        assert!(parse_reg_text(&short_qword).is_err(), "qword 必须恰好 16 位");
+    }
+
+    #[test]
+    fn 读盘上限边界() {
+        assert!(within_reg_file_cap(MAX_REG_BACKUP_BYTES));
+        assert!(!within_reg_file_cap(MAX_REG_BACKUP_BYTES + 1));
+    }
+
+    #[test]
+    fn 解析错误只带行号不带原文() {
+        let body = format!("{HDR}[HKEY_CURRENT_USER\\T]\r\n\"secret\"=zzz\r\n");
+        let err = parse_reg_text(&body).unwrap_err();
+        assert!(err.contains("第") && err.contains("行"), "{err}");
+        assert!(!err.contains("secret"), "不得回显值名: {err}");
+        assert!(!err.contains("zzz"), "不得回显值内容: {err}");
+        let before_key = format!("{HDR}\"secret\"=dword:1\r\n");
+        let err = parse_reg_text(&before_key).unwrap_err();
+        assert!(err.contains("第") && !err.contains("secret"), "{err}");
+    }
+
+    #[test]
+    fn 管理员摘要只对hklm目标写入() {
+        for t in [r"HKLM\Software\X", r"HKEY_LOCAL_MACHINE\Software\X", "hklm\\Software"] {
+            assert!(needs_admin_seal(t), "{t} 是 HKLM 目标");
+        }
+        for t in [r"HKCU\Software\X", r"HKEY_CURRENT_USER\Software\X", r"HKCR\X", ""] {
+            assert!(!needs_admin_seal(t), "{t} 不是 HKLM 目标");
+        }
+        let root = dir("hkcu-seal");
+        let file = root.join(format!("hkcu-{}.reg", crate::engine::now_ms()));
+        std::fs::write(&file, format!("{HDR}[HKEY_CURRENT_USER\\Acme]\r\n\"X\"=dword:1\r\n")).unwrap();
+        write_reg_backup_seals("cleanup", &file, r"HKCU\Software\Acme");
+        assert!(
+            read_admin_seal("cleanup", &file).is_none(),
+            "HKCU 备份不得写管理员摘要"
+        );
+        let _ = drop_admin_seal_for(&file);
+    }
+
+    fn drop_admin_seal_for(file: &Path) -> bool {
+        let Some(vn) = admin_seal_value_name("cleanup", file) else { return false };
+        crate::engine::native::reg_restore_delete(
+            crate::engine::native::hive_hklm(),
+            ADMIN_SEAL_SUBKEY,
+            &vn,
+        )
+    }
+
+    #[test]
+    fn 可还原判据四态矩阵() {
+        // HKLM：边车必须 ok，管理员摘要必须 ok
+        assert!(backup_restorable("ok", true, "ok"));
+        assert!(!backup_restorable("ok", true, "missing"));
+        assert!(!backup_restorable("ok", true, "mismatch"));
+        assert!(!backup_restorable("ok", true, "unreadable"));
+        assert!(!backup_restorable("missing", true, "ok"));
+        assert!(!backup_restorable("mismatch", true, "ok"));
+        // HKCU：ok/missing 放行，其余拒；不看管理员摘要
+        assert!(backup_restorable("ok", false, "missing"));
+        assert!(backup_restorable("missing", false, "missing"));
+        assert!(!backup_restorable("mismatch", false, "ok"));
+        assert!(!backup_restorable("corrupt", false, "ok"));
+    }
+
+    #[test]
+    fn 管理员摘要状态四态() {
+        assert_eq!(admin_seal_verdict(None, None), "unreadable");
+        assert_eq!(admin_seal_verdict(None, Some("x")), "missing");
+        let upper = "A".repeat(64);
+        let lower = "a".repeat(64);
+        assert_eq!(admin_seal_verdict(Some(upper.as_str()), Some(lower.as_str())), "ok");
+        assert_eq!(
+            admin_seal_verdict(Some(upper.as_str()), Some("b".repeat(64).as_str())),
+            "mismatch"
+        );
+    }
+
+    /// RB-10 静态钉：写侧必须真的按目标根分流（纯函数对但调用点漏判也是漏洞）。
+    #[test]
+    fn 写侧按hklm目标分流() {
+        let src = include_str!("reg_backup.rs");
+        // 判据不能自引用：期望串在源码里用 concat! 拼，避免断言自己那行恒真。
+        let needle = concat!("if needs_admin_", "seal(target)");
+        assert!(
+            src.contains(needle),
+            "write_reg_backup_seals_with 必须在 HKLM 目标时才写管理员摘要"
+        );
+    }
+
+    /// RB-12 静态钉：本文件的测试夹具不得回到全局可写 `%TEMP%`。
+    #[test]
+    fn 测试夹具不用全局临时目录() {
+        let src = include_str!("reg_backup.rs");
+        let needle = concat!("std::env::temp_", "dir()");
+        assert!(!src.contains(needle), "测试夹具不得使用全局 %TEMP%");
     }
 }

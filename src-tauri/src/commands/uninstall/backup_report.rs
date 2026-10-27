@@ -4,7 +4,10 @@
 //! 还原点/整批还原是最后防线，默认不自动删旧（对齐红线依据 §9.2 的「危险能力默认关」）。
 
 use crate::engine::{guard, log};
-use crate::engine::reg_backup::reg_backup_seal_state;
+use crate::engine::reg_backup::{
+    backup_restorable, needs_admin_seal, reg_backup_admin_seal_state, reg_backup_seal_state,
+    reg_backup_seal_state_with_digest,
+};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use tauri::WebviewWindow;
@@ -202,7 +205,17 @@ pub(super) fn render_reg_backups(entries: Vec<(PathBuf, bool)>) -> Vec<Value> {
             continue;
         }
         let Ok(meta) = p.metadata() else { continue };
-        let (seal, seal_meta) = reg_backup_seal_state(&p);
+        // RB-11：一次哈希同时供边车与管理员摘要判定；列表给出「可还原」合成判据，
+        // 不再出现「封条相符但还原必被闸 ⑤ 拒」的界面承诺。
+        let digest = crate::engine::hash::sha256_file(&p).ok();
+        let (seal, seal_meta) = match digest.as_deref() {
+            Some(d) => reg_backup_seal_state_with_digest(&p, d),
+            None => reg_backup_seal_state(&p),
+        };
+        let admin_seal = reg_backup_admin_seal_state("uninstall", &p, digest.as_deref());
+        let target = seal_meta.get("target").and_then(Value::as_str).unwrap_or("");
+        // 封条里没有 target 的老备份无法判断根；维持旧行为（仍给入口，由还原闸兜底）。
+        let restorable = backup_restorable(seal, needs_admin_seal(target), admin_seal);
         // 文件名形如 `{毫秒}_{键末段}.reg`：时间戳直接取首段，取不到就以 mtime 为准
         let stamp = name.split('_').next().unwrap_or("").parse::<i64>().unwrap_or(0);
         items.push(json!({
@@ -215,9 +228,11 @@ pub(super) fn render_reg_backups(entries: Vec<(PathBuf, bool)>) -> Vec<Value> {
                 .unwrap_or(0),
             "sizeBytes": meta.len(),
             "seal": seal,
+            "adminSeal": admin_seal,
+            "restorable": restorable,
             // 老根那份必须标来源：它是升级前的唯一还原依据，不是当前版本偷偷写的
             "fromLegacy": from_legacy,
-            "target": seal_meta.get("target").and_then(Value::as_str).unwrap_or(""),
+            "target": target,
         }));
     }
     items.sort_by(|a, b| b["mtimeMs"].as_i64().cmp(&a["mtimeMs"].as_i64()));
@@ -471,10 +486,8 @@ pub(super) mod backup_visibility_tests {
     use std::time::{Duration, SystemTime};
 
     fn sandbox(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "trim-backup-vis-{tag}-{}",
-            std::process::id()
-        ));
+        // 与 reg_backup 的 RB-12 同口径：测试沙箱不放全局可写 %TEMP%。
+        let dir = crate::engine::paths::lib_test_data_root().join(format!("backup-vis-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -512,9 +525,41 @@ pub(super) mod backup_visibility_tests {
         assert_eq!(items[0]["file"], "1700000000002_Beta.reg", "mtime 倒序");
         assert_eq!(items[0]["fromLegacy"], json!(true), "老根那份必须标来源");
         assert_eq!(items[0]["seal"], "missing", "无封条的老备份仍要可见");
+        assert_eq!(items[0]["adminSeal"], "missing", "列表必须带管理员摘要状态");
+        assert_eq!(items[0]["restorable"], json!(true), "HKCU 老备份维持可还原");
         assert_eq!(items[1]["fromLegacy"], json!(false));
         assert_eq!(items[1]["seal"], "ok");
+        assert_eq!(items[1]["adminSeal"], "missing");
+        assert_eq!(items[1]["restorable"], json!(true), "HKCU 不要求管理员摘要");
         assert_eq!(items[1]["target"], "HKCU\\Software\\Alpha");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RB-11：HKLM 目标的边车封条相符、但管理员摘要缺失时，列表必须标「不可还原」——
+    /// 旧列表只算边车哈希，界面说「封条相符」而还原闸 ⑤ 必拒。
+    #[test]
+    fn 列表hkml缺管理员摘要时标不可还原() {
+        let root = sandbox("render-admin");
+        let p = root.join(format!(
+            "{}_{}.reg",
+            crate::engine::now_ms(),
+            std::process::id()
+        ));
+        std::fs::write(
+            &p,
+            "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\Software\\TrimListProbe]\r\n\"X\"=dword:1\r\n",
+        )
+        .unwrap();
+        write_reg_backup_seal(&p, r"HKLM\Software\TrimListProbe");
+        let items = render_reg_backups(vec![(p.clone(), false)]);
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0]["seal"], "ok");
+        assert_ne!(items[0]["adminSeal"], "ok", "本用例不写管理员摘要");
+        assert_eq!(
+            items[0]["restorable"],
+            json!(false),
+            "HKLM 缺管理员摘要必须标不可还原"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

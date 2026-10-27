@@ -2658,17 +2658,23 @@
        <div class="detail-file-list">${manifests.map((m, i) =>
         `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(m.file)}">${fmtBackupTime(m.mtimeMs)} · ${m.count} 个文件 · ${formatSize(m.totalSize)} ${legacyBadge(m)}</span><button class="fileclean-preview-btn" data-file-backup-view="${i}" type="button" data-tip="查看本批次条目并逐个还原">查看</button></div>`
       ).join('')}</div>`;
-    // 卸载域备份：每行标出封条核对结果。seal 不是 ok 的行**不给还原按钮**——
-    // 内容与封条不符的备份 import 回注册表，等于把可能被改写过的内容当可信还原
+    // 卸载域备份：每行标出封条核对结果。restorable 是后端合成判据
+    //（边车封条 + HKLM 管理员摘要 + 目标根），与还原闸口径一致——
+    // 只显示「封条相符」再让用户点进去被拒，是把界面承诺和闸分开两套。
     const SEAL_TEXT = { ok: '封条相符', missing: '无封条（旧备份）', mismatch: '封条不符', corrupt: '封条损坏', unreadable: '备份不可读' };
     const uninstSection = !uninst.length ? '' :
       `<div class="finder-group-header"><span>${backupHead(uninst, respU && respU.data, '卸载残留注册表备份')}</span></div>
        <div class="detail-file-list">${uninst.map((b, i) => {
-         const canRestore = b.seal === 'ok' || b.seal === 'missing';
-         // 封条状态已经在行内文本里出现过，这里不重复它，只说明「为什么没有还原入口」
+         const canRestore = typeof b.restorable === 'boolean'
+           ? b.restorable
+           : (b.seal === 'ok' || b.seal === 'missing');
+         // 封条状态已经在行内文本里出现过，这里只说明「为什么没有还原入口」。
+         const why = (b.seal !== 'ok' && b.seal !== 'missing')
+           ? `封条核对未通过（${b.seal}）`
+           : `管理员摘要${b.adminSeal === 'mismatch' ? '与备份不符' : b.adminSeal === 'unreadable' ? '不可读' : '缺失'}`;
          const restoreBtn = canRestore
            ? `<button class="fileclean-preview-btn" data-uninst-restore="${i}" type="button">还原</button>`
-           : `<span class="finder-name-text" style="opacity:.6" data-tip="封条核对未通过（${escapeHtml(b.seal)}），不提供还原入口">不可还原</span>`;
+           : `<span class="finder-name-text" style="opacity:.6" data-tip="${escapeHtml(why)}，不提供还原入口">不可还原</span>`;
          return `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(b.target || b.file)}">${fmtBackupTime(b.mtimeMs)} · ${escapeHtml(b.keyLeaf || b.file)} · ${formatSize(b.sizeBytes)} · ${escapeHtml(SEAL_TEXT[b.seal] || b.seal)} ${legacyBadge(b)}</span>${restoreBtn}</div>`;
        }).join('')}</div>`;
     // 还原包：zip 不在了就**不给还原按钮**（内容缺失时点下去只会逐条失败，不如这里说清）

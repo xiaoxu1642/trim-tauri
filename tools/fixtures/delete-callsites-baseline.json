@@ -24,7 +24,7 @@
     "src-tauri/src/commands/fileclean.rs": 16,
     "src-tauri/src/commands/gameclean.rs": 4,
     "src-tauri/src/commands/realtime.rs": 2,
-    "src-tauri/src/commands/uninstall/backup_report.rs": 4,
+    "src-tauri/src/commands/uninstall/backup_report.rs": 5,
     "src-tauri/src/commands/uninstall/drivers_orphan.rs": 3,
     "src-tauri/src/commands/uninstall/pending_delete.rs": 4,
     "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 10,
@@ -36,7 +36,7 @@
     "src-tauri/src/engine/native/startup.rs": 11,
     "src-tauri/src/engine/paths.rs": 11,
     "src-tauri/src/engine/protect.rs": 5,
-    "src-tauri/src/engine/reg_backup.rs": 12,
+    "src-tauri/src/engine/reg_backup.rs": 14,
     "src-tauri/src/engine/restore_pack.rs": 18,
     "src-tauri/src/engine/shellicon.rs": 3,
     "src-tauri/src/pwsh/mod.rs": 7,
@@ -88,8 +88,7 @@
     "src-tauri/src/commands/uninstall/residue.rs": 1,
     "src-tauri/src/engine/native/cleanup.rs": 2,
     "src-tauri/src/engine/native/registry.rs": 2,
-    "src-tauri/src/engine/pssteps.rs": 1,
-    "src-tauri/src/engine/reg_backup.rs": 4
+    "src-tauri/src/engine/reg_backup.rs": 5
   },
   "startup_delete": {
     "src-tauri/src/commands/startup.rs": 1,
