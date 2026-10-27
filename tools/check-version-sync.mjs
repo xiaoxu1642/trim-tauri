@@ -184,6 +184,35 @@ check(
     : `已移除：${GONE_MANIFESTS.join('、')}`,
 );
 
+// 9) D1-M07（P2-a，D-4 拍板升门禁 G-7）：conf `identifier` ⇄ `engine/paths.rs`
+//    `pub const IDENTIFIER` 字面对拍。
+//
+// 为什么必须是机检：Tauri 运行期 `$APPDATA`（assetProtocol scope）由 conf 的
+// identifier 推出，而应用数据根由 `paths.rs` 的 `appdata_dir().join(IDENTIFIER)` 拼
+// —— 两者一旦分叉，背景图/字体走新根、配置与备份走旧根，表现为「用户数据像被
+// 清空」，且升级链认的是老根。此前两处只靠 paths.rs 里一句注释承诺「与
+// tauri.conf.json identifier 一致」，全仓没有任何门禁读 conf 的 identifier 字段。
+{
+  let confId = '';
+  let confIdErr = '';
+  try {
+    confId = String(JSON.parse(read('src-tauri/tauri.conf.json')).identifier ?? '');
+  } catch (e) {
+    confIdErr = e.message;
+  }
+  const pathsSrc = read('src-tauri/src/engine/paths.rs');
+  const rsId = (pathsSrc.match(/pub\s+const\s+IDENTIFIER\s*:\s*&str\s*=\s*"([^"]*)"/) || [])[1] ?? '';
+  check(
+    !!confId && !!rsId && confId === rsId,
+    '9. conf identifier ⇄ engine/paths.rs IDENTIFIER 字面一致（D1-M07 双真源对拍）',
+    confIdErr ? `conf 读取失败：${confIdErr}`
+      : !confId ? 'conf 缺 identifier 字段'
+        : !rsId ? 'paths.rs 里没解析到 pub const IDENTIFIER 字面量（声明形态变了？）'
+          : confId === rsId ? `双方均为 ${confId}`
+            : `分叉：conf=${confId} / IDENTIFIER=${rsId} ⇒ 用户数据面与升级链分裂`,
+  );
+}
+
 console.log('');
 if (fail > 0) {
   console.error('门禁失败：有断言未通过');

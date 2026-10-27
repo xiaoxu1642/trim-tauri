@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_comment": "退役优化项清单（v2.6.0 P0-3）。优化项从目录移除时在此登记。v2-M14 接线（2026-09-29）：本清单由 commands/optimizer/catalog.rs（RETIRED_JSON，include_str! 编译内嵌）读取——还原通道认得这里的 id，启动概览把本机仍留有注册表备份的项列成「待还原」交用户点；不做启动静默写回（无人确认的 HKLM 写入与本应用安全模型冲突）。note 供日志与更新说明使用。注意：仅注册表类步骤（reg）会进 optimizer-backups 因而有还原出口；cmd（fsutil 等）与 service 类步骤只记在 optimization-state，不在还原范围内。",
+  "_comment": "退役优化项清单（v2.6.0 P0-3）。优化项从目录移除时在此登记。v2-M14 接线（2026-09-29）：本清单由 src-tauri/src/commands/optimizer/catalog.rs（RETIRED_JSON，include_str! 编译内嵌）读取——还原通道认得这里的 id，启动概览把本机仍留有注册表备份的项列成「待还原」交用户点；不做启动静默写回（无人确认的 HKLM 写入与本应用安全模型冲突）。note 供日志与更新说明使用。注意：仅注册表类步骤（reg）会进 optimizer-backups 因而有还原出口；cmd（fsutil 等）与 service 类步骤只记在 optimization-state，不在还原范围内。",
   "items": [
     {
       "id": "tf_pccleaner",
@@ -65,7 +65,7 @@
     {
       "id": "tasks_stubborn_strategy",
       "title": "顽固软件策略专杀",
-      "note": "N1（2026-09-14 重复点审查）：与「内存清理 - 顽固软件治理」针对同一批目标（MuMu / 网易 UU 远程 / 微软电脑管家 / WPS），现合并为内存清理页同一张卡片的两层（立即结束进程 / 阻止开机自启）。脚本已迁至 src/scripts-powershell/memory-scripts.js 的 STUBBORN_BLOCK_SCRIPT，IPC 为 memory:stubborn-block。该项为 pwsh 步骤、不含注册表写入，通常无备份记录需要还原。"
+      "note": "N1（2026-09-14 重复点审查）：与「内存清理 - 顽固软件治理」针对同一批目标（MuMu / 网易 UU 远程 / 微软电脑管家 / WPS），现合并为内存清理页同一张卡片的两层（立即结束进程 / 阻止开机自启）。脚本已迁至 vendor/upstream-js/src/scripts-powershell/memory-scripts.js 的 STUBBORN_BLOCK_SCRIPT，IPC 为 memory:stubborn-block。该项为 pwsh 步骤、不含注册表写入，通常无备份记录需要还原。"
     },
     {
       "id": "mmcss_optimize",

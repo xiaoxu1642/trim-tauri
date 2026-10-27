@@ -1,5 +1,5 @@
 {
-  "_comment": "优化项 provenance 侧表（M4 · 借 Winaero 的可识别诉求：UI 上给高危项一个可解释的标记，而不是只靠 risk 字段暗示）。**为什么不写进 optimizer-runtime.json**：那份与 vendor/upstream-js/optimizer-scripts.js 的 OPTIONS 是双源逐字段对拍（check-data-parity P2），往里加字段必判红。姿势同 optimizer-scope.json / optimizer-security.json：按 id 挂、include_str! 编译内嵌、缺键按「无 provenance」处理。  sourceClass 语义：builtin=按 Windows 公开机制推导 / measured=本机实测 / vendor=厂商公开文档。 覆盖基线（tools/check-optimizer-write-contract.mjs 的 A5 组钉住，只增不减）：全部 risk=high 项 + 每分组至少一项。",
+  "_comment": "优化项 provenance 侧表（M4 · 借 Winaero 的可识别诉求：UI 上给高危项一个可解释的标记，而不是只靠 risk 字段暗示）。**为什么不写进 optimizer-runtime.json**：那份与 vendor/upstream-js/src/scripts-powershell/optimizer-scripts.js 的 OPTIONS 是双源逐字段对拍（check-data-parity P2），往里加字段必判红。姿势同 optimizer-scope.json / optimizer-security.json：按 id 挂、include_str! 编译内嵌、缺键按「无 provenance」处理。  sourceClass 语义：builtin=按 Windows 公开机制推导 / measured=本机实测 / vendor=厂商公开文档。 覆盖基线（tools/check-optimizer-write-contract.mjs 的 A5 组钉住，只增不减）：全部 risk=high 项 + 每分组至少一项。",
   "schemaVer": 1,
   "items": {
     "disable_uac": {

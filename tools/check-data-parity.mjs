@@ -392,7 +392,7 @@ const NO_COMMENT_REGISTRY = [
   // 运行期生成文件（%APPDATA%，不落仓）：_comment 提及它们是讲数据来源，不是仓内坐标
   const RUNTIME_GENERATED = new Set(['optimizer-backups.json', 'optimizer-runtime.json.sig.json']);
   const dataDir = join(REPO_ROOT, 'src-tauri', 'data');
-  const extRe = /\b([\w-]+(?:\.[\w-]+)*\.(?:rs|mjs|json|js|ps1))\b/g;
+  const extRe = /(?<![\w/:-])((?:[\w-]+\/)*[\w-]+(?:\.[\w-]+)*\.(?:rs|mjs|json|js|ps1))\b/g;
   const dead = [];
   let checkedNames = 0;
   // 扫描面 = `src-tauri/data/*.json` + 无对拍登记表里那些**不在 data/ 的件**。
@@ -432,6 +432,15 @@ const NO_COMMENT_REGISTRY = [
     if (!texts.length) continue;
     for (const text of texts) {
       for (const m of text.matchAll(extRe)) {
+        // D1-M09：带 `/` 的点名按「仓根 + 字面路径」解析 —— basename 索引只防
+        // 「文件被改名/删掉」，防不了「路径写错到另一棵目录树」（实例：retired 里
+        // 写 src/scripts-powershell/memory-scripts.js，真身在 vendor/ 下，basename
+        // 命中 ⇒ 恒绿）。只有裸文件名形态才退回 basename 对拍。
+        if (m[1].includes('/')) {
+          checkedNames++;
+          if (!existsSync(join(REPO_ROOT, m[1]))) dead.push(`${f}: ${m[1]}（带前缀路径从仓根解析失败）`);
+          continue;
+        }
         const base = pathMod.basename(m[1]);
         if (RUNTIME_GENERATED.has(base)) continue;
         checkedNames++;
