@@ -88,12 +88,24 @@ const SRC_ROOTS = [
 ];
 const EXCLUDE_DIRS = new Set(['target', 'node_modules', '.git', 'build-release', 'docs']);
 
+// X0-5-1（D-3 拍板）：按「构建输入 ⇄ 构建产物」分类。构建后**回写**的文件在发版
+// 流程内被工具自己重算（`--write`），mtime 必然晚于产物 —— 它们不是「参与构建的
+// 输入」，参与 mtime 对拍只会制造「每次成功发版后必假红」。新回写件出现时必须
+// 登记进本表；未登记的回写件仍会假红（刻意：宁可红一次提醒登记，不可静默放过）。
+const POST_BUILD_OUTPUTS = new Set([
+  'tools/fixtures/artifact-size-baseline.json', // 发版流程 check-artifact-size --write 回写
+]);
+
 const srcFiles = [];
 for (const r of SRC_ROOTS) {
   const p = join(ROOT, r);
   if (existsSync(p) && statSync(p).isFile()) srcFiles.push(p);
   else srcFiles.push(...walkFiles(p, null, { ignoreDir: (n) => EXCLUDE_DIRS.has(n) }));
 }
+// 分类过滤：构建后回写件不参与 mtime 对拍（--list 与正式判定两处共用同一份清单）。
+const buildInputs = srcFiles.filter(
+  (p) => !POST_BUILD_OUTPUTS.has(relative(ROOT, p).split(sep).join('/')),
+);
 
 console.log('=== 产物新鲜度门禁（源码 mtime vs build-release 产物 mtime）===\n');
 
@@ -138,7 +150,7 @@ if (LIST_ONLY) {
     console.log(`  ${t === null ? '（缺失）' : new Date(t).toISOString().slice(0, 19).replace('T', ' ')}  ${a.name}`);
   }
   let newest = -1, newestF = '';
-  for (const f of srcFiles) {
+  for (const f of buildInputs) {
     const t = mtime(f) || 0;
     if (t > newest) { newest = t; newestF = f; }
   }
@@ -160,7 +172,7 @@ for (const a of missing) fail(`产物缺失：${a.name}（${a.why}）—— 资�
 // ── 2. 产物 vs 源文件：最旧产物必须比最新源文件新 ──
 let newestSrc = -1;
 let newestSrcRel = '';
-for (const f of srcFiles) {
+for (const f of buildInputs) {
   const t = mtime(f);
   if (t !== null && t > newestSrc) { newestSrc = t; newestSrcRel = relative(ROOT, f).split(sep).join('/'); }
 }
