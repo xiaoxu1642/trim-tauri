@@ -2134,7 +2134,7 @@ mod reg_import_tests {
         // hex 串由目标字符串生成，不手抄字节 —— 手抄时我漏掉过一个 `%`，
         // 结果测试把"内容不对"报成"实现不对"，白查一轮。
         // RB-07 真机探针订正（2026-10-28）：reg.exe export 的 UTF-16 串以**一个 u16 NUL**
-        // 结尾（一对零字节），MULTI_SZ 再多一个 u16 NUL。旧夹具只补了单个 0 字节，
+        // 结尾（一对零字节），MULTI_SZ 再多一个 u16 NUL。旧夹具只补了单个零字节，
         // 长度成奇数；修好长度校验后这条探针先红，红的是夹具不是实现。
         let hex_of = |s: &str, multi: bool| -> String {
             let mut bytes: Vec<u8> = s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
