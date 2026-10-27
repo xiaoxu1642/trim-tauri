@@ -1000,6 +1000,18 @@ pub(super) fn snapshot_has(snap: &[Value], kind: &str, target: &str) -> bool {
     })
 }
 
+/// 取快照里**那一条**条目（口径与 `snapshot_has` 完全一致：`kind` 全等 + `target` 大小写不敏感）。
+///
+/// B2-5：执行链需要读条目里的 `details.raw` / `details.decodedTarget`（扫描那一刻的原值串
+/// 与解析目标），而「哪条算命中」必须与 `snapshot_has` 同一份判据 —— 否则会出现
+/// 「快照闸说有、取条目却取到别的/取不到」，两处口径又一次分叉。
+pub(super) fn snapshot_finding<'a>(snap: &'a [Value], kind: &str, target: &str) -> Option<&'a Value> {
+    snap.iter().find(|f| {
+        f["kind"].as_str() == Some(kind)
+            && f["target"].as_str().map(|s| s.eq_ignore_ascii_case(target)).unwrap_or(false)
+    })
+}
+
 /// 执行目标去重（纯函数，可测）。返回 `(去重后的目标, 被合并掉的条数)`。
 ///
 /// R2a-L05：快照闸按 `(kind,target)` **存在性**判，重复项每条都过得到 ⇒ 同一目标被提交
@@ -1149,7 +1161,12 @@ pub(super) enum OpVerdict {
 /// 方案 §5·D3 原文还有个 `mode="plan"`（干跑不落变更）。这里刻意**不做**成参数：
 /// 现在没有任何调用方会传 plan，加了就是死分支；"判定与变更分离"这个目的已经由本函数达成，
 /// UI 真需要预览时再显式加 mode，届时这条函数就是它的实现。
-pub(super) fn classify_residue_op(kind: &str, target: &str) -> OpVerdict {
+///
+/// B2-5：判据本身仍然全在这个函数里，但 `reg_value` 的「启动项」窄口子需要**扫描那一刻**
+/// 的原值串与解析目标（都在执行快照条目里），所以入口带一个 `snap_finding` 参数。
+/// 传 `None` = 没有快照（单测 / 无快照调用方）：那条窄口子会 fail-closed —— 这是刻意的，
+/// 拿不到原串就无法证明值没被改过，凭「形状合格」放行正是这次要堵的口子。
+pub(super) fn classify_residue_op_in(kind: &str, target: &str, snap_finding: Option<&Value>) -> OpVerdict {
     let skip = |m: &str| OpVerdict::Skip(m.to_string());
     match kind {
         "reg_key" => {
@@ -1212,15 +1229,32 @@ pub(super) fn classify_residue_op(kind: &str, target: &str) -> OpVerdict {
                     return skip(&format!("已拒绝删除：{reason}"));
                 }
                 super::run_keys::RegValueGate::Allowed => {
-                    // 第 5 条「失败不扩大范围」的落点：删除**当下**再读一次值，
-                    // 只有「值仍是字符串类型 且 取出的目标仍不在本机」才允许删。
-                    if let Err(reason) = unsafe { super::run_keys::recheck_run_value(key_part, value_name) } {
+                    // B2-5：复检不再复用解析器。两条腿都只读、都不需要判断形态：
+                    // ① 原始值串与**扫描那一刻**逐字相同（原串只存在于执行快照里）；
+                    // ② 拿扫描时算好的目标当场看一眼磁盘（照既有结论复核，不重新解析）。
+                    let snap_raw = snap_finding.and_then(super::run_keys::snapshot_run_raw);
+                    let snap_target = snap_finding.and_then(super::run_keys::snapshot_run_target);
+                    let (Some(snap_raw), Some(snap_target)) = (snap_raw, snap_target) else {
+                        // 快照里没有原串/目标 ⇒ 无法证明这条值与扫描时是同一条：fail-closed。
+                        // 能走到这里说明候选不是扫描面产出的（或快照格式变了），不许凭「形状合格」删。
+                        log::write_log("warn", &format!("启动项快照缺原值串或解析目标，跳过 {target}"));
+                        return skip("启动项快照缺原值串或解析目标，无法复核，未删除");
+                    };
+                    if let Err(reason) = unsafe {
+                        super::run_keys::recheck_run_value(key_part, value_name, snap_raw)
+                    } {
                         log::write_log("warn", &format!("启动项现读复检未通过，跳过 {target}: {reason}"));
                         return skip(&format!("启动项现读复检未通过：{reason}"));
                     }
+                    // 目标「又回来了」（用户重装回同一路径）⇒ 这条已不是残留。
+                    // 用的是**扫描时**解析出的目标，因此解析器再出缺陷也只会影响扫描可见性。
+                    if unsafe { super::run_keys::run_target_present(snap_target) } {
+                        log::write_log("warn", &format!("启动项目标此刻已存在，跳过 {target}: {snap_target}"));
+                        return skip(&format!("目标此刻已存在 —— 这条启动项已不是残留：{snap_target}"));
+                    }
                     // 放行必须留痕：这是本仓第二处「A1 让路」，事后要能在日志里数出来
                     // （第一处是服务键窄口子，见上面 reg_key 分支的同类登记）。
-                    log::write_log("warn", &format!("R-2 启动项删值窄口子放行（形状合格 + 现读复检通过）: {target}"));
+                    log::write_log("warn", &format!("R-2 启动项删值窄口子放行（形状合格 + 原串未变 + 目标仍失踪）: {target}"));
                 }
             }
             OpVerdict::Ready(ResidueOp::RegValue {
@@ -1373,7 +1407,10 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
         // 不再出现任何保护判断 —— 「谁查了哪几道闸」从"通读三段"变成"看一个函数的行序"。
         let mut ops: Vec<ResidueOp> = Vec::new();
         for (kind, target) in &wanted {
-            match classify_residue_op(kind, target) {
+            // B2-5：把同一 `(kind,target)` 的快照条目一起交给判据 —— 启动项窄口子要读
+            // **扫描那一刻**的原值串与解析目标；「哪条算命中」与快照闸共用 `snapshot_finding`。
+            let finding = snapshot_finding(&snap, kind, target);
+            match classify_residue_op_in(kind, target, finding) {
                 OpVerdict::Ready(op) => ops.push(op),
                 OpVerdict::Skip(msg) => details.push(detail(kind, target, "skip", &msg)),
                 OpVerdict::Abort(msg) => return Err(msg),

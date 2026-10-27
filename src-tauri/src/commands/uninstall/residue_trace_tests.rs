@@ -680,10 +680,45 @@ use super::residue_update::*;
         );
     }
 
+    /// B2-5：启动项删值窄口子拿不到「扫描那一刻」的原值串时必须 fail-closed。
+    ///
+    /// 为什么这条比「形状合格就删」重要：`reg_value_gate` 只谈形状（父键是不是六条 Run 根、
+    /// 值名是不是单层具名），它证明不了「这条值在扫描之后没被改过」。旧实现靠**重新解析**
+    /// 现值来判断，于是解析器切成 `C:\Program` 这种残片时「目标仍失踪」恒成立 ⇒ 放行删除
+    /// 一条活着的自启动（R2b-M06）。现在原串只能从快照里取，取不到就不许删。
+    ///
+    /// 判红自证：把 `Allowed` 分支改成「取不到原串也往下走」⇒ 第一条断言当场红。
+    #[test]
+    fn b2_5_启动项窄口子缺快照原串时必须拒() {
+        let t = r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run::Acme";
+        // 正向对照：形状本身必须合格，否则下面两条「拒」可能只是因为形状被拒（假绿）
+        assert!(
+            matches!(super::run_keys::reg_value_gate(t), super::run_keys::RegValueGate::Allowed),
+            "正对照失败：{t} 的形状必须在本判据的窄口子内"
+        );
+        // ① 完全没有快照条目
+        assert!(
+            matches!(
+                classify_residue_op_in("reg_value", t, None),
+                OpVerdict::Skip(ref m) if m.contains("原值串")
+            ),
+            "没有快照条目时必须按「缺原值串」跳过，不得凭形状合格放行"
+        );
+        // ② 有条目但缺 details.raw / details.decodedTarget
+        let bare = json!({ "kind": "reg_value", "target": t });
+        assert!(
+            matches!(
+                classify_residue_op_in("reg_value", t, Some(&bare)),
+                OpVerdict::Skip(ref m) if m.contains("原值串")
+            ),
+            "快照条目缺细节字段时同样必须跳过"
+        );
+    }
+
     #[test]
     fn classify_residue_op_gates_run_before_any_mutation() {
         let skip_msg = |kind: &str, target: &str| -> Option<String> {
-            match classify_residue_op(kind, target) {
+            match classify_residue_op_in(kind, target, None) {
                 OpVerdict::Skip(m) => Some(m),
                 OpVerdict::Ready(_) => panic!("{kind} 不该通过判定: {target}"),
                 OpVerdict::Abort(m) => panic!("{kind} 不该整批拒绝: {m}"),
@@ -698,7 +733,7 @@ use super::residue_update::*;
         // ② 受保护路径：整批拒绝，不降级成单项跳过。用 %WINDIR% 而不是应用数据目录——
         // 后者只在 `configure_from_app()` 跑过之后才进 subtree 清单，单测环境里没有那一步
         let win = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".to_string());
-        match classify_residue_op("folder", &win) {
+        match classify_residue_op_in("folder", &win, None) {
             OpVerdict::Abort(m) => assert!(m.contains("受保护"), "实测: {m}"),
             _ => panic!("系统根目录必须触发整批拒绝"),
         }
@@ -724,7 +759,7 @@ use super::residue_update::*;
         let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
         let sys32 = format!("{}\\Windows\\System32", drive.trim_end_matches('\\'));
         assert!(
-            matches!(classify_residue_op("folder", &sys32), OpVerdict::Skip(_)),
+            matches!(classify_residue_op_in("folder", &sys32, None), OpVerdict::Skip(_)),
             "系统目录必须被拒（v4-K02）: {sys32}"
         );
         // v5-K02 批次 1（R2a-K01）：同一目录的非规范写法在执行侧同样必须 Skip。
@@ -738,7 +773,7 @@ use super::residue_update::*;
             r"\Windows\System32".to_string(),
         ] {
             assert!(
-                matches!(classify_residue_op("folder", &form), OpVerdict::Skip(_)),
+                matches!(classify_residue_op_in("folder", &form, None), OpVerdict::Skip(_)),
                 "非规范系统目录形态必须被拒: {form}"
             );
         }
@@ -747,7 +782,7 @@ use super::residue_update::*;
         let pf = format!("{}\\Program Files\\Common Files", drive.trim_end_matches('\\'));
         if Path::new(&pf).is_dir() {
             assert!(
-                matches!(classify_residue_op("folder", &pf), OpVerdict::Ready(_)),
+                matches!(classify_residue_op_in("folder", &pf, None), OpVerdict::Ready(_)),
                 "合法安装位置被误拦: {pf}"
             );
         } else {
@@ -797,14 +832,14 @@ use super::residue_update::*;
 
         // ① 活链仍拒（目标在 → 不属于「断链」对象）
         assert!(
-            matches!(classify_residue_op("folder", &link_s), OpVerdict::Skip(_)),
+            matches!(classify_residue_op_in("folder", &link_s, None), OpVerdict::Skip(_)),
             "活链必须仍拒: {link_s}"
         );
 
         // ② 断链放行（分类层 Ready；删除时 trim_finder::scan::delete 走回收站原语）
         std::fs::remove_dir_all(&target).unwrap();
         assert!(
-            matches!(classify_residue_op("folder", &link_s), OpVerdict::Ready(_)),
+            matches!(classify_residue_op_in("folder", &link_s, None), OpVerdict::Ready(_)),
             "断链 junction 必须放行（J12）: {link_s}"
         );
 
@@ -815,7 +850,7 @@ use super::residue_update::*;
         std::fs::create_dir_all(&inner).unwrap();
         let inner_s = inner.to_string_lossy().to_string();
         assert!(
-            matches!(classify_residue_op("folder", &inner_s), OpVerdict::Skip(_)),
+            matches!(classify_residue_op_in("folder", &inner_s, None), OpVerdict::Skip(_)),
             "上级是链接的目标必须仍拒: {inner_s}"
         );
 

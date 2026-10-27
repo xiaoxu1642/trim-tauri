@@ -86,12 +86,12 @@ pub(super) enum RunTarget {
 ///
 /// 认识的形态（都是真机上实际出现过的）：
 /// - 带引号：`"C:\Program Files\App\app.exe" --flag` ⇒ 取引号内
-/// - 未带引号但含扩展名：`C:\A B\app.exe --flag` ⇒ 切到第一个 exe 类扩展名之后
+/// - 未带引号但含扩展名：`C:\A B\app.exe --flag` ⇒ 切到可执行扩展名之后
 /// - 纯命令：`cmd /c start ...` / `rundll32.exe x.dll,Entry` ⇒ 取第一个空白分隔的 token
 /// - 环境变量：`%LOCALAPPDATA%\App\app.exe` ⇒ 先展开再判
 ///
-/// **不猜**：引号未闭合、变量展不开都返回 [`RunTarget::Unparseable`]，宁可漏报这条，
-/// 也不把仍在用的程序判成残留。
+/// **不猜**：引号未闭合、变量展不开、无引号且路径带空格导致切分有歧义，一律返回
+/// [`RunTarget::Unparseable`]，宁可漏报这条，也不把仍在用的程序判成残留。
 pub(super) fn extract_run_target(raw: Option<&str>) -> RunTarget {
     let Some(raw) = raw else { return RunTarget::NoTarget };
     let s = raw.trim();
@@ -105,7 +105,11 @@ pub(super) fn extract_run_target(raw: Option<&str>) -> RunTarget {
             None => return RunTarget::Unparseable,
         }
     } else {
-        unquoted_head(s)
+        match unquoted_head(s) {
+            Ok(h) => h,
+            // 无引号 + 路径带空格 + 后面既不像参数也不像可执行扩展名收尾 ⇒ 切分是猜的
+            Err(()) => return RunTarget::Unparseable,
+        }
     };
     if head.is_empty() {
         return RunTarget::NoTarget;
@@ -130,23 +134,68 @@ pub(super) fn extract_run_target(raw: Option<&str>) -> RunTarget {
     RunTarget::Target(expanded)
 }
 
-/// 未加引号时的目标截取。
+/// 可执行扩展名（`.com` 也算 —— ARP 时代的 `command.com` 还在一些机器上）。
+const EXE_EXTS: [&str; 6] = [".exe", ".com", ".bat", ".cmd", ".scr", ".pif"];
+
+/// token 是否以可执行扩展名收尾（大小写不敏感）。
+fn has_exe_ext(tok: &str) -> bool {
+    let low = tok.to_ascii_lowercase();
+    EXE_EXTS.iter().any(|e| low.ends_with(e))
+}
+
+/// **无引号值**的可执行段切分（`Err(())` = 形态有歧义，调用方按「不猜」处理）。
 ///
-/// R2b-M05：只在**最后一段路径**（末个 `\` 或 `/` 之后）里认扩展名。旧实现取全文首个
-/// 扩展名命中，`C:\Program Files\netscape.com\mozilla.exe` 会被切成 `…\netscape.com`
-/// （目录）⇒ `is_file()` 判 false ⇒ 把仍在用的启动项判成残留。目录名里的 `.com`/`.bat`
-/// 不是可执行目标。找不到可执行扩展名时退回第一个空白分隔的 token（纯命令形态）。
-fn unquoted_head(s: &str) -> &str {
-    const EXE_EXTS: [&str; 6] = [".exe", ".com", ".bat", ".cmd", ".scr", ".pif"];
-    let seg_start = s.rfind(['\\', '/']).map(|i| i + 1).unwrap_or(0);
-    let seg = &s[seg_start..];
-    let token = seg.split_whitespace().next().unwrap_or("");
-    let token_low = token.to_ascii_lowercase();
-    // 文件名 token 的扩展名必须在末尾（`.com` 出现在目录段或 token 中间都不算目标）
-    if EXE_EXTS.iter().any(|ext| token_low.ends_with(ext)) {
-        return s[..seg_start + token.len()].trim();
+/// R2b-M06 的病根不在「扩展名没认出来」，而在**分界找错了**：旧实现用
+/// `rfind(['\\','/'])` 在**整串**里找末个分隔符，于是参数里的正斜杠开关
+/// （`/startup`、`/run`、`/cfg=C:/cfg.ini`）被当成路径分隔符，可执行段被切到开关后面，
+/// 再退化成「第一个空白前的 token」—— 实测得到 `C:\Program` / `D:\Tools\My` / `C:\A`
+/// 这种**存在性必然为假**的残片 ⇒ 在用启动项被判「目标已失踪」⇒ 勾上就删掉一条活着的自启动。
+///
+/// 现在的口径：**只在第一个非引号空白处切分可执行段与参数**，并且只承认两种能把分界
+/// 往后推的证据：
+/// 1. 某一段以可执行扩展名收尾（`…\app.exe`）—— 空格在**路径里**的情形只有这一种证据；
+/// 2. 首个空白之后确实像参数（以 `-` 或 `/` 开头）。
+/// 两条都不成立时返回 `Err(())`：那是「带空格路径被切了一半」，猜哪边都可能删错。
+fn unquoted_head(s: &str) -> Result<&str, ()> {
+    // 按 ASCII 空白切 token（路径里的多字节字符字节值 ≥ 0x80，不会被误当空白）
+    let b = s.as_bytes();
+    let mut spans: Vec<(usize, &str)> = Vec::new();
+    let mut i = 0usize;
+    while i < s.len() {
+        while i < s.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let st = i;
+        while i < s.len() && !b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if st < i {
+            spans.push((st, &s[st..i]));
+        }
     }
-    s.split_whitespace().next().unwrap_or("").trim()
+    let Some(&(_, first)) = spans.first() else { return Err(()) };
+    // 首段自己就带可执行扩展名（`unins000.exe /SILENT`、`rundll32.exe x.dll`）⇒ 就是它
+    if has_exe_ext(first) {
+        return Ok(first);
+    }
+    // 首段像路径 ⇒ 空格可能落在路径里，往后找第一个「以可执行扩展名收尾」的段
+    if first.contains('\\') || first.contains('/') {
+        for &(st, tok) in &spans[1..] {
+            if has_exe_ext(tok) {
+                return Ok(s[..st + tok.len()].trim_end());
+            }
+        }
+        if spans.len() == 1 {
+            return Ok(first);
+        }
+        let rest = s[spans[1].0..].trim_start();
+        if rest.starts_with('-') || rest.starts_with('/') {
+            return Ok(first);
+        }
+        return Err(());
+    }
+    // 首段是裸命令名（无分隔符）：参数怎么排都不影响目标
+    Ok(first)
 }
 
 /// 目标是否"在本机可用"。
@@ -358,14 +407,46 @@ pub(super) fn reg_value_gate(target: &str) -> RegValueGate {
     RegValueGate::Allowed
 }
 
+/// 从执行快照条目里取**扫描那一刻读到的原始值串**（`details.raw`）。
+///
+/// 快照是唯一还留着「当时那条值长什么样」的地方；取不到就必须 fail-closed ——
+/// 没有原串就无法证明这条值在扫描之后没被改过。
+pub(super) fn snapshot_run_raw(finding: &Value) -> Option<&str> {
+    finding.get("details")?.get("raw")?.as_str()
+}
+
+/// 从执行快照条目里取**扫描时刻解析出的目标**（`details.decodedTarget`）。
+///
+/// 空串/缺失一律当「扫描时就没解析出目标」——那类条目在扫描面是 readonly，不该走到删除。
+pub(super) fn snapshot_run_target(finding: &Value) -> Option<&str> {
+    finding
+        .get("details")?
+        .get("decodedTarget")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+}
+
 /// 删除**当下**的现读复检（R-2 第 5 条：失败不扩大删除范围）。
 ///
 /// 为什么必须再读一次：扫描与执行之间用户可能把那个程序装回去了，于是这条启动项从
 /// 「残留」变回「在用配置」。只按值名删就会删掉一条活着的自启动 —— 而报告还会写
-/// 「已删除」。判据全部 fail-closed：读不到值、类型不是字符串、目标改为存在，一律拒绝。
+/// 「已删除」。判据全部 fail-closed：读不到值、类型不是字符串、原串变了，一律拒绝。
+///
+/// B2-5：复检**不再复用解析器**。旧写法把「现在这条值」重新解析一遍再查磁盘，于是解析器的
+/// 任何缺陷都会在删除当下原样复现 —— 切成 `C:\Program` 这种残片时 `is_file()` 恒假 ⇒
+/// 「目标仍失踪」成立 ⇒ 放行删除一条活着的自启动（R2b-M06 的现场）。现在只做两件不需要
+/// 判断的事：值还在且仍是字符串类型；**原始值串与扫描那一刻逐字相同**。
+///
+/// 「目标是否又回来了」由调用方拿**扫描时算好的**目标查磁盘（`run_target_present`）——
+/// 那是「照既有结论复核磁盘」，不是重新解析。解析只发生在扫描时刻，缺陷最多让扫描少报/
+/// 多报一条**可见**候选，不会在删除当下变成放行依据。
 ///
 /// 返回 `Err(理由)` = 不允许删除（调用方按跳过处理，不降级成删除）。
-pub(super) unsafe fn recheck_run_value(key_part: &str, value_name: &str) -> Result<(), String> {
+pub(super) unsafe fn recheck_run_value(
+    key_part: &str,
+    value_name: &str,
+    raw_at_scan: &str,
+) -> Result<(), String> {
     use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RegCloseKey};
     let canon = crate::engine::protect::canonical_reg_key(key_part)
         .ok_or_else(|| "父键无法归一化".to_string())?;
@@ -388,11 +469,12 @@ pub(super) unsafe fn recheck_run_value(key_part: &str, value_name: &str) -> Resu
         let Some(data) = super::helpers::reg_sz(hk, value_name) else {
             return Err("值数据此刻读不到".to_string());
         };
-        match extract_run_target(Some(&data)) {
-            RunTarget::Target(t) if !run_target_present(&t) => Ok(()),
-            RunTarget::Target(t) => Err(format!("目标 {t} 此刻已存在 —— 这条启动项已不是残留")),
-            other => Err(format!("值形态解析不出目标（{other:?}），不猜")),
+        // 逐字比对：**不解析、不查磁盘**。差一个字节就说明这条值在扫描之后被改过，
+        // 扫描时的「目标失踪」结论不再能代表现在这一条。
+        if data != raw_at_scan {
+            return Err("值数据在扫描之后被改动过（原串与现串不一致），不按扫描结论删除".to_string());
         }
+        Ok(())
     })();
     let _ = RegCloseKey(hk);
     verdict
@@ -454,6 +536,82 @@ mod tests {
             extract_run_target(Some(r"C:\Program Files\App\app.exe --flag")),
             RunTarget::Target(r"C:\Program Files\App\app.exe".to_string())
         );
+    }
+
+    /// B2-5（R2b-M06）：参数里的正斜杠开关**不是**路径分隔符。
+    ///
+    /// 三组现场样本取自审查探针 P1b/P1c/P1d —— 修复前分别被切成 `C:\Program` /
+    /// `D:\Tools\My` / `C:\A`（全是「存在性必然为假」的残片 ⇒ 在用启动项被判「目标已失踪」）。
+    /// 后三组是反向对照：收紧不能把功能弄坏（Inno 原厂串是卸载键里最常见的形态）。
+    #[test]
+    fn unquoted_args_with_forward_slash_do_not_truncate_target() {
+        for (input, want) in [
+            (r"C:\Program Files\App\app.exe /startup", r"C:\Program Files\App\app.exe"),
+            (r"D:\Tools\My App\run.exe /run", r"D:\Tools\My App\run.exe"),
+            (r"C:\A B\x.exe /cfg=C:/cfg.ini", r"C:\A B\x.exe"),
+            (r"C:\Apps\Foo\unins000.exe /SILENT", r"C:\Apps\Foo\unins000.exe"),
+            (r"C:\Program Files\App\app.exe --flag", r"C:\Program Files\App\app.exe"),
+            (r"C:\Tools\util", r"C:\Tools\util"),
+            // 多段路径 + 扩展名收尾，参数里再出现分隔符也不影响
+            (r"D:\Games\acme.bat\launcher.exe /run C:\x", r"D:\Games\acme.bat\launcher.exe"),
+        ] {
+            assert_eq!(
+                extract_run_target(Some(input)),
+                RunTarget::Target(want.to_string()),
+                "input={input}"
+            );
+        }
+    }
+
+    /// B2-5：切分有歧义时**不猜** —— 带空格路径既没有可执行扩展名收尾、后面又不像参数时，
+    /// 猜哪边都可能把活着的程序判成残留（这正是 R2b-M06 的伤害方向）。
+    /// 四条对照各钉一面：否则「一律 Unparseable」也能让前两条过。
+    #[test]
+    fn ambiguous_unquoted_path_is_not_guessed() {
+        assert_eq!(
+            extract_run_target(Some(r"C:\A B\app /x")),
+            RunTarget::Unparseable,
+            "首段 C:\\A 之后是 B\\app —— 不像参数，空格属于路径还是分界无法判断"
+        );
+        assert_eq!(extract_run_target(Some(r"C:\Program Files\App\util")), RunTarget::Unparseable);
+        // 对照一：以可执行扩展名收尾 ⇒ 分界确凿，照常取全路径
+        assert_eq!(
+            extract_run_target(Some(r"C:\A B\app.exe /x")),
+            RunTarget::Target(r"C:\A B\app.exe".to_string())
+        );
+        // 对照二：首段是裸命令名 ⇒ 参数怎么排都不影响目标
+        assert_eq!(extract_run_target(Some(r"cmd /c start /min foo")), RunTarget::Target("cmd.exe".to_string()));
+        // 对照三：单段路径（无空白）⇒ 整串就是目标
+        assert_eq!(extract_run_target(Some(r"C:\Tools\util")), RunTarget::Target(r"C:\Tools\util".to_string()));
+        // 对照四：空白后以 `-`/`/` 开头 ⇒ 那是参数，首段就是目标
+        assert_eq!(
+            extract_run_target(Some(r"C:\Tools\util /x")),
+            RunTarget::Target(r"C:\Tools\util".to_string())
+        );
+    }
+
+    /// B2-5：删前复检**不许再解析**（解耦的机检面）。
+    ///
+    /// 判红自证：把 `extract_run_target` 调回 `recheck_run_value` 体内 ⇒ 第一条断言当场红；
+    /// 把逐字比对改成 `!= ""` 这类宽松形状 ⇒ 第二条红。
+    #[test]
+    fn recheck_does_not_reuse_the_parser() {
+        let src = include_str!("run_keys.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or("");
+        let start = prod
+            .find("pub(super) unsafe fn recheck_run_value")
+            .expect("找不到复检函数");
+        let rest = &prod[start..];
+        // 复检之后必须已经没有别的 pub(super) fn 了（它是生产面的最后一条）
+        let end = rest[1..].find("\npub(super)").map(|i| i + 1).unwrap_or(rest.len());
+        let body = &rest[..end];
+        assert!(
+            !body.contains("extract_run_target("),
+            "删值复检不得复用解析器 —— 旧耦合让解析缺陷在删除当下原样复现（R2b-M06）"
+        );
+        assert!(!body.contains("run_target_present("), "复检只读注册表；查磁盘交给调用方用扫描结论");
+        assert!(body.contains("raw_at_scan"), "复检必须拿扫描那一刻的原值串做比对");
+        assert!(body.contains("data != raw_at_scan"), "原串比对必须是逐字相等");
     }
 
     /// 环境变量要先展开；展开不了按「解析不出」处理（不猜）。
