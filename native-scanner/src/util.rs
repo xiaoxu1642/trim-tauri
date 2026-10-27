@@ -604,8 +604,11 @@ mod tests {
         // 关键是**没有拒绝**，且含字面 `~~26100` 的段原样保留。
         assert!(got.ends_with("a.txt"), "展开结果必须仍指向该文件：{got}");
         assert!(got.contains("trim-expand-~~26100-"), "字面波浪号段不得被丢弃：{got}");
-        // 反向对照：不存在的 `~1` 段无法证伪 ⇒ None（fail-closed 仍然保留）
-        let ghost = dir.join("no~1dir").join("x.txt").to_string_lossy().to_string();
+        // 反向对照：不存在的 `~1` 段无法证伪 ⇒ None（fail-closed 仍然保留）。
+        // 段名必须是**真 8dot3 形状**（`~数字` 贴主干末尾，如 `GHOST~1`）才会进展开
+        // 分支——`no~1dir` 这类 ~ 在段中间的名字命中「无短名形状 ⇒ 字面采信」，
+        // 该用例首版因此在本机红（测试构造缺陷，非实现缺陷，2026-10-28 修正）。
+        let ghost = dir.join("GHOST~1").join("x.txt").to_string_lossy().to_string();
         assert!(expand_short_path(&ghost).is_none(), "展不开的 ~数字 段必须拒绝");
         let _ = std::fs::remove_dir_all(&dir);
     }
