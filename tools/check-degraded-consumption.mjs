@@ -97,4 +97,40 @@ const ctrlOk = badState.length === 1 && STATES.every((s) => !badState.includes(s
 if (!ctrlOk) g.fail('正向对照失败：status 白名单判定本身失真（非法值必须恰好 1 个）');
 else g.ok('正向对照通过：status 白名单只认 consumed/pending/exempt，其它值必被拦');
 
+// ---------- B3-4（2026-10-27）：时序前提 ——「还没读到配置」不得与「配置就绪」同形 ----------
+// 病根：`pathConfigState` 初值是 'ok'，于是 load 未完成时也自称就绪；补扫定时器窗口内点
+// 「重新扫描」会拿空 pathConfig 逐键 paths.save，把真源重建成扫描所见 —— 与本门禁主判据
+// 盯的 A1-M12 是同一处真源，只是入口换成了「时序」而不是「状态位丢失」。
+// 判据：初值必须是 'loading'；扫描/写回入口必须以 `!== 'ok'` 前置（只拒 degraded 会让
+// loading / unavailable 穿过去）。
+{
+  const initState = (text) => {
+    const m = /let\s+pathConfigState\s*=\s*'([a-z]+)'/.exec(text);
+    return m ? m[1] : null;
+  };
+  // 正向对照：判定器必须能把两种初值区分开（否则下面两条绿是空绿）
+  if (initState("let pathConfigState = 'ok';") !== 'ok'
+    || initState("let pathConfigState = 'loading';") !== 'loading') {
+    g.fail('B3-4 正向对照失败：pathConfigState 初值判定器失真');
+  }
+  const pb = join(ROOT, 'src', 'scripts', 'pathbinding.js');
+  if (!existsSync(pb)) {
+    g.fail('B3-4：src/scripts/pathbinding.js 不存在（判定对象缺失）');
+  } else {
+    const pbsrc = readFileSync(pb, 'utf8');
+    const init = initState(pbsrc);
+    if (init === null) g.fail('B3-4：找不到 pathConfigState 声明（判据锚点失效）');
+    else if (init !== 'loading') {
+      g.fail(`B3-4：pathConfigState 初值是 '${init}'，应为 'loading' —— 未落地时自称就绪，扫描会拿空配置覆盖真源`);
+    } else {
+      g.ok("B3-4：pathConfigState 初值为 'loading'（load 未完成不再冒充就绪）");
+    }
+    if (/if\s*\(\s*pathConfigState\s*!==\s*'ok'\s*\)/.test(pbsrc)) {
+      g.ok("B3-4：扫描入口以 `!== 'ok'` 前置（loading / unavailable / degraded 一并拒）");
+    } else {
+      g.fail("B3-4：扫描入口缺少 `pathConfigState !== 'ok'` 前置 —— 只拒 degraded 会让 loading/unavailable 穿过");
+    }
+  }
+}
+
 g.finish('check-degraded-consumption: 全部通过（pending ' + (emitters.size - consumed) + ' 条待 B1/B3 清零）');

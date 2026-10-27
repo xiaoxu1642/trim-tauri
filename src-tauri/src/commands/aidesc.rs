@@ -498,6 +498,19 @@ fn mask_secret_in(text: &str, secret: &str) -> String {
     }
 }
 
+/// 响应体进日志的**唯一出口**（B3-1）：先整串掩码，**再**截预览长度。
+///
+/// 顺序为什么不能反：`resp.body.chars().take(N)` 先截再掩时，密钥若跨第 N 个字符，
+/// 掩码器看到的只是**半截密钥** ⇒ 匹配不上 ⇒ 半截密钥原样落进本地日志。200 字符的
+/// 预览窗对「错误体 echo 请求头」的调试型端点完全不够用，那个头就压在边界附近。
+///
+/// 也不能只在调用点各写一次 `mask_secret_in(...)` 再 `.take()`：全仓已经这样写错过两次
+/// （两个服务商分支各一处），说明这不是笔误而是**默认顺序**会写反。收成一个函数后，
+/// 「掩码在前」成了唯一写法，新增服务商分支照抄就是对的。
+fn body_preview(body: &str, secret: &str, cap: usize) -> String {
+    mask_secret_in(body, secret).chars().take(cap).collect()
+}
+
 // ==================== AI 调用链 ====================
 
 /// `callOpenAICompat`：OpenAI 兼容 chat/completions（秘塔 / 知乎直答 / 自定义模型共用）
@@ -546,7 +559,7 @@ fn call_openai_compat(
             &format!(
                 "[{key}] 模型返回 {}: {}",
                 resp.status,
-                mask_secret_in(&resp.body.chars().take(200).collect::<String>(), api_key)
+                body_preview(&resp.body, api_key, 200)
             ),
         );
         return None;
@@ -646,7 +659,7 @@ fn call_baidu_web_summary(
             &format!(
                 "百度千帆高性能版返回 {}: {}",
                 resp.status,
-                mask_secret_in(&resp.body.chars().take(200).collect::<String>(), key)
+                body_preview(&resp.body, key, 200)
             ),
         );
         return None;
@@ -1054,6 +1067,70 @@ mod tests {
         let k = ai_cache_key("解压到当前文件夹", "WinRAR", "global:metaso:fast_thinking");
         assert_eq!(k.len(), 32);
         assert!(k.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ==================== B3-1：掩码必须先于截断 ====================
+
+    /// 密钥**跨预览边界**时，落盘的预览里不许出现半截密钥。
+    ///
+    /// 构造：190 字符填充 + 26 字符密钥 + 尾巴 ⇒ 边界（第 200 位）正落在密钥中间。
+    /// 旧写法 `.chars().take(200)` 先截再掩 ⇒ 掩码器看到的是 10 字符的半截密钥、匹配不上
+    /// ⇒ 那半截密钥原样进日志。现在 `body_preview` 先整串掩再截，掩码完整。
+    ///
+    /// 判红自证：把 `body_preview` 改回「先 take 再 mask_secret_in」⇒ 本用例两条断言都红。
+    #[test]
+    fn 密钥跨预览边界时预览里不得出现半截密钥() {
+        let key = "sk-ABCDEFGHIJKLMNOPQRSTUVWX";
+        let body = format!("{}{key}tail", "x".repeat(190));
+        let pv = body_preview(&body, key, 200);
+        assert!(
+            pv.chars().count() <= 200,
+            "预览长度必须仍受 200 上限约束（先把整串掩了不等于放弃长度闸）: {}",
+            pv.chars().count()
+        );
+        assert!(
+            !pv.contains("sk-ABCDEFG"),
+            "预览里出现了密钥前缀 —— 掩码发生在截断之后: {pv}"
+        );
+        assert!(pv.contains(crate::security::SECRET_MASK), "密钥必须被替换成掩码: {pv}");
+        // 正向对照：边界之外的普通内容照常保留（别为了掩码把预览清空）
+        assert!(pv.starts_with("xxxx"), "填充内容应照常在预览里: {pv}");
+    }
+
+    /// 空密钥不改变文本（未配置密钥时错误体照原样给诊断价值）。
+    #[test]
+    fn 空密钥时预览只做截断() {
+        let body = "y".repeat(300);
+        let pv = body_preview(&body, "", 200);
+        assert_eq!(pv.chars().count(), 200);
+        assert!(pv.chars().all(|c| c == 'y'));
+    }
+
+    /// B3-1（禁形态）：生产段不许再出现「先截后掩」—— 同一行里既 `mask_secret_in(` 又
+    /// `.take(` 的，只允许是 `body_preview` 内部那句（掩码在前、截断在后）。
+    ///
+    /// 判红自证：把任一处调用点写回 `mask_secret_in(&body.chars().take(200)…)` ⇒ 本用例红。
+    #[test]
+    fn 生产段不许出现先截后掩() {
+        let src = include_str!("aidesc.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap_or("");
+        for line in prod.lines() {
+            // 注释里可能同时出现两个词（说明文字），禁的是**代码**形态
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            if line.contains("mask_secret_in(") && line.contains(".take(") {
+                assert!(
+                    line.contains("mask_secret_in(body, secret).chars().take("),
+                    "先截后掩的形态禁止出现（掩码必须先于截断）：{line}"
+                );
+            }
+        }
+        assert_eq!(
+            prod.matches("body_preview(").count(),
+            3,
+            "一个定义 + 两个服务商错误体分支；新增分支也必须走这个出口"
+        );
     }
 
     // ==================== 审查 v2-M7：跳转链不得在凭据发出后才发现违规 ====================

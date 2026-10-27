@@ -92,7 +92,13 @@
   // 真源被一次静默重建顶掉，所以这条状态位是永久删除链上的断点，不是展示层装饰。
   // 用户显式点「手动重建路径配置」即把它转回 ok：损坏文件在后端读取时就已 quarantine，
   // 此后写的是全新配置，不再需要额外第二个状态位表达「人工已确认」。
-  let pathConfigState = 'ok';
+  // B3-4：初值必须是 'loading' 而不是 'ok'。旧初值让「load 还没跑完」与「配置已就绪」
+  // 同形 —— load 的补扫定时器窗口内（现算见 load() 里那两处 setTimeout）点「重新扫描」，
+  // 于是每个扫到的键都被当「尚未绑定」逐键 paths.save，把真源重建成扫描所见。写回通道
+  // 一旦跑在读到配置之前，degraded 那套保护（A1-M12）也一并失效，因为它也依赖同一状态位。
+  // 'unavailable' 是 load 抛错/失败的终态：此时 pathConfig 不可信，扫描与写回都必须拒，
+  // 但用户仍可打开弹窗手工填写（读无害、写有害）。
+  let pathConfigState = 'loading';
   let icons = {};        // groupId -> dataUrl
   let isInitialized = false;
   let modal = null;      // { ctrl, backdrop, body, hint }
@@ -176,6 +182,7 @@
         pathConfigState = 'ok';
         renderBody();
         updateFooter();
+        syncScanBtn();
       });
       return;
     }
@@ -278,22 +285,45 @@
     // P0-1：degraded 下一个 paths.save 都不许发出去 —— 扫描会把损坏配置静默重建成
     // 「扫到的就是真的」，而该真源随后被清理扫描原样采纳并永久删除（paths.rs R1a-M01）。
     // 弹窗「重新扫描」按钮也走本入口，所以拒绝要给可见回执，不能静默返回 0。
-    if (pathConfigState === 'degraded') {
-      window.app?.toast('warning', '路径配置已损坏，请先手动重建配置后再扫描');
+    if (pathConfigState !== 'ok') {
+      // B3-4：不只是 degraded —— 'loading'（load 未完成）与 'unavailable'（load 失败）同样
+      // 不许发 paths:scan：扫描结果会逐键 paths.save，等于用「扫到的就是真的」覆盖真源。
+      const why = pathConfigState === 'degraded'
+        ? '路径配置已损坏，请先手动重建配置后再扫描'
+        : pathConfigState === 'loading'
+          ? '路径配置还在加载，请稍候再扫描'
+          : '路径配置读取失败，本次不扫描（避免用空配置覆盖真源）';
+      window.app?.toast('warning', why);
       return 0;
     }
     try {
       window.pathbindingAppearance.log('info', '开始自动扫描安装路径');
       const resp = await window.api.paths.scan();
       if (resp && resp.success && resp.data) {
-        let found = 0;
+        // B3-4：写回**先列清单、再逐条看回执**。旧写法不看 paths:save 的返回就
+        // `found++`，后端拒掉（相对路径/受保护目录/损坏态）的键照样算进「已自动绑定 N 项」
+        // —— 用户以为绑好了，实际一条都没落地，而下一轮扫描又会重复同样的动作。
+        const pending = [];
         for (const item of ALL_KEYS) {
           const scanned = resp.data[item] || '';
-          if (scanned && !pathConfig[item]) {
+          if (scanned && !pathConfig[item]) pending.push([item, scanned]);
+        }
+        let found = 0;
+        const rejected = [];
+        for (const [item, scanned] of pending) {
+          const saved = await window.api.paths.save(item, scanned);
+          if (saved && saved.success) {
             pathConfig[item] = scanned;
-            await window.api.paths.save(item, scanned);
             found++;
+          } else {
+            rejected.push(item);
           }
+        }
+        if (rejected.length) {
+          window.pathbindingAppearance.log(
+            'warn',
+            `自动绑定有 ${rejected.length} 个键被后端拒绝（未计入绑定数）：${rejected.join(', ')}`
+          );
         }
         if (resp.data.scannedAt) {
           // P3 顺手修（2026-10-09）：不再回写 scannedAt —— 后端 paths_scan 已把本次
@@ -306,7 +336,9 @@
         renderBody();
         updateFooter();
         if (!silent) {
-          if (found > 0) window.app?.toast('success', `安装路径扫描完成，已自动绑定 ${found} 项`);
+          const tail = rejected.length ? `；${rejected.length} 项被拒绝未绑定` : '';
+          if (found > 0) window.app?.toast('success', `安装路径扫描完成，已自动绑定 ${found} 项${tail}`);
+          else if (rejected.length) window.app?.toast('warning', `安装路径扫描完成，但 ${rejected.length} 项被拒绝写入${tail}`);
           else window.app?.toast('info', '安装路径扫描完成，部分路径未识别，请手动填写');
         }
         return found;
@@ -339,10 +371,37 @@
       modal.hint.textContent = '路径配置损坏，请逐项手动填写后保存';
       return;
     }
+    // B3-4：loading / unavailable 也不许写「可点击重新扫描」—— 那两个态下扫描按钮是禁用的
+    if (pathConfigState !== 'ok') {
+      modal.hint.textContent = pathConfigState === 'loading'
+        ? '路径配置加载中，扫描暂不可用'
+        : '路径配置读取失败，可直接手动填写并保存';
+      return;
+    }
     modal.hint.textContent = at ? `上次扫描：${at}` : '尚未扫描，可点击「重新扫描」自动识别';
   }
 
   // ==================== 弹窗开关 ====================
+
+  // B3-4：扫描按钮的可用性**只由** pathConfigState 决定，与 autoScan 入口共用同一判据。
+  // 分开写两份的下场是「按钮能点、入口又拒」或者反过来 —— 用户看到能点却什么都没发生，
+  // 正是这条 P0 的形态。
+  function syncScanBtn() {
+    const btn = modal?.backdrop.querySelector('[data-role="scanBtn"]');
+    if (!btn) return;
+    const ready = pathConfigState === 'ok';
+    btn.disabled = !ready;
+    if (ready) {
+      btn.removeAttribute('data-tip');
+    } else {
+      btn.setAttribute('data-tip', pathConfigState === 'degraded'
+        ? '路径配置已损坏，请先手动重建后再扫描'
+        : pathConfigState === 'loading'
+          ? '路径配置还在加载，稍候再试'
+          : '路径配置读取失败，本次不能扫描（避免覆盖真源）');
+    }
+  }
+
   // v3.2.0 弹窗统一批次：骨架改由 modal.js 工厂生成（Esc/遮罩/× 关闭 + 焦点陷阱统一）
   function openModal() {
     closeModal();
@@ -372,8 +431,9 @@
       const btn = e.currentTarget;
       btn.disabled = true;
       btn.textContent = '扫描中…';
-      try { await autoScan(false); } finally { btn.disabled = false; btn.textContent = '重新扫描'; }
+      try { await autoScan(false); } finally { btn.textContent = '重新扫描'; syncScanBtn(); }
     });
+    syncScanBtn();
 
     // 先渲染已保存配置，再后台补齐图标，避免等待图标造成白屏
     renderBody();
@@ -399,10 +459,19 @@
         window.pathbindingAppearance.log('warn', '路径配置已损坏并被隔离，已禁用自动扫描与自动写回');
         return;
       }
-      if (resp && resp.success && resp.data) pathConfig = resp.data || {};
+      if (resp && resp.success && resp.data) {
+        pathConfig = resp.data || {};
+        pathConfigState = 'ok';
+      } else {
+        // 拿不到配置（后端返回失败/无 data）：不许冒充「已就绪」，否则扫描会拿空配置写回
+        pathConfigState = 'unavailable';
+        window.pathbindingAppearance.log('warn', '路径配置读取未成功，已禁用自动扫描与自动写回');
+      }
     } catch (e) {
+      pathConfigState = 'unavailable';
       console.error('加载路径配置失败:', e);
     }
+    syncScanBtn();
 
     // 首次启动自动扫描（仅在后台静默补全，不弹窗打扰）。
     // 判据只用后端回传的 `scannedAt`：`paths:scan` 每次都唯一产生时间戳并落盘，所以

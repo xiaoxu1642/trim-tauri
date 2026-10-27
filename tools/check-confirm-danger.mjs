@@ -75,9 +75,46 @@ function nativeFallbackViolations(text) {
   return [...text.matchAll(RE_NATIVE_FALLBACK)].map((m) => m[0]);
 }
 
+// B3-2 / B3-3：确认件必须**在 try 内** await。确认框自己抛错时，若 await 在 try 之外，
+// 异常就落进 async handler 变成无人接的 rejection —— 界面零提示、按钮停在中间态
+// （cleanup.js 的「正在登记...」、startup.js 的批量启停），用户只看到「点了没反应」。
+// 判据面刻意只收 `window.app` 前缀：`window.modal.confirm({...})` 是另一层契约（对象参数、
+// 组件缺席即 fail-closed），它的 await 位置由那段代码自己的 try 管，不并入本判据。
+const RE_AWAIT_APP_CONFIRM = /\bawait\s+window\s*\.\s*app\s*\??\.\s*confirm(?:Danger|Warning)?\s*\(/g;
+/**
+ * 返回「不在 try 内」的命中下标。判定＝命中之前最近的 `try {` 与命中之间没有 catch 闭合，
+ * 且命中之后能找到同一个 try 的 `} catch`。源码级近似（不做括号配对），对本仓写法足够；
+ * 要精确必须上 AST —— 那会把这条门禁变成解析器工程，收益不成比例。
+ */
+function confirmOutsideTry(text) {
+  const out = [];
+  for (const m of text.matchAll(RE_AWAIT_APP_CONFIRM)) {
+    const pre = text.slice(0, m.index);
+    const t = pre.lastIndexOf('try {');
+    let inside = false;
+    if (t >= 0) {
+      const between = text.slice(t, m.index);
+      const after = text.slice(m.index);
+      inside = !/\}\s*catch\b/.test(between) && /\}\s*catch\b/.test(after);
+    }
+    if (!inside) out.push(m.index);
+  }
+  return out;
+}
+// 逐文件基线（只减不增）：B3-2/B3-3 范围内的 cleanup.js / startup.js 已归零；余下是**已登记的
+// 债**（本批范围外），每降一处就把数字改小或删键。新文件进场即红 —— 别往表里塞条目凑绿。
+const CONFIRM_TRY_BASELINE = {
+  'cleanup.js': 7,
+  'maintenance.js': 1,
+  'netcheck.js': 2,
+  'optimizer.js': 8,
+};
+
 const bad = [];
 const hardcoded = [];
 const nativeFallback = [];
+const outsideTry = [];
+const grow = [];
 for (const f of files) {
   const text = stripBlockComments(readFileSync(join(dir, f), 'utf8'));
   for (const re of [RE_BARE, RE_APP]) {
@@ -104,6 +141,17 @@ for (const f of files) {
     if (text.slice(lineStart, h.index).includes('//')) continue;
     hardcoded.push(`${f}:${text.slice(0, h.index).split('\n').length}`);
   }
+  // B3-2/B3-3：确认件 await 的 try 归属（逐文件计数，与基线比）
+  {
+    const hits = confirmOutsideTry(text);
+    if (hits.length > (CONFIRM_TRY_BASELINE[f] ?? 0)) {
+      for (const idx of hits.slice(0, 3)) {
+        outsideTry.push(`${f}:${text.slice(0, idx).split(String.fromCharCode(10)).length}`);
+      }
+      grow.push(`${f} ${CONFIRM_TRY_BASELINE[f] ?? 0}→${hits.length}`);
+    }
+  }
+
   // P0-5：原生框兜底（行注释跳过，同前）
   RE_NATIVE_FALLBACK.lastIndex = 0;
   let nf;
@@ -137,7 +185,18 @@ for (const f of files) {
     console.error(`✗ 正向对照失败：原生兜底样本命中 ${nb}（应 1）/ 合规样本命中 ${ng}（应 0）`);
     process.exit(1);
   }
-  console.log('✓ 正向对照自检通过（凭据字面量判定器可判红、合规样本放行；原生兜底判定器可判红、合规样本放行）');
+  // B3-2/B3-3：确认件 try 归属判定器 —— 无 try 的必须命中、包在 try 里的必须放行
+  const TRY_CONTROLS = {
+    bad: "const ok = await window.app.confirm('x', 'y');\nif (!ok) return;",
+    good: "try {\n  const ok = await window.app.confirm('x', 'y');\n  if (!ok) return;\n} catch (e) {\n  return;\n}",
+  };
+  const tb = confirmOutsideTry(TRY_CONTROLS.bad).length;
+  const tg = confirmOutsideTry(TRY_CONTROLS.good).length;
+  if (tb !== 1 || tg !== 0) {
+    console.error(`✗ 正向对照失败：确认件 try 归属样本命中 ${tb}（应 1）/ 合规样本命中 ${tg}（应 0）`);
+    process.exit(1);
+  }
+  console.log('✓ 正向对照自检通过（凭据字面量判定器可判红、合规样本放行；原生兜底判定器可判红、合规样本放行；确认件 try 归属判定器可判红、合规样本放行）');
 }
 
 console.log('=== app 确认入口门禁（调用形态 + 原生兜底）===\n');
@@ -163,9 +222,20 @@ if (nativeFallback.length) {
   console.log('✓ 渲染层无原生确认框兜底（window.confirm / window.alert / window.prompt 零命中）');
 }
 
+if (grow.length) {
+  for (const g of grow) {
+    console.error(`✗ ${g} — 确认件 await 不在 try 内（会变成无人接的 rejection：界面零提示、按钮卡在中间态）`);
+  }
+  for (const o of outsideTry) {
+    console.error(`✗ src/scripts/${o} — 确认件必须在 try 内 await（B3-2/B3-3 回归形态）`);
+  }
+} else {
+  console.log('✓ 确认件 await 的 try 归属不高于基线（B3-2/B3-3 范围内 cleanup.js / startup.js 均为 0）');
+}
+
 console.log('');
-if (bad.length > 0 || hardcoded.length > 0 || nativeFallback.length > 0) {
-  console.error('门禁失败：确认入口调用形态/凭据/原生兜底回归（见上）');
+if (bad.length > 0 || hardcoded.length > 0 || nativeFallback.length > 0 || grow.length > 0) {
+  console.error('门禁失败：确认入口调用形态/凭据/原生兜底/try 归属回归（见上）');
   process.exit(1);
 }
 console.log('确认入口门禁通过');

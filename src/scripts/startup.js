@@ -684,16 +684,53 @@
     return { rejected: false, partial: false, data, results: (data && data.results) || [] };
   }
 
+  // B3-3：click 处理器里调 async 动作的**唯一推荐写法** —— 返回一个同步包装函数，
+  // 把 Promise 上的异常转成可见提示。
+  //
+  // 为什么必须有它：六个入口（批量启用/禁用/删除、列表行内删除/切换、列表内批量三连）
+  // 原来都是裸调用 `doToggle(...)` / `doDelete(...)`，返回的 Promise 没人接 —— 确认件或
+  // 后续链一旦抛错就是**无人接的 rejection**：控制台一条、界面零提示，用户只看到
+  // 「点了没反应」。逐个补 `.catch` 要写六遍且迟早漏一处，收成一个包装器后「忘了 catch」
+  // 在源码里一眼可见。
+  function safeAction(fn, what) {
+    return function (ev) {
+      try {
+        const r = fn(ev);
+        if (r && typeof r.catch === 'function') {
+          r.catch(e => window.app?.toast?.('error', `${what}失败：${(e && e.message) || e}`));
+        }
+      } catch (e) {
+        window.app?.toast?.('error', `${what}失败：${(e && e.message) || e}`);
+      }
+    };
+  }
+
   async function doToggle(selItems, enable) {
     if (!selItems.length) return;
     const act = enable ? '启用' : '禁用';
-    const ok = await window.app.confirm(
-      `${act}启动项`,
-      `将${act}以下 ${selItems.length} 个启动项。\n\n${enable ? '（启用后该项将随系统启动运行）' : '（禁用后可随时重新启用，操作可逆）'}`,
-      act,
-      '取消',
-      { consequences: selItems.map(i => ({ name: i.name, text: i.command || i.location || '' })) }
-    );
+    // B3-3：确认件移入 try。旧写法在 try 之外 await —— 确认框自己抛错时变成
+    // **无人接的 rejection**：界面既没有提示，用户也会以为「点了没反应」。
+    // 用 `window.app.confirm(` 而不是 `window.app?.confirm(`：后者在 app 缺席时得到
+    // undefined（静默当取消），且把方法取出来再调会丢 this。
+    let ok = false;
+    try {
+      if (typeof window.app?.confirm !== 'function') {
+        window.app?.toast?.('warning', '当前环境不支持确认框，本次操作已取消');
+        return;
+      }
+      ok = await window.app.confirm(
+        `${act}启动项`,
+        `将${act}以下 ${selItems.length} 个启动项。
+
+${enable ? '（启用后该项将随系统启动运行）' : '（禁用后可随时重新启用，操作可逆）'}`,
+        act,
+        '取消',
+        { consequences: selItems.map(i => ({ name: i.name, text: i.command || i.location || '' })) }
+      );
+    } catch (e) {
+      window.app?.toast?.('error', `${act}启动项：确认框异常，本次操作已取消（${(e && e.message) || e}）`);
+      return;
+    }
     if (!ok) return;
     try {
       const resp = await window.api.startup.toggle(selItems, enable);
@@ -758,14 +795,25 @@
   async function doDelete(selItems) {
     if (!selItems.length) return;
     // 删除类操作：规范要求红色二次确认
-    const ok = await window.app.confirmDanger(
-      '删除启动项',
-      `将删除以下 ${selItems.length} 个启动项（删除前会自动备份）。`,
-      '仍然删除',
-      '取消',
-      '此操作不可逆，删除后需重新配置才能恢复。',
-      selItems.map(i => ({ name: i.name, text: i.command || i.location || '' }))
-    );
+    // B3-3：同 doToggle —— 确认件必须在 try 内，抛错要有可见提示而不是静默
+    let ok = false;
+    try {
+      if (typeof window.app?.confirmDanger !== 'function') {
+        window.app?.toast?.('warning', '当前环境不支持危险操作确认，本次删除已取消');
+        return;
+      }
+      ok = await window.app.confirmDanger(
+        '删除启动项',
+        `将删除以下 ${selItems.length} 个启动项（删除前会自动备份）。`,
+        '仍然删除',
+        '取消',
+        '此操作不可逆，删除后需重新配置才能恢复。',
+        selItems.map(i => ({ name: i.name, text: i.command || i.location || '' }))
+      );
+    } catch (e) {
+      window.app?.toast?.('error', `删除启动项：确认框异常，本次删除已取消（${(e && e.message) || e}）`);
+      return;
+    }
     if (!ok) return;
     try {
       const resp = await window.api.startup.remove(selItems);
@@ -930,9 +978,9 @@
       updateBatchButtons();
     });
     // 顶部批量按钮
-    el('btnStartupDisable')?.addEventListener('click', () => doToggle(getSelected(), false));
-    el('btnStartupEnable')?.addEventListener('click', () => doToggle(getSelected(), true));
-    el('btnStartupDelete')?.addEventListener('click', () => doDelete(getSelected()));
+    el('btnStartupDisable')?.addEventListener('click', safeAction(() => doToggle(getSelected(), false), '禁用启动项'));
+    el('btnStartupEnable')?.addEventListener('click', safeAction(() => doToggle(getSelected(), true), '启用启动项'));
+    el('btnStartupDelete')?.addEventListener('click', safeAction(() => doDelete(getSelected()), '删除启动项'));
     // 列表内事件委托（筛选变更后列表会重新渲染）
     el('startupList')?.addEventListener('click', (e) => {
       const secBtn = e.target.closest('.btn-opt-sec');
@@ -948,21 +996,21 @@
       const delBtn = e.target.closest('.btn-opt-del');
       if (delBtn) {
         const item = items.find(i => i.id === delBtn.dataset.id);
-        if (item) doDelete([item]);
+        if (item) safeAction(() => doDelete([item]), '删除启动项')();
         return;
       }
       const togBtn = e.target.closest('.btn-opt-toggle');
       if (togBtn) {
         const item = items.find(i => i.id === togBtn.dataset.id);
-        if (item) doToggle([item], togBtn.dataset.act === 'enable');
+        if (item) safeAction(() => doToggle([item], togBtn.dataset.act === 'enable'), '切换启动项')();
         return;
       }
       const bulkBtn = e.target.closest('#btnStartupDisableBulk, #btnStartupEnableBulk, #btnStartupDeleteBulk');
       if (bulkBtn) {
         const sel = getSelected();
-        if (bulkBtn.id === 'btnStartupDisableBulk') doToggle(sel, false);
-        else if (bulkBtn.id === 'btnStartupEnableBulk') doToggle(sel, true);
-        else if (bulkBtn.id === 'btnStartupDeleteBulk') doDelete(sel);
+        if (bulkBtn.id === 'btnStartupDisableBulk') safeAction(() => doToggle(sel, false), '禁用启动项')();
+        else if (bulkBtn.id === 'btnStartupEnableBulk') safeAction(() => doToggle(sel, true), '启用启动项')();
+        else if (bulkBtn.id === 'btnStartupDeleteBulk') safeAction(() => doDelete(sel), '删除启动项')();
         return;
       }
       // 点击条目主体（非按钮/复选框区域）→ 弹出详细简介（含本地简介 + 联网 AI 简介）

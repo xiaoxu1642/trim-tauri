@@ -2408,23 +2408,33 @@
         window.app?.toast('warning', '没有可登记的文件：本批没有逐文件失败明细（目录、已删除与受保护项不支持重启后删）');
         return;
       }
-      // K12：PFRO 是**永久删**出口，登记前必须独立高危险确认（旧流程点了就登记，
-      // 用户不知道是永久删）。文案三要素：重启后删除 / 不进回收站 / 重启前可撤回。
-      const ok = await window.app?.confirmDanger(
-        '登记重启后删除',
-        `将把 ${paths.length} 个删除失败的文件登记为「下次重启时删除」。\n这是永久删除：不进回收站、无法还原；重启前可在本页「重启后删除」入口查看并撤回。`,
-        '仍然登记',
-        '取消',
-        '删除动作由系统在重启的会话管理器阶段执行，Trim 不参与那一步；目录不支持该机制，登记时会被跳过。'
-      );
-      if (!ok) return;
-      pendingBtn.disabled = true;
-      pendingBtn.textContent = '正在登记...';
-      // K12：按 PENDING_ADD_BATCH 切片顺序登记并聚合回执（单批超限会被后端整批拒）
-      let added = 0;
-      let skipped = 0;
-      const failedRows = [];
+      // B3-2：确认件也必须进 try。旧写法 `await confirmDanger(...)` 在 try 之外 ——
+      // 确认件自己抛错时交给 async handler 变成**无人接的 rejection**：用户看不到提示，
+      // 而按钮已经处在「正在登记...」的中间态（disable 一旦挪到确认之前就是焊死）。
+      // 现在：确认 → 登记 → 终态全在一个 try 里，finally 兜住任何残留的中间态。
+      // 先判确认件可用性：`window.app?.confirmDanger(...)` 在缺该函数时只得到 undefined
+      // ⇒ 走「用户取消」分支 ⇒ 点了没反应。这种情况下要提示，不能静默。
+      if (typeof window.app?.confirmDanger !== 'function') {
+        window.app?.toast?.('warning', '当前环境不支持危险操作确认，已取消登记');
+        return;
+      }
       try {
+        // K12：PFRO 是**永久删**出口，登记前必须独立高危险确认（旧流程点了就登记，
+        // 用户不知道是永久删）。文案三要素：重启后删除 / 不进回收站 / 重启前可撤回。
+        const ok = await window.app.confirmDanger(
+          '登记重启后删除',
+          `将把 ${paths.length} 个删除失败的文件登记为「下次重启时删除」。\n这是永久删除：不进回收站、无法还原；重启前可在本页「重启后删除」入口查看并撤回。`,
+          '仍然登记',
+          '取消',
+          '删除动作由系统在重启的会话管理器阶段执行，Trim 不参与那一步；目录不支持该机制，登记时会被跳过。'
+        );
+        if (!ok) return;
+        pendingBtn.disabled = true;
+        pendingBtn.textContent = '正在登记...';
+        // K12：按 PENDING_ADD_BATCH 切片顺序登记并聚合回执（单批超限会被后端整批拒）
+        let added = 0;
+        let skipped = 0;
+        const failedRows = [];
         for (let i = 0; i < paths.length; i += PENDING_ADD_BATCH) {
           const resp = await window.api.uninstall.pendingAdd(paths.slice(i, i + PENDING_ADD_BATCH));
           if (!resp || !resp.success) throw new Error((resp && resp.message) || '登记失败');
@@ -2441,8 +2451,12 @@
         refreshPendingBadge();
       } catch (e) {
         window.app?.toast('error', '登记失败：' + ((e && e.message) || e));
-        pendingBtn.disabled = false;
-        pendingBtn.textContent = '登记到重启后删除';
+      } finally {
+        // 只复位**中间态**：成功分支的「已登记 / 无可登记项」是终态，不许被 finally 抹平
+        if (pendingBtn.textContent === '正在登记...') {
+          pendingBtn.disabled = false;
+          pendingBtn.textContent = '登记到重启后删除';
+        }
       }
     });
   }
