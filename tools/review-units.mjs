@@ -358,11 +358,21 @@ export const UNITS = [
       'tools/check-escape-delegation.mjs', 'tools/check-native-hygiene.mjs',
       'tools/check-positive-controls.mjs', 'tools/check-gate-roster.mjs',
       'tools/check-doc-refs.mjs', 'tools/check-optimizer-write-contract.mjs',
-      'tools/check-subwindow-init.mjs', 'tools/check-idle-scripts.mjs',
       'tools/check-review-units.mjs'],
     contract: '档位 / 通道 / 删除出口 / PS 调用点 / 门禁自身假绿 / 派单台账',
     boundary: '审的是门禁**自身**会不会假绿，不是拿它审别的模块',
     gates: ['check-gate-roster', 'check-positive-controls'],
+  },
+  {
+    // 2026-10-28 P2-a 重切（小旭拍板）：subwindow-init / idle-scripts 是**渲染初始化与
+    // 按需加载**的门禁，与「安全与执行面」不同执行链；挪出后 T1a 精读行数回到 U2
+    // 余量内（挪出前 7990/8000，重条目 M12/M14/M17/M20-M28 无处落笔）。
+    // 消费方：F3 的 gates 已含 idle-scripts、F4c 已含 subwindow-init，归属与执行链一致。
+    id: 'T1h', owner: 'sub', name: '门禁·渲染初始化与按需面',
+    files: ['tools/check-subwindow-init.mjs', 'tools/check-idle-scripts.mjs'],
+    contract: '子窗 on_page_load 初始化台账 / IDLE_SCRIPTS 按需注入与完成序',
+    boundary: '被审对象是渲染初始化链路；假绿判定纪律与 T1a 同律（正向对照 + 地板）',
+    gates: ['check-idle-scripts', 'check-subwindow-init'],
   },
   {
     id: 'T1c', owner: 'sub', name: '生成器与发布工具',

@@ -2477,10 +2477,20 @@
     const btn = document.getElementById('btnPendingList');
     if (!btn || !window.api?.uninstall?.pendingList) return;
     window.api.uninstall.pendingList().then(function (resp) {
+      const text = document.getElementById('btnPendingListText');
+      // F4a1-M13：success:false 与 reject 是「读取失败」，不是「没有待删项」——
+      // 与 degraded 同姿势（不隐藏 + 置灰 + 明示原因），把失败态折成隐藏等于收回
+      // 「待删清单可见且重启前可撤回」的唯一载体。
+      if (resp && resp.success === false) {
+        btn.hidden = false;
+        btn.disabled = true;
+        if (text) text.textContent = '重启后删除（读取失败）';
+        btn.setAttribute('data-tip', '待删清单读取失败，无法确认哪些条目仍挂起；PFRO 里的登记可能仍会在下次重启时执行。');
+        return;
+      }
       const data = (resp && resp.success && resp.data) || {};
       const entries = data.entries || [];
       const n = entries.filter(e => e.status === 'pending').length;
-      const text = document.getElementById('btnPendingListText');
       if (data.degraded) {
         // 台账损坏 = 撤回凭据不可信：不隐藏按钮（用户该知道 PFRO 里可能还挂着），
         // 置灰 + data-tip 说明，与「真的没有待删项」区分开（残留副窗同口径）。
@@ -2494,8 +2504,12 @@
       btn.hidden = entries.length === 0;
       if (text) text.textContent = n > 0 ? `重启后删除（${n}）` : '重启后删除';
     }).catch(function () {
-      // 读失败不显示入口：没有可确认的清单就不给「查看/撤回」的幻觉
-      btn.hidden = true;
+      // F4a1-M13：reject 同样是读取失败——与 degraded 同姿势，不隐藏（原形状折成隐藏）。
+      btn.hidden = false;
+      btn.disabled = true;
+      const textEl = document.getElementById('btnPendingListText');
+      if (textEl) textEl.textContent = '重启后删除（读取失败）';
+      btn.setAttribute('data-tip', '待删清单读取失败，无法确认哪些条目仍挂起；PFRO 里的登记可能仍会在下次重启时执行。');
     });
   }
 
@@ -2506,6 +2520,11 @@
       resp = await window.api.uninstall.pendingList();
     } catch (e) {
       window.app?.toast('error', '待删清单读取失败：' + ((e && e.message) || e));
+      return;
+    }
+    // F4a1-M13：success:false 是读取失败，不许折成「当前没有登记」（撤回凭据不可见的假象）。
+    if (resp && resp.success === false) {
+      window.app?.toast('error', '待删清单读取失败：' + (resp.error || '后端返回失败'));
       return;
     }
     const data = (resp && resp.success && resp.data) || {};

@@ -214,7 +214,15 @@ pub(crate) fn collect_redist_by_platform() -> GameRedistResult {
     let mut by_platform: HashMap<&str, Vec<Candidate>> = HashMap::new();
     let mut global_cap = MAX_CANDIDATES_GLOBAL;
 
+    // R2a-M10：只扫会进分桶的平台（Steam/Epic/WeGame，与下方 targets 对齐）。
+    // 原形状全平台扫：`MAX_CANDIDATES_GLOBAL` 与每游戏目录预算被注定丢弃的平台吃掉，
+    // 三家分桶系统性偏短，且「候选达全局上限」的 note 指向用户看不到的桶；
+    // 早退放在 is_dir 之前，整趟 BFS 一起省掉。新平台接分桶时必须同步扩本表。
+    const BUCKETS: [&str; 3] = ["Steam", "Epic", "WeGame"];
     for rec in &index.records {
+        if !BUCKETS.contains(&rec.platform) {
+            continue;
+        }
         let game_dir = PathBuf::from(&rec.dir);
         if !game_dir.is_dir() {
             continue;

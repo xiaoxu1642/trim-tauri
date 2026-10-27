@@ -1755,7 +1755,9 @@
       const detected = resp.detected || {};
       let prefill = 0;
       for (const [id, d] of Object.entries(detected)) {
-        const opt = OPTIONS.find(o => o.id === id);
+        // F4b-M20：持久集合的成员判据用目录全集 —— 面板外成员（hiddenFromOptimizer
+        // 并集）的主进程记账被展示列表当场丢掉，「宁可多灰，不可漏灰」在 1/3 目录上失效。
+        const opt = ALL_OPTIONS.find(o => o.id === id);
         if (!opt || opt.dynamic) continue;
         if (d && d.optimized === true && !appliedDetected.has(id)) { appliedDetected.add(id); prefill++; }
       }
@@ -1765,7 +1767,8 @@
       // 现在字段给的是「本机仍留有注册表备份的退役项」，还原由用户点，走同一条已确认通道。
       const mig = resp.migration;
       if (mig && Array.isArray(mig.pending) && mig.pending.length) showRetiredBanner(mig.pending);
-      const staleIds = (Array.isArray(resp.staleIds) ? resp.staleIds : []).filter(id => OPTIONS.some(o => o.id === id));
+      // F4b-M20：同上 —— 侧表成员的「执行中断、状态不明」不进横幅即永不提示。
+      const staleIds = (Array.isArray(resp.staleIds) ? resp.staleIds : []).filter(id => ALL_OPTIONS.some(o => o.id === id));
       if (staleIds.length) {
         // 根治（2026-10-03）：条目带失败子步原因——横幅文本与悬浮提示都从这里出
         const staleItems = staleIds.map(id => {
@@ -1794,7 +1797,8 @@
     try { localStorage.removeItem(OPT_PENDING_BATCH_KEY); } catch (e) { /* 同上 */ }
     // 落盘的 id 必须仍在目录里、且不是已迁出本页的项（迁出项界面上没有对应行，
     // 勾上也执行不了——displayList 会把它们滤掉；不能报「已恢复 N 项」却看不见）。
-    const valid = pending.filter(id => OPTIONS.some(o => o.id === id) && !MOVED_TO_WIN_SETTINGS.has(id));
+    // F4b-M20：成员判据改目录全集；落在面板成员上的恢复后只报数不进主列表勾选集。
+    const valid = pending.filter(id => ALL_OPTIONS.some(o => o.id === id) && !MOVED_TO_WIN_SETTINGS.has(id));
     if (!valid.length) return;
     valid.forEach(id => selectedIds.add(id));
     renderGroups(OPTIONS);
@@ -1854,7 +1858,7 @@
         btn.textContent = '还原中…';
         let okCount = 0;
         for (const id of ids) {
-          const opt = OPTIONS.find(o => o.id === id);
+          const opt = ALL_OPTIONS.find(o => o.id === id); // F4b-M20：横幅还原入口对目录全集开放
           if (!opt) continue;
           try { if (await restoreOption(opt)) okCount++; } catch (e) { /* 单项失败继续 */ }
         }
@@ -1869,7 +1873,7 @@
     // 提权中断续跑（batchRemainingIds）、批次生效粒度提示一条都不会绕过去。
     const applyBtn = document.getElementById('btnStaleApply');
     if (applyBtn) {
-      const applicable = ids.filter((id) => OPTIONS.some((o) => o.id === id));
+      const applicable = ids.filter((id) => ALL_OPTIONS.some((o) => o.id === id)); // F4b-M20
       applyBtn.disabled = applicable.length === 0;
       if (applicable.length === 0) {
         applyBtn.setAttribute('data-tip', '这些项已不在优化目录里，只能按原值还原');
