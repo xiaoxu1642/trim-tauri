@@ -2539,11 +2539,19 @@
       return;
     }
     const rows = entries.map(e => {
-      const label = PENDING_STATUS_LABELS[e.status] || e.status || '未知';
-      const tip = e.target || '';
-      return `<div class="lock-app-row"><span class="lock-app-name" data-tip="${escapeHtml(tip)}">${escapeHtml(tip)}</span><span class="lock-app-count">${escapeHtml(label)}</span></div>`;
+      // R2a-U01（B 方案）：orphanSource = PFRO 挂着但台账无凭据的对补行（可能来自
+      // 更早批次或第三方软件，归属不可信）——「撤回全部」摘不到它，标签必须明示。
+      const label = e.orphanSource
+        ? '挂起删除（来源不明·不可撤回）'
+        : (PENDING_STATUS_LABELS[e.status] || e.status || '未知');
+      const tip = e.orphanSource
+        ? `${e.target || ''}\n系统重启队列仍挂着这条删除，但 Trim 没有它的登记凭据（可能来自更早批次或其它软件）；「撤回全部」只摘除 Trim 登记的条目。`
+        : (e.target || '');
+      return `<div class="lock-app-row"><span class="lock-app-name" data-tip="${escapeHtml(tip)}">${escapeHtml(tip.split('\n')[0] || '')}</span><span class="lock-app-count">${escapeHtml(label)}</span></div>`;
     }).join('');
-    const pendingN = entries.filter(e => e.status === 'pending').length;
+    // R2a-U01（B 方案）：「撤回全部」只摘台账登记项——计数必须排除 orphanSource
+    // 对补行，否则按钮文案承诺的条数与实际摘除数不符。
+    const pendingN = entries.filter(e => e.status === 'pending' && !e.orphanSource).length;
     const ctrl = window.modal.create({
       id: 'pendingListModal-' + Date.now(),
       title: `重启后删除（${entries.length} 项登记）`,

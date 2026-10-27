@@ -389,7 +389,9 @@
       window.api.uninstall.pendingList().then(function (r) {
         const entries = (r && r.success && r.data && r.data.entries) || [];
         const degraded = !!(r && r.success && r.data && r.data.degraded);
-        const n = entries.filter(function (e) { return e.status === 'pending'; }).length;
+        // R2a-U01（B 方案）：orphanSource 对补行（PFRO 挂着但台账无凭据）不在
+        // 「撤回全部」的摘除集合里——按钮计数与显隐只数可撤的登记项。
+        const n = entries.filter(function (e) { return e.status === 'pending' && !e.orphanSource; }).length;
         if (degraded) {
           // M-6：台账损坏 = 撤回凭据不可信。不能隐藏按钮（那样用户不知道 PFRO 里还挂着），
           // 置灰 + data-tip 说明，与「真的没有待删项」区分开。

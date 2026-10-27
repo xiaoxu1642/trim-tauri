@@ -211,33 +211,6 @@ pub(super) fn read_pfro() -> Result<Vec<String>, String> {
 /// 全是它）。不剥这三层，MoveFileExW 登记的条目在「已登记过」检查、list 三态、
 /// 撤回摘除里全部失配——用户看着「未登记」再登记一次，或撤不回（K06 同族病）。
 /// 只做**同实体归并**（三种前缀是同一路径的三种写法），不与任何保护判据耦合。
-fn pfro_norm(entry: &str) -> String {
-    let mut s = entry.trim();
-    // `*<数字>\` 会话前缀：未提权 MoveFileExW 登记时系统写的形态
-    if let Some(rest) = s.strip_prefix('*') {
-        if let Some(idx) = rest.find('\\') {
-            if !rest.is_empty() && rest[..idx].chars().all(|c| c.is_ascii_digit()) {
-                // 注意：`*N\??\path` 里 N 后面那个 `\` 正是 `\??\` 的第一个字符——
-                // 从 idx 处切（不是 idx+1），否则设备路径前缀被啃掉一口、永远剥不掉
-                s = &rest[idx..];
-            }
-        }
-    }
-    // `\\?\` / `\??\` 两种设备/verbatim 前缀（长的在前，避免 `\\?\` 被 `\??\` 分支吃掉）
-    for pre in [r"\\?\", r"\??\"] {
-        if let Some(rest) = s.strip_prefix(pre) {
-            s = rest;
-            break;
-        }
-    }
-    // 会话前缀 + 普通盘符（`*N\C:\...`）：前导分隔符去掉，`C:` 与 `\C:` 同一实体
-    let b = s.as_bytes();
-    if b.len() > 2 && b[0] == b'\\' && b[1].is_ascii_alphabetic() && b[2] == b':' {
-        s = &s[1..];
-    }
-    s.trim_end_matches(['\\', '/']).to_lowercase()
-}
-
 /// PFRO 里"删除 target"的登记形态：src=target、紧随其后的 dst 为空串。
 /// 匹配走 [`pfro_norm`]（会话前缀/设备路径/verbatim 三形态同实体）。
 pub(super) fn pfro_has_delete(entries: &[String], target: &str) -> bool {
@@ -365,23 +338,76 @@ pub(super) const PENDING_ADD_MAX_ITEMS: usize = 32;
 
 /// 台账保留窗口（审查 L-10，2026-10-03）：entries 原先只增不减——单批 32 有上限、
 /// 累计无界、永不过期，只有用户手动撤回才减。口径对齐备份类保留策略（还原包
-/// KEEP_BATCHES=20）：最近 20 批 / 30 天内的登记保留撤回能力，更旧的裁掉。
-/// ⚠️ 语义：被裁条目的 PFRO 系统项**仍在**（重启后照样被会话管理器删除），Trim 侧
-/// 只是不再提供撤回入口——30 天不重启的机器上「撤回窗口已过」是接受的取舍。
+/// KEEP_BATCHES=20）：最近 20 批 / 30 天内的登记保留撤回能力。
+/// R2a-U01（2026-10-28 拍板 B 方案）：裁剪必须先看 PFRO 现值——系统队列仍挂着的
+/// 条目**永不裁**（红线「待删清单可见且重启前可撤回」无「到期即失明」例外），
+/// 打 `expiredWindow` 标记；只裁「超窗 且 PFRO 已不挂」的条目。
 pub(super) const PENDING_KEEP_BATCHES: usize = 20;
 pub(super) const PENDING_MAX_AGE_DAYS: u64 = 30;
 
+/// 剥 PFRO 条目的会话/设备前缀，保留原大小写（显示用）。[`pfro_norm`] 的剥前缀
+/// 段与之共用同一份实现（§5.16）：norm 只在 display 之上多做「盘符前导斜杠折叠 +
+/// 去尾分隔符 + 小写」——两处判据永远同步，不留第二份前缀清单。
+fn pfro_strip_prefixes(entry: &str) -> String {
+    let mut s = entry.trim();
+    // `*<数字>\` 会话前缀：未提权 MoveFileExW 登记时系统写的形态
+    if let Some(rest) = s.strip_prefix('*') {
+        if let Some(idx) = rest.find('\\') {
+            if !rest.is_empty() && rest[..idx].chars().all(|c| c.is_ascii_digit()) {
+                // 注意：`*N\??\path` 里 N 后面那个 `\` 正是 `\??\` 的第一个字符——
+                // 从 idx 处切（不是 idx+1），否则设备路径前缀被啃掉一口、永远剥不掉
+                s = &rest[idx..];
+            }
+        }
+    }
+    // `\\?\` / `\??\` 两种设备/verbatim 前缀（长的在前，避免 `\\?\` 被 `\??\` 分支吃掉）
+    for pre in [r"\\?\", r"\??\"] {
+        if let Some(rest) = s.strip_prefix(pre) {
+            s = rest;
+            break;
+        }
+    }
+    s.to_string()
+}
+
+fn pfro_norm(entry: &str) -> String {
+    let s = pfro_strip_prefixes(entry);
+    // 会话前缀 + 普通盘符（`*N\C:\...`）：前导分隔符去掉，`C:` 与 `\C:` 同一实体
+    let b = s.as_bytes();
+    let s = if b.len() > 2 && b[0] == b'\\' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+        &s[1..]
+    } else {
+        &s[..]
+    };
+    s.trim_end_matches(['\\', '/']).to_lowercase()
+}
+
 /// 按「30 天 + 最近 N 批」裁剪 entries，返回剔除条数（纯函数，可测）。
 /// addedAt 缺失/不可解析的条目按最老处理（裁掉）——无法判年龄的撤回凭据不可信。
-pub(super) fn prune_pending_entries(entries: &mut Vec<Value>, now_secs: u64) -> usize {
+/// R2a-U01（B 方案）：裁剪判据必须在「超窗」之外再加「PFRO 现值已不挂」——
+/// 系统队列仍挂着的撤回凭据无论多老都保留并打 `expiredWindow` 标记，否则
+/// 「30 天不重启」的机器上会出现「系统挂着、界面看不见、撤不回」的失明子集。
+pub(super) fn prune_pending_entries(entries: &mut Vec<Value>, now_secs: u64, pfro: &[String]) -> usize {
     let before = entries.len();
     let cutoff = now_secs.saturating_sub(PENDING_MAX_AGE_DAYS * 86_400);
-    entries.retain(|e| {
-        e["addedAt"]
+    entries.retain_mut(|e| {
+        let aged_out = e["addedAt"]
             .as_str()
             .and_then(|s| s.parse::<u64>().ok())
-            .map(|t| t >= cutoff)
-            .unwrap_or(false)
+            .map(|t| t < cutoff)
+            .unwrap_or(true);
+        if !aged_out {
+            return true;
+        }
+        // 超窗但系统队列仍挂 ⇒ 撤回凭据保留（界面标「窗口已过」），不裁
+        let still_held = e["target"].as_str().map(|t| pfro_has_delete(pfro, t)).unwrap_or(false);
+        if still_held {
+            if let Some(obj) = e.as_object_mut() {
+                obj.insert("expiredWindow".into(), json!(true));
+            }
+            return true;
+        }
+        false
     });
     // 同一秒内可能有多批/多批同秒：按批次 secs 排序去重后保最近 N 批
     if entries.len() > PENDING_KEEP_BATCHES {
@@ -396,10 +422,60 @@ pub(super) fn prune_pending_entries(entries: &mut Vec<Value>, now_secs: u64) -> 
         batches.dedup();
         if batches.len() > PENDING_KEEP_BATCHES {
             let keep_from = batches[batches.len() - PENDING_KEEP_BATCHES];
-            entries.retain(|e| batch_secs(e).map(|t| t >= keep_from).unwrap_or(false));
+            entries.retain_mut(|e| match batch_secs(e) {
+                Some(t) if t >= keep_from => true,
+                Some(_) => {
+                    // 批次超窗的同一套 PFRO 判据：系统仍挂的不裁，打标记
+                    let still_held =
+                        e["target"].as_str().map(|t| pfro_has_delete(pfro, t)).unwrap_or(false);
+                    if still_held {
+                        if let Some(obj) = e.as_object_mut() {
+                            obj.insert("expiredWindow".into(), json!(true));
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => false,
+            });
         }
     }
     before - entries.len()
+}
+
+/// R2a-U01（B 方案）对补腿：PFRO 里「src + 空 dst」形态挂着、但台账（归一后）没有
+/// 的条目，合成 `status:"pending"` + `orphanSource:true` 的补行——「系统挂着、界面
+/// 看不见」从根上消灭。归属**诚实标注**：PFRO 是系统全局队列，无法区分这条登记
+/// 来自 Trim 早期被裁批次还是第三方软件，故补行不进「撤回全部」的摘除集合
+/// （revoke 按台账 scoped 摘，天然不碰补行），前端显示「来源不明·不可撤回」。
+/// 纯函数：rows 由调用方从台账构造，本函数只做补行（可测）。
+pub(super) fn reconcile_pfro_orphans(mut rows: Vec<Value>, pfro: &[String]) -> Vec<Value> {
+    let known: HashSet<String> = rows
+        .iter()
+        .filter_map(|r| r["target"].as_str().map(pfro_norm))
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut orphans: Vec<Value> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for w in pfro.windows(2) {
+        if !w[1].is_empty() {
+            continue;
+        }
+        let key = pfro_norm(&w[0]);
+        if key.is_empty() || known.contains(&key) || !seen.insert(key) {
+            continue;
+        }
+        orphans.push(json!({
+            "target": pfro_strip_prefixes(&w[0]),
+            "batchId": Value::Null,
+            "addedAt": Value::Null,
+            "status": "pending",
+            "orphanSource": true,
+        }));
+    }
+    rows.extend(orphans);
+    rows
 }
 
 /// v6-K05：PFRO 登记前的**新增两道**只读闸（纯函数，可测）——系统命名空间 + 别名复检。
@@ -537,14 +613,15 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
             for t in &plan {
                 entries.push(json!({ "target": t, "batchId": batch, "addedAt": batch.trim_start_matches('p') }));
             }
-            // 审查 L-10：写回前按保留窗口裁剪（最近 20 批 / 30 天），台账不再只增不减
+            // 审查 L-10：写回前按保留窗口裁剪（最近 20 批 / 30 天）；R2a-U01（B 方案）：
+            // 裁剪看 PFRO 现值——系统仍挂着的凭据不裁（pfro 即本函数入口 ① 读的现值）。
             let now_secs = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let pruned = prune_pending_entries(entries, now_secs);
+            let pruned = prune_pending_entries(entries, now_secs, &pfro);
             if pruned > 0 {
-                log::write_log("info", &format!("重启后删除台账：按保留窗口裁剪 {pruned} 条过期登记（撤回窗口已过）"));
+                log::write_log("info", &format!("重启后删除台账：按保留窗口裁剪 {pruned} 条过期登记（系统队列已不挂、撤回凭据一并清除）"));
             }
             Ok(())
         })?;
@@ -691,6 +768,9 @@ pub async fn uninstall_pending_list<R: tauri::Runtime>(window: WebviewWindow<R>)
                 })
             })
             .collect();
+        // R2a-U01（B 方案）对补腿：PFRO 挂着但台账没有的条目补进清单（orphanSource 标记），
+        // 「系统挂着、界面看不见」从根上消灭；补行不进撤回集合（归属不可信，撤回只摘台账对）。
+        let rows = reconcile_pfro_orphans(rows, &pfro);
         let degraded = doc.get("degraded").and_then(Value::as_bool).unwrap_or(false);
         Ok(json!({
             "entries": rows,
@@ -765,8 +845,9 @@ mod tests {
     use super::*;
 
     fn entry(batch_secs: u64) -> Value {
+        // target 用真实登记形态（反斜杠）：prune 的 PFRO 对拍不折叠正反斜杠
         json!({
-            "target": format!("C:/f{batch_secs}.tmp"),
+            "target": format!(r"C:\f{batch_secs}.tmp"),
             "batchId": format!("p{batch_secs}"),
             "addedAt": batch_secs.to_string(),
         })
@@ -777,10 +858,26 @@ mod tests {
     fn 超期条目被裁剪() {
         let now = 1_800_000_000u64;
         let mut v = vec![entry(now - 31 * 86_400), entry(now - 29 * 86_400)];
-        let n = prune_pending_entries(&mut v, now);
+        let n = prune_pending_entries(&mut v, now, &[]);
         assert_eq!(n, 1);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0]["addedAt"], (now - 29 * 86_400).to_string());
+    }
+
+    /// R2a-U01（B 方案）：超窗但 PFRO 仍挂着 ⇒ 不裁，打 expiredWindow 标记；
+    /// 超窗且 PFRO 已不挂 ⇒ 照裁。PFRO 对形态 = src 后跟空 dst（windows(2)）。
+    #[test]
+    fn 超期但系统仍挂的不裁只打标() {
+        let now = 1_800_000_000u64;
+        let held = entry(now - 40 * 86_400); // 超窗
+        let held_target = held["target"].as_str().unwrap_or_default().replace('/', "\\");
+        let mut v = vec![held, entry(now - 35 * 86_400)];
+        // PFRO 现值：一条挂着（\??\ 设备形态，覆盖归一）、一条没有
+        let pfro = vec![format!(r"\??\{held_target}"), String::new()];
+        let n = prune_pending_entries(&mut v, now, &pfro);
+        assert_eq!(n, 1, "仍挂系统队列的条目不得被裁");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0]["expiredWindow"], json!(true), "保留的条目必须打「窗口已过」标记");
     }
 
     /// 审查 L-10：全部未超期但批次超量时，只保留最近 N 批。
@@ -788,11 +885,23 @@ mod tests {
     fn 批次超量只留最近批() {
         let now = 1_800_000_000u64;
         let mut v: Vec<Value> = (0..25).map(|i| entry(now - (25 - i) * 3_600)).collect();
-        let n = prune_pending_entries(&mut v, now);
+        let n = prune_pending_entries(&mut v, now, &[]);
         assert_eq!(n, 5);
         assert_eq!(v.len(), PENDING_KEEP_BATCHES);
         assert!(!v.iter().any(|e| e["batchId"] == format!("p{}", now - 25 * 3_600)), "最老一批必须被裁");
         assert!(v.iter().any(|e| e["batchId"] == format!("p{}", now - 3_600)), "最近一批必须保留");
+    }
+
+    /// R2a-U01（B 方案）：批次超窗 + PFRO 仍挂 ⇒ 同样不裁（批裁剪腿也看现值）。
+    #[test]
+    fn 批次超量但系统仍挂的不裁() {
+        let now = 1_800_000_000u64;
+        let mut v: Vec<Value> = (0..25).map(|i| entry(now - (25 - i) * 3_600)).collect();
+        let oldest = v[0]["target"].as_str().unwrap_or_default().replace('/', "\\");
+        let pfro = vec![format!(r"\??\{oldest}"), String::new()];
+        let n = prune_pending_entries(&mut v, now, &pfro);
+        assert_eq!(n, 4, "最老一批有一条仍挂 ⇒ 只裁其余四条");
+        assert!(v.iter().any(|e| e["batchId"] == format!("p{}", now - 25 * 3_600) && e["expiredWindow"] == json!(true)));
     }
 
     /// 审查 L-10：addedAt 缺失/不可解析的条目按最老处理——无法判年龄的撤回凭据不可信。
@@ -800,9 +909,36 @@ mod tests {
     fn addedat缺失视为过期裁掉() {
         let now = 1_800_000_000u64;
         let mut v = vec![json!({ "target": "C:/x.tmp", "batchId": "p1" })];
-        let n = prune_pending_entries(&mut v, now);
+        let n = prune_pending_entries(&mut v, now, &[]);
         assert_eq!(n, 1);
         assert!(v.is_empty());
+    }
+
+    /// R2a-U01（B 方案）对补腿：PFRO 挂着、台账没有 ⇒ 合成 pending + orphanSource 补行；
+    /// 台账已有的不重复补；PFRO 里非删除对（dst 非空的重命名对）不补。
+    #[test]
+    fn pfro孤儿对补且台账已有不重复() {
+        let pfro = vec![
+            r"\??\C:\gone\a.tmp".to_string(),
+            String::new(),                                 // 删除对（挂起）
+            r"\??\C:\gone\b.tmp".to_string(),
+            r"C:\gone\b_new.tmp".to_string(),              // 重命名对（dst 非空，不补）
+        ];
+        let rows = vec![json!({ "target": r"C:\gone\known.tmp", "status": "pending" })];
+        // PFRO 第一对与台账 known.tmp 无关 ⇒ 补行含 a.tmp；b.tmp 是重命名对 ⇒ 不补
+        let out = reconcile_pfro_orphans(rows.clone(), &pfro);
+        assert_eq!(out.len(), 2, "补行恰一条（a.tmp）");
+        assert_eq!(out[1]["status"], json!("pending"));
+        assert_eq!(out[1]["orphanSource"], json!(true));
+        assert_eq!(out[1]["target"], json!(r"C:\gone\a.tmp"), "补行 target 保留原大小写、剥设备前缀");
+        // 台账已有该对 ⇒ 零补行（归一判重）
+        let known_rows = vec![json!({ "target": r"C:\GONE\A.TMP", "status": "pending" })];
+        let out2 = reconcile_pfro_orphans(known_rows, &pfro);
+        assert_eq!(out2.len(), 1, "台账已有（大小写不敏感归一）不得重复补");
+        // 同一对重复出现只补一条
+        let dup = vec![r"\??\C:\gone\a.tmp".to_string(), String::new(), r"C:\gone\a.tmp".to_string(), String::new()];
+        let out3 = reconcile_pfro_orphans(Vec::new(), &dup);
+        assert_eq!(out3.len(), 1, "同对重复出现不得重复补行");
     }
 
     /// v4 P2-F（R2-M03/M04）+ v6-K06：**撤回凭据先于系统队列**——旧反序里系统已登记
