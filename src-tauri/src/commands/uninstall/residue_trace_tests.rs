@@ -1321,6 +1321,70 @@ use super::residue_update::*;
             0,
             "执行侧不得再留第二处自拼备份名（撞名会连封条一起覆盖）"
         );
+        // B2-3：同一个出口生成之后，两处都必须先过「导出前自检」再去调 reg.exe export
+        assert_eq!(
+            prod.matches("backup_export_path(&file)").count(),
+            2,
+            "两处导出都必须先过导出前自检（名字不可用要在删除之前变成 fail 且不删）"
+        );
+    }
+
+    /// B2-3：厂库里每一条注册表目标（`reg_key` 与 `reg_value`，条数由本用例现算）都必须
+    /// 生成还原入口认得出的备份名，且过得了导出前自检 —— 即「零拒收」。
+    ///
+    /// 为什么不用真机 export 验：这条判据的失败形态是**名字不可用**，与 `reg.exe` 行为无关；
+    /// 上真机只会把「净化写错」与「注册表没这个键」混成同一种红。生成器与自检都是纯函数，
+    /// 拿厂库全量目标当输入就是最诚实的那一面。
+    ///
+    /// 判红自证：① 把 `new_reg_backup_file` 里的 `sanitize_backup_leaf` 摘掉 ⇒ 带空格那两条
+    /// 当场红；② 把 `backup_export_path` 的白名单校验摘掉 ⇒ 自检那半段红（末段带空格时）。
+    #[test]
+    fn b2_3_厂库末段全部生成合法备份名() {
+        let doc: Value =
+            serde_json::from_str(include_str!("../../../data/uninstall-residue-rules.json"))
+                .expect("厂库 JSON 必须可解析");
+        let sb = crate::testutil::Sandbox::new(&format!("b23-footer-{}", std::process::id()));
+        let root = sb.path();
+        let ms = 1_700_000_000_000i64;
+        let (mut checked, mut needs_sanitize) = (0usize, 0usize);
+        for rule in doc["rules"].as_array().expect("厂库必须有 rules").iter() {
+            for item in rule["residue"].as_array().into_iter().flatten() {
+                let kind = item["kind"].as_str().unwrap_or("");
+                if kind != "reg_key" && kind != "reg_value" {
+                    continue;
+                }
+                let target = item["target"].as_str().unwrap_or("");
+                // 与执行侧同一取法：reg_value 的目标形如 `HKCU\<键>::<值名>`，末段取**父键**叶子
+                let key_part = target.split("::").next().unwrap_or(target);
+                let leaf = key_part.rsplit('\\').next().unwrap_or("key");
+                let p = new_reg_backup_file(root, ms, leaf);
+                assert_eq!(p.parent(), Some(root), "净化后逃出备份目录: {target}");
+                let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                assert!(
+                    valid_uninstall_backup_name(&name),
+                    "厂库目标 {target} 生成的备份名被还原侧拒收: {name}"
+                );
+                assert!(
+                    backup_export_path(&p).is_ok(),
+                    "厂库目标 {target} 过不了导出前自检（这一条会被记 fail 且不删）: {name}"
+                );
+                // 列表侧按首段毫秒解析，净化不得动首段
+                assert_eq!(
+                    name.split('_').next().unwrap_or("").parse::<i64>().unwrap(),
+                    ms,
+                    "首段不再是毫秒: {name}"
+                );
+                if leaf.chars().any(|c| c == ' ' || !c.is_ascii()) {
+                    needs_sanitize += 1;
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "厂库注册表目标断言对象为 0 ⇒ 语料失明，本用例什么都没测");
+        assert!(
+            needs_sanitize > 0,
+            "厂库里已没有需要净化的末段 ⇒ 本用例失去判红面（净化失效也不会红），换样本或删本用例"
+        );
     }
 
     /// R2a-L07：执行入口的形状闸必须与扫描入口**同一对函数**（§5.16/N6 只许一份判据）。

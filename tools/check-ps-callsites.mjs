@@ -330,8 +330,8 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/engine/native/startup.rs', anchor: '&["export", &export_path, reg_file_str, "/y"]', reason: '启动项禁用台账：删值前整键备份' },
   { file: 'src-tauri/src/engine/native/peripheral.rs', anchor: '&["export", &reg_path, stage_str, "/y"]', reason: '外设优化写值前逐键备份（B2-2：导出到私有中转件，落位由 land_backup 判根后 rename）' },
   { file: 'src-tauri/src/engine/native/cleanup.rs', anchor: '&["export", &export_path, file_str, "/y"]', reason: 'cleanup regKeys 删除前逐键备份' },
-  { file: 'src-tauri/src/commands/uninstall/residue.rs', anchor: '&["export", &export_path, file_str, "/y"]', reason: '残留 reg_key 删除前整键备份' },
-  { file: 'src-tauri/src/commands/uninstall/residue.rs', anchor: '&["export", key_part, file_str, "/y"]', reason: '残留 reg_value 删值前父键备份' },
+  { file: 'src-tauri/src/commands/uninstall/residue.rs', anchor: '&["export", &export_path, &file_str, "/y"]', reason: '残留 reg_key 删除前整键备份（B2-3：file_str 由 backup_export_path 自检后返回，故取引用）' },
+  { file: 'src-tauri/src/commands/uninstall/residue.rs', anchor: '&["export", key_part, &file_str, "/y"]', reason: '残留 reg_value 删值前父键备份（B2-3：同上，导出前自检）' },
   // 顽固软件治理的 schtasks 三点（v5 M-1）：备份不判成败就无条件 /Delete 是"删了且没凭据"，
   // 裸 .output() 又会让挂死的 schtasks 永久锁住这条 IPC。超时复用 REG_EXPORT_TIMEOUT（同为
   // 备份类短命令：平时毫秒级，15s 已是宽限上界）。

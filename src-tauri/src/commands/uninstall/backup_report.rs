@@ -31,14 +31,102 @@ pub(super) fn uninstall_reg_backup_dir() -> PathBuf {
     crate::engine::paths::backup_write_dir(UNINSTALL_REG_BACKUP_SUB)
 }
 
-/// 备份文件名准入：只认生成器产出的形状（`<毫秒>_<键末段>.reg`，撞名时末段后带 `_序号`），
-/// 路径穿越（`..` / `\` / `/`）与非 .reg 一律拒绝——还原是**写注册表**的通道
+/// 备份名总长上限。生成侧（`BACKUP_LEAF_MAX`）与准入侧共用这一份，别在两处各写一个数。
+const BACKUP_NAME_MAX: usize = 120;
+
+/// 键末段（**净化后**）长度上限：给「毫秒戳 + 分隔符 + `.reg` + 撞名序号」留足余量，
+/// 使任何合法末段生成的名字都必然 ≤ `BACKUP_NAME_MAX`。
+/// 余量是否够由 `b2_3_厂库末段全部生成合法备份名` 用例逐条兜（末段声明与生成器两边一起漂才红）。
+const BACKUP_LEAF_MAX: usize = 88;
+
+/// 备份名合法字节：ASCII 字母数字与 `-` `_` `.`。
+///
+/// B2-3：生成侧净化与准入侧校验**必须**同读这一份 —— 两边各写一套字符判据的后果不是
+/// 「名字难看」，而是生成侧写下一个名字、准入侧当场拒收，于是「备份留了、还原入口点不动」，
+/// 而对应的注册表删除**已经发生**（这份 `.reg` 是唯一还原依据）。
+fn backup_name_byte_ok(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')
+}
+
+/// 备份文件名准入：只认生成器产出的形状（`<毫秒>_<净化后的键末段>.reg`，撞名时末段后带 `_序号`），
+/// 路径穿越（`..` / `\` / `/`）、空格与非 .reg 一律拒绝——还原是**写注册表**的通道。
+///
+/// 字符集**刻意不收空格**：`a reg.reg` 这类输入在准入侧就是可疑形态（真实生成器不会产出），
+/// 拒收它比放行它安全。所以空格只能在**生成侧**被净化掉，见 `sanitize_backup_leaf`。
 pub(super) fn valid_uninstall_backup_name(name: &str) -> bool {
     let n = name.trim();
     n.len() > 4
-        && n.len() <= 120
+        && n.len() <= BACKUP_NAME_MAX
         && n.ends_with(".reg")
-        && n.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        && n.bytes().all(backup_name_byte_ok)
+}
+
+/// 键末段的稳定短哈希（FNV-1a 低 24 位）：只在原串里**丢了非 ASCII 字符**时才用得上。
+///
+/// 不引哈希 crate（仓内没有也刻意不引）：这里要的不是抗碰撞，是「同一原串每次都喂出同一尾缀，
+/// 不同原串大概率分得开」。纯净化会把「网易云音乐」与「网易大神」压成同一个 `-----`，
+/// 撞名虽由 `new_reg_backup_file` 用序号让路，但用户再也分不出哪份是哪份。
+fn leaf_hash(s: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in s.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h & 0x00ff_ffff
+}
+
+/// 键末段净化（生成备份名的唯一前置闸）。
+///
+/// 病根：键末段是**注册表里的字面名**，可以带空格、中文、Windows 非法字符 ——
+/// 厂库里的 `HKCU\Software\Clash Verge Rev`、`HKCU\Software\HiBit Uninstaller`
+/// 就是空格式样（条数由 `b2_3_厂库末段全部生成合法备份名` 用例现算，不在此写死）。旧写法拿它
+/// 直接拼文件名，于是生成的备份名过不了 `valid_uninstall_backup_name`：文件确实写到了盘上，
+/// 列表与还原入口却认不出它 —— 删除已经发生，还原依据却成了孤儿。
+///
+/// 口径：
+/// - 合法字节原样保留（历史末段如 `MuiCache`、`ESET` 产出与旧形状逐字节相同）；
+/// - 任何非法字符（空格、分隔符、Windows 保留字符、控制字符）压缩成**一个** `-`；
+/// - 丢了非 ASCII 时补 `_h<六位十六进制>` 尾缀，把原串的可区分性留住；
+/// - 净化到只剩分隔符或全空 ⇒ 回 `key`（与两处调用点的兜底同名，不生成 `1700_.reg`）。
+fn sanitize_backup_leaf(leaf: &str) -> String {
+    let src = leaf.trim();
+    let mut kept = String::with_capacity(src.len().min(BACKUP_LEAF_MAX));
+    let mut dropped_non_ascii = false;
+    let mut pending_sep = false;
+    for c in src.chars() {
+        if c.is_ascii() && backup_name_byte_ok(c as u8) {
+            // 连续非法字符只在中间补一个 `-`（首尾不补，否则名字会带无意义的边）
+            if pending_sep && !kept.is_empty() {
+                kept.push('-');
+            }
+            pending_sep = false;
+            kept.push(c);
+        } else {
+            if !c.is_ascii() {
+                dropped_non_ascii = true;
+            }
+            pending_sep = true;
+        }
+    }
+    let tail = if dropped_non_ascii {
+        format!("_h{:06x}", leaf_hash(src))
+    } else {
+        String::new()
+    };
+    // 先截到「留出尾缀后的预算」再补尾缀：反过来的话截断可能把哈希切掉一半，
+    // 那就退化成「两个不同末段共享同一个残尾」，比不补更糟
+    let budget = BACKUP_LEAF_MAX.saturating_sub(tail.len());
+    if kept.len() > budget {
+        kept.truncate(budget);
+    }
+    while kept.ends_with('-') {
+        kept.pop();
+    }
+    kept.push_str(&tail);
+    if kept.trim_matches('-').is_empty() {
+        kept = format!("key{tail}");
+    }
+    kept
 }
 
 /// 生成一份卸载域 `.reg` 备份的落盘路径（两处 export 共用的唯一出口，§5.16/N6）。
@@ -52,8 +140,12 @@ pub(super) fn valid_uninstall_backup_name(name: &str) -> bool {
 /// 口径：首份文件名与旧形状逐字节相同（列表/还原侧按 `<毫秒>_<末段>.reg` 解析、
 /// `prune_backups_ext` 按扩展名计数，都不受影响）；只有实体已存在时才顺次加 `_2`、`_3`。
 /// 判据走真实磁盘（`exists`），因此配套用例必须有可判红的正向对照（同名占位文件）。
+///
+/// B2-3：末段**先过** `sanitize_backup_leaf` 再拼名。调用点不必自己净化（两处都别私自
+/// 预处理，否则判据又分叉成两份）；名字是否真能被还原入口认出来，由
+/// `backup_export_path` 在导出前当场验一次。
 pub(super) fn new_reg_backup_file(dir: &std::path::Path, stamp_ms: i64, leaf: &str) -> std::path::PathBuf {
-    let base = format!("{stamp_ms}_{leaf}");
+    let base = format!("{stamp_ms}_{}", sanitize_backup_leaf(leaf));
     let mut n = 1u32;
     loop {
         let name = if n == 1 {
@@ -67,6 +159,28 @@ pub(super) fn new_reg_backup_file(dir: &std::path::Path, stamp_ms: i64, leaf: &s
         }
         n += 1;
     }
+}
+
+/// 导出前自检（B2-3 的第二条腿）：把 `new_reg_backup_file` 产出的路径翻成
+/// `reg.exe export` 要的文本，并**当场**确认这个名字过得了还原白名单。
+///
+/// 为什么生成侧已经净化了还要再验一次：净化是「尽力而为」的纯函数，它一旦被改坏
+/// （判据放宽、截断算错、尾缀漏补），故障形态**不是报错**，而是写下一份谁都不认识的文件；
+/// 而调用点紧接着就要删注册表。这一句让「名字不可用」在**删除之前**变成 `Err`，
+/// 调用方据此记 fail 并跳过该目标 —— 宁可这一条不删，也不留一份孤儿备份。
+pub(super) fn backup_export_path(path: &std::path::Path) -> Result<String, String> {
+    let Some(full) = path.to_str() else {
+        return Err("备份路径无法表示为文本，拒绝删除".to_string());
+    };
+    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+        return Err("备份路径无法表示为文本，拒绝删除".to_string());
+    };
+    if !valid_uninstall_backup_name(name) {
+        return Err(format!(
+            "生成的备份名过不了还原白名单（{name}），未执行删除"
+        ));
+    }
+    Ok(full.to_string())
 }
 
 // 封条与 `.reg` 严格解析的**实现已移到 `engine::reg_backup`**（N9）：清理域那条还原链
@@ -443,6 +557,66 @@ pub(super) mod backup_visibility_tests {
             assert_eq!(n.split('_').next().unwrap().parse::<i64>().unwrap(), ms, "首段不再是毫秒: {n}");
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// B2-3：末段带空格 / 中文 / Windows 保留字符时，生成的名字必须**当场**过得了还原
+    /// 白名单，且导出前自检回 Ok。厂库里 `HKCU\Software\Clash Verge Rev` 与
+    /// `HKCU\Software\HiBit Uninstaller` 两条就是这个形状（全量逐条由
+    /// `b2_3_厂库末段全部生成合法备份名` 兜，这里只钉净化口径）。
+    ///
+    /// 判红自证：把 `new_reg_backup_file` 里的 `sanitize_backup_leaf` 摘掉 ⇒ 本用例当场红
+    /// （带空格那条连 `valid_uninstall_backup_name` 都过不了）。
+    #[test]
+    fn 末段带空格或中文时生成的备份名仍过白名单() {
+        // 走自删守卫而不是本模块的 `sandbox` + 手写收尾：新建的 `remove_dir_all` 会抬
+        // `check-delete-callsites` 的计数（删除原语每加一处都要 review），
+        // 而守卫在 panic 时也照样收——手写在最后一行的那种反而会留残。
+        let sb = crate::testutil::Sandbox::new(&format!("b23-leaf-{}", std::process::id()));
+        let root = sb.path();
+        let ms = 1_700_000_000_000i64;
+        for (leaf, must_contain) in [
+            ("Clash Verge Rev", "Clash-Verge-Rev"),
+            ("HiBit Uninstaller", "HiBit-Uninstaller"),
+            // 连续空格与首尾空格都压成一个分隔符，不留空段
+            ("  A   B  ", "A-B"),
+            // 路径分隔符与 Windows 保留字符一律不得出现在名字里（否则 join 会逃出备份目录）
+            (r"A/B\C:D*E?F", "A-B-C-D-E-F"),
+        ] {
+            let p = new_reg_backup_file(root, ms, leaf);
+            assert_eq!(p.parent(), Some(root), "净化后仍不得逃出备份目录: {leaf}");
+            let n = p.file_name().unwrap().to_string_lossy().to_string();
+            assert!(valid_uninstall_backup_name(&n), "生成的备份名过不了还原白名单: {leaf} → {n}");
+            assert!(n.contains(must_contain), "净化口径不符（{leaf} → {n}，应含 {must_contain}）");
+            assert!(backup_export_path(&p).is_ok(), "导出前自检必须放行自己生成的名字: {n}");
+        }
+        // 非 ASCII 末段：不能净化成一片分隔符——两份中文备份分不出谁是谁就等于没区分
+        let cn1 = new_reg_backup_file(root, ms, "网易云音乐");
+        let cn2 = new_reg_backup_file(root, ms, "网易大神");
+        let n1 = cn1.file_name().unwrap().to_string_lossy().to_string();
+        let n2 = cn2.file_name().unwrap().to_string_lossy().to_string();
+        assert!(valid_uninstall_backup_name(&n1) && valid_uninstall_backup_name(&n2), "{n1} / {n2}");
+        assert_ne!(n1, n2, "不同中文末段必须留下可区分的尾缀（纯替换会把两者压成同一个名字）");
+        assert!(n1.contains("_h") && n2.contains("_h"), "丢了非 ASCII 就该补哈希尾缀: {n1} / {n2}");
+        // 幂等：同一末段每次都喂出同一个名字（否则撞名让路的 _2/_3 会随进程漂移）
+        assert_eq!(new_reg_backup_file(root, ms, "网易云音乐"), cn1);
+        // 空末段 / 只有分隔符 ⇒ 回 key，不产出 `1700_.reg` 这种没有信息量的名字
+        for leaf in ["", "   ", "///", "-"] {
+            let n = new_reg_backup_file(root, ms, leaf).file_name().unwrap().to_string_lossy().to_string();
+            assert!(valid_uninstall_backup_name(&n), "兜底名也必须合法: {leaf:?} → {n}");
+            assert!(n.contains("key"), "空/纯分隔末段应回 key: {leaf:?} → {n}");
+        }
+        // 导出前自检必须**真能拒**：手工造一个带空格的名字（净化失效时就是这个形态）。
+        // 只断言「合法名回 Ok」是假绿 —— 把白名单校验摘掉照样过，本断言才盯得住那一条。
+        let bad = root.join("1700000000000_a reg.reg");
+        assert!(
+            backup_export_path(&bad).is_err(),
+            "导出前自检对非法名必须回 Err（否则删除会带出一份谁都不认识的孤儿备份）"
+        );
+        // 超长末段：截断后仍须合法，且截断不得把哈希尾缀切掉半截
+        let n = new_reg_backup_file(root, ms, &"甲".repeat(200))
+            .file_name().unwrap().to_string_lossy().to_string();
+        assert!(valid_uninstall_backup_name(&n), "超长末段截断后仍须合法: {n}");
+        assert!(n.contains("_h"), "截断不得吃掉哈希尾缀: {n}");
     }
 
     /// R2a-L03：报告根的「取哪几份」必须是**排序后**截断。

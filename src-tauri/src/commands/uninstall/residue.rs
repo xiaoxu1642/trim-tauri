@@ -1388,9 +1388,14 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             // R2a-L06：文件名由 `new_reg_backup_file` 这一个出口生成（撞名顺次让路，
             // 不再各处自拼 `{毫秒}_{末段}.reg` 互相覆盖）
             let file = new_reg_backup_file(&backup_dir, crate::engine::now_ms(), rest.rsplit('\\').next().unwrap_or("key"));
-            let Some(file_str) = file.to_str() else {
-                details.push(detail(kind, target, "fail", "备份路径无法表示为文本，拒绝删除"));
-                continue;
+            // B2-3：导出前自检。名字过不了还原白名单（末段带空格/中文而净化失效时就是这种）
+            // 就**既不导出也不删**——删除一旦发生，这份 .reg 是唯一还原依据，孤儿备份等于没备
+            let file_str = match backup_export_path(&file) {
+                Ok(s) => s,
+                Err(msg) => {
+                    details.push(detail(kind, target, "fail", &msg));
+                    continue;
+                }
             };
             let export_path = format!("{}\\{rest}", target.split('\\').next().unwrap_or(""));
             // v2-L4P-29（B-7）：备份类子进程统一走带超时入口，reg.exe 被拖住不再永久挂死
@@ -1400,7 +1405,7 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 .and_then(|exe| {
                     crate::engine::systembin::quiet_cmd_timeout(
                         exe,
-                        &["export", &export_path, file_str, "/y"],
+                        &["export", &export_path, &file_str, "/y"],
                         crate::engine::systembin::REG_EXPORT_TIMEOUT,
                     )
                 })
@@ -1461,9 +1466,13 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             // R2a-L06：与 reg_key 分支同一个出口生文件名。这一支的末段是**父键**叶子，
             // 同一批多条 MuiCache / 防火墙值天然同末段，是撞名覆盖的主形态。
             let file = new_reg_backup_file(&backup_dir, crate::engine::now_ms(), leaf);
-            let Some(file_str) = file.to_str() else {
-                details.push(detail(kind, target, "fail", "备份路径无法表示为文本，拒绝删除"));
-                continue;
+            // B2-3：与 reg_key 分支同一道导出前自检（两处都不许各自造名字或各自放行）
+            let file_str = match backup_export_path(&file) {
+                Ok(s) => s,
+                Err(msg) => {
+                    details.push(detail(kind, target, "fail", &msg));
+                    continue;
+                }
             };
             // v2-L4P-29（B-7）：备份类子进程统一走带超时入口
             // v6-K01（P0-2）：解析失败并进 backup_ok=false（同上 fail-closed）
@@ -1472,7 +1481,7 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 .and_then(|exe| {
                     crate::engine::systembin::quiet_cmd_timeout(
                         exe,
-                        &["export", key_part, file_str, "/y"],
+                        &["export", key_part, &file_str, "/y"],
                         crate::engine::systembin::REG_EXPORT_TIMEOUT,
                     )
                 })
