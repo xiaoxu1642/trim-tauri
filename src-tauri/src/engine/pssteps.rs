@@ -88,6 +88,10 @@ const KIND_BINARY: u32 = 3;
 const KIND_DWORD: u32 = 4;
 const KIND_QWORD: u32 = 11;
 
+/// `New-Object byte[] n` 的分配上限（R6c-11）。签名数据现值 n=40；
+/// 上限只防「解析面被喂进超大数字后在 `vec![0u8; n]` 处 abort」，不是业务约束。
+const MAX_BYTE_ALLOC: usize = 1024 * 1024;
+
 fn parse_ps_reg_path(p: &str) -> Option<(Hive, String)> {
     let p = p.trim();
     for (pref, h) in [
@@ -548,6 +552,13 @@ fn strip_pipeline(s: &str) -> Option<(&str, bool)> {
     if let Some((head, tail)) = t.rsplit_once('|') {
         if tail.trim() == "Out-Null" {
             t = head.trim();
+            // 只剥尾巴不够（R6c-06）：`New-Item … | ForEach-Object {…} | Out-Null`
+            // 剥掉尾段后仍剩一段管道，parse_cmd 会把 `|` 当位置参数忽略，
+            // 于是整条语句只剩 `KeyCreate`，中间那段副作用静默消失。
+            // 剥完后仍必须是单段，否则交回上层走 PsInline。
+            if split_pipes(t).len() != 1 {
+                return None;
+            }
         } else {
             return None;
         }
@@ -618,9 +629,14 @@ fn eval_term(t: &str, vars: &VarMap) -> Option<Expr> {
         return unquote(t).map(Expr::Str);
     }
     if t.starts_with('"') {
+        // 未闭合的双引号不是「按字面理解」，而是 PS 的语法错误（R6c-10）：
+        // 旧实现用 trim_matches('"') 兜底，会把只带前引号的串当成合法字面量。
+        if t.len() < 2 || !t.ends_with('"') {
+            return None;
+        }
         return unquote(t)
             .map(Expr::Str)
-            .or_else(|| interpolate(t.trim_matches('"'), vars).map(Expr::Str));
+            .or_else(|| interpolate(&t[1..t.len() - 1], vars).map(Expr::Str));
     }
     if let Some(rest) = t.strip_prefix('$') {
         let (name, prop) = match rest.split_once('.') {
@@ -713,6 +729,10 @@ fn parse_assign(stmt: &str, vars: &VarMap) -> Option<(String, Expr)> {
     if let Some(rest) = rhs.strip_prefix("New-Object") {
         let n = rest.trim().strip_prefix("byte[]")?.trim();
         let n = n.parse::<usize>().ok()?;
+        // R6c-11：上限必须在**分配前**判 —— `vec![0u8; n]` 失败是 abort 不是 Err。
+        if n > MAX_BYTE_ALLOC {
+            return None;
+        }
         return Some((name, Expr::Bytes(n)));
     }
     // `[byte[]](0x00,…)` 字面字节串
@@ -782,7 +802,12 @@ fn parse_assign(stmt: &str, vars: &VarMap) -> Option<(String, Expr)> {
                 return None;
             }
             let v = v.trim();
-            let v = unquote(v).unwrap_or_else(|| v.to_string());
+            // R6c-09：值必须走表达式求值，未定义变量 / 非法形态整条赋值失败，
+            // 不允许退化成字面 `$v` 写进注册表（PS 里会展开成真实值）。
+            let v = match eval_term(v, vars) {
+                Some(Expr::Str(s)) => s,
+                _ => return None,
+            };
             map.push((k, v));
         }
         if map.is_empty() {
@@ -1507,7 +1532,7 @@ fn parse_block(
 /// `if (Test-Path $p) { … }` → (守卫键, 内层 ops, 其后剩余文本)
 fn parse_if_test_path<'a>(
     src: &'a str,
-    vars: &mut std::collections::HashMap<String, Expr>,
+    vars: &VarMap,
 ) -> Result<Option<((Hive, String), Vec<PsOp>, &'a str)>, String> {
     let Some(rest) = src.trim_start().strip_prefix("if (Test-Path") else {
         return Ok(None);
@@ -1540,7 +1565,11 @@ fn parse_if_test_path<'a>(
     let inner = &after_paren[open + 1..close];
     let (hive, subkey) =
         parse_ps_reg_path(&path).ok_or_else(|| format!("Test-Path 路径不可识别: {path}"))?;
-    let ops = parse_block(inner, vars)?;
+    // R6c-07：守卫体内赋值只对守卫内后续语句可见（与 foreach 的 scoped 语义一致）。
+    // 旧实现直接写回外层 vars ⇒ 守卫不成立时也会把 `$p = 'HKLM:\A'` 当成已赋值，
+    // 后面的 `New-Item -Path $p` 就被无条件编译成 KeyCreate。
+    let mut scoped = vars.clone();
+    let ops = parse_block(inner, &mut scoped)?;
     Ok(Some(((hive, subkey), ops, &after_paren[close + 1..])))
 }
 
@@ -1833,7 +1862,10 @@ fn parse_statement(
         "sc.exe" => {
             validate_branch_params(&cmd, &[])?;
             // `sc.exe config <svc> start= <n>`：位置参数 [config, <svc>, start=, <n>]
-            if cmd.positional.len() != 4 || cmd.positional[0] != "config" {
+            if cmd.positional.len() != 4
+                || cmd.positional[0] != "config"
+                || !cmd.positional[2].eq_ignore_ascii_case("start=")
+            {
                 return Err(format!("sc.exe 只支持 `config <svc> start= <n>`: {raw}"));
             }
             let svc = unquote(&cmd.positional[1]).unwrap_or_else(|| cmd.positional[1].clone());
@@ -1880,7 +1912,8 @@ fn encode_value(
     // 变量形式的值（如 $zero / $nowFt）；resolve_vars 会把 Bytes 变量替换成哨兵
     if let Some(name) = value.trim().strip_prefix('$') {
         return match vars.get(name) {
-            Some(Expr::Bytes(n)) => Ok((KIND_BINARY, vec![0u8; *n])),
+            Some(Expr::Bytes(n)) if *n <= MAX_BYTE_ALLOC => Ok((KIND_BINARY, vec![0u8; *n])),
+            Some(Expr::Bytes(n)) => Err(format!("byte[] 长度 {n} 超过上限 {MAX_BYTE_ALLOC}")),
             Some(Expr::BytesData(d)) => Ok((KIND_BINARY, d.clone())),
             Some(Expr::Str(s)) => Ok(sz_bytes(s)),
             _ => Err(format!("变量 ${name} 不能作 -Value")),
@@ -1892,6 +1925,9 @@ fn encode_value(
         .and_then(|s| s.strip_suffix("__"))
         .and_then(|s| s.parse::<usize>().ok())
     {
+        if n > MAX_BYTE_ALLOC {
+            return Err(format!("byte[] 长度 {n} 超过上限 {MAX_BYTE_ALLOC}"));
+        }
         return Ok((KIND_BINARY, vec![0u8; n]));
     }
     // 字节串 hex 哨兵（BytesData 变量经 resolve_vars 过墙的形态，v3-K1）
@@ -1919,7 +1955,13 @@ fn encode_value(
         let data = parse_byte_list(inner).ok_or_else(|| format!("内联字节列表畸形: {value}"))?;
         return Ok((KIND_BINARY, data));
     }
-    match ptype.trim().to_ascii_lowercase().as_str() {
+    // R6c-08：只放行本解析器**真的实现了**的五个类型标签。旧实现的 `_` 兜底把
+    // `MultiString`、`None`、拼错标签一律写成 REG_SZ —— 类型不同、值也可能不同，
+    // 比失败更难发现。不认识就 Err，交回 PsInline 由 PowerShell 自己解释。
+    let ptype_norm = unquote(ptype.trim())
+        .unwrap_or_else(|| ptype.trim().to_string())
+        .to_ascii_lowercase();
+    match ptype_norm.as_str() {
         "dword" => {
             let n: i32 = unquote(value)
                 .unwrap_or_else(|| value.to_string())
@@ -1953,11 +1995,14 @@ fn encode_value(
             let (_, bytes) = sz_bytes(&s);
             Ok((KIND_EXPAND_SZ, bytes))
         }
-        // String / 其它标签一律按 SZ（与 New-ItemProperty 不带类型时的默认一致）
-        _ => {
+        // String / Sz：与 New-ItemProperty 不带类型时的默认一致
+        "string" | "sz" => {
             let s = unquote(value).ok_or_else(|| format!("字符串值非字面量: {value}"))?;
             Ok(sz_bytes(&s))
         }
+        other => Err(format!(
+            "不支持的 -PropertyType: {other}（本解析器只认 DWord/QWord/Binary/String/ExpandString）"
+        )),
     }
 }
 
@@ -2108,6 +2153,12 @@ fn task_op_result(silent: bool, run: &native::TaskRun) -> Result<String, String>
     }
 }
 
+/// 删值失败的统一归因（R6c-12）。纯函数：与 win32 错误码 → 人话的映射同源，
+/// 不在执行分支里另写一份。
+fn value_remove_err(subkey: &str, name: &str, code: u32) -> String {
+    format!("删注册表值失败: {subkey}\\{name} —— {}", reg_err(code))
+}
+
 fn exec_one(op: &PsOp) -> Result<String, String> {
     match op {
         PsOp::KeyCreate { hive, subkey } => {
@@ -2171,10 +2222,9 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
                     hive_prefix(*hive)
                 ));
             }
-            if native::reg_restore_delete(hive_handle(*hive), subkey, name) {
-                Ok(String::new())
-            } else {
-                Err(format!("删注册表值失败: {subkey}\\{name}"))
+            match native::reg_restore_delete_checked(hive_handle(*hive), subkey, name) {
+                Ok(()) => Ok(String::new()),
+                Err(code) => Err(value_remove_err(subkey, name, code)),
             }
         }
         PsOp::SvcStop { name } => {
@@ -2972,5 +3022,145 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ops.len(), 1, "注释（含引号）之后的新语句必须仍被识别");
+    }
+
+    /// R6c-05：`sc.exe` 的位置词必须真的是 `start=`。
+    /// 判红：删掉 `positional[2]` 校验 ⇒ 第一条变 Ok（SvcSetStart{4}）。
+    #[test]
+    fn sc配置只认_start_位置词() {
+        assert!(
+            compile("sc.exe config W32Time depend= disabled").is_err(),
+            "`depend=` 不是 `start=`，不得被读成启动类型"
+        );
+        let ops = compile("sc.exe config W32Time start= disabled").expect("现行形态应可编译");
+        assert!(matches!(&ops[0], PsOp::SvcSetStart { start: 4, .. }), "{ops:?}");
+    }
+
+    /// R6c-06：`| Out-Null` 之前若还有第二段管道，不得只执行第一段的副作用。
+    /// 判红：删掉 `strip_pipeline` 的单管道校验 ⇒ 此处只剩 `SvcSetStart`。
+    #[test]
+    fn 中段管道不得被静默丢弃() {
+        let ops = compile(
+            "Set-Service -Name W32Time -StartupType Manual | ForEach-Object { Out-Null } | Out-Null",
+        );
+        if let Ok(ops) = ops {
+            assert!(
+                matches!(ops.as_slice(), [PsOp::PsInline { .. }]),
+                "中间还有一段管道时必须整体交回 PowerShell，不得只执行第一段: {ops:?}"
+            );
+        }
+        // Err 也是安全方向：不接管就不存在「半段执行」。
+    }
+
+    /// R6c-07：守卫体内的赋值只对守卫内可见，不得泄漏到守卫外。
+    /// 判红：把 `parse_if_test_path` 的 scoped 克隆改回直接写回 ⇒ 第一条出现 `KeyCreate`。
+    #[test]
+    fn 守卫体内赋值不得泄漏到守卫外() {
+        if let Ok(ops) = compile(
+            "if (Test-Path 'HKLM:\\Nope') { $p = 'HKLM:\\A' }\nNew-Item -Path $p -Force | Out-Null",
+        ) {
+            assert!(
+                !ops.iter().any(|o| matches!(o, PsOp::KeyCreate { .. })),
+                "守卫不成立时 $p 未赋值，不得无条件建键: {ops:?}"
+            );
+        }
+        // 正向对照：守卫体内的真实写入仍必须进 GuardedKeyExists。
+        let ok = compile(
+            "if (Test-Path 'HKLM:\\Nope') { New-Item -Path 'HKLM:\\A' -Force | Out-Null }",
+        )
+        .unwrap();
+        assert!(
+            matches!(&ok[0], PsOp::GuardedKeyExists { ops, .. } if matches!(ops.as_slice(), [PsOp::KeyCreate { .. }])),
+            "{ok:?}"
+        );
+    }
+
+    /// R6c-08：未知 `-PropertyType` 不得被写成 REG_SZ。
+    /// 判红：恢复 `_ => SZ` 兜底 ⇒ 三个负例变成原生 `ValueWrite{kind=SZ}`。
+    #[test]
+    fn 未知属性类型一律拒绝() {
+        for ptype in ["MultiString", "None", "RegSz"] {
+            let src = format!(
+                "New-ItemProperty -Path 'HKCU:\\TrimTypeProbe' -Name A -Value 'x' -PropertyType {ptype} -Force"
+            );
+            if let Ok(ops) = compile(&src) {
+                assert!(
+                    matches!(ops.as_slice(), [PsOp::PsInline { .. }]),
+                    "{ptype} 不得被原生写成 SZ: {ops:?}"
+                );
+            }
+        }
+        let ops = compile(
+            "New-ItemProperty -Path 'HKCU:\\TrimTypeProbe' -Name A -Value 'x' -PropertyType String -Force",
+        )
+        .unwrap();
+        assert!(matches!(&ops[0], PsOp::ValueWrite { kind: KIND_SZ, .. }), "{ops:?}");
+    }
+
+    /// R6c-09：哈希表值必须走表达式求值，未定义变量不得写成字面 `$v`。
+    /// 判红：值处理改回 `unquote(...).unwrap_or_else(|| v.to_string())` ⇒ 第一条出现 `ValueWrite`。
+    #[test]
+    fn 哈希表值必须可求值() {
+        if let Ok(ops) = compile(
+            "$map = @{ A = $v }\n$k = 'A'\nNew-ItemProperty -Path 'HKCU:\\TrimMapProbe' -Name V -Value $map[$k] -PropertyType String -Force",
+        ) {
+            assert!(
+                matches!(ops.as_slice(), [PsOp::PsInline { .. }]),
+                "未定义变量不得被写成字面 $v: {ops:?}"
+            );
+        }
+        // 正向对照：数字与已赋值变量仍可解析。
+        let ok = compile(
+            "$v = 'x'\n$map = @{ A = $v; B = 3 }\n$k = 'A'\nNew-ItemProperty -Path 'HKCU:\\TrimMapProbe' -Name V -Value $map[$k] -PropertyType String -Force",
+        )
+        .unwrap();
+        assert!(matches!(&ok[0], PsOp::ValueWrite { .. }), "{ok:?}");
+    }
+
+    /// R6c-10：未闭合双引号是 PS 语法错误，不得被兜底成字面量。
+    /// 判红：恢复 `trim_matches('"')` 兜底 ⇒ 第一条被编译成 `ab`（赋值无 op、不报错）。
+    #[test]
+    fn 未闭合双引号不得当字面量() {
+        if let Ok(ops) = compile("$x = \"a\" + \"b") {
+            assert!(
+                matches!(ops.as_slice(), [PsOp::PsInline { .. }]),
+                "未闭合引号必须交给 PowerShell 报语法错误: {ops:?}"
+            );
+        }
+        let ok = compile("$n = 'x'\n$x = \"a$n\"").unwrap();
+        assert!(ok.is_empty(), "合法插值赋值不产生操作: {ok:?}");
+    }
+
+    /// R6c-11：`byte[]` 长度有上限，且必须在分配前拒绝。
+    /// 判红：删掉 `MAX_BYTE_ALLOC` 判断 ⇒ 第一条被原生接受（测试不得真的分配大块内存）。
+    #[test]
+    fn byte数组长度有上限() {
+        let r = compile(
+            "$zero = New-Object byte[] 1048577\nNew-ItemProperty -Path 'HKCU:\\TrimByteProbe' -Name A -Value $zero -PropertyType Binary -Force",
+        );
+        assert!(
+            r.is_err() || matches!(&r.as_ref().unwrap()[0], PsOp::PsInline { .. }),
+            "超限 byte[] 不得被原生接受（断言不打印字节内容）"
+        );
+        let ok = compile(
+            "$zero = New-Object byte[] 40\nNew-ItemProperty -Path 'HKCU:\\TrimByteProbe' -Name A -Value $zero -PropertyType Binary -Force",
+        )
+        .unwrap();
+        assert!(
+            matches!(&ok[0], PsOp::ValueWrite { data, .. } if data.len() == 40),
+            "{ok:?}"
+        );
+    }
+
+    /// R6c-12：删值失败的归因必须指到下一步动作。
+    /// 判红：删掉 `value_remove_err` 的 `reg_err(code)` ⇒ 第一条不含「拒绝访问」。
+    #[test]
+    fn 删值失败带win32归因() {
+        let denied = value_remove_err("Software\\TrimProbe", "A", 5);
+        assert!(
+            denied.contains("拒绝访问") && denied.contains("Software\\TrimProbe"),
+            "删值失败要说清是权限问题并点名路径: {denied}"
+        );
+        assert!(value_remove_err("S", "V", 13).contains("长度"), "13 = 长度不符");
     }
 }

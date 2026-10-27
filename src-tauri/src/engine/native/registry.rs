@@ -910,22 +910,31 @@ fn open_key_missing_is_idempotent(code: u32) -> bool {
 }
 
 pub fn reg_restore_delete(hive: HKEY, subkey: &str, value_name: &str) -> bool {
+    reg_restore_delete_checked(hive, subkey, value_name).is_ok()
+}
+
+/// 同 [`reg_restore_delete`]，但把失败码交给调用方渲染成人话（R6c-12）。
+///
+/// 删值失败的原因（拒绝访问 / 长度不符）此前在 pssteps 侧只能报一句「删注册表值失败」，
+/// 用户拿不到可行动信息。语义与 bool 版本完全一致：键不存在仍是幂等成功。
+pub fn reg_restore_delete_checked(hive: HKEY, subkey: &str, value_name: &str) -> Result<(), u32> {
     use windows::Win32::Foundation::WIN32_ERROR;
     const ERROR_FILE_NOT_FOUND: WIN32_ERROR = WIN32_ERROR(2);
-    // 形态闸先于任何 Win32 调用（红线⑨：判定字节 ≠ 执行字节）
-    let (Ok(sk), Ok(nm)) = (to_wide_checked(subkey), to_wide_checked(value_name)) else {
-        return false;
+    // 形态闸先于任何 Win32 调用（红线⑨：判定字节 ≠ 执行字节）；123 = ERROR_INVALID_NAME
+    let (sk, nm) = match (to_wide_checked(subkey), to_wide_checked(value_name)) {
+        (Ok(sk), Ok(nm)) => (sk, nm),
+        _ => return Err(123),
     };
     let mut hk = HKEY::default();
     unsafe {
         let opened = RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk);
         if opened.is_err() {
-            // R5b-M01（v7.2 C06）：只有「键不存在」才是幂等成功。
-            return open_key_missing_is_idempotent(opened.0);
+            let code = opened.0;
+            return if open_key_missing_is_idempotent(code) { Ok(()) } else { Err(code) };
         }
         let r = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
         let _ = RegCloseKey(hk);
-        r.is_ok() || r == ERROR_FILE_NOT_FOUND
+        if r.is_ok() || r == ERROR_FILE_NOT_FOUND { Ok(()) } else { Err(r.0) }
     }
 }
 
@@ -1258,11 +1267,11 @@ mod tests {
         );
 
         // ④ 删值面：键路径与值名都要过闸（两个出口各钉一次）
-        let restore_del = body_of(prod, "pub fn reg_restore_delete");
+        let restore_del = body_of(prod, "pub fn reg_restore_delete_checked");
         assert!(
             restore_del.contains("to_wide_checked(subkey)")
                 && restore_del.contains("to_wide_checked(value_name)"),
-            "删值面（reg_restore_delete）必须对键路径与值名都吃 to_wide_checked"
+            "删值面（reg_restore_delete_checked）必须对键路径与值名都吃 to_wide_checked"
         );
         let del_value = body_of(prod, "pub(super) unsafe fn reg_delete_value");
         assert!(
