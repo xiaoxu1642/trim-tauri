@@ -766,26 +766,52 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
     // - 腿②（本段打的来源标记）挡住「不是本次扫描现读得到的」那一类 —— 执行侧
     //   只收 `origin:"scan"` 的 task 行。
     match read_disabled_records() {
-        Ok(records) => {
-            for r in records {
-                let Some(id) = r.get("id").and_then(|v| v.as_str()) else { continue; };
-                if results.iter().any(|x| x.get("id").and_then(|v| v.as_str()) == Some(id)) { continue; }
-                let mut item = r.clone();
-                if let Some(o) = item.as_object_mut() {
-                    o.insert("enabled".into(), json!(false));
-                    o.insert("disabledBy".into(), json!("trim"));
-                    // 来源标记覆盖台账行自带的任何值（台账行里的 `origin` 不可信）。
-                    o.insert("origin".into(), json!("disabled-ledger"));
-                }
-                results.push(item);
-            }
-        }
+        Ok(records) => merge_disabled_ledger(&mut results, &records),
         Err(e) => {
             crate::engine::log::write_log("warn", &format!("启动项禁用台账不可读，本次按无附加项处理: {e}"));
         }
     }
 
     Ok(results)
+}
+
+/// 把台账行并入扫描结果（R5a-M01 腿②的唯一实现）。
+///
+/// 抽成纯函数是为了让它**能被判红而不用碰用户真实台账**：旧写法把这段留在
+/// `startup_scan` 里，验收只能走「写 `%APPDATA%\...\disabled.json` → 扫描 → 断言」，
+/// 那既会覆盖用户台账（Drop 守卫只删自己写的那份，用户原有记录已经没了），
+/// 又会与并行跑的同域用例互相踩（本机实测偶发红，2026-10-27 B2 批次复现）。
+fn merge_disabled_ledger(results: &mut Vec<Value>, records: &[Value]) {
+    for r in records {
+        let Some(id) = r.get("id").and_then(|v| v.as_str()) else { continue; };
+        if results.iter().any(|x| x.get("id").and_then(|v| v.as_str()) == Some(id)) { continue; }
+        let mut item = r.clone();
+        if let Some(o) = item.as_object_mut() {
+            o.insert("enabled".into(), json!(false));
+            o.insert("disabledBy".into(), json!("trim"));
+            // 来源标记覆盖台账行自带的任何值（台账行里的 `origin` 不可信）。
+            o.insert("origin".into(), json!("disabled-ledger"));
+        }
+        results.push(item);
+    }
+}
+
+/// 判据函数的**链路挂载点**（B1-3 的自证锚）：扫描合并段必须调
+/// [`merge_disabled_ledger`]，执行两臂必须调 [`require_scan_origin`]。
+/// 判据函数自身再正确，没挂上链路等于没修 —— 这条字符串断言是那个「挂上了」的证据。
+#[cfg(test)]
+const MERGE_CALLSITE: &str = "merge_disabled_ledger(&mut results, &records)";
+
+/// 会**写真实用户台账**的用例共用这把锁（2026-10-27 B2 批次）。
+///
+/// 台账只有一本（`%APPDATA%\...\startup-backup\disabled.json` + 老根兜底），
+/// `startup_toggle` / `startup_delete` 结尾都会把它整体写回。多条用例并行跑时，
+/// 「写注入行 → 扫描断言」的窗口会被另一条用例的写回踩掉 —— 本机实测偶发红
+/// （B1 的端到端用例在 B2 批次里复现过一次）。锁只作用于测试，不进生产语义。
+#[cfg(test)]
+fn ledger_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    L.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 // ==================== B5 startup_toggle：启动项启用/禁用 ====================
@@ -2331,11 +2357,41 @@ mod r5a_m01_task_guard_tests {
     /// 链路任一环没接上（合并段没打标记 / 执行臂忘了调 / 快照层把它换掉了），
     /// 三条判据函数照样全绿，而注入行照样能驱动 `schtasks`。
     ///
+    /// 2026-10-27（B2 批次）修正两处：**① 不再删用户的台账**（旧版 Drop 里直接
+    /// `remove_file`，把用户原有 `disabled.json` 一并抹掉）；改成先快照原字节、结束时原样
+    /// 写回（原本没有的则删掉）。**② 全程持 `ledger_lock()`** —— 同域用例结尾都会把台账
+    /// 整体写回，并行跑时会在「写注入行 → 扫描」的窗口里踩掉注入内容（本机实测偶发红）。
+    ///
     /// 判红自证：
-    /// - 把扫描合并段的 `o.insert("origin", "disabled-ledger")` 去掉 ⇒ ② 红；
-    /// - 把 `require_scan_origin` 改成恒 `Ok(())` ⇒ ④ 红。
+    /// - 把 `merge_disabled_ledger` 的 `origin` 覆盖去掉 ⇒ ③ 红；
+    /// - 把 `require_scan_origin` 改成恒 `Ok(())` ⇒ ④⑤ 红。
     #[test]
     fn 台账注入的task行扫描后必须带台账标记且被执行臂拒() {
+        let _g = ledger_lock();
+        // ⓪ 快照原台账（两本候选都要），Drop 里原样写回 —— 测试不许覆盖用户数据。
+        struct Snapshot(Vec<(std::path::PathBuf, Option<Vec<u8>>)>);
+        impl Drop for Snapshot {
+            fn drop(&mut self) {
+                for (f, bytes) in &self.0 {
+                    match bytes {
+                        Some(b) => {
+                            let _ = std::fs::write(f, b);
+                        }
+                        None => {
+                            let _ = std::fs::remove_file(f);
+                        }
+                    }
+                }
+            }
+        }
+        let candidates = startup_disabled_file_candidates();
+        let _snapshot = Snapshot(
+            candidates
+                .iter()
+                .map(|f| (f.clone(), std::fs::read(f).ok()))
+                .collect(),
+        );
+
         // ① 准备台账：注入一行 `source:"task"` 且 taskPath 是**合法**的根容器形态
         let evil_id = "task|\\TrimEvilTask";
         let evil = json!({
@@ -2355,26 +2411,19 @@ mod r5a_m01_task_guard_tests {
         // 选最新的一本，只写新根的话，机器上若残留一本更新的老根台账，选中的就不是
         // 我们写的那本 ⇒ 用例变成「看运气」（本机实测踩过：清理残留前一直红）。
         // 两本都写 ⇒ 选中的必然是我们写的这一份内容。
-        let mut written: Vec<std::path::PathBuf> = Vec::new();
-        for f in startup_disabled_file_candidates() {
+        for f in &candidates {
             let _ = std::fs::create_dir_all(
                 f.parent().unwrap_or_else(|| std::path::Path::new(".")),
             );
-            std::fs::write(&f, &payload).expect("台账写入");
-            written.push(f);
+            std::fs::write(f, &payload).expect("台账写入");
         }
-        // Drop 守卫：断言提前 panic 时也要清干净（不留残迹污染后续轮次）
-        struct Cleanup(Vec<std::path::PathBuf>);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                for f in &self.0 {
-                    let _ = std::fs::remove_file(f);
-                }
-            }
-        }
-        let _cleanup = Cleanup(written);
 
         // ② 扫描：台账行必须被并入，且带上 `origin:"disabled-ledger"` 标记
+        // 先钉「合并段真挂在 startup_scan 上」——判据函数再对，没挂链路等于没修。
+        assert!(
+            include_str!("startup.rs").contains(MERGE_CALLSITE),
+            "startup_scan 没有调用 merge_disabled_ledger ⇒ 台账行根本进不了扫描结果"
+        );
         let scanned = startup_scan().expect("扫描应成功");
         let row = scanned
             .iter()
@@ -2465,6 +2514,7 @@ mod input_chain_tests {
     /// 正向断言：禁用方向在动作之前被拒（不碰注册表），回执点名是哪条护栏。
     #[test]
     fn 禁用方向被拒且回执点名护栏() {
+        let _g = ledger_lock();
         let res = startup_toggle(&[reg_item("ctfmon", r"C:\Windows\System32\ctfmon.exe")], false)
             .expect("整批不应失败（护栏只让这一条 failed）");
         assert_eq!(res["success"], json!(0), "受保护项不得算成功: {res}");
@@ -2476,6 +2526,7 @@ mod input_chain_tests {
     /// 删除方向无条件拒（不像禁用还有「系统本来就关了」的歧义）。
     #[test]
     fn 删除方向被拒() {
+        let _g = ledger_lock();
         let res = startup_delete(&[reg_item("ctfmon", r"C:\Windows\System32\ctfmon.exe")])
             .expect("整批不应失败");
         assert_eq!(res["success"], json!(0), "受保护项不得被删: {res}");

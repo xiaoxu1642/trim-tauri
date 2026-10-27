@@ -1195,23 +1195,17 @@ pub fn power_plan_import(path: &Path) -> Result<Value, String> {
     }))
 }
 
-/// 导出 A′：只在这一条路径破例起 `powercfg.exe`，先落应用私有 tmp，再复制到用户目标。
-pub fn power_plan_export(guid: &str, destination: &Path) -> Result<Value, String> {
-    let _ = require_listed_scheme(guid)?;
-    validate_export_destination(destination)?;
-    let tmp_dir = crate::engine::paths::temp_script_dir()?;
-    // B2-1：名字由 `engine::tmpnames` 的形态声明拼出，与清扫白名单共用同一份。
-    let tmp_path = tmp_dir.join(crate::engine::tmpnames::POWER_PLAN_EXPORT.build(
-        crate::engine::now_ms(),
-        &std::process::id().to_string(),
-    ));
-    let _ = std::fs::remove_file(&tmp_path);
-    let mut cleanup = RemoveOnDrop(Some(tmp_path.clone()));
-    let tmp_str = tmp_path.to_string_lossy().to_string();
+/// 把方案导出到**调用方给的路径**（落位语义由调用方负责），返回字节数。
+///
+/// 三判（v6-K01 口径）：`powercfg` 退出码成功 + 产出非空普通文件 + 回读仍能枚举到该方案。
+/// 抽出来是因为「用户自选导出」（可能跨卷，走 copy）与「备份落位」（必判根，走 rename）
+/// 两条路径要共用同一份三判，不能各写一套。
+fn powercfg_export_to(guid: &str, target: &Path) -> Result<u64, String> {
+    let target_str = target.to_string_lossy().to_string();
     // v6-K01（P0-2）：解析失败与 spawn 失败同报错口径
     let out = crate::engine::systembin::quiet_cmd_timeout(
         crate::engine::systembin::system_tool("powercfg.exe")?,
-        &["/export", tmp_str.as_str(), guid],
+        &["/export", target_str.as_str(), guid],
         crate::engine::systembin::POWERCFG_TIMEOUT,
     )
     .map_err(|e| format!("启动 powercfg.exe 失败：{e}"))?;
@@ -1224,7 +1218,7 @@ pub fn power_plan_export(guid: &str, destination: &Path) -> Result<Value, String
                 .unwrap_or_else(|| "未知".to_string())
         ));
     }
-    let md = std::fs::symlink_metadata(&tmp_path)
+    let md = std::fs::symlink_metadata(target)
         .map_err(|e| format!("导出后读取中转文件失败：{e}"))?;
     if crate::engine::protect::is_reparse(&md) || !md.is_file() || md.len() == 0 {
         return Err("powercfg /export 未产出有效的非空普通文件".to_string());
@@ -1232,7 +1226,25 @@ pub fn power_plan_export(guid: &str, destination: &Path) -> Result<Value, String
     if !listed_scheme(guid) {
         return Err(format!("导出后回读不到方案 {guid}，已按失败上报"));
     }
-    let bytes = md.len();
+    Ok(md.len())
+}
+
+/// 导出 A′：只在这一条路径破例起 `powercfg.exe`，先落应用私有 tmp，再复制到用户目标。
+///
+/// 用户目标可以是他盘（跨卷），故这里仍是 copy 而非 rename —— 与备份落位分两条路，
+/// 备份那条在 `power_high_performance_hide` 里走 `backup_write::land_backup`。
+pub fn power_plan_export(guid: &str, destination: &Path) -> Result<Value, String> {
+    let _ = require_listed_scheme(guid)?;
+    validate_export_destination(destination)?;
+    let tmp_dir = crate::engine::paths::temp_script_dir()?;
+    // B2-1：名字由 `engine::tmpnames` 的形态声明拼出，与清扫白名单共用同一份。
+    let tmp_path = tmp_dir.join(crate::engine::tmpnames::POWER_PLAN_EXPORT.build(
+        crate::engine::now_ms(),
+        &std::process::id().to_string(),
+    ));
+    let _ = std::fs::remove_file(&tmp_path);
+    let mut cleanup = RemoveOnDrop(Some(tmp_path.clone()));
+    let bytes = powercfg_export_to(guid, &tmp_path)?;
     std::fs::copy(&tmp_path, destination)
         .map_err(|e| format!("复制导出文件到目标路径失败：{e}"))?;
     let _ = std::fs::remove_file(&tmp_path);
@@ -1381,9 +1393,13 @@ pub fn power_high_performance_hide() -> Result<Value, String> {
     std::fs::create_dir_all(&root).map_err(|e| format!("创建备份目录失败：{e}"))?;
     let backup = root.join(format!("high-performance-{}.powrplan", crate::engine::now_ms()));
     let backup_s = backup.to_string_lossy().to_string();
-    let export = power_plan_export(HIGH_PERFORMANCE_GUID, &backup)
-        .map_err(|e| format!("导出备份失败，未执行删除：{e}"))?;
-    let bytes = export.get("bytes").and_then(Value::as_u64).unwrap_or(0);
+    // B2-2：备份落位走「私有 tmp 产出 → 判备份根 → 同卷 rename」。
+    // 旧实现由 `power_plan_export` 直接 copy 到目标 —— 备份根被换成 junction 时，
+    // 「删除前唯一还原依据」会落在链接另一头，而这里紧接着就要删方案。
+    let bytes = crate::engine::backup_write::land_backup(&root, &backup, |stage| {
+        powercfg_export_to(HIGH_PERFORMANCE_GUID, stage).map(|_| ())
+    })
+    .map_err(|e| format!("导出备份失败，未执行删除：{e}"))?;
     crate::engine::paths::prune_stamped_files(&root, 50);
     // R5b-M11（v7.2 C06）：先落还原台账，再删方案。旧顺序是「先删、后记账」——
     // 记账失败即通过 `?` 返回 Err，回执说「未更改」，但方案已经删掉、power-ops.json

@@ -738,7 +738,10 @@ fn ancestor_block_reason(p: &std::path::Path, stop_after: Option<&std::path::Pat
 /// 两段路径是否同一处：Windows 路径大小写不敏感，且尾部分隔符形态不稳定，
 /// 所以按「大写归一 + 去尾分隔符」的字符串比较，不用 `canonicalize`（它会跟随链接，
 /// 观测层就错了 —— 与本文件 `canonicalize` 只用于别名面核验、不用于 reparse 观测同口径）。
-fn paths_same(a: &std::path::Path, b: &std::path::Path) -> bool {
+///
+/// B2-2 起对外：备份写出要核「被判定的根」与「落位目标的父目录」是同一处
+/// （判 A 写 B 是这类闸门最容易漏的形态），那里不能另抄一份路径比较。
+pub(crate) fn paths_same(a: &std::path::Path, b: &std::path::Path) -> bool {
     let norm = |p: &std::path::Path| -> String {
         let s = p.to_string_lossy().to_uppercase();
         s.trim_end_matches(['\\', '/']).to_string()

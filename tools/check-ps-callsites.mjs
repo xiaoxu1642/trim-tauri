@@ -328,7 +328,7 @@ check(
 // ② 谁把 REG_EXPORT_TIMEOUT 常量改掉（换字面量/换时长）即红（超时一致性）。
 const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/engine/native/startup.rs', anchor: '&["export", &export_path, reg_file_str, "/y"]', reason: '启动项禁用台账：删值前整键备份' },
-  { file: 'src-tauri/src/engine/native/peripheral.rs', anchor: '&["export", &reg_path, backup_file_str, "/y"]', reason: '外设优化写值前逐键备份' },
+  { file: 'src-tauri/src/engine/native/peripheral.rs', anchor: '&["export", &reg_path, stage_str, "/y"]', reason: '外设优化写值前逐键备份（B2-2：导出到私有中转件，落位由 land_backup 判根后 rename）' },
   { file: 'src-tauri/src/engine/native/cleanup.rs', anchor: '&["export", &export_path, file_str, "/y"]', reason: 'cleanup regKeys 删除前逐键备份' },
   { file: 'src-tauri/src/commands/uninstall/residue.rs', anchor: '&["export", &export_path, file_str, "/y"]', reason: '残留 reg_key 删除前整键备份' },
   { file: 'src-tauri/src/commands/uninstall/residue.rs', anchor: '&["export", key_part, file_str, "/y"]', reason: '残留 reg_value 删值前父键备份' },
@@ -338,7 +338,7 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Query", "/TN", task, "/NH"],', reason: '顽固软件治理：判任务是否存在' },
   { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Query", "/TN", task, "/XML"],', reason: '顽固软件治理：删任务前导出 XML（唯一还原凭据）' },
   { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Delete", "/TN", task, "/F"],', reason: '顽固软件治理：删除计划任务' },
-  { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["export", &run_reg_path, reg_file_str, "/y"]', reason: '顽固软件治理：删抖音托盘 Run 值前整键备份（2026-10-06 扩链）' },
+  { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["export", &run_reg_path, stage_str, "/y"]', reason: '顽固软件治理：删抖音托盘 Run 值前整键备份（2026-10-06 扩链；B2-2 改导出到私有中转件）' },
   // 维护任务（v2-L4P-37/F-6）：sfc/DISM/sc，30 分钟上限
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'exe, args, MAINT_CMD_TIMEOUT', reason: '维护任务 run_cmd：sfc/DISM/sc 长耗时子进程', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&["stop", name],', reason: 'stop_service_wait 的 sc stop（R5b-M09 收 30s 档）', timeoutConst: 'SC_CMD_TIMEOUT', secs: 30 },
@@ -366,7 +366,7 @@ const TIMEOUT_SPAWN_SITES = [
   // 是「第四本无超时出口」：命令挂在扫描/体检/修复/优化步骤的同步链上，挂住即锁 IPC。
   // 本次改造由本表棘轮反向抓出（改造后首跑 F 组未登记 11 处全被点名）。
   // v5 P0：电源计划导出是唯一破例子进程；读取/枚举/写值仍走 powrprof。
-  { file: 'src-tauri/src/engine/native/syspanel.rs', anchor: '&["/export", tmp_str.as_str(), guid]', reason: '电源计划导出：powercfg /export 到应用私有 tmp，再复制到用户目标', timeoutConst: 'POWERCFG_TIMEOUT', secs: 30 },
+  { file: 'src-tauri/src/engine/native/syspanel.rs', anchor: '&["/export", target_str.as_str(), guid]', reason: '电源计划导出：powercfg /export 到调用方给的路径（用户自选目标 copy 落位、备份走 land_backup 判根 rename）', timeoutConst: 'POWERCFG_TIMEOUT', secs: 30 },
   { file: 'src-tauri/src/commands/appearance.rs', anchor: '"EnableTransparency",', reason: '外观查询：读系统透明度开关（reg query，只读低频）', timeoutConst: 'REG_EXPORT_TIMEOUT', secs: 15 },
   { file: 'src-tauri/src/commands/misc.rs', anchor: '"IMAGENAME eq DWMBlurGlass.exe"', reason: 'DWM 注入工具探测：tasklist 进程痕迹', timeoutConst: 'PROBE_TIMEOUT', secs: 10 },
   { file: 'src-tauri/src/commands/misc.rs', anchor: '"/TN", "DWMBlurGlass_Extend"', reason: 'DWM 注入工具探测：schtasks 计划任务痕迹', timeoutConst: 'PROBE_TIMEOUT', secs: 10 },

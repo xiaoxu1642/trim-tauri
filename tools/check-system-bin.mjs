@@ -146,6 +146,11 @@ const RAW_EXEMPT = [
     anchor: 'let built = std::process::Command::new("cmd")',
     reason: 'P0-2A（B2）真机 #[ignore] 探针：mklink /J 在 lib 单测隔离数据根内造 junction 当裁根，验证 prune_backups_ext / prune_stamped_files 整轮跳过且另一头 5 份备份完好（cfg(test) 专用、非生产执行面）',
   },
+  {
+    file: 'src-tauri/src/engine/backup_write.rs',
+    anchor: 'let out = std::process::Command::new("cmd")',
+    reason: 'B2-2 验收用例：mklink /J 把备份根换成指向沙箱另一目录的 junction，验证 land_backup 判根拒绝且链接另一头零新增文件（cfg(test) 专用、非生产执行面；与 cleanup.rs / fileclean.rs / protect.rs 夹具同口径，junction 无稳定 Rust API）',
+  },
 ];
 
 /**

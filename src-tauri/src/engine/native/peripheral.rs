@@ -68,20 +68,30 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
         part += 1;
         let reg_path = format!("HKLM\\{subkey}");
         let backup_file = backup_dir.join(format!("backup_{stamp}_{part}.reg"));
-        // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，整批中止（备份不完整绝不能继续写入）
-        let Some(backup_file_str) = backup_file.to_str() else { return Err("备份路径无法编码".into()); };
         // v2-L4P-29（B-7）：备份类子进程统一走带超时入口
         // v6-K01（P0-2）：解析失败走既有 Err 回执（备份不完整绝不写入）
-        let exe = system_tool("reg.exe")?;
-        let out = crate::engine::systembin::quiet_cmd_timeout(
-            exe,
-            &["export", &reg_path, backup_file_str, "/y"],
-            crate::engine::systembin::REG_EXPORT_TIMEOUT,
-        );
-        if !out.map(|o| o.status.success()).unwrap_or(false) {
-            let _ = std::fs::remove_file(&backup_file);
-            return Err("注册表备份失败".into());
-        }
+        // B2-2：导出写到**中转件**，落位由 land_backup 判根后 rename 完成 ——
+        // 旧实现把 reg.exe 直接指到目标路径，备份根被换成 junction 时会落在链接另一头。
+        // 原来那条「backup_file.to_str() 为 None 就整批中止」（v3-L7）现在由中转件路径承担，
+        // 语义不变：编码不出来就报错、绝不继续写入。
+        crate::engine::backup_write::land_backup(&backup_dir, &backup_file, |stage| {
+            let stage_str = stage
+                .to_str()
+                .ok_or_else(|| "备份路径无法编码".to_string())?;
+            let exe = system_tool("reg.exe")?;
+            let ok = crate::engine::systembin::quiet_cmd_timeout(
+                exe,
+                &["export", &reg_path, stage_str, "/y"],
+                crate::engine::systembin::REG_EXPORT_TIMEOUT,
+            )
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+            if ok {
+                Ok(())
+            } else {
+                Err("注册表备份失败".into())
+            }
+        })?;
         // K11（v6）：**新生成的备份必须写边车封条**（同目录 `<file>.reg.meta.json`，
         // SHA-256 + 目标键）。还原侧只接受封条 `ok` 的备份——同用户往备份目录投放
         // 一份自制 .reg（哪怕不含删除段，也能覆盖任意键值）不再是可导入形态。

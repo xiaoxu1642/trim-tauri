@@ -667,7 +667,14 @@ pub fn stubborn_block() -> Result<Value, String> {
             failed += 1;
             continue;
         }
-        if let Err(e) = std::fs::write(&xml_path, xml.as_bytes()) {
+        // B2-2：备份走「私有 tmp 产出 → 判目标根 → 同卷 rename 落位」。
+        // 旧实现是 `fs::write(&xml_path, …)` 直写目标 —— 备份根被换成 junction 时，
+        // 「删除前唯一还原依据」就落在链接另一头，而调用方完全看不出来。
+        if let Err(e) =
+            crate::engine::backup_write::land_backup(&backup_dir, &xml_path, |stage| {
+                std::fs::write(stage, xml.as_bytes()).map_err(|e| format!("写中转件失败: {e}"))
+            })
+        {
             crate::engine::log::write_log(
                 "warn",
                 &format!("顽固软件治理：{task} 备份落盘失败: {e}（{}），已放弃删除", xml_path.display()),
@@ -765,25 +772,44 @@ pub fn stubborn_block() -> Result<Value, String> {
             let _ = std::fs::create_dir_all(&run_backup_dir);
             // 同名覆写（与任务 XML 备份同取舍）：值被删后不会再次执行备份，保最近一份即可
             let reg_file = run_backup_dir.join("douyinTray.reg");
-            let mut exported = false;
-            if let Some(reg_file_str) = reg_file.to_str() {
-                let run_reg_path = format!("HKCU\\{RUN_KEY}");
-                // R5b-M08（v7.2 C06）：`quiet_cmd_timeout` 的 Ok 只代表「进程跑完」，
-                // 不代表 reg.exe 成功；同名旧文件还会让 exists() 恒真。三判：退出码成功
-                // + 文件在 + 内容非空，缺一不删值。
-                exported = crate::engine::systembin::system_tool("reg.exe")
-                    .map_err(std::io::Error::other)
-                    .and_then(|exe| {
-                        crate::engine::systembin::quiet_cmd_timeout(
-                            exe,
-                            &["export", &run_reg_path, reg_file_str, "/y"],
-                            crate::engine::systembin::REG_EXPORT_TIMEOUT,
-                        )
-                    })
-                    .map(|o| o.status.success())
-                    .unwrap_or(false)
-                    && reg_file.metadata().map(|m| m.len() > 0).unwrap_or(false);
-            }
+            let run_reg_path = format!("HKCU\\{RUN_KEY}");
+            // B2-2：导出写到**中转件**，落位由 land_backup 判根后 rename 完成。
+            // R5b-M08（v7.2 C06）的三判口径不变：退出码成功 + 文件在 + 内容非空，
+            // 只是后两判现在由 land_backup 判中转件，缺一不删值。
+            let exported = match crate::engine::backup_write::land_backup(
+                &run_backup_dir,
+                &reg_file,
+                |stage| {
+                    let stage_str = stage
+                        .to_str()
+                        .ok_or_else(|| "备份路径无法编码".to_string())?;
+                    let ok = crate::engine::systembin::system_tool("reg.exe")
+                        .map_err(std::io::Error::other)
+                        .and_then(|exe| {
+                            crate::engine::systembin::quiet_cmd_timeout(
+                                exe,
+                                &["export", &run_reg_path, stage_str, "/y"],
+                                crate::engine::systembin::REG_EXPORT_TIMEOUT,
+                            )
+                        })
+                        .map(|o| o.status.success())
+                        .unwrap_or(false);
+                    if ok {
+                        Ok(())
+                    } else {
+                        Err("reg.exe export 未成功".to_string())
+                    }
+                },
+            ) {
+                Ok(_) => true,
+                Err(e) => {
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!("顽固软件治理：{RUN_VALUE} 备份未做成: {e}"),
+                    );
+                    false
+                }
+            };
             if !exported {
                 fail_run.push(format!("{RUN_VALUE}（注册表备份失败，未删除）"));
                 failed += 1;

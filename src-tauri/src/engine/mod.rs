@@ -4,6 +4,8 @@
 //! 单一域专用的实现留在对应 commands/<domain>.rs 内，避免 engine 变成杂物间。
 
 pub mod appearance;
+/// B2-2（2026-10-27 全仓重审 P0）：备份写出原语 —— 私有 tmp 产出、判目标根、同卷 rename 落位。
+pub mod backup_write;
 pub mod delete_failed;
 pub mod delete_manifest;
 pub mod guard;

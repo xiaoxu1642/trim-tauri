@@ -132,6 +132,18 @@ pub const POWER_PLAN_PROBE: TmpNameShape = TmpNameShape {
     suffix: ".powrplan",
 };
 
+/// 备份写出的中转件（B2-2：先落私有 tmp、判目标根、再 rename 落位）。
+///
+/// 扩展名固定 `.tmp`：实测 `reg.exe export` 与 `powercfg /export` 都不校验扩展名
+/// （两者都按传入路径原样写出），故中转件不必伪装成 `.reg` / `.powrplan` ——
+/// 伪装反而让「这是谁写的」更难分辨。
+pub const BACKUP_STAGE: TmpNameShape = TmpNameShape {
+    prefix: "bakstage",
+    sep: '_',
+    segs: &[Seg::Digits(MS_DIGITS), Seg::Hex(TOKEN_HEX)],
+    suffix: ".tmp",
+};
+
 /// 公共根 `%TEMP%\Trim`（全局可写）的白名单：只认收件箱脚本形态。
 pub const PUBLIC_ROOT_SHAPES: &[&TmpNameShape] = &[&SCRIPT_PS1];
 
@@ -151,6 +163,7 @@ pub const PRIVATE_ROOT_SHAPES: &[&TmpNameShape] = &[
     &OPTIMIZER_REG,
     &POWER_PLAN_EXPORT,
     &POWER_PLAN_PROBE,
+    &BACKUP_STAGE,
 ];
 
 /// 名字是否命中给定白名单中的任一份形态。
@@ -174,6 +187,7 @@ mod tests {
             (&OPTIMIZER_REG, TOKEN_SAMPLE),
             (&POWER_PLAN_EXPORT, "12345"),
             (&POWER_PLAN_PROBE, "12345"),
+            (&BACKUP_STAGE, TOKEN_SAMPLE),
         ];
         for (shape, tail) in cases {
             let name = shape.build(MS_SAMPLE, tail);
@@ -194,6 +208,7 @@ mod tests {
             OPTIMIZER_REG.build(MS_SAMPLE, TOKEN_SAMPLE),
             POWER_PLAN_EXPORT.build(MS_SAMPLE, "1"),
             POWER_PLAN_PROBE.build(MS_SAMPLE, "1"),
+            BACKUP_STAGE.build(MS_SAMPLE, TOKEN_SAMPLE),
         ] {
             assert!(!any_matches(PUBLIC_ROOT_SHAPES, &name), "公共根不该认这种形态：{name}");
         }
