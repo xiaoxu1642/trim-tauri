@@ -456,6 +456,10 @@ fn resolve_scan_roots(scan_type: &str, raw_inputs: &[String]) -> Result<ScanRoot
                         roots_truncated,
                     ));
                 }
+                // R1d-M15：部分缺失且扫得下去时，missing 也必须并入丢根计数 ——
+                // 否则回执 droppedRoots:0 且前端不出「N 个扫描目录无效」的提示，
+                // 界面照报「扫描完成」，用户会拿不完整的结果去删。
+                dropped_roots += missing.len();
                 plist = found;
             } else {
                 // 自填目录同样跳过不存在的，全部无效时报错
@@ -474,6 +478,9 @@ fn resolve_scan_roots(scan_type: &str, raw_inputs: &[String]) -> Result<ScanRoot
                         roots_truncated,
                     ));
                 }
+                // R1d-M15：同上 —— 部分缺失并进丢根计数（全部无效的早退已带计数，
+                // 唯独「部分缺失且扫得下去」这条分支漏了，回执会谎报完整）。
+                dropped_roots += missing.len();
                 plist = found;
             }
         }
@@ -993,7 +1000,7 @@ pub async fn finder_delete_manifest<R: tauri::Runtime>(window: WebviewWindow<R>)
     })
     .await;
     match read {
-        Ok((items, dir_text)) => json!({ "success": true, "data": { "items": items, "dir": dir_text } }),
+        Ok((items, dir_text, broken)) => json!({ "success": true, "data": { "items": items, "dir": dir_text, "broken": broken } }),
         Err(e) => {
             log::write_log("error", &format!("finder 删除清单读取任务异常: {e}"));
             json!({ "success": false, "message": format!("读取删除清单失败: {e}") })

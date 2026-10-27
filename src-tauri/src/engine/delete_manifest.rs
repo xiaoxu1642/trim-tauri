@@ -176,7 +176,9 @@ fn prune_manifests(dir: &Path) {
 /// paths.rs 的三段口径（写只新根 / **读带老根兜底** / 裁只裁新根，restore_pack
 /// 同单元已照做）；便携模式下老根 `%APPDATA%\Trim\fileclean-backup` 的误删追溯
 /// 凭据整批不可见。同名批次清单只取新根那份；裁剪侧保持只裁新根不动。
-pub fn list_manifest_items(max: usize) -> (Vec<Value>, String) {
+/// 返回 `(条目, 主目录, broken 批次名)`：第三位是「文件在但读不出 / 不是合法 JSON」的批次
+/// （R6b-M15）—— 把它折成「没条目」会让误删追溯凭据无声消失。
+pub fn list_manifest_items(max: usize) -> (Vec<Value>, String, Vec<String>) {
     let primary = backup_dir();
     let dirs = crate::engine::paths::backup_read_dirs("fileclean-backup");
     // (完整路径, 文件名)：新根先扫，同名（同批次段）天然只留新根那份
@@ -198,7 +200,7 @@ pub fn list_manifest_items(max: usize) -> (Vec<Value>, String) {
         }
     }
     if files.is_empty() {
-        return (Vec::new(), primary.to_string_lossy().to_string());
+        return (Vec::new(), primary.to_string_lossy().to_string(), Vec::new());
     }
     // 最近批次在前：按**解析出的批次时刻**倒序（R6b-M02 同 delete_manifest 写侧），
     // 未知时刻排最后并计数告警——文件名序会让 `deleted-startup-*` 恒排在 `deleted-2026-*` 之后。
@@ -217,17 +219,29 @@ pub fn list_manifest_items(max: usize) -> (Vec<Value>, String) {
     });
 
     let mut items: Vec<Value> = Vec::new();
-    for (path, _name) in files {
+    // R6b-M15：读不出 / 解析失败必须留痕 —— 本模块头把清单定义为「误删追溯的唯一凭据」，
+    // 把「读不动」折成「这批没条目」等于凭据无声消失（同单元 restore_pack::list 对同一件事
+    // 有 broken 档，两套口径必须并成一套）。点名批次名，不写清单内容（隐私纪律）。
+    let mut broken_batches: Vec<String> = Vec::new();
+    for (path, name) in files {
         if items.len() >= max {
             break;
         }
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
-            Err(_) => continue,
+            Err(e) => {
+                log::write_log("warn", &format!("删除清单读取：批次 {name} 读不出（{e}），该批条目缺席（broken）"));
+                broken_batches.push(name);
+                continue;
+            }
         };
         let obj: Value = match serde_json::from_str(&text) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(e) => {
+                log::write_log("warn", &format!("删除清单读取：批次 {name} 不是合法 JSON（{e}），该批条目缺席（broken）"));
+                broken_batches.push(name);
+                continue;
+            }
         };
         let deleted_at = obj.get("deletedAt").and_then(|v| v.as_str()).unwrap_or("");
         if let Some(arr) = obj.get("items").and_then(|v| v.as_array()) {
@@ -245,7 +259,7 @@ pub fn list_manifest_items(max: usize) -> (Vec<Value>, String) {
             }
         }
     }
-    (items, primary.to_string_lossy().to_string())
+    (items, primary.to_string_lossy().to_string(), broken_batches)
 }
 
 /// 确保清单目录存在（open-backup-dir 用）
@@ -291,5 +305,63 @@ mod tests {
         assert_eq!(batch_time_key("deleted-2026-10-10T21-41-29Z.json"), None);
         assert_eq!(batch_time_key("deleted-startup-abc.json"), None);
         assert_eq!(batch_time_key("manifest-2026-10-10T21-41-29-023Z.json"), None);
+    }
+}
+
+/// R1d 前半批（2026-10-28 P1-d）的形态钉。
+///
+/// `include_str!` 类断言：期望串用 `concat!` 拼两半、断言消息里也不许出现完整字面量
+/// —— 任何一处出现，断言都会扫到自己那行，变成恒真的假绿（本仓 2026-10-27/28 两次实测踩坑）。
+#[cfg(test)]
+mod p1d_shape_tests {
+    /// R6b-M15：清单读侧必须区分「没条目」与「读不出」（broken 计数与留痕在场）。
+    #[test]
+    fn 清单读侧broken机制在场() {
+        let src = include_str!("delete_manifest.rs");
+        assert!(
+            src.contains(concat!("broken_bat", "ches")),
+            "list_manifest_items 必须带出 broken 批次清单"
+        );
+        assert!(
+            src.contains(concat!("该批条目缺席（", "broken）")),
+            "读不出 / 解析失败必须各写一条 warn 留痕"
+        );
+    }
+
+    /// R1a27-M02：背景图删除出口不得把「读不到」报成「已删除」（只 NotFound 才幂等成功）。
+    #[test]
+    fn 背景图删除不得吞全部读取错误() {
+        let src = include_str!("../commands/appearance.rs");
+        let bad = concat!("Err(_) => return Ok(json!({ \"success\": true", " }))");
+        assert!(!src.contains(bad), "裸 Err 吞掉全部读取错误 = 假绿回执（删除出口）");
+        assert!(
+            src.contains(concat!("ErrorKind::Not", "Found")),
+            "幂等成功必须显式限定 NotFound"
+        );
+    }
+
+    /// R1d-M15：finder 扫描根「部分缺失且扫得下去」必须并入丢根计数（两个分支同形）。
+    #[test]
+    fn 扫描根部分缺失必须计数() {
+        let src = include_str!("../commands/finder.rs");
+        let needle = concat!("dropped_roots += missing.", "len()");
+        assert_eq!(
+            src.matches(needle).count(),
+            2,
+            "默认目录分支与自填目录分支都要把缺失并进丢根计数"
+        );
+    }
+
+    /// R5a-M02：删除臂三处落点名必须带单调序号（同名项不得互相覆盖）。
+    #[test]
+    fn 删除臂落点名必须带序号() {
+        let src = include_str!("native/startup.rs");
+        for tag in ["reg", "folder", "task"] {
+            let needle = format!(concat!("{{stamp}}_{{seq:04}}_", "{}_{{safe"), tag);
+            assert!(
+                src.contains(&needle),
+                "落点名形态必须带单调序号（防同批同名备份互相覆盖）: {tag}"
+            );
+        }
     }
 }

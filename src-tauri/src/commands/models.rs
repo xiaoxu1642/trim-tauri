@@ -71,11 +71,27 @@ fn cfg_str(cfg: &Value, key: &str) -> Option<String> {
 /// `slot` 为 `None` 时不动槽位 —— 是否算「一个真槽位」由调用方判：`models_save` 只在
 /// scope 命中 `AI_SCOPES` 时给 `Some`，`models_set_scope` 的 slot 已经过 `GLOBAL_ENGINE_KEY`
 /// 兜底，恒给 `Some`（判据留在调用方，本函数不猜语义）。
-fn apply_model_edit(current: &Value, key: &str, entry: Option<&Value>, slot: Option<&str>) -> Value {
+///
+/// `full_models` 是 R1b-M09 的首次引导：盘上**没有** `models` 段时，读侧那套「平铺字段
+/// 一次性迁移」只看「models 段整体缺失」，只补写本键会让 `stored` 变 Some、迁移分支
+/// 永久失效，其余键静默回退出厂值。所以首次写入要用读侧已迁移好的**整张** models 建段，
+/// 再覆盖本键；盘上已有 models 段时该参数不参与（按键补写语义不变，并发判据仍守 P1-5）。
+fn apply_model_edit(
+    current: &Value,
+    key: &str,
+    entry: Option<&Value>,
+    slot: Option<&str>,
+    full_models: Option<&Value>,
+) -> Value {
     let mut next = current.clone();
     let Some(map) = next.as_object_mut() else { return next };
     if let Some(e) = entry {
-        let models = map.entry("models").or_insert_with(|| json!({}));
+        let models = match map.entry("models") {
+            serde_json::map::Entry::Vacant(v) => {
+                v.insert(full_models.cloned().unwrap_or_else(|| json!({})))
+            }
+            serde_json::map::Entry::Occupied(occ) => occ.into_mut(),
+        };
         if let Some(m) = models.as_object_mut() {
             m.insert(key.to_string(), e.clone());
         }
@@ -197,8 +213,9 @@ pub async fn models_save<R: tauri::Runtime>(
         }
         // v4 组 1：读-改-写收口 —— update_settings 内部的「最新盘上值」替代旧 current 克隆
         let touched = models.get(&key).cloned().unwrap_or_else(|| json!({}));
+        let full_models = models.clone();
         let saved = settings::update_settings(|next| {
-            *next = apply_model_edit(next, &key, Some(&touched), save_slot(scope.as_deref().unwrap_or("")));
+            *next = apply_model_edit(next, &key, Some(&touched), save_slot(scope.as_deref().unwrap_or("")), Some(&full_models));
             Ok(())
         })
         .is_ok();
@@ -244,8 +261,9 @@ pub async fn models_save<R: tauri::Runtime>(
     }
     // v4 组 1：读-改-写收口（同上）
     let touched = models.get(&key).cloned().unwrap_or_else(|| json!({}));
+        let full_models = models.clone();
     let saved = settings::update_settings(|next| {
-        *next = apply_model_edit(next, &key, Some(&touched), save_slot(scope.as_deref().unwrap_or("")));
+        *next = apply_model_edit(next, &key, Some(&touched), save_slot(scope.as_deref().unwrap_or("")), Some(&full_models));
         Ok(())
     })
     .is_ok();
@@ -298,7 +316,7 @@ pub fn models_set_scope<R: tauri::Runtime>(
     // 写入口径与 models_save 同一条（apply_model_edit 的 entry=None 分支）。
     let slot_owned = slot.to_string();
     let ok = settings::update_settings(|next| {
-        *next = apply_model_edit(next, &key, None, Some(slot_owned.as_str()));
+        *next = apply_model_edit(next, &key, None, Some(slot_owned.as_str()), None);
         Ok(())
     })
     .is_ok();
@@ -477,9 +495,9 @@ mod p1_5_concurrency_tests {
         let a_旧快照 = json!({ "metaso": { "model": "m", "verified": true } });
         let mut 模拟盘 = 盘上最新.clone();
         // B 先落盘（用同一把写入口径，只是另一个键）
-        模拟盘 = apply_model_edit(&模拟盘, "xiaoce", Some(&json!({ "model": "n", "verified": true })), None);
+        模拟盘 = apply_model_edit(&模拟盘, "xiaoce", Some(&json!({ "model": "n", "verified": true })), None, None);
         // A 的校验这时才回来，拿着旧快照写
-        模拟盘 = apply_model_edit(&模拟盘, "metaso", Some(a_旧快照.get("metaso").unwrap()), None);
+        模拟盘 = apply_model_edit(&模拟盘, "metaso", Some(a_旧快照.get("metaso").unwrap()), None, None);
 
         let models = 模拟盘["models"].as_object().unwrap();
         assert!(models.contains_key("xiaoce"), "B 那一键被 A 的旧快照吞掉了");
@@ -494,8 +512,8 @@ mod p1_5_concurrency_tests {
     #[test]
     fn 两个槽位并发设置互不吞() {
         let mut 盘 = json!({ "models": {}, "aiScopes": { "global": "metaso" } });
-        盘 = apply_model_edit(&盘, "siliconflow", None, Some("aidesc"));
-        盘 = apply_model_edit(&盘, "metaso", None, Some("optimizer"));
+        盘 = apply_model_edit(&盘, "siliconflow", None, Some("aidesc"), None);
+        盘 = apply_model_edit(&盘, "metaso", None, Some("optimizer"), None);
         let scopes = 盘["aiScopes"].as_object().unwrap();
         assert_eq!(scopes.get("aidesc"), Some(&json!("siliconflow")));
         assert_eq!(scopes.get("optimizer"), Some(&json!("metaso")));
@@ -509,17 +527,47 @@ mod p1_5_concurrency_tests {
     #[test]
     fn 未点名的键与非法槽位一律不动() {
         let base = json!({ "models": { "metaso": { "model": "m" } }, "aiScopes": { "global": "metaso" } });
-        let out = apply_model_edit(&base, "metaso", Some(&json!({ "model": "m2" })), save_slot("随便一个不是槽位的串"));
+        let out = apply_model_edit(&base, "metaso", Some(&json!({ "model": "m2" })), save_slot("随便一个不是槽位的串"), None);
         assert_eq!(out["aiScopes"], base["aiScopes"], "非法 scope 不得写 aiScopes");
         assert_eq!(out["models"]["metaso"]["model"], json!("m2"));
 
-        let out = apply_model_edit(&base, "metaso", None, Some("global"));
+        let out = apply_model_edit(&base, "metaso", None, Some("global"), None);
         assert_eq!(out["models"]["metaso"]["model"], json!("m"), "entry=None 不得改 models");
         assert!(out["models"]["metaso"].is_object(), "models 里不许出现字符串条目");
 
         let 空 = json!({});
-        let out = apply_model_edit(&空, "metaso", Some(&json!({ "model": "m" })), Some("global"));
+        let out = apply_model_edit(&空, "metaso", Some(&json!({ "model": "m" })), Some("global"), None);
         assert_eq!(out["models"]["metaso"]["model"], json!("m"), "首次保存必须建出 models 段");
         assert_eq!(out["aiScopes"]["global"], json!("metaso"), "首次保存必须建出 aiScopes 段");
+    }
+
+    /// R1b-M09 回归钉：盘上没有 models 段（平铺字段时代）时，首次保存必须用
+    /// 读侧迁移好的**整张** models 建段 —— 只补写本键会让迁移分支永久失效，
+    /// 其余键的平铺旧值不再被采信、静默回退出厂值。
+    #[test]
+    fn 首次保存必须用整张迁移表建段() {
+        let 平铺迁移整表 = json!({
+            "baidu": { "model": "b-old", "verified": true },
+            "zhihu": { "model": "z-old", "verified": true },
+            "metaso": { "model": "m-old", "verified": true },
+            "custom": { "model": "c-old", "verified": true }
+        });
+        let 盘上无models段 = json!({});
+        let out = apply_model_edit(
+            &盘上无models段, "metaso",
+            Some(&json!({ "model": "m-new", "verified": false })),
+            None, Some(&平铺迁移整表),
+        );
+        assert_eq!(out["models"]["metaso"]["model"], json!("m-new"), "本次键按新值写");
+        assert_eq!(out["models"]["baidu"]["model"], json!("b-old"), "其余键的平铺旧值必须随首次写入落盘");
+        assert_eq!(out["models"]["custom"]["model"], json!("c-old"), "其余键不得回退出厂默认");
+        // 盘上已有 models 段时整表参数不参与：按键补写语义不变（P1-5 并发判据）
+        let 已有段 = json!({ "models": { "baidu": { "model": "b-live" } } });
+        let out = apply_model_edit(
+            &已有段, "metaso", Some(&json!({ "model": "m-new2" })), None,
+            Some(&json!({ "baidu": { "model": "旧快照" } })),
+        );
+        assert_eq!(out["models"]["baidu"]["model"], json!("b-live"), "已有段时不得被旧快照整表顶掉");
+        assert_eq!(out["models"]["metaso"]["model"], json!("m-new2"));
     }
 }

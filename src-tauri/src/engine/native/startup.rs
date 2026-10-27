@@ -1732,6 +1732,11 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
     let _guard = STARTUP_LEDGER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let deleted_dir = startup_deleted_dir();
     let stamp = crate::engine::now_ms().to_string();
+    // R5a-M02：删除臂三处落点名必须带单调序号 —— 同一次删除内同名项（同一值名登记在
+    // HKCU/HKLM 两条 Run、两个启动文件夹各一份同名 .lnk、不同任务目录的同名任务）
+    // 会解析出同一落点，而备份写入是静默覆盖：注册表值与计划任务是永久删，先写的那份
+    // 还原凭据会被后写的顶掉且无任何兜底（禁用臂 R5a-M03 已有同一道修法）。
+    static DELETE_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
     // 取本口径必须与读取链同一份（`startup_ledger_file` → 最近修改那本）：
     // 固定读新根会在老根存有历史账时形成两个「权威账本」——删除链改的那本
@@ -1786,7 +1791,12 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                 }
                 // 备份整个键到 .reg
                 let safe = safe_name(&name);
-                let reg_file = deleted_dir.join(format!("{stamp}_reg_{safe}.reg"));
+                let seq = DELETE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut reg_file = deleted_dir.join(format!("{stamp}_{seq:04}_reg_{safe}.reg"));
+                while reg_file.exists() {
+                    let seq = DELETE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    reg_file = deleted_dir.join(format!("{stamp}_{seq:04}_reg_{safe}.reg"));
+                }
                 let hive_short = if hive == HKEY_LOCAL_MACHINE { "HKLM" } else { "HKCU" };
                 let export_path = format!("{hive_short}\\{subkey}");
                 // 审查 v3-L7：非 UTF-8 路径上 to_str() 为 None，记失败跳过而不是 panic
@@ -1864,7 +1874,12 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                         // 备份到 deleted 目录（复制失败即失败，不送回收站）
                         let safe = safe_name(&name);
                         let ext = std::path::Path::new(&src).extension().and_then(|e| e.to_str()).unwrap_or("");
-                        let dest = deleted_dir.join(format!("{stamp}_folder_{safe}.{ext}"));
+                        let seq = DELETE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let mut dest = deleted_dir.join(format!("{stamp}_{seq:04}_folder_{safe}.{ext}"));
+                        while dest.exists() {
+                            let seq = DELETE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            dest = deleted_dir.join(format!("{stamp}_{seq:04}_folder_{safe}.{ext}"));
+                        }
                         if std::fs::copy(&src, &dest).is_err() {
                             failed += 1;
                             results.push(json!({"id": id, "name": name, "status": "error", "message": "文件备份失败"}));
@@ -1912,7 +1927,12 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                 let tn = if task_path.is_empty() || task_path == "\\" { task_name.to_string() } else { format!("{task_path}{task_name}") };
                 // 导出 XML 备份
                 let safe = safe_name(&task_name);
-                let xml_file = deleted_dir.join(format!("{stamp}_task_{safe}.xml"));
+                let seq = DELETE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let mut xml_file = deleted_dir.join(format!("{stamp}_{seq:04}_task_{safe}.xml"));
+                while xml_file.exists() {
+                    let seq = DELETE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    xml_file = deleted_dir.join(format!("{stamp}_{seq:04}_task_{safe}.xml"));
+                }
                 let query_out = crate::engine::systembin::system_tool("schtasks")
                     .map_err(std::io::Error::other)
                     .and_then(|exe| {

@@ -382,7 +382,17 @@ pub fn appearance_bg_delete<R: Runtime>(
         Ok(meta) if protect::is_reparse(&meta) => {
             return Ok(json!({ "success": false, "message": "拒绝删除符号链接目标" }));
         }
-        Err(_) => return Ok(json!({ "success": true })), // 不存在 = 幂等成功（对齐上游 existsSync 短路）
+        // R1a27-M02：只有 NotFound 才算「幂等成功」——注释原先只论证了这一种，
+        // 代码却吞掉全部 Err（权限不足 / 目录被外部工具置为不可读 / 路径形态异常）。
+        // 用户点「删除背景图」拿到 success，前端据此把条目从列表移除而文件仍在盘上；
+        // 「以为删了」比「删失败报错」更坏（同单元 updater 的清理链早有三态正解）。
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(json!({ "success": true })); // 不存在 = 幂等成功（对齐上游 existsSync 短路）
+        }
+        Err(e) => {
+            log::write_log("warn", &format!("背景图删除前元数据读取失败: {} -> {e}", target.display()));
+            return Ok(json!({ "success": false, "message": "读取文件状态失败，未执行删除" }));
+        }
         Ok(_) => {}
     }
     // v2-L4P-12（B-1）：此处不得再调 protect::is_path_protected——configure_from_app
