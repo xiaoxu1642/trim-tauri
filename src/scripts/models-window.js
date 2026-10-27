@@ -307,13 +307,22 @@
         // 护栏就变成了骚扰（与「不可逆动作才确认」同一条原则）。
         const prevKey = String((models[key] || {}).apiKey || '').trim();
         const newKey = String(cfg.apiKey || '').trim();
+        // F4b-M14：把输入框清空再保存，后端按「清除密钥」落盘（commands/models.rs 的空串语义），
+        // 破坏面比覆盖更大 —— 旧判据只罩覆盖支，等于护栏只守了较轻的那一半。
+        const clearingKey = !!prevKey && !newKey;
         // P1-7：确认件这一步原先在 try **之外** —— selfConfirm 的 Promise reject 会直接变成
         // unhandled rejection，用户看到「点保存没反应」。现在确认段自己带出口，拒了就如实
         // 记一条并停手（不带着一个不确定的 `go` 继续往下写密钥）。
-        if (prevKey && newKey && newKey !== prevKey) {
+        if (prevKey && (clearingKey || newKey !== prevKey)) {
           let go;
           try {
-            go = await selfConfirm({
+            go = await selfConfirm(clearingKey ? {
+              title: `清除「${MODEL_META[key].name}」的密钥`,
+              message: '将删除已保存的密钥。\n\n清除后依赖该密钥的联网功能会立即失败，旧密钥无法在本应用内找回。',
+              okText: '清除密钥',
+              danger: true,
+              hint: '清除后需重新填写密钥并通过校验，才能恢复联网功能。'
+            } : {
               title: `覆盖「${MODEL_META[key].name}」的密钥`,
               message: `将用新密钥替换已保存的密钥。\n\n覆盖后，依赖旧密钥的联网功能会立即改用新密钥，旧密钥无法在本应用内找回。`,
               okText: '覆盖保存',
@@ -324,11 +333,11 @@
               hint: '密钥只发送给上面填写的接口地址，不写入日志、也不上传到其它地方。接口地址填 http:// 时，密钥会明文经过网络链路。'
             });
           } catch (e) {
-            log(key, '覆盖密钥确认流程中断，未做改动：' + ((e && e.message) || e), 'error');
+            log(key, '密钥确认流程中断，未做改动：' + ((e && e.message) || e), 'error');
             return;
           }
           if (!go) {
-            log(key, '用户取消覆盖密钥，未做改动', 'info');
+            log(key, clearingKey ? '用户取消清除密钥，未做改动' : '用户取消覆盖密钥，未做改动', 'info');
             return;
           }
         }
@@ -371,9 +380,16 @@
       if (resp && resp.success && resp.data) {
         models = resp.data.models || {};
         defaults = resp.data.modelDefaults || {};
+        // F4b-M13：后端为「Corrupt ≠ Absent」专留 degraded 位。不接它就把「配置读坏了」
+        // 画成「还没配」——用户会去重复填写而不是查日志，且后续保存会覆盖掉可恢复的原文件。
+        if (resp.degraded === true) {
+          toast('error', '本机模型配置读取异常（文件损坏或解密失败），下面是空配置，请勿直接保存');
+        }
+      } else {
+        toast('error', '读取模型配置失败：' + ((resp && resp.message) || '无回执') + '（下面是空配置，请勿直接保存）');
       }
     } catch (e) {
-      toast('error', '读取模型配置失败');
+      toast('error', '读取模型配置失败：' + ((e && e.message) || e));
     }
     render();
   }

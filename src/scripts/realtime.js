@@ -298,6 +298,16 @@
             latencyMs: Number(resp.latencyMs) || 0,
             gateway: resp.gateway || ''
           };
+        } else {
+          // 后端把「读不出」当 Ok({success:false}) 返回，不进 catch ⇒ 不落地失败态就只剩上一拍的
+          // 陈旧丢包率当现行（采样侧 sampleOnce 走 handleSampleError，两条判据必须同形）。
+          // lossRate 置 null 让 renderMetrics 的 lossKnown 落到 `--` 并收起徽标。
+          state.loss = { lossRate: null, sent: 0, received: 0, latencyMs: 0, gateway: '' };
+          const now = Date.now();
+          if (now - state.lossErrAt > 10000) {
+            state.lossErrAt = now;
+            window.app?.log?.('warn', '丢包检测失败: ' + ((resp && resp.message) || '未返回 success'));
+          }
         }
       } catch (e) {
         // 丢包检测失败不阻断流量监控，但「只有注释的静默」会把持续故障伪装成正常

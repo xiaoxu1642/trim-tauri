@@ -66,13 +66,16 @@
     // L06：参数组装与进度订阅并入 try——原实现 running=true 之后、try 之前有约
     // 20 行可抛代码，一旦抛出 running 永久为 true、按钮永久禁用；finally 统一复位。
     try {
+      // P1-6E 把时长收进 options 时,函数内的 duration 绑定一起消失了,而演示分支的
+      // totalMs 还要读它 ⇒ 先取一次再进对象字面量（pickTier 带 TIER_WARN 副作用,不能取两次）
+      const duration = pickTier($('diskDuration')?.value, [4, 8, 16], 8, '时长');
       const options = {
         path: ($('diskBenchPath')?.value || '').trim(), // 空路径由主进程白名单校验拒绝，不再回落硬编码开发机路径
         blockSize: pickTier($('diskBlockSize')?.value, [4096, 65536, 1048576], 1048576, '块大小'),
         // v3.7.1 R1：QD=每线程在途上限、线程数真实生效（Rust OVERLAPPED 并发）；白名单与主进程一致
         queueDepth: pickTier($('diskQueueDepth')?.value, [1, 8, 32], 1, '队列深度'),
         threads: pickTier($('diskThreads')?.value, [1, 4, 8], 1, '线程数'),
-        duration: pickTier($('diskDuration')?.value, [4, 8, 16], 8, '时长')
+        duration
       };
       // 订阅后端真实进度
       if (window.api?.diskbench?.onProgress) {
@@ -133,7 +136,7 @@
     // 演示数据不落历史：历史记录页没有引擎字段可标「演示」，落进去会被当成真实测速结果
     if (!window.api?.benchHistory || engine === 'demo') return;
     try {
-      await window.api.benchHistory.add({
+      const receipt = await window.api.benchHistory.add({
         path: options.path,
         blockSize: options.blockSize,
         queueDepth: options.queueDepth,
@@ -147,8 +150,13 @@
         latency: result.latency,
         engine: engine || undefined // 仅 rust/powershell，主进程白名单校验
       });
+      // 后端拒收是 Ok({success:false}) 出口（Promise 照常 resolve）⇒ 不看这一位就等于
+      // 把「没落盘」念成「已保存」。渲染层 console 不进日志页，失败必须走 app.log。
+      if (!receipt || receipt.success === false) {
+        window.app?.log?.('warn', '保存测速历史失败：' + ((receipt && receipt.message) || '无回执'));
+      }
     } catch (e) {
-      console.error('保存测速历史失败:', e);
+      window.app?.log?.('warn', '保存测速历史失败: ' + ((e && e.message) || e));
     }
   }
 
@@ -250,7 +258,12 @@
       btn.addEventListener('click', async () => {
         const id = btn.dataset.deleteId;
         try {
-          await window.api.benchHistory.delete(id);
+          const receipt = await window.api.benchHistory.delete(id);
+          // 先看回执再改 DOM：旧实现无条件摘行 + 无条件报「已删除」，重开弹窗记录全回来
+          if (!receipt || receipt.success === false) {
+            window.app?.toast('error', '删除失败：' + ((receipt && receipt.message) || '无回执'));
+            return;
+          }
           btn.closest('tr')?.remove();
           const remaining = ctrl.body.querySelectorAll('tbody tr').length;
           const countEl = ctrl.modal.querySelector('.bench-history-count');
@@ -277,7 +290,12 @@
       );
       if (!ok) return;
       try {
-        await window.api.benchHistory.clear();
+        const receipt = await window.api.benchHistory.clear();
+        // 同删除支：清空失败时必须留住弹窗与记录，不能报「已清空」
+        if (!receipt || receipt.success === false) {
+          window.app?.toast('error', '清空失败：' + ((receipt && receipt.message) || '无回执'));
+          return;
+        }
         ctrl.close();
         setTimeout(showHistory, 100);
         window.app?.toast('success', '历史记录已清空');

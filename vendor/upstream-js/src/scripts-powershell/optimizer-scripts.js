@@ -166,7 +166,7 @@ const OPTIONS = [
   // ---------- 游戏与多媒体 ----------
   {
     id: 'game_dvr', group: '游戏与多媒体', title: '关闭游戏 DVR 录制', risk: 'low',
-    desc: '关闭 GameDVR / 游戏栏后台录制（GameDVR_Enabled / AllowGameDVR / AppCaptureEnabled），减少后台录制带来的性能占用。全屏优化(FSO)相关键已统一由「全屏优化(FSO)行为」负责——本项原先也写 GameDVR_FSEBehaviorMode 等 4 个同域键，与 tf_fso 取值相反（2/0 vs 0/1），执行顺序决定结果，第六大点-A（2026-09-14）已移交。',
+    desc: '关闭 GameDVR / 游戏栏后台录制（GameDVR_Enabled / AllowGameDVR / AppCaptureEnabled），减少后台录制带来的性能占用。全屏优化(FSO)相关键不在本项职责内。',
     steps: [
       {
         label: 'GameDVR 录制开关', reg: regBlock({
@@ -477,7 +477,7 @@ const OPTIONS = [
   },
   {
     id: 'tf_privacy', group: '安全与隐私', title: '系统隐私设置', risk: 'medium',
-    desc: 'Trim 隐私大项：关闭开始菜单建议、操作中心通知、跨设备同步(CDP)、搜索建议与 Cortana 同意项、实验性体验、TaggedEnergy，并停用 GpuEnergyDrv（麦克风/摄像头权限保留允许）。\n\n归属划分（第六大点-B，2026-09-14）：内容推荐/商店推广类键归「禁用商店自动更新与推广内容」，云推荐与锁屏聚焦类键归「云推荐内容排查」，广告 ID 归「广告 ID 个性化排查」，遥测策略归「遥测优化」，错误报告归「Windows Error Reporting 策略排查」。本项不再重复写入上述键，只想单项处理时请用对应专项项。',
+    desc: 'Trim 隐私大项：关闭开始菜单建议、操作中心通知、跨设备同步(CDP)、搜索建议与 Cortana 同意项、实验性体验、TaggedEnergy，并停用 GpuEnergyDrv（麦克风/摄像头权限保留允许）。\n\n归属划分：内容推荐/商店推广类键归「禁用商店自动更新与推广内容」，云推荐与锁屏聚焦类键归「云推荐内容排查」，广告 ID 归「广告 ID 个性化排查」，遥测策略归「遥测优化」，错误报告归「Windows Error Reporting 策略排查」。本项不再重复写入上述键，只想单项处理时请用对应专项项。',
     steps: [
       { label: '隐私注册表键', reg: regBlock({
         // 第六大点-B（2026-09-14 重复点审查）：ContentDeliveryManager 的全部键已移出本项，

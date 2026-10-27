@@ -30,7 +30,7 @@ const MIN_EMITTERS = 5; // 对象地板：低于此数说明命令解析失效�
 //   并不发这个位。consumed 行必须给可核锚点；pending 行只标批次与理由，不许凭空写锚点。
 const TABLE = [
   { cmd: 'paths_load', status: 'consumed', anchor: { file: 'src/scripts/pathbinding.js', text: 'resp.degraded === true' } },
-  { cmd: 'settings_load', status: 'pending', batch: 'B3/P1-6', reason: 'F4b-M13：两个消费方一起丢该位' },
+  { cmd: 'settings_load', status: 'consumed', anchor: { file: 'src/scripts/models-window.js', text: 'resp.degraded === true' } },
   { cmd: 'fileclean_scan', status: 'pending', batch: 'B3/P1-6', reason: 'A1 命中：未接（展示层假绿族）' },
   { cmd: 'appearance_get_material', status: 'pending', batch: 'B3/P1-6', reason: '材质面未见消费方：window-material.js 现算无 degraded' },
   { cmd: 'optimizer_state_overview', status: 'pending', batch: 'B3/P1-6A', reason: '与 R3b-M10 同一条链（目录不可用 vs 空目录）' },
@@ -40,6 +40,25 @@ const TABLE = [
 
 const walkRs = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
   e.isDirectory() ? walkRs(join(dir, e.name)) : (e.name.endsWith('.rs') ? [join(dir, e.name)] : []));
+
+/**
+ * 锚点命中判定（不走 blankNonCode）。
+ *
+ * 原因：`blankNonCode` 的模板分支对「模板里套 ${…} 再套模板」这种嵌套失准 —— 实测
+ * `src/scripts/models-window.js` 从第一个 `return \`` 之后起整段被当成字符串抹掉，
+ * 于是该文件后部的任何真实代码在 blanked 文本里都不存在（锚点永远判红）。
+ * 工具层修法属 P2-a（门禁判据强度），本门禁先走保守口径：逐行剔除行注释与块注释行，
+ * 不抹字符串（现有锚点文字都不在字符串字面量里）。
+ */
+const anchorHit = (abs, text) => {
+  if (!existsSync(abs)) return false;
+  const lines = readFileSync(abs, 'utf8').split('\n').map(l => {
+    const t = l.trim();
+    if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return '';
+    return l.replace(/\/\/.*$/, '');
+  });
+  return lines.join('\n').includes(text);
+};
 
 const g = gate(import.meta.url);
 if (!g.skipUnlessPresent(join(SRC_RS, 'engine', 'protect.rs'), 'src-tauri/src（本门禁的判定对象）')) g.finish();
@@ -70,11 +89,11 @@ for (const [cmd, where] of emitters) {
   if (t.status !== 'consumed' && !t.batch) { g.fail(`${cmd} 是 ${t.status} 但缺批次归属`); }
   if (t.status === 'consumed') {
     const abs = join(ROOT, t.anchor.file);
-    const hit = existsSync(abs) && blankNonCode(readFileSync(abs, 'utf8'), 'js').includes(t.anchor.text);
+    const hit = anchorHit(abs, t.anchor.text);
     if (!hit) g.fail(`${cmd} 登记为 consumed，但 ${t.anchor.file} 里找不到锚点「${t.anchor.text}」⇒ 消费点被删了或锚点写错`);
   } else if (t.anchor) {
     const abs = join(ROOT, t.anchor.file);
-    if (existsSync(abs) && blankNonCode(readFileSync(abs, 'utf8'), 'js').includes(t.anchor.text)) {
+    if (anchorHit(abs, t.anchor.text)) {
       g.fail(`${cmd} 仍登记为 ${t.status}（${t.batch}），但锚点已在盘上命中 ⇒ 修完要回收条目`);
     }
   }
@@ -131,6 +150,42 @@ else g.ok('正向对照通过：status 白名单只认 consumed/pending/exempt�
       g.fail("B3-4：扫描入口缺少 `pathConfigState !== 'ok'` 前置 —— 只拒 degraded 会让 loading/unavailable 穿过");
     }
   }
+}
+
+// ---------- F4b-M13（2026-10-27 · P1）：settings_load 的两个消费方都得接 degraded ----------
+// 病根：后端为「Corrupt ≠ Absent」专留 degraded，两个消费方（模型管理窗 / 模型选择器）都只判
+// success+data ⇒ 配置损坏被画成「还没配」，用户去重复填写，随后的保存把可恢复的原文件覆盖掉。
+// 判据：两处源码都必须同时命中「degraded 判定」与「可见提示出口」（只有 log 不算 —— 用户看不见）。
+{
+  const consumers = [
+    { file: 'src/scripts/models-window.js', hint: 'toast(' },
+    { file: 'src/scripts/modelpicker.js', hint: 'toastOut(' },
+  ];
+  const probe = (src, hint) => {
+    const lines = src.split('\n').map(l => {
+      const t = l.trim();
+      if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return '';
+      return l.replace(/\/\/.*$/, '');
+    });
+    const code = lines.join('\n');
+    return code.includes('resp.degraded === true') && code.includes(hint);
+  };
+  // 正向对照：判定器必须能把「接了 degraded」与「只判 success」区分开，否则下面两条绿是空绿
+  const POS = 'const resp = await window.api.settings.load(); if (resp.degraded === true) { toastOut("error", "x"); }';
+  const NEG = 'const resp = await window.api.settings.load(); if (resp && resp.success && resp.data) { x(); }';
+  if (!probe(POS, 'toastOut(') || probe(NEG, 'toastOut(')) {
+    g.fail('F4b-M13 正向对照失败：degraded 消费判定器失真（必须能把「接 degraded」与「只判 success」分开）');
+  }
+  let bad = 0;
+  for (const c of consumers) {
+    const abs = join(ROOT, c.file);
+    if (!existsSync(abs)) { g.fail(`F4b-M13：${c.file} 不存在（判定对象缺失）`); bad++; continue; }
+    if (!probe(readFileSync(abs, 'utf8'), c.hint)) {
+      g.fail(`F4b-M13：${c.file} 未同时具备 degraded 判定与可见提示 ⇒ 配置损坏会被画成「还没配」`);
+      bad++;
+    }
+  }
+  if (bad === 0) g.ok('F4b-M13：settings_load 的两个消费方都接了 degraded 且都有用户可见提示');
 }
 
 g.finish('check-degraded-consumption: 全部通过（pending ' + (emitters.size - consumed) + ' 条待 B1/B3 清零）');

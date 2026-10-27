@@ -43,11 +43,20 @@
       if (window.api?.settings?.load) {
         const resp = await window.api.settings.load();
         if (resp && resp.success && resp.data) {
+          // F4b-M13：degraded=配置损坏或解密失败。这里不能落成「空配置」——
+          // 下游 normalize() 会画出五项「未启用」，与「这台机器还没配」完全同形。
+          if (resp.degraded === true) {
+            toastOut('error', '本机模型配置读取异常（文件损坏或解密失败），下面按空配置显示，请勿直接保存');
+            logOut('warn', 'settings:load 返回 degraded=true，模型选择器已按空配置降级显示');
+          }
           settingsCache = resp.data;
           return settingsCache;
         }
+        logOut('warn', '读取模型配置失败：' + ((resp && resp.message) || '无回执'));
       }
-    } catch (e) { /* 读取失败使用空配置 */ }
+    } catch (e) {
+      logOut('warn', '读取模型配置失败：' + ((e && e.message) || e));
+    }
     settingsCache = { models: {}, aiScopes: {}, modelList: [] };
     return settingsCache;
   }

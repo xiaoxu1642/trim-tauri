@@ -2789,42 +2789,47 @@
     // 逐项提示会把用户推向「每改一项重启一次」；档位由后端侧表算好透在每行的 applyScope 上
     // （data/optimizer-scope.json，判定规则与档位序两侧同表，由 check-optimizer-dynamic 对拍）。
     let batchScope = 0, batchScopeCount = 0;
-    for (let i = 0; i < allowed.length; i++) {
-      const opt = allowed[i];
-      // 审查 2026-09-27 M8：记录「当前 + 剩余」，提权确认瞬间据此持久化
-      batchRemainingIds = allowed.slice(i).map(o => o.id);
-      // 进度 Toast 由 runOptionActive 内部创建（此前这里先建一条、内部再建一条并销毁前者）
-      progressToastSuffix = `${i + 1}/${allowed.length}`;
-      try {
-        const p = batchParams(opt, paramsByRun);
-        if (p === null) { failCount++; failedNames.push(opt.title + '（未选定参数）'); continue; }
-        const succeeded = await runOptionActive(p, opt);
-        if (succeeded) {
-          okCount++;
-          const rank = SCOPE_RANK[String(opt.applyScope || 'none')] || 0;
-          if (rank > batchScope) { batchScope = rank; batchScopeCount = 1; }
-          else if (rank === batchScope && rank > 0) batchScopeCount++;
+    // F4b-M12：上锁之后必须整段有 finally —— 循环之后还有 clearSelection / renderGroups /
+    // toast 三段可抛代码，任一处抛错都会把 batchRunning 永久钉在 true，四个批量入口全部失灵。
+    try {
+      for (let i = 0; i < allowed.length; i++) {
+        const opt = allowed[i];
+        // 审查 2026-09-27 M8：记录「当前 + 剩余」，提权确认瞬间据此持久化
+        batchRemainingIds = allowed.slice(i).map(o => o.id);
+        // 进度 Toast 由 runOptionActive 内部创建（此前这里先建一条、内部再建一条并销毁前者）
+        progressToastSuffix = `${i + 1}/${allowed.length}`;
+        try {
+          const p = batchParams(opt, paramsByRun);
+          if (p === null) { failCount++; failedNames.push(opt.title + '（未选定参数）'); continue; }
+          const succeeded = await runOptionActive(p, opt);
+          if (succeeded) {
+            okCount++;
+            const rank = SCOPE_RANK[String(opt.applyScope || 'none')] || 0;
+            if (rank > batchScope) { batchScope = rank; batchScopeCount = 1; }
+            else if (rank === batchScope && rank > 0) batchScopeCount++;
+          }
+          else { failCount++; failedNames.push(opt.title); }
+        } catch (e) {
+          failCount++; failedNames.push(opt.title);
         }
-        else { failCount++; failedNames.push(opt.title); }
-      } catch (e) {
-        failCount++; failedNames.push(opt.title);
       }
-    }
-    batchRemainingIds = null;
-    progressToastSuffix = '';
-    batchRunning = false;
-    if (btn) { btn.disabled = false; btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig; }
-    if (!entriesOverride) clearSelection();  // 面板批次用独立勾选集，不清主页面选择
-    renderGroups(OPTIONS); // 刷新已优化灰态
-    window.app?.toast(
-      okCount === allowed.length ? 'success' : 'warning',
-      `执行完成：成功 ${okCount} 项，失败 ${failCount} 项` +
-      (failCount ? `（${failedNames.slice(0, 5).join('、')}${failedNames.length > 5 ? ' 等' : ''}）` : '')
-    );
-    // 整批只提示一次生效粒度，且排在「执行完成」之后 —— 用户先要知道做没做成，再要知道要不要重启
-    if (batchScope > 0 && batchScopeCount > 0) {
-      window.app?.toast(batchScope >= SCOPE_RANK.reboot ? 'info' : 'success', scopeAdviceText(batchScope, batchScopeCount), 9000);
-      window.app?.log('info', `优化批次生效粒度：${batchScope >= SCOPE_RANK.reboot ? '需重启电脑' : '建议重启资源管理器'}（${batchScopeCount} 项）`);
+      if (!entriesOverride) clearSelection();  // 面板批次用独立勾选集，不清主页面选择
+      renderGroups(OPTIONS); // 刷新已优化灰态
+      window.app?.toast(
+        okCount === allowed.length ? 'success' : 'warning',
+        `执行完成：成功 ${okCount} 项，失败 ${failCount} 项` +
+        (failCount ? `（${failedNames.slice(0, 5).join('、')}${failedNames.length > 5 ? ' 等' : ''}）` : '')
+      );
+      // 整批只提示一次生效粒度，且排在「执行完成」之后 —— 用户先要知道做没做成，再要知道要不要重启
+      if (batchScope > 0 && batchScopeCount > 0) {
+        window.app?.toast(batchScope >= SCOPE_RANK.reboot ? 'info' : 'success', scopeAdviceText(batchScope, batchScopeCount), 9000);
+        window.app?.log('info', `优化批次生效粒度：${batchScope >= SCOPE_RANK.reboot ? '需重启电脑' : '建议重启资源管理器'}（${batchScopeCount} 项）`);
+      }
+    } finally {
+      batchRemainingIds = null;
+      progressToastSuffix = '';
+      batchRunning = false;
+      if (btn) { btn.disabled = false; btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig; }
     }
   }
 
@@ -2972,45 +2977,50 @@
     let okCount = 0, failCount = 0;
     const failedNames = [];
     let batchScope = 0, batchScopeCount = 0;
-    for (let i = 0; i < allowed.length; i++) {
-      const opt = allowed[i];
-      // 审查 2026-09-27 M8：同 runSelected——提权中断时据此恢复剩余批次
-      batchRemainingIds = allowed.slice(i).map(o => o.id);
-      // 进度 Toast 由 runOptionActive 内部创建（同上，消除每项一次白建白毁）
-      progressToastSuffix = `${i + 1}/${allowed.length}`;
-      try {
-        const p = opt.id === 'tf_svc_bulk'
-          ? { includeStore: !!batchIncludeStore }
-          : batchParams(opt, paramsByRun);
-        if (p === null) { failCount++; failedNames.push(opt.title + '（未选定参数）'); continue; }
-        const succeeded = await runOptionActive(p, opt);
-        if (succeeded) {
-          okCount++;
-          const rank = SCOPE_RANK[String(opt.applyScope || 'none')] || 0;
-          if (rank > batchScope) { batchScope = rank; batchScopeCount = 1; }
-          else if (rank === batchScope && rank > 0) batchScopeCount++;
+    // F4b-M12：同 runSelected —— 循环之后的 setCardsSelected / clearSelection / renderGroups /
+    // toast 都可能抛，锁必须在 finally 里放。
+    try {
+      for (let i = 0; i < allowed.length; i++) {
+        const opt = allowed[i];
+        // 审查 2026-09-27 M8：同 runSelected——提权中断时据此恢复剩余批次
+        batchRemainingIds = allowed.slice(i).map(o => o.id);
+        // 进度 Toast 由 runOptionActive 内部创建（同上，消除每项一次白建白毁）
+        progressToastSuffix = `${i + 1}/${allowed.length}`;
+        try {
+          const p = opt.id === 'tf_svc_bulk'
+            ? { includeStore: !!batchIncludeStore }
+            : batchParams(opt, paramsByRun);
+          if (p === null) { failCount++; failedNames.push(opt.title + '（未选定参数）'); continue; }
+          const succeeded = await runOptionActive(p, opt);
+          if (succeeded) {
+            okCount++;
+            const rank = SCOPE_RANK[String(opt.applyScope || 'none')] || 0;
+            if (rank > batchScope) { batchScope = rank; batchScopeCount = 1; }
+            else if (rank === batchScope && rank > 0) batchScopeCount++;
+          }
+          else { failCount++; failedNames.push(opt.title); }
+        } catch (e) {
+          failCount++; failedNames.push(opt.title);
         }
-        else { failCount++; failedNames.push(opt.title); }
-      } catch (e) {
-        failCount++; failedNames.push(opt.title);
       }
-    }
-    batchRemainingIds = null;
-    progressToastSuffix = '';
-    batchRunning = false;
-    if (btn) { btn.disabled = false; btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig; }
-    setCardsSelected(false);
-    clearSelection();
-    renderGroups(OPTIONS); // 刷新已优化灰态
-    window.app?.toast(
-      okCount === allowed.length ? 'success' : 'warning',
-      `批量执行完成：成功 ${okCount} 项，失败 ${failCount} 项` +
-      (failCount ? `（${failedNames.slice(0, 5).join('、')}${failedNames.length > 5 ? ' 等' : ''}）` : '')
-    );
-    // 与 runSelected 同一口径：两条批量入口都只提示一次，漏一条会让「一键全选」比手勾更没有提示
-    if (batchScope > 0 && batchScopeCount > 0) {
-      window.app?.toast(batchScope >= SCOPE_RANK.reboot ? 'info' : 'success', scopeAdviceText(batchScope, batchScopeCount), 9000);
-      window.app?.log('info', `优化批次生效粒度：${batchScope >= SCOPE_RANK.reboot ? '需重启电脑' : '建议重启资源管理器'}（${batchScopeCount} 项）`);
+      setCardsSelected(false);
+      clearSelection();
+      renderGroups(OPTIONS); // 刷新已优化灰态
+      window.app?.toast(
+        okCount === allowed.length ? 'success' : 'warning',
+        `批量执行完成：成功 ${okCount} 项，失败 ${failCount} 项` +
+        (failCount ? `（${failedNames.slice(0, 5).join('、')}${failedNames.length > 5 ? ' 等' : ''}）` : '')
+      );
+      // 与 runSelected 同一口径：两条批量入口都只提示一次，漏一条会让「一键全选」比手勾更没有提示
+      if (batchScope > 0 && batchScopeCount > 0) {
+        window.app?.toast(batchScope >= SCOPE_RANK.reboot ? 'info' : 'success', scopeAdviceText(batchScope, batchScopeCount), 9000);
+        window.app?.log('info', `优化批次生效粒度：${batchScope >= SCOPE_RANK.reboot ? '需重启电脑' : '建议重启资源管理器'}（${batchScopeCount} 项）`);
+      }
+    } finally {
+      batchRemainingIds = null;
+      progressToastSuffix = '';
+      batchRunning = false;
+      if (btn) { btn.disabled = false; btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig; }
     }
   }
 

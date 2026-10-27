@@ -74,6 +74,13 @@ const REGISTRY = [
   { file: 'check-async-exits.mjs', reason: 'A-9 前端 await/出口：3 组合成样本与真仓扫描共用同一判据（置 busy 后 try 前有 await 必红、置 busy 立刻 try 放行、**await 只出现在注释里不得判红**——反向也要成立）；EXEMPT 台账双向咬合' },
   // B1（2026-10-27 全仓重审 P0）：注册表递归删树出口的容器准入与名字形态闸。
   { file: 'check-registry-delete-guard.mjs', reason: 'B1 注册表删树守卫：6 组合成样本与真仓扫描共用同一 build()/denyFaceReached() 判据（删树+无禁删面必红、本函数内有禁删面放行、**只在注释里写禁删面仍必红**、1 跳 callee 认账、无删树原语的函数不误伤、纯 to_wide 形态必红）+ 原语两道闸在场断言（空子键形态闸 `reg_delete_subkey_shape_is_malformed` / 名字形态闸 `to_wide_checked`，摘掉即红）+ pssteps 专项（整条链零禁删面必红，摘掉调用即被抓）+ TRANSITION 豁免表双向咬合（代码补上判定但台账未回收 ⇒ 红）+ 对象地板 4 条' },
+  // P1-a（2026-10-27 全仓重审 P1 · F4b 回执三态）：五条形态各自配一组正反对照，
+  // 判据都打在语义差上（M12 打「锁与解锁同函数且解锁在 finally 之后」，M14 打「清空态真定义 +
+  // 进条件 + 确认件有清空分支」），只查关键字出现的写法一律视为判定器失真。
+  { file: 'check-receipt-tri-state.mjs', reason: 'P1-a 回执三态：五条判据共用同一组正反对照（M10 有 else 且置 lossRate:null / M17 时长先绑定不再内联 / M18 三处写侧都读回执 / M12 锁在同一函数的 finally 里放 / M14 清空密钥也走红色确认件）；对照样本必须能把「修好」与「改坏」分开，改坏后门禁 exit≠0 并点名条目' },
+  // P1-a（2026-10-27 全仓重审 P1 · D1-M08）：用户可见文案的禁语判据与真仓扫描共用同一
+  // violations()；退役 id / 退役标题 / 轮次术语三类命中都必须报红并点名条目与字段。
+  { file: 'check-user-copy-policy.mjs', reason: 'P1-a 用户文案纪律：合规样本放行、指向退役项 + 夹带轮次术语的样本必红（对照块每次运行都跑）；真仓扫描走同一判据，命中即点名条目与字段；判定只作用在活跃目录（item-intro.json 故意保留已退役项介绍，不在判据面内）' },
 ];
 
 // MUST_RUN 里尚未配「内置正向对照自检」的存量门禁（T1-M05，2026-10-09 现算 33 条）。
