@@ -168,7 +168,7 @@ fn paths_file_icon_rejects_remote_namespace_before_touching_shell() {
     assert_eq!(
         reached.len(),
         3,
-        "三条不受信向量必须逐条命中（实到 {reached:?}）——少一条就是用例没在测东西"
+        "循环体内已逐条断言，此处仅作长度汇总（X1-M03）实到 {reached:?}"
     );
 }
 
@@ -246,7 +246,7 @@ fn readonly_channel_passes_guard_from_every_subwindow() {
         );
         reached.push(label);
     }
-    assert_eq!(reached, sub_windows(), "每个子窗 label 都必须被点名走过（清单塌缩时这条红）");
+    assert_eq!(reached, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 }
 
 // ==================== P2-13：UI 偏好键后端真源（get-prefs / set-pref） ====================
@@ -339,7 +339,7 @@ fn settings_get_prefs_reaches_every_subwindow() {
         assert!(text.contains("success"), "{label} 窗应越过档位进入命令体，回执 {text}");
         reached.push(label);
     }
-    assert_eq!(reached, sub_windows(), "每个子窗 label 都必须被点名走过（清单塌缩时这条红）");
+    assert_eq!(reached, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 }
 
 /// 负例：白名单外的键必须在**落盘前**被拒（防渲染层被注入后借偏好通道往 settings.json
@@ -420,7 +420,7 @@ fn appearance_prefs_tier_is_main_window_only() {
             &format!("{label} 窗写外观偏好必须被拒杀（放宽=把写用户外观暴露给子窗）"),
         );
     }
-    assert_eq!(reached, vec!["main"], "只有主窗应越过档位（实到 {reached:?}）");
+    assert_eq!(reached, vec!["main"], "本用例循环面只有 main，此处仅作可读汇总（X1-M03）实到 {reached:?}");
 }
 
 /// 形状闸的反向对照（全部**零副作用**：拒发生在落盘之前 ⇒ 进快速组）。
@@ -459,7 +459,7 @@ fn appearance_set_pref_rejects_bad_shape_before_writing() {
     assert_eq!(
         reached.len(),
         vectors.len(),
-        "每条不受信向量都必须各自命中拒因（实到 {reached:?}）——少一条就是用例没在测东西"
+        "循环体内已逐条断言，此处仅作长度汇总（X1-M03）实到 {reached:?}"
     );
     // 白名单外的键当场拒（防借外观通道往 appearance.json 塞任意键）
     let unknown = invoke(
@@ -527,7 +527,7 @@ fn appearance_set_pref_accepts_legal_values_roundtrip() {
         assert_eq!(res["success"], json!(true), "{key}={value} 是合法形状，必须被收: {res}");
         reached.push(key.to_string());
     }
-    assert_eq!(reached.len(), legal.len(), "合法向量必须逐条走过（实到 {reached:?}）");
+    assert_eq!(reached.len(), legal.len(), "循环体内已逐条断言，此处仅作长度汇总（X1-M03）实到 {reached:?}");
 
     let read = invoke(&w, "appearance_get_prefs", json!({}));
     for (key, value) in legal {
@@ -687,7 +687,7 @@ fn uninstall_run_is_main_only_and_passes_guard_from_main() {
         assert_guard_rejected(&text, &format!("{label} 窗调卸载命令必须被来源校验拒杀"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
+    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
     let w = main_window();
     let res = invoke(&w, "uninstall_run", json!({ "appId": GHOST_APP_ID }));
     assert_eq!(res["success"], json!(false), "不存在的卸载键不得假装成功: {res}");
@@ -709,7 +709,7 @@ fn uninstall_modify_is_main_only_and_passes_guard_from_main() {
         assert_guard_rejected(&text, &format!("{label} 窗调修改/修复命令必须被来源校验拒杀"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
+    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
     let w = main_window();
     let res = invoke(&w, "uninstall_modify", json!({ "appId": GHOST_APP_ID }));
     assert_eq!(res["success"], json!(false), "不存在的卸载键不得假装成功: {res}");
@@ -1001,7 +1001,7 @@ fn reg_backup_channels_are_main_only() {
         assert_guard_rejected(&restore, &format!("{label} 窗调卸载域备份还原必须被拒杀"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
+    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 
     let w = main_window();
     let list = invoke(&w, "uninstall_reg_backup_list", json!({}));
@@ -1038,7 +1038,7 @@ fn dir_size_channel_is_main_only_and_refuses_non_absolute() {
         assert_guard_rejected(&text, &format!("{label} 窗调体积兜底必须被拒杀"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
+    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 
     let w = main_window();
     // `"."` 而不是随便一个相对串：它**一定**存在，所以去掉绝对路径闸后这条必然变绿，
@@ -1085,7 +1085,7 @@ fn restore_reg_recognises_retired_ids_but_still_refuses_unknown() {
         assert_guard_rejected(&text, &format!("{label} 窗调优化项还原必须被拒杀"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
+    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 
     let w = main_window();
     let unknown = invoke(&w, "optimizer_restore_reg", json!({ "optionId": "trim-不存在的选项" }));
@@ -1415,7 +1415,7 @@ fn batch_pack_channels_are_main_only() {
         assert_guard_rejected(&restore, &format!("{label} 窗调整批还原必须被拒杀（它往磁盘写文件）"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
+    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 
     let w = main_window();
     let list = invoke(&w, "uninstall_batch_list", json!({}));
@@ -1497,7 +1497,7 @@ fn cleanup_reg_backup_restore_shares_the_uninstall_domain_gates() {
         assert_guard_rejected(&r, &format!("{label} 窗调清理域备份还原必须被拒杀"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
+    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 
     // ② 命令边界两个早退面（零触盘、不依赖备份根内容）
     let w = main_window();
@@ -1593,7 +1593,7 @@ fn batch_preflight_is_readonly_for_all_app_windows() {
         );
         reached.push(label);
     }
-    assert_eq!(reached, sub_windows(), "每个子窗 label 都必须被点名走过（清单塌缩时这条红）");
+    assert_eq!(reached, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 }
 
 /// R1-1.4 / R1-1.5：空 ids 与未知 id 的**fail-closed** 形状。
@@ -1834,7 +1834,7 @@ fn syspanel_power_edit_command_is_main_only() {
     assert_eq!(
         rejected.len(),
         sub_windows().len() * cases.len(),
-        "每个子窗 label 都必须逐命令被拒杀（清单塌缩时这条红）"
+        "循环体内已逐命令断言，此处仅作数量汇总（X1-M03）"
     );
 }
 
@@ -1849,7 +1849,7 @@ fn optimizer_stale_dismiss_is_main_only() {    let mut rejected: Vec<&str> = Vec
         assert_guard_rejected(&text, &format!("{label} 窗调 optimizer_stale_dismiss 必须被来源校验拒杀"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
+    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 }
 
 /// 账外核对（2026-10-15 拍板）：只读但只被主窗优化页消费 ⇒ 按 D5 判据取 MAIN，子窗被拒杀。
@@ -1863,7 +1863,7 @@ fn optimizer_external_scan_is_main_only() {
         assert_guard_rejected(&text, &format!("{label} 窗调 optimizer_external_scan 必须被来源校验拒杀"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
+    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 }
 
 /// 2026-10-04 磁盘清理审计 §5.6：item-detail 的 path 形参必须与扫描快照同源。
@@ -2056,7 +2056,7 @@ fn optimizer_restore_frequency_subwindows_always_rejected() {
         );
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
+    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 }
 
 /// 2026-10-06 任务四：空目录忽略名单三命令 —— 档位与负例。
@@ -2081,7 +2081,7 @@ fn finder_ignore_list_guard_tiers_and_negative_cases() {
         }
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
+    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
     let w = main_window();
     // ② 不存在的目录：在读取 / 写盘之前拒绝
     // X1-M03（v7.2 C08）补拒因点名：只断 success:false 分不清「存在性闸拦住了」与
@@ -2121,7 +2121,7 @@ fn quickcmds_run_is_main_only() {
         );
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
+    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
     let w = main_window();
     let res = invoke(&w, "quickcmds_run", json!({ "id": "__trim_smoke_unknown__" }));
     assert_eq!(res["success"], json!(false), "主窗越过档位后未知 id 必须被白名单拒: {res}");
@@ -2582,7 +2582,7 @@ fn cleanup_query_locked_is_main_only() {
         assert_guard_rejected(&text, &format!("{label} 窗调占用查询必须被来源校验拒杀（主窗档）"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "每个子窗 label 都必须被点名拒杀（清单塌缩时这条红）");
+    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 }
 
 /// C1-1 占用查询：主窗 + 不存在的路径必须「明说路径不存在」，不许装「无占用」——
