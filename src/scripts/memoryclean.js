@@ -287,7 +287,7 @@
   // ==================== 执行清理 ====================
   // v5 P2：内存页三条会改系统状态的入口（整页清理 / 单项清理 / 阻止开机自启）此前没有任何
   // 串行闸门 —— 高危确认弹窗 await 期间连点，会并发跑两遍 NtSetSystemInformation 链、
-  // 并叠出两个确认弹窗。对照 sysrestore.js:140「进函数即 disabled」的既有写法。
+  // 并叠出两个确认弹窗。对照 src/scripts/sysrestore.js 里「进函数即 disabled」的既有写法。
   let memBusy = false;
   function withMemBusy(fn) {
     if (memBusy) {

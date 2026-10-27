@@ -379,7 +379,7 @@ fn folder_restore_verdict(backup_path: &str, orig_path: &str) -> Result<(), Stri
 ///
 /// 刻意**不跑** `is_path_protected`：备份根住在 `app_data_dir()` 下，而应用自身
 /// 数据目录是 `configure_from_app` 登记的受保护子树（整棵不许碰）——对备份路径跑
-/// 保护判定恒为 true，合法备份会被全拦（同 `appearance.rs:390` 踩过的坑）。
+/// 保护判定恒为 true，合法备份会被全拦（同 `src-tauri/src/commands/appearance.rs:398` 踩过的坑：彼处 `is_path_protected` 恒为 true）。
 /// 备份区的「可动」由本 containment（只认本域备份根）单独授权。
 fn backup_in_root_verdict(backup_path: &str) -> Result<(), String> {
     let backup_key = crate::engine::paths::path_key(backup_path);

@@ -3,7 +3,7 @@
 // 为什么需要它：`tauri.conf.json` 的 build.frontendDist = `../src`，**src/ 下的每个字节都会进产物**。
 // v2-L8 实测 `src/assets/ico/` 11 个文件里 9 个零引用、共 3,414,696 B（母版 source_squared.png
 // 2,713,043 + source.png 670,086 + 7 个 icon_NxNxN.png 31,567），另 douyin.ico 29,801 B 也只被
-// `pathbinding.js:2` 的内联 base64 顶替、运行期无人加载。这类件不会报错、只会一直躺在安装包里。
+// `src/scripts/pathbinding.js` 的内联 base64 顶替、运行期无人加载。这类件不会报错、只会一直躺在安装包里。
 //
 // 判据（刻意保守，宁可不判红也不误判）：
 //   ① 枚举 `src/` 全部文件；

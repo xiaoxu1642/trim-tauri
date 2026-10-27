@@ -279,7 +279,7 @@ fn netcheck_collect_shape() {
     // X1-L02（v7.2 C08）：原实现只断「success 是布尔」⇒ 检测整条失败
     // （success:false、压根没有 items）也绿；同文件兄弟 runtimes_collect_shape
     // （:208-234）已按 v5 P2 补齐渲染层口径，这里是唯一没跟上的——一文件内双标。
-    // 按 §4.1 纪律③「形状断言对渲染层消费口径写」对齐：netcheck.js:180 对
+    // 按 §4.1 纪律③「形状断言对渲染层消费口径写」对齐：netcheck.js 对
     // `resp.data.items` 直接取用（非数组 ⇒ 整页 setAll('pending') + 报错），
     // :189-192 按 id 索引并给 status 缺省 'unknown'，:199-201 只认 fail/warn。
     assert!(res["success"].as_bool().unwrap_or(false), "本机网络检测整条失败: {res}");

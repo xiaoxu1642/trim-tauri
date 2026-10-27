@@ -2,7 +2,7 @@
 // tools/check-degraded-consumption.mjs —— 后端已分态的 `degraded`，前端不得折回单态（B0 门禁）
 //
 // 出处：2026-10-24 全仓重审 F4a2-K02（🔴）与族 F-2 / A1。
-// 形状：后端为「Corrupt ≠ Absent」专门回传 `degraded`（`commands/paths.rs:102-104` 的 A1-M12
+// 形状：后端为「Corrupt ≠ Absent」专门回传 `degraded`（`src-tauri/src/commands/paths.rs:102-104` 的 A1-M12
 // 注释就是这条的出处），前端只看 `success` + `data` ⇒ 配置损坏被当成「这台机器从没扫过」，
 // 1.5 秒后自动重扫并把猜测值逐键写回真源，而该真源被清理链原样采纳并永久删除。
 // A1 现算：后端 9 个命令文件发射 `degraded`，前端只有 3 个文件消费 ⇒ 这是系统性缺口，

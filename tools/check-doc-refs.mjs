@@ -97,7 +97,7 @@ if (agentsPresent && docsPresent) {
 // v5-K04 批次 7（2026-10-13）修补「三重失明」（T1c 实测）：
 //   ① 令牌黑名单收编 `~/.trim-signing` 变体（`trim-signing` 单词覆盖全部含它的写法）；
 //   ② 语料扩面：tools/ 与 vendor/ 也扫，且 **全行扫**（Rust 的 panic!/assert 文案是
-//      字符串字面量不是注释行，contract_tests.rs:2011 型漏报就在这）；
+//      字符串字面量不是注释行，src-tauri/src/commands/optimizer/contract_tests.rs:2011 型漏报就在这）；
 //   ③ 受控例外按 {file, anchor} 白名单（§5.19 键形，禁行号），且每条必须真的命中
 //      ≥1 次（白名单不命中 = 腐烂，判红——正向对照）。
 // 受控例外的位置/理由/范围登记在发版手册 §7.3「受控例外」小节。

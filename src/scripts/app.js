@@ -707,7 +707,7 @@
     if (!backdrop) return;
     backdrop.style.display = 'flex';
     // 审查 v2-F8：这个弹窗声明了 `role="dialog" aria-modal="true"` 却全程没有焦点管理 —— 打开时不移焦点、Tab 不圈闭、
-    // 关闭时不归还，屏幕阅读器与纯键盘用户被留在弹窗背后。仓库自己有正确做法（`ds.focusTrap`，modal.js:145 工厂在用），这里直接复用同一件。
+    // 关闭时不归还，屏幕阅读器与纯键盘用户被留在弹窗背后。仓库自己有正确做法（`ds.focusTrap`，modal.js 的 focusTrap 工厂在用），这里直接复用同一件。
     const modalEl = backdrop.querySelector('.usage-modal');
     if (window.ds && typeof window.ds.focusTrap === 'function' && modalEl) {
       usageTrap?.release();

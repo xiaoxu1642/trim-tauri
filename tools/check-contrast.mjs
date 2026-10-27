@@ -52,7 +52,7 @@ import { readFileSync, readdirSync } from 'node:fs';
  * 任何选择器都参与 theme-block 扫描，多一层「别处冒出个 :root 就污染主题表」
  * 的隐患。行号也因此天然是**文件内行号**，不需要跨文件偏移量 —— 合并方案要手工
  * 维护偏移，任一文件一增删行就整体漂移（已实测踩过：拼 offsets 算出的
- * `ds.css:9793` 指向 main.css 第 9000 行，比不写行号更难查）。
+ * 注释里写「文件:行号」指向别处的某一行，比不写行号更难查）。
  *
  * ds.css 必须在其余两份之后加载（其文件头明写），所以它的规则在级联里更晚，
  * 冲突时以它为准 —— 这与「先扫谁」无关，门禁只是把各自的组合算一遍。
@@ -367,7 +367,7 @@ const TINT_WEAK_ALLOW = [];
 //   · 真正算不出的是 --splash-* 族（独立局部调色板，不随主题联动）——
 //     那些走 UNKNOWN_BASE_ALLOW 登记，登记项仍由 E 组棘轮守着。
 // 实测代价（本次收口时现算）：+144 组，仅 `.bg-list-del:hover` 一条落到 4.16:1，
-// 且它是**纯图标**按钮（`✕`，pathbinding.js:461），适用 WCAG 1.4.11 的 3:1 而非
+// 且它是**纯图标**按钮（`✕`，见 src/styles/main.css 的 .bg-list-del:hover），适用 WCAG 1.4.11 的 3:1 而非
 // 1.4.3 的 4.5:1 ⇒ 进 ICON_ONLY 清单，不是违规。
 const SOLID_SKIP = /^$/;
 // K1 失明源一（2026-10-03 L3 审查）：属性值的**括号平衡**读取器。
@@ -609,7 +609,7 @@ const weak = solidRows.filter((r) => r.ratio < AA_NORMAL);
 // 未登记的一律按 4.5 硬判 ⇒ 有人拿「这是图标」当借口放行新组合，门禁会红。
 //
 // 2026-10-03 现算：收口 SOLID_SKIP 盲区后 +144 组，只有 1 组落到 4.5~3 之间 ——
-// `.bg-list-del:hover`（✕ 删除按钮，pathbinding.js:461，**纯图标无文本**）实测 4.16:1。
+// `.bg-list-del:hover`（✕ 删除按钮，src/styles/main.css 的 .bg-list-del:hover，**纯图标无文本**）实测 4.16:1。
 const ICON_ONLY_MIN = 3.0;
 const ICON_ONLY_ALLOW = [
   '.bg-list-del:hover',

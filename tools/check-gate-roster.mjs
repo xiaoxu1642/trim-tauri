@@ -38,6 +38,7 @@ const MUST_RUN = [
   'check-a11y',
   'check-native-hygiene',
   'check-handle-lifecycle',
+  'check-comment-coords',
   'check-css-tokens',
   'check-css-hygiene',
   'check-assets-used',

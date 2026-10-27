@@ -5,7 +5,7 @@
 // `grep -rn "data/" tools/*.mjs` = 0 命中）。附录 G 当时逐条深比对是「零漂移」——
 // 可「一致」和「有断言守着」是两件事：前者会漂，且漂移的表现是**静默**：
 //   · 规则库只改了 JSON ⇒ 兜底副本停在旧 71 项，IPC 异常时界面展示过期分类且不报错
-//     （`cleanup.js:55` 直接吃 FALLBACK）；
+//     （`src/scripts/cleanup.js` 里直接吃 FALLBACK 的位置）；
 //   · 优化项只改了前端 OPTIONS ⇒ JSON 停在旧字段，Rust 侧按旧值下发步骤；
 //   · 受保护路径基线重拷了 vendor 却没重跑夹具 ⇒ Rust 测的是过期期望值，看着绿其实在测旧口径。
 // 本门禁把附录 G 的四条对拍固化下来，四条都是**纯内存重算**（不写盘、不起 pwsh、不开窗口）。
@@ -325,7 +325,7 @@ const NO_PARITY_REGISTRY = [
 const NO_COMMENT_REGISTRY = [
   { file: 'cleanup-rules.json', why: '签名规则库：加字段会改规范化体，必须重签；坐标由 check-cleanup-rule-contract / rule-schema 管' },
   { file: 'item-intro.json', why: '顶层 note 已承担说明；简介正文不是坐标表' },
-  { file: 'maintenance-tasks.json', why: '生成物（vendor/maintenance-scripts.js），任务表内无仓内坐标' },
+  { file: 'maintenance-tasks.json', why: '手维护的任务表（D1-M10：实盘无写盘器），任务表内无仓内坐标' },
   { file: 'optimizer-runtime.json', why: '生成物（vendor OPTIONS）+ 顶层是裸数组挂不了字段，签名走 sidecar' },
   { file: 'optimizer-runtime.json.sig.json', why: '签名载体本身' },
   { file: 'uninstall-residue-rules.json', why: '签名规则库：加字段会改规范化体，必须重签；坐标由 residue 契约门禁管' },

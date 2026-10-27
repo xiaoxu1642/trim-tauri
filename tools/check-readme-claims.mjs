@@ -202,7 +202,7 @@ assertAllEqual('9c. 清理项大类数 = groups.length', /(\d+)\s*大类共\s*\d
 
 // 10. 右键菜单扫描类数：readme「按 N 类扫描」⇄ 后端可达类数实算
 //     = contextmenu.rs scenes 表条目数 + 四个特殊 category 字面量（发送到/Win+X/新建菜单/
-//     打开方式，各自只有一段生成代码）。UWP/PackagedCom 后端未实现（contextmenu.rs:440
+//     打开方式，各自只有一段生成代码）。UWP/PackagedCom 后端未实现（src-tauri/src/engine/native/contextmenu.rs:837
 //     自述「暂未实现」），所以这个数小于侧边栏 CATEGORY_ORDER.length —— readme 只承诺
 //     「扫得出数据的类数」。补实现或隐藏 UWP 属业务裁定： whichever 方向落地，两侧
 //     数字一起动，本门禁的对拍会引导 readme 同步。

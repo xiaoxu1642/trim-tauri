@@ -105,7 +105,7 @@ fn annotate_error_codes(message: &str) -> String {
 }
 
 fn load_tasks() -> TasksFile {
-    serde_json::from_str(TASKS_JSON).expect("maintenance-tasks.json 由生成器保证合法")
+    serde_json::from_str(TASKS_JSON).expect("maintenance-tasks.json 手维护且经契约测试钉住（D1-M10：实盘无写盘器）")
 }
 
 use crate::commands::state::RUNNING;

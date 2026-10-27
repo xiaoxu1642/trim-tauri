@@ -624,7 +624,7 @@
 
     // 折叠头的键盘等价路径（A3-M03）：这些 div 头带 `cursor:pointer` 且只挂 click ⇒
     // 键盘用户既聚焦不了也按不动，磁盘清理页全部一级/二级分类折叠走不到。
-    // 同一张表的表头折叠本来就有键盘通路（`xtable.js:48` 给 role=columnheader tabindex=0、
+    // 同一张表的表头折叠本来就有键盘通路（`src/scripts/xtable.js` 给 role=columnheader tabindex=0、
     // `:127` 挂 keydown），这里是同仓双口径的另一半，收在同一个局部函数里而不是两处各写。
     const bindCollapseKeys = (el) => {
       if (!el || el.matches('button,a,input') || el.hasAttribute('tabindex')) return;

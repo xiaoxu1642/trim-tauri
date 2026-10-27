@@ -95,13 +95,16 @@ const EXTS = (n) => n.endsWith('.rs') || n.endsWith('.js') || n.endsWith('.css')
 // 会被 commentLines 当成注释行扫到 —— 样本是刻意写假的，扫描语料必须排除本文件
 // （与 check-idle-scripts 的 include_str! 自指是同一类坑：判定器不得吃自己的样本）。
 const SELF_FILE = 'tools/check-comment-rot.mjs';
+// 姊妹门禁 `check-comment-coords.mjs` 的正向对照同样是刻意写假的坐标（越界行号 / 裸文件名），
+// 一并豁免 —— 两张表都属「判定器不得吃自己的样本」（同 check-idle-scripts 的 include_str! 自指坑）。
+const SELF_FILE_EXTRA = 'tools/check-comment-coords.mjs';
 
 const commentsByFile = new Map();
 let commentLineTotal = 0;
 for (const base of SCAN_ROOTS) {
   for (const fAbs of walkFiles(base, EXTS, { ignoreDir: IGNORE_DIR })) {
     const rel = relative(ROOT, fAbs).replace(/\\/g, '/');
-    if (rel === SELF_FILE) continue; // 自指豁免：本文件的合成样本见上注
+    if (rel === SELF_FILE || rel === SELF_FILE_EXTRA) continue; // 自指豁免：合成样本见上注
     const cs = commentLines(readFileSync(fAbs, 'utf8'));
     if (cs.length) {
       commentsByFile.set(rel, cs);

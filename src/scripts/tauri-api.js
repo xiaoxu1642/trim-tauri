@@ -867,9 +867,9 @@
 
     var bar = document.createElement('div');
     bar.className = 'tauri-caption';
-    // 审查 v2-F8：`decorations(false)`（lib.rs:439）已排除原生标题栏，这套自绘按钮是最小化/最大化/关闭的**唯一**入口。
+    // 审查 v2-F8：`decorations(false)`（src-tauri/src/lib.rs:736）已排除原生标题栏，这套自绘按钮是最小化/最大化/关闭的**唯一**入口。
     // 原先三个按钮都带 `tabindex="-1"`，纯键盘用户完全不可达（`ds.js` 的焦点陷阱选择器也排除 `[tabindex="-1"]`），且
-    // `index.html:32/40` 还留着「由 Windows 原生 titleBarOverlay 渲染」的过时注释。这里去掉限制，容器升级为 `role="toolbar"`。
+    // `src/index.html:50` 还留着「由 Windows 原生 `titleBarOverlay` 渲染」的过时注释。这里去掉限制，容器升级为 `role="toolbar"`。
     bar.setAttribute('role', 'toolbar');
     bar.setAttribute('aria-label', '窗口控制');
     bar.innerHTML =

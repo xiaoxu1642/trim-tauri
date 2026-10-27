@@ -5,7 +5,7 @@
 // 根因形状：清扫根 `dirs.push(std::env::temp_dir().join("Trim"))` 之后逐**子项**判 reparse，
 // 根自身没人判 ⇒ 根被换成 junction 时 `read_dir` 直接穿透，旧文件被 `remove_file` 永久删，
 // 不经回收站、不经 `is_path_protected`。写侧原语 `engine::paths::temp_script_dir()` 恰恰是对
-// **根**拒 reparse 的（`paths.rs:431-445`）⇒ 同族两套口径，本门禁把它钉成一条。
+// **根**拒 reparse 的（`src-tauri/src/engine/paths.rs:431-445`）⇒ 同族两套口径，本门禁把它钉成一条。
 //
 // 判据为什么不是「文件里出现过 inspect_root 就算过」（v2 §4 A-7「文本命中不算」）：
 //   ① 判定作用在 `blankNonCode` 之后的文本上 ⇒ 注释/字符串里写 `inspect_root(` 不顶账；

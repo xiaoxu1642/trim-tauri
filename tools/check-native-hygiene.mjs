@@ -557,7 +557,7 @@ const PANIC_ALLOW = [
   { file: 'native-scanner/src/util.rs', count: 6, reason: '编译期 const 布局断言两族（RM_PROCESS_INFO 668/12/652 + OSVERSIONINFOW 276/4/12），panic 只可能发生在编译错' },
   { file: 'src-tauri/src/lib.rs', count: 2, reason: '启动期 main 窗口创建 / Tauri 运行时构建失败——无 UI 可落，fail-fast 是唯一选择' },
   { file: 'src-tauri/src/commands/cleanup/rules.rs', count: 1, reason: '生成器产物 cleanup-postactions.json 的 expect，合法性由 contract_tests 钉住（对 build 产物 fail-fast 正确）' },
-  { file: 'src-tauri/src/commands/maintenance.rs', count: 1, reason: '生成器产物 maintenance-tasks.json 的 expect，同上' },
+  { file: 'src-tauri/src/commands/maintenance.rs', count: 1, reason: '手维护件 maintenance-tasks.json 的 expect（D1-M10：实盘无写盘器），同上' },
   { file: 'src-tauri/src/commands/optimizer/subitems.rs', count: 1, reason: '生成器产物 optimizer-subitems.json 的 expect，同上' },
 ];
 {

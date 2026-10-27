@@ -65,8 +65,8 @@ const MIGRATION_FILES: &[&str] = &[
 /// 落老根，于是老根那份往往更新。新根优先会把用户后来禁用的启动项从界面里抹掉，而系统里它们
 /// 还禁用着——台账取本口径见 `engine::native::startup_ledger_file`（取最近修改的那本）。
 ///
-/// 这条注释此前还把写侧算到 PowerShell 头上（`startup_*.ps1`、`peripheral_apply.ps1`、
-/// `cleanup_execute.ps1:706`、`memory_stubborn_block.ps1:40`）——那是 S3 退役前的旧轨坐标，
+/// 这条注释此前还把写侧算到 PowerShell 头上（`startup_*.ps1`、`peripheral_apply.ps1`
+/// 那批旧轨脚本）——它们在 S3 退役后已不存在，
 /// 现在 `src-tauri/ps/` 只剩 1 个脚本（optimizer_build.ps1）、`grep -i appdata` 零命中，写侧全在 Rust
 /// （`engine/native/` 的启动项与外设备份、`commands/cleanup/backup.rs` 的注册表备份）。
 /// 留着错坐标比不留更坏：下一个人会去改一个不存在的文件。

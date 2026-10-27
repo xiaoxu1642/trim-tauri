@@ -1187,7 +1187,7 @@ pub(super) fn classify_residue_op_in(kind: &str, target: &str, snap_finding: Opt
                 if !narrow {
                     log::write_log("warn", &format!("uninstall_residue_execute 拒绝注册表目标: {reason}"));
                     // 状态只用既有的 skip：报告明细按 ok/fail/skip 三态渲染中文标签，
-                    // 新增 status 会在前端漏出英文字面量（uninstall.js:487）
+                    // 新增 status 会在前端漏出英文字面量（见 src/scripts/uninstall.js 的状态映射处）
                     return OpVerdict::Skip(format!("已拒绝删除：{reason}"));
                 }
                 // 放行必须留痕：这条是本仓唯一一处「A1 让路」，事后要能在日志里数出来

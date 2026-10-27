@@ -26,7 +26,7 @@ import { REPO_ROOT } from './ps-origin.mjs';
 import { walkFiles } from './lib/fs-walk.mjs';
 
 // 基线 = 2026-10-02 v2-L4P-16（E-2）重算：`function` 定义 29 + 箭头定义 1
-// （runtimes.js:9 `const escapeHtml = (s) => window.ds.esc(s)`，旧正则看不见）
+// （src/scripts/runtimes.js 里 escapeHtml 的定义处，旧正则看不见）
 // = 30。只许下调。
 const BASELINE = 30;
 

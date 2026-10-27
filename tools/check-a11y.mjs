@@ -281,7 +281,7 @@ console.log('=== 可达性门禁（勾选框三属性 / aria-live 宿主 / data-
   check(rmViolations(badRmNoThumb).some((v) => v.includes('slider-thumb')), '对照④b：拇指未归零的样本必须判红');
   check(rmViolations(goodRm).length === 0, '对照④c：body 自身 + 拇指都归零的样本必须放行');
   // 焦点环（v5-K05 批次 8 补，门禁候选「6 条断言 0 处管焦点环」）：判据 = 该窗加载的
-  // CSS 合并集存在 :focus-visible 规则（A3 裁决：ds.css:181 规则以 bg+color 作替代
+  // CSS 合并集存在 :focus-visible 规则（A3 裁决：src/styles/ds.css 里 :focus-visible 规则以 bg+color 作替代
   // 指示，存在性判据即可，不规定实现形态）。
   check(focusVisibleMissing('body { color: red; }'), '对照④d：无 :focus-visible 规则的样本必须判红');
   check(!focusVisibleMissing(':focus-visible { outline: 2px solid; }'), '对照④e：有焦点环的样本必须放行');

@@ -748,7 +748,7 @@ fn strip_js_comments(src: &str) -> String {
     /// R3-L03：注释锚点必须**门禁看得见**。
     ///
     /// `tools/check-comment-rot.mjs` 的 `RE_FILE_LINE` 只匹配带仓内前缀的
-    /// `src/…`|`src-tauri/…`|`tools/…`|`native-scanner/…` 路径，裸文件名（`mod.rs:211`）
+    /// `src/…`|`src-tauri/…`|`tools/…`|`native-scanner/…` 路径，裸文件名（`mod.rs` 这类不带目录前缀的写法）
     /// 与不带目录前缀的 `:NNN` 都落在判定面之外 —— 「失效但看不见」比「失效」更久。
     /// 本域改用 Rust 模块符号锚（同一门禁的 R1 段按 `defIndex` 校验存在性）。
     #[test]
@@ -811,7 +811,7 @@ fn strip_js_comments(src: &str) -> String {
                     e += 1;
                 }
                 let token: String = c[s..e].iter().collect();
-                // 带仓内目录前缀（`src-tauri/src/…/x.rs:12`）的锚点门禁能解析，放行
+                // 带仓内目录前缀（`src-tauri/src/…` 这类路径）的锚点门禁能解析，放行
                 if !token.contains('/') && !token.contains('\\') {
                     out.push(token);
                 }
