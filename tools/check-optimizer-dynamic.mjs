@@ -575,7 +575,7 @@ check(
     missingGrey.length ? `缺：${missingGrey.join(' / ')}——退回 OPTIONS 会把侧表并集里的项从灰态集合里丢掉` : '');
   // A10b（F4b-M20 / D-5 语义面枚举）：持久集合（detected / staleIds / pending /
   // applied*）的成员判据**整文件**不得再用展示列表 OPTIONS. —— 来源②/横幅/提权续跑
-  // 这批站点曾是 M20 的漏网半边（43 项面板成员的主进程记账被前端当场丢掉）。
+  // 这批站点曾是 M20 的漏网半边（四十余项面板成员的主进程记账被前端当场丢掉）。
   // 判据 = 语义面逐行扫：持久集合标识符与 `OPTIONS.`（非 ALL_）同行即红；
   // 地板 = 文件里必须存在 ALL_OPTIONS 成员判据（否则判据失明）。合成对照：含
   // `detected` 且 `OPTIONS.find` 的行必红（还原 M20 原形状），ALL_OPTIONS 放行。
