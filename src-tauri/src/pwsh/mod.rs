@@ -25,6 +25,7 @@ use std::os::windows::process::CommandExt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::engine::tmpnames::{self, TmpNameShape};
 use crate::engine::{job::ProcessJob, log, paths, protect};
 
 pub struct PsOutput {
@@ -247,7 +248,11 @@ pub fn injection_hazard(script: &str) -> Option<&'static str> {
 }
 
 /// 写临时 PowerShell 脚本：返回**守卫**，脚本随作用域结束自动删除（审查 v2-L2）。
-fn write_temp_script_bytes(bytes: &[u8], suffix: &str) -> Result<TempScript, String> {
+///
+/// B2-1：文件名由 [`tmpnames::SCRIPT_PS1`] 拼出，与清扫白名单读的是**同一份形态声明** ——
+/// 此前拼装与白名单各写一份字面量，任一侧改名都会让另一侧静默失效（漂严则自己的残留
+/// 再也清不掉，漂松则别人的文件被当垃圾永久删）。
+fn write_temp_script_bytes(bytes: &[u8]) -> Result<TempScript, String> {
     let dir = paths::temp_script_dir()?;
     // 审查 L-19（2026-10-03 L4）：独占创建（CREATE_NEW 语义）而非 create+truncate。
     // 同名文件若被同用户进程预先放好（哪怕做成 reparse 点），truncate 写入会跟随它
@@ -255,12 +260,7 @@ fn write_temp_script_bytes(bytes: &[u8], suffix: &str) -> Result<TempScript, Str
     // 新名），与熵强弱无关地消灭「观察目录 → 换件」的竞态窗口。
     use std::io::Write;
     for _ in 0..3 {
-        let candidate = dir.join(format!(
-            "script_{}_{}{}",
-            crate::engine::now_ms(),
-            random_token(),
-            suffix
-        ));
+        let candidate = dir.join(tmpnames::SCRIPT_PS1.build(crate::engine::now_ms(), &random_token()));
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -321,7 +321,7 @@ pub fn run_inbox_script(script: &str, timeout: Duration, diag_op: Option<&str>) 
     if let Some(hazard) = injection_hazard(script) {
         return Err(format!("拒绝注入 PowerShell：{hazard}"));
     }
-    let path = write_temp_script_bytes(&render_ps1_bytes(script), ".ps1")?;
+    let path = write_temp_script_bytes(&render_ps1_bytes(script))?;
     run_inbox_ps(path.path(), timeout, diag_op)
 }
 
@@ -819,21 +819,66 @@ mod tests {
     #[test]
     fn 回收执行体只删沙箱内的过期文件() {
         let root = sandbox_dir("prune-run");
-        let old = root.join("old.ps1");
-        let fresh = root.join("sub").join("fresh.ps1");
+        // 本工具产出的形态：过期 ⇒ 必删
+        let ours = root.join(tmpnames::SCRIPT_PS1.build(1789999999999, "0123456789abcdef"));
+        let fresh = root.join("sub").join(tmpnames::SCRIPT_PS1.build(1789999999998, "fedcba9876543210"));
+        // 别人的件（沙箱内自造的文件名 old.ps1，不碰真实目录；R3f 白名单登记见
+        // check-comment-rot 的 PS1_MENTION_ALLOW）：过期也不许删
+        let foreign = root.join("old.ps1");
         std::fs::create_dir_all(root.join("sub")).unwrap();
-        std::fs::write(&old, b"old").unwrap();
-        std::fs::write(&fresh, b"fresh").unwrap();
-        // 把 old.ps1 的 mtime 推到 2 小时前（沙箱内自造文件名，不碰真实目录；
-        // R3f 白名单登记见 check-comment-rot PS1_MENTION_ALLOW）
-        let f = std::fs::OpenOptions::new().write(true).open(&old).unwrap();
-        f.set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1))
-            .unwrap();
-        drop(f);
-        let removed = prune_temp_scripts_in(&root, std::time::SystemTime::now(), Duration::from_secs(3600));
-        assert_eq!(removed, 1, "只该删掉那一个过期件");
-        assert!(!old.exists());
+        for p in [&ours, &fresh, &foreign] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        // 把 ours 与 foreign 的 mtime 推到 2 小时前，fresh 保持新
+        for p in [&ours, &foreign] {
+            let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+            f.set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+                .unwrap();
+        }
+        let c = prune_temp_scripts_in(
+            &root,
+            std::time::SystemTime::now(),
+            Duration::from_secs(3600),
+            tmpnames::PRIVATE_ROOT_SHAPES,
+        );
+        assert_eq!(c.removed, 1, "只该删掉那一个命中白名单的过期件");
+        assert_eq!(c.skipped, 1, "过期但不在白名单内的件必须计入 skipped");
+        assert!(!ours.exists(), "本工具产出的过期件必须被删");
+        assert!(foreign.exists(), "白名单外的过期件绝不能被删（B2-1 病根就在这）");
         assert!(fresh.exists(), "未过期文件（含子目录里的）不得被删");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// B2-1 验收：公共根（全局可写 `%TEMP%\Trim`）只删收件箱脚本形态。
+    ///
+    /// 沙箱里模拟公共根，喂 `PUBLIC_ROOT_SHAPES` —— 与生产侧同一个常量、同一个执行体，
+    /// 只是不碰真实 `%TEMP%\Trim`（测试不改系统状态）。
+    #[test]
+    fn 公共根只删收件箱脚本形态且计数可见() {
+        let root = sandbox_dir("public-root");
+        let ours = root.join(tmpnames::SCRIPT_PS1.build(1789999999999, "0123456789abcdef"));
+        let foreign = root.join("evil.ps1");
+        let foreign_reg = root.join(tmpnames::OPTIMIZER_REG.build(1789999999999, "0123456789abcdef"));
+        for p in [&ours, &foreign, &foreign_reg] {
+            std::fs::write(p, b"x").unwrap();
+            let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+            f.set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+                .unwrap();
+        }
+        let c = prune_temp_scripts_in(
+            &root,
+            std::time::SystemTime::now(),
+            Duration::from_secs(3600),
+            tmpnames::PUBLIC_ROOT_SHAPES,
+        );
+        assert_eq!(c.removed, 1, "只有收件箱脚本形态该被删");
+        assert_eq!(c.skipped, 2, "白名单外的过期件各计一次 skipped");
+        assert!(!ours.exists());
+        assert!(foreign.exists(), "公共根里别人的脚本必须留下");
+        assert!(
+            foreign_reg.exists(),
+            "注册表中转件只该出现在私有根；公共根里同形态的文件不认"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1052,6 +1097,11 @@ mod tests {
 /// - `cleanup-reg-backup\` 下超额的注册表备份 —— 此前由 `cleanup_execute.ps1`（已退役）产出
 ///   （**`.ps1` 禁手改**，故修剪只能在 Rust 侧做），文件名带时间戳、全仓零读者，此前无上限增长。
 ///
+/// **B2-1（2026-10-27 全仓重审 P0）**：龄期不再是唯一判据，名字还必须命中该根的白名单
+/// （形态真源在 `engine::tmpnames`）。此前只看龄期，于是公共根 `%TEMP%\Trim`（全局可写）
+/// 里任何进程放进去的文件，够一小时就被永久删掉 —— 不经回收站、不经 `is_path_protected`，
+/// 且删的是别人的文件。两个根的白名单不同，见 `cleanup_temp_scripts` 的注释。
+///
 /// lstat 不跟随符号链接：非常规文件（链接/设备）直接跳过（审查 1-6）。
 /// 递归原因见 `collect_temp_files`。
 ///
@@ -1064,17 +1114,47 @@ mod tests {
 /// 退出路径不能因为一次毒化就再也不清临时脚本。
 static TEMP_SWEEP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// 单目录清扫的计数（B2-1 要求「计数可见」：删掉几件、留下几件、各自为什么）。
+///
+/// `skipped` 只数**过了保留期但名字不在白名单内**的件 —— 那正是「换作旧实现会被永久删、
+/// 现在被白名单挡下」的那批，是本轮修复唯一有意义的观测值。未过期的件不计数（它们不是
+/// 候选，计数会把日志淹掉）。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SweepCount {
+    pub(crate) removed: usize,
+    pub(crate) skipped: usize,
+}
+
+impl std::ops::AddAssign for SweepCount {
+    fn add_assign(&mut self, o: Self) {
+        self.removed += o.removed;
+        self.skipped += o.skipped;
+    }
+}
+
 pub fn cleanup_temp_scripts() {
     let _guard = TEMP_SWEEP_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut dirs = Vec::new();
+    let now = std::time::SystemTime::now();
+    let mut total = SweepCount::default();
+    // B2-1：两个根的白名单**不同**。私有根是每用户 DACL、且承载本工具全部产物
+    // （脚本 / 注册表中转件 / 电源方案导出件），故取生产者并集；公共根 `%TEMP%\Trim` 是
+    // 全局可写目录，只认历史上写在那里的收件箱脚本形态 —— 该目录里别人的文件一律不碰。
     if let Ok(d) = paths::temp_script_dir() {
-        dirs.push(d);
+        total += prune_temp_scripts_in(&d, now, TMP_SCRIPT_TTL, tmpnames::PRIVATE_ROOT_SHAPES);
     }
-    dirs.push(std::env::temp_dir().join("Trim"));
-    for dir in dirs {
-        prune_temp_scripts_in(&dir, std::time::SystemTime::now(), TMP_SCRIPT_TTL);
+    let public = std::env::temp_dir().join("Trim");
+    total += prune_temp_scripts_in(&public, now, TMP_SCRIPT_TTL, tmpnames::PUBLIC_ROOT_SHAPES);
+    // 计数必须可见（B2-1 验收）：只在真有动作时落一条，避免每次启动都写零值噪音。
+    if total.removed > 0 || total.skipped > 0 {
+        log::write_log(
+            "info",
+            &format!(
+                "临时件清扫：已删 {} 件，白名单外保留 {} 件（未删的件不在本工具产出的名字形态内）",
+                total.removed, total.skipped
+            ),
+        );
     }
     prune_reg_backups(REG_BACKUP_KEEP_BATCHES);
 }
@@ -1111,8 +1191,17 @@ fn collect_temp_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// 单个目录的回收执行体（不写日志，便于在一次性沙箱里断言，审查纪律：测试不改系统状态）
-fn prune_temp_scripts_in(dir: &Path, now: std::time::SystemTime, cutoff: Duration) -> usize {
+/// 单个目录的回收执行体（不写日志，便于在一次性沙箱里断言，审查纪律：测试不改系统状态）。
+///
+/// `allow` 是该根的件名白名单（B2-1）。**只有同时满足「过了保留期」与「名字命中白名单」
+/// 两个条件的件才会被删**：旧实现只看龄期，于是公共根 `%TEMP%\Trim`（全局可写）里任何
+/// 进程放进去的文件，够一小时就被本工具永久删掉，不经回收站、不经 `is_path_protected`。
+fn prune_temp_scripts_in(
+    dir: &Path,
+    now: std::time::SystemTime,
+    cutoff: Duration,
+    allow: &[&TmpNameShape],
+) -> SweepCount {
     // P0-2A（R7-K01 本体）：这两个根先前只判**子项**、没人判根。根被换成 junction 时
     // `collect_temp_files` 已经在链接另一头枚举，子项各各「普通文件」⇒ 那边别人的旧
     // `.ps1` 被 `remove_file` 永久删，不经回收站、不经 is_path_protected。
@@ -1122,22 +1211,30 @@ fn prune_temp_scripts_in(dir: &Path, now: std::time::SystemTime, cutoff: Duratio
     let verdict = protect::inspect_root(dir, Some(std::path::Path::new(&std::env::temp_dir())));
     if !verdict.is_trusted() {
         protect::note_root_skipped("临时脚本清扫", dir, &verdict);
-        return 0;
+        return SweepCount::default();
     }
     let mut files = Vec::new();
     collect_temp_files(dir, 0, &mut files);
-    let mut removed = 0;
+    let mut count = SweepCount::default();
     for path in files {
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
             continue;
         };
-        if expired_since(meta.modified().ok(), now, cutoff) {
-            if std::fs::remove_file(&path).is_ok() {
-                removed += 1;
-            }
+        if !expired_since(meta.modified().ok(), now, cutoff) {
+            continue;
+        }
+        // 名字取自目录项，可能是任意串（含非 UTF-8）：to_string_lossy 后的替换字符不可能
+        // 命中形态声明里的字面前缀/字符类，故这类名字自然落进 skipped 一侧（fail-closed）。
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if !tmpnames::any_matches(allow, &name) {
+            count.skipped += 1;
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            count.removed += 1;
         }
     }
-    removed
+    count
 }
 
 /// 龄期判定：mtime 取不到（非常规文件系统/时间戳异常）按「不过期」处理 ——

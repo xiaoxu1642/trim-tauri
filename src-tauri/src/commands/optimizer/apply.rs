@@ -282,10 +282,11 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
             let mut reg_path: Option<std::path::PathBuf> = None;
             let mut write_err: Option<String> = None;
             for _ in 0..3 {
-                let candidate = tmp_dir.join(format!(
-                    "wcopt_{}_{}.reg",
+                // B2-1：名字由 `engine::tmpnames` 的形态声明拼出，与清扫白名单共用同一份
+                // （此前这里与白名单各写一份字面量，改名会让另一侧静默失效）。
+                let candidate = tmp_dir.join(crate::engine::tmpnames::OPTIMIZER_REG.build(
                     crate::engine::now_ms(),
-                    crate::pwsh::random_token()
+                    &crate::pwsh::random_token(),
                 ));
                 match std::fs::OpenOptions::new()
                     .write(true)

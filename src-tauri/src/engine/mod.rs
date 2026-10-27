@@ -29,6 +29,8 @@ pub mod snapshot;
 pub mod sysrestore;
 pub mod sysinfo;
 pub mod systembin;
+/// B2-1（2026-10-27 全仓重审 P0）：临时件名的形态真源 —— 生成侧与清扫白名单共用一份声明。
+pub mod tmpnames;
 pub mod winhttp;
 
 use serde_json::Value;

@@ -1200,10 +1200,10 @@ pub fn power_plan_export(guid: &str, destination: &Path) -> Result<Value, String
     let _ = require_listed_scheme(guid)?;
     validate_export_destination(destination)?;
     let tmp_dir = crate::engine::paths::temp_script_dir()?;
-    let tmp_path = tmp_dir.join(format!(
-        "power-export-{}-{}.powrplan",
+    // B2-1：名字由 `engine::tmpnames` 的形态声明拼出，与清扫白名单共用同一份。
+    let tmp_path = tmp_dir.join(crate::engine::tmpnames::POWER_PLAN_EXPORT.build(
         crate::engine::now_ms(),
-        std::process::id()
+        &std::process::id().to_string(),
     ));
     let _ = std::fs::remove_file(&tmp_path);
     let mut cleanup = RemoveOnDrop(Some(tmp_path.clone()));
@@ -2370,10 +2370,9 @@ mod tests {
         let dup = power_plan_duplicate(source, &name).expect("克隆应成功");
         let dup_guid = dup["guid"].as_str().expect("克隆 GUID").to_string();
         let export_dir = crate::engine::paths::temp_script_dir().expect("tmp 目录");
-        let export_file = export_dir.join(format!(
-            "trim-p0-export-{}-{}.powrplan",
+        let export_file = export_dir.join(crate::engine::tmpnames::POWER_PLAN_PROBE.build(
             crate::engine::now_ms(),
-            std::process::id()
+            &std::process::id().to_string(),
         ));
         let result = (|| {
             let exported = power_plan_export(&dup_guid, &export_file).expect("导出应成功");
