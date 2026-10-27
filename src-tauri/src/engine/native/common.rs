@@ -41,6 +41,25 @@ pub(crate) fn to_wide(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
 }
 
+/// Rust str → null 结尾宽字符串，**先过名字形态闸**（R5c-M01 / A6-M05）。
+///
+/// 与 [`to_wide`] 的差别只有一处：拒内嵌 NUL 与控制字符。为什么必须拒：
+/// `PCWSTR` 以**第一个 NUL** 为串尾 ⇒ `to_wide("a\0b")` 交给 Win32 的是 `"a"` ——
+/// 「判定的名字」与「执行的名字」不是同一个（红线⑨）。值名方向此前**全仓零闸**
+/// （键路径方向由 `protect::normalize_reg_target` 兜住，值名方向没人管）。
+///
+/// 写/删/建面一律吃本版；读面继续吃 [`to_wide`]（读到一个截断名不产生破坏性副作用，
+/// 且读面判据要与磁盘现状对拍，改闸面会让既有夹具大面积漂移）。
+///
+/// 错误码用 `87`（ERROR_INVALID_PARAMETER）：调用方把它渲染成「名字非法」，
+/// 与「键不存在(2)/拒绝访问(5)」区分得开。
+pub(crate) fn to_wide_checked(s: &str) -> Result<Vec<u16>, u32> {
+    if crate::engine::protect::name_has_control_chars(s) {
+        return Err(87);
+    }
+    Ok(to_wide(s))
+}
+
 /// 展开环境变量（%VAR%）——委托给原生扫描器的唯一实现
 /// `trim_finder::cleanup_scan::expand_env_path`（P0 统一，规则库最终优化方案 2026-09-27）。
 ///

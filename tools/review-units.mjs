@@ -99,11 +99,27 @@ export const UNITS = [
     gates: ['check-guard-tiers', 'check-data-parity'],
   },
   {
-    id: 'R5a', owner: 'sub', name: 'native 三胖（清理/右键/启动项执行层）',
-    files: [`${N}/cleanup.rs`, `${N}/contextmenu.rs`, `${N}/startup.rs`],
-    contract: '删除出口 / shellex 与 winx 启停 / 启动项台账',
-    boundary: 'engine 顶层口径归 R6a；删除闸数按基线核，不核存在性',
+    id: 'R5a', owner: 'sub', name: 'native 清理与右键（删除出口 / shellex 与 winx 启停）',
+    files: [`${N}/cleanup.rs`, `${N}/contextmenu.rs`],
+    contract: '删除出口 / shellex 与 winx 启停',
+    boundary: 'engine 顶层口径归 R6a；删除闸数按基线核，不核存在性；启动项执行层归 R5d',
     gates: ['check-delete-callsites', 'check-native-hygiene'],
+  },
+  {
+    // 2026-10-27 B1（v7.2 全仓重审 P0）：R5a 接入启动项任务臂准入
+    // （`task_container_verdict` / `require_scan_origin` / `task_scan_tree_check` 三道闸
+    // + 端到端验收用例）后整包越 U2 上限（取数：`node tools/check-review-units.mjs`
+    // 的 U2 输出）。按本门禁自述口径
+    // 「优先按执行链」把**启动项执行层**单独切成一个单元，上限不放宽 ——
+    // 与 2026-10-25 把注册表读写切给 R5c 同一处置。
+    //
+    // 必须排在 R5b 之前：R5b 用 engine/native 目录兜底认领，兜底只吃此前无人认领的文件
+    // （同 R5c / R6c 先例）。startup.rs 若被 R5b 兜底吃掉，本单元就成死条目。
+    id: 'R5d', owner: 'sub', name: 'native 启动项执行层（扫描/启停/删除与台账）',
+    files: [`${N}/startup.rs`],
+    contract: '启动项扫描 / 启停 / 删除三臂与「Trim 禁用台账」；计划任务两臂的容器准入与来源校验（R5a-M01）',
+    boundary: '红线口径一律引用 R6a 基线；注册表原语与禁删面真源归 R5c；本单元只审启动项链路的判定与执行',
+    gates: ['check-delete-callsites', 'check-native-hygiene', 'check-registry-delete-guard'],
   },
   {
     // 必须排在 R5b 之前：R5b 用 engine/native 目录兜底认领，兜底只吃此前无人认领的文件

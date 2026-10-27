@@ -72,6 +72,8 @@ const REGISTRY = [
   { file: 'check-delete-root-guard.mjs', reason: 'A-7 删除根守卫：5 组合成样本与真仓扫描共用同一 build() 判据（read_dir+删除且无 inspect_root 必红、caller 先判根放行、**只在注释里写判定仍必红**、1 跳穿透必红、纯枚举工具放行）；TRANSITION 豁免表双向咬合（代码补上判定但台账未回收 ⇒ 红）+ 对象地板 5 条' },
   { file: 'check-ignored-isolation.mjs', reason: 'A-8 ignored 探针隔离：4 组合成样本与真仓解析共用同一判据（第 45 行才定根必红、注释里的属性不算属性、定根在首语句放行、纯函数不误报）；与 `cargo test -- --ignored --list` 的条数对账靠对象地板兜底' },
   { file: 'check-async-exits.mjs', reason: 'A-9 前端 await/出口：3 组合成样本与真仓扫描共用同一判据（置 busy 后 try 前有 await 必红、置 busy 立刻 try 放行、**await 只出现在注释里不得判红**——反向也要成立）；EXEMPT 台账双向咬合' },
+  // B1（2026-10-27 全仓重审 P0）：注册表递归删树出口的容器准入与名字形态闸。
+  { file: 'check-registry-delete-guard.mjs', reason: 'B1 注册表删树守卫：6 组合成样本与真仓扫描共用同一 build()/denyFaceReached() 判据（删树+无禁删面必红、本函数内有禁删面放行、**只在注释里写禁删面仍必红**、1 跳 callee 认账、无删树原语的函数不误伤、纯 to_wide 形态必红）+ 原语两道闸在场断言（空子键形态闸 `reg_delete_subkey_shape_is_malformed` / 名字形态闸 `to_wide_checked`，摘掉即红）+ pssteps 专项（整条链零禁删面必红，摘掉调用即被抓）+ TRANSITION 豁免表双向咬合（代码补上判定但台账未回收 ⇒ 红）+ 对象地板 4 条' },
 ];
 
 // MUST_RUN 里尚未配「内置正向对照自检」的存量门禁（T1-M05，2026-10-09 现算 33 条）。

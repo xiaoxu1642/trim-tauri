@@ -255,8 +255,12 @@ pub fn reg_key_ensure(hive: HKEY, subkey: &str) -> bool {
 }
 
 /// 同 `reg_key_ensure`，但把 win32 错误码交回调用方渲染成人话（5 = 拒绝访问等）。
+///
+/// **建面吃名字形态闸**（R5c-M01 / A6-M05）：`subkey` 含 NUL/控制字符 ⇒ `Err(87)`。
+/// `PCWSTR` 以第一个 NUL 为串尾，形态非法的名字交给 Win32 的是它的**前缀**，
+/// 判定的键与实际建的键不是同一个（红线⑨）。
 pub fn reg_key_ensure_checked(hive: HKEY, subkey: &str) -> Result<(), u32> {
-    let sk = to_wide(subkey);
+    let sk = to_wide_checked(subkey)?;
     let mut hk = HKEY::default();
     unsafe {
         let r = RegCreateKeyExW(hive, PCWSTR(sk.as_ptr()), None, PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_READ, None, &mut hk, None);
@@ -273,10 +277,35 @@ pub fn reg_key_ensure_checked(hive: HKEY, subkey: &str) -> Result<(), u32> {
     }
 }
 
+/// 注册表删除目标的**形态**闸（R5c-M02，红线①②）。
+///
+/// 判据：`subkey` 去掉首尾空白后为空、或只剩反斜杠 ⇒ 拒。
+///
+/// 为什么必须拒（这是 R5c-M02 的实锤）：
+/// - `RegDeleteTreeW(hive, "")` 的口径是「以 `hKey` 本身为根」⇒ 目标从「某个产品叶键」
+///   变成「整个 HKCU 子树」；
+/// - `RegDeleteKeyW(hive, "")` 同样把空路径落到 hive 根。
+///
+/// 两种口径都是**删整棵树**，不是删一个键。原先这道闸只存在于调用方（谁先把路径交给
+/// `protect::reg_target_block_reason`），而 pssteps 这条链一道都没有 ⇒ 空子键可达。
+/// 红线①要求「空段 fail-closed」落在**被执行的那一层**，不能只写在模块头一句自述里。
+fn reg_delete_subkey_shape_is_malformed(subkey: &str) -> bool {
+    let t = subkey.trim();
+    t.is_empty() || t.chars().all(|c| c == '\\')
+}
+
 /// 删除键的带因版本：返回 Win32 错误码（0 不当错误），供回执点名失败原因。
+///
+/// **形态闸在入口**（R5c-M02）：`subkey` 空 / 仅空白 / 仅反斜杠 ⇒ `Err(87)`；
+/// 含 NUL 或控制字符 ⇒ `Err(87)`（`to_wide_checked`，红线⑨）。
+/// 两者都发生在**任何 Win32 调用之前** —— `RegDeleteTreeW` 的空路径口径会把目标
+/// 从「一个键」换成「整棵子树」，闸必须落在调用之前而不是之后。
 pub fn reg_key_remove_checked(hive: HKEY, subkey: &str, recurse: bool) -> Result<(), u32> {
     use windows::Win32::System::Registry::{RegDeleteTreeW, RegDeleteKeyW};
-    let sk = to_wide(subkey);
+    if reg_delete_subkey_shape_is_malformed(subkey) {
+        return Err(87);
+    }
+    let sk = to_wide_checked(subkey)?;
     unsafe {
         if recurse {
             // RegDeleteTreeW 可直接作用于父 hive + 子键路径
@@ -289,11 +318,11 @@ pub fn reg_key_remove_checked(hive: HKEY, subkey: &str, recurse: bool) -> Result
             return if e.is_ok() { Ok(()) } else { Err(e.0) };
         };
         let mut hk = HKEY::default();
-        let open = RegOpenKeyExW(hive, PCWSTR(to_wide(parent).as_ptr()), Some(0), KEY_SET_VALUE, &mut hk);
+        let open = RegOpenKeyExW(hive, PCWSTR(to_wide_checked(parent)?.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk);
         if open.is_err() {
             return Err(open.0);
         }
-        let r = RegDeleteKeyW(hk, PCWSTR(to_wide(last).as_ptr()));
+        let r = RegDeleteKeyW(hk, PCWSTR(to_wide_checked(last)?.as_ptr()));
         let _ = RegCloseKey(hk);
         if r.is_ok() { Ok(()) } else { Err(r.0) }
     }
@@ -305,6 +334,7 @@ pub fn remove_cause_label(code: u32) -> String {
         5 => "拒绝访问(5)：父键不允许删除子键".to_string(),
         1018 => "键仍有子键(1018)：非递归删除前需先清空".to_string(),
         2 | 3 => "键不存在(2)".to_string(),
+        87 => "目标名非法(87)：含 NUL 或控制字符，或子键路径为空/畸形（已按红线①fail-closed 拒绝，未执行任何 Win32 调用）".to_string(),
         other => format!("win32={other}"),
     }
 }
@@ -806,6 +836,10 @@ pub fn reg_enum_value_names_pub(hive: HKEY, subkey: &str) -> (Vec<String>, bool)
 /// `RegDeleteValueW` 返回 `ERROR_FILE_NOT_FOUND`(2) 视为幂等成功。
 /// R5b-M01（v7.2 C06）：打开键失败时，只有「键/路径不存在」算幂等成功；
 /// ACCESS_DENIED(5)、1008 等其余失败必须判失败——旧实现一律 true，回执说删了、值还在。
+/// R5c-M01（v7.2 B1-2）：**名字形态闸在开键之前**。`PCWSTR` 以第一个 NUL 为串尾，
+/// 形态非法的值名交给 Win32 的是它的前缀 —— 删的是「另一个值」而回执说删的是「这个值」
+/// （红线⑨）。形态非法一律判**失败**（不是幂等成功）：判不出「本来就不存在」，
+/// 按「可能存在但拒绝动它」记账才是诚实的。
 fn open_key_missing_is_idempotent(code: u32) -> bool {
     const ERROR_FILE_NOT_FOUND: u32 = 2;
     const ERROR_PATH_NOT_FOUND: u32 = 3;
@@ -815,7 +849,10 @@ fn open_key_missing_is_idempotent(code: u32) -> bool {
 pub fn reg_restore_delete(hive: HKEY, subkey: &str, value_name: &str) -> bool {
     use windows::Win32::Foundation::WIN32_ERROR;
     const ERROR_FILE_NOT_FOUND: WIN32_ERROR = WIN32_ERROR(2);
-    let sk = to_wide(subkey);
+    // 形态闸先于任何 Win32 调用（红线⑨：判定字节 ≠ 执行字节）
+    let (Ok(sk), Ok(nm)) = (to_wide_checked(subkey), to_wide_checked(value_name)) else {
+        return false;
+    };
     let mut hk = HKEY::default();
     unsafe {
         let opened = RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk);
@@ -823,7 +860,6 @@ pub fn reg_restore_delete(hive: HKEY, subkey: &str, value_name: &str) -> bool {
             // R5b-M01（v7.2 C06）：只有「键不存在」才是幂等成功。
             return open_key_missing_is_idempotent(opened.0);
         }
-        let nm = to_wide(value_name);
         let r = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
         let _ = RegCloseKey(hk);
         r.is_ok() || r == ERROR_FILE_NOT_FOUND
@@ -853,10 +889,12 @@ pub unsafe fn reg_read_value_typed(hive: HKEY, subkey: &str, value_name: &str) -
 
 /// 删除注册表值
 pub(super) unsafe fn reg_delete_value(hive: HKEY, subkey: &str, value_name: &str) -> bool {
-    let sk = to_wide(&subkey);
+    // 形态闸先于任何 Win32 调用（R5c-M01 / A6-M05，红线⑨）
+    let (Ok(sk), Ok(nm)) = (to_wide_checked(&subkey), to_wide_checked(value_name)) else {
+        return false;
+    };
     let mut hk = HKEY::default();
     if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk).is_err() { return false; }
-    let nm = to_wide(value_name);
     let r = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
     let _ = RegCloseKey(hk);
     r.is_ok()
@@ -876,8 +914,13 @@ pub(super) unsafe fn reg_write_value(hive: HKEY, subkey: &str, value_name: &str,
 }
 
 /// 同 `reg_write_value`，但把 win32 错误码交回调用方（pssteps 用它渲染可诊断的失败原因）。
+///
+/// **写面吃名字形态闸**（R5c-M01 / A6-M05）：键路径与值名含 NUL/控制字符 ⇒ `Err(87)`。
+/// 闸在开键之前：`PCWSTR` 以第一个 NUL 为串尾，形态非法的名字交给 Win32 的是前缀，
+/// 写进去的是「另一个键/另一个值」（红线⑨）。
 pub(super) unsafe fn reg_write_value_checked(hive: HKEY, subkey: &str, value_name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> Result<(), u32> {
-    let sk = to_wide(subkey);
+    let sk = to_wide_checked(subkey)?;
+    let nm = to_wide_checked(value_name)?;
     let mut hk = HKEY::default();
     if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk).is_err() {
         // 键不存在才需要创建（这一步才真正要求父键给 KEY_CREATE_SUB_KEY）
@@ -886,7 +929,6 @@ pub(super) unsafe fn reg_write_value_checked(hive: HKEY, subkey: &str, value_nam
             return Err(r.0);
         }
     }
-    let nm = to_wide(value_name);
     let r = RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), kind, Some(data));
     let _ = RegCloseKey(hk);
     if r.is_ok() {
@@ -916,6 +958,255 @@ mod tests {
         open_key_missing_is_idempotent, win_reg_err_label, read_reg_value_state, reg_key_remove,
         reg_restore_write, reg_enum_value_names_pub, to_wide, RegReadState, remove_cause_label,
     };
+
+    /// R5c-M01（B1-2）：**判定字节 = 执行字节**（红线⑨）—— 名字形态闸的真机验收。
+    ///
+    /// 验收形态（方案 §4.1 B1-2 明列）：目标 `"a\0b"` ⇒ **必须拒**，且盘上那个
+    /// 叫 `a` 的键**不得被删**。后者是这条断言的核心：`PCWSTR` 以第一个 NUL 为串尾，
+    /// 所以旧实现（`to_wide` 不滤 NUL）会把 `"a\0b"` 当成 `"a"` 交给 Win32 ——
+    /// 删掉的是「另一个键」，而回执/调用方以为动的是「`a\0b`」。
+    ///
+    /// 卫生口径照本文件既有真机探针：只碰自己的 scratch 键，`Drop` 里删干净。
+    /// 判红自证：把 `reg_key_remove_checked` 的 `to_wide_checked(subkey)?` 换回
+    /// `to_wide(subkey)` ⇒ 第②条红（`a` 那个键会被真删掉）。
+    #[test]
+    #[ignore = "真实写注册表（HKCU scratch 键 + Drop 清理），发布前门禁跑"]
+    fn r5c_m01_含nul的目标必须被拒且同名真键不被删() {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ};
+        const SUB: &str = r"Software\TrimNulNameProbe";
+        // 盘上真键叫 `a`（子键名就是单字符 `a`）
+        const REAL: &str = r"Software\TrimNulNameProbe\a";
+        struct Probe;
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                let _ = reg_key_remove(HKEY_CURRENT_USER, SUB, true);
+            }
+        }
+        let _probe = Probe;
+
+        // ① 先把「叫 a 的键」建出来并写一个值，确认它在盘上
+        assert!(
+            reg_restore_write(HKEY_CURRENT_USER, REAL, "v", REG_SZ, b"x\0"),
+            "scratch 键写入应成功"
+        );
+        assert!(
+            super::reg_key_exists(HKEY_CURRENT_USER, REAL),
+            "前置：叫 a 的键必须在盘上"
+        );
+
+        // ② 用「a\0b」去删 —— 形态闸必须拒（Err 87），且盘上那个 `a` **必须还在**
+        let evil = format!("{REAL}\0b");
+        let r = super::reg_key_remove_checked(HKEY_CURRENT_USER, &evil, true);
+        assert_eq!(r, Err(87), "含 NUL 的目标必须判 87 拒绝，实得 {r:?}");
+        assert!(
+            super::reg_key_exists(HKEY_CURRENT_USER, REAL),
+            "含 NUL 的目标被拒后，盘上同名真键不得被删（这正是旧实现会踩的坑）"
+        );
+
+        // ③ 值名方向同样：含 NUL 的值名必须拒，且那个真值不得被删
+        assert!(
+            super::reg_restore_delete(HKEY_CURRENT_USER, REAL, &"v\0x".to_string()),
+            "含 NUL 的值名必须被拒（拒 = false = 没删）"
+        );
+        assert!(
+            unsafe { super::reg_read_value_typed(HKEY_CURRENT_USER, REAL, "v") }.is_some(),
+            "含 NUL 的值名被拒后，盘上同名真值不得被删"
+        );
+
+        // ④ 空 / 仅空白 / 仅反斜杠的子键 ⇒ 同样 Err(87)（空路径口径 = 删整棵子树）
+        for bad in ["", "   ", "\\", "\\\\"] {
+            assert_eq!(
+                super::reg_key_remove_checked(HKEY_CURRENT_USER, bad, true),
+                Err(87),
+                "畸形子键 {bad:?} 必须判 87 拒绝"
+            );
+        }
+    }
+
+    /// R5c-M01（B1-2）：名字形态闸的**纯逻辑**侧 —— 不碰注册表，四种形态各自判红。
+    ///
+    /// 为什么要有这一条（真机那条被 `#[ignore]`）：真机探针是发布前门禁跑的，
+    /// 日常 `cargo test` 不执行 ⇒ 形态闸的活性在日常轮次里**无人看守**。
+    /// 这一条把判据本体（`to_wide_checked` 拒 NUL 与控制字符）变成日常可跑的断言。
+    ///
+    /// 判红自证：把 `to_wide_checked` 的 `name_has_control_chars` 判据去掉
+    /// ⇒ 第①②条红。
+    #[test]
+    fn r5c_m01_名字形态闸拒nul与控制字符() {
+        use super::super::common::to_wide_checked;
+        // ① NUL ⇒ Err(87)
+        assert_eq!(to_wide_checked("a\0b"), Err(87), "含 NUL 必须拒");
+        assert_eq!(to_wide_checked("\0abc"), Err(87), "开头 NUL 也必须拒");
+        // ② 控制字符（\r \n \t）⇒ Err(87)
+        assert_eq!(to_wide_checked("a\rb"), Err(87), "含 \\r 必须拒");
+        assert_eq!(to_wide_checked("a\nb"), Err(87), "含 \\n 必须拒");
+        assert_eq!(to_wide_checked("a\tb"), Err(87), "含 \\t 必须拒");
+        // ③ 正常名字 ⇒ 放行，且得到的宽串与 to_wide 逐字一致
+        assert!(to_wide_checked("Normal_Name.1").is_ok(), "正常名字必须放行");
+        assert!(to_wide_checked("").is_ok(), "空值名合法（= 默认值），不得误拒");
+        assert_eq!(
+            to_wide_checked("Normal_Name.1").unwrap(),
+            to_wide("Normal_Name.1"),
+            "放行时宽串必须与 os 语义逐字一致"
+        );
+    }
+
+    /// R5c-M02（B1-1）：删树原语的**空子键形态闸**（红线①②）。
+    ///
+    /// `RegDeleteTreeW(hive, "")` 的口径是「以 hKey 本身为根」⇒ 目标从「某个产品叶键」
+    /// 变成「整棵 HKCU 子树」。闸必须在**任何 Win32 调用之前**。
+    ///
+    /// 判红自证：把 `reg_delete_subkey_shape_is_malformed` 的判据去掉（或让
+    /// `reg_key_remove_checked` 不调它）⇒ 第①②条红。
+    #[test]
+    fn r5c_m02_空子键形态闸拒畸形路径() {
+        use super::super::common::to_wide_checked;
+        // ① 纯逻辑侧：空 / 仅空白 / 仅反斜杠 ⇒ 拒
+        for bad in ["", "   ", "\\", "\\\\", " \t "] {
+            assert_eq!(
+                super::reg_delete_subkey_shape_is_malformed(bad),
+                true,
+                "畸形子键 {bad:?} 必须判为畸形"
+            );
+        }
+        // ② 正常子键 ⇒ 不判畸形
+        assert!(!super::reg_delete_subkey_shape_is_malformed("Software\\Foo"));
+        assert!(!super::reg_delete_subkey_shape_is_malformed("Foo"));
+        // ③ 名字形态闸独立生效（两闸覆盖面不同：形态闸管空/反斜杠，名字闸管 NUL）
+        assert_eq!(to_wide_checked("a\0b"), Err(87), "名字闸必须独立拒 NUL");
+    }
+
+    /// R5c-M01（B1-2）：**写/删/建面必须吃名字形态闸** —— 源码形态断言。
+    ///
+    /// 为什么需要这一条：上面两条测的是**闸本体**（`to_wide_checked` 拒 NUL、
+    /// `reg_delete_subkey_shape_is_malformed` 拒畸形），但它们**不保证原语真的调了它**。
+    /// 把 `reg_key_remove_checked` 里的 `to_wide_checked(subkey)?` 换回 `to_wide(subkey)`
+    /// 时，前两条仍然全绿 —— 而原语已经退回「判定字节 ≠ 执行字节」的老形态
+    /// （`PCWSTR` 以第一个 NUL 为串尾 ⇒ `"a\0b"` 执行的是 `"a"`）。
+    ///
+    /// 这正是方案 §4.1 B1-2 的破坏自证原文：「`checked` 换回 `to_wide` ⇒ 该用例必红」。
+    /// 本条就是那个「该用例」：它把「原语调了闸」这件事本身变成可判红的断言。
+    ///
+    /// 判定口径：切掉 `mod tests` 之后的测试面，只判**生产段**；在生产段里逐个
+    /// 写/删/建出口找「用了 `to_wide` 而不是 `to_wide_checked`」的形态。
+    /// 允许 `to_wide` 出现的只有**读面**（枚举/查询/读值）—— 读到一个截断名不产生
+    /// 破坏性副作用（口径见 `common::to_wide_checked` 的文档注释）。
+    #[test]
+    fn r5c_m01_写删建面必须吃名字形态闸() {
+        let src = include_str!("registry.rs");
+        let prod = &src[..src.find("mod tests").expect("找不到单测段起点")];
+
+        /// 取「从标记起、到该函数体花括号配平处」的**函数体**片段（不含签名行与 `use` 行）。
+        ///
+        /// 三个坑（都踩过）：
+        /// ① 结束锚不能用「下一个函数声明」——会撞上函数体内部的嵌套 `fn`/闭包，把片段截短；
+        /// ② 函数体起点不能取「标记后的第一个 `{`」——签名下一行的
+        /// `use windows::…::{RegDeleteTreeW, RegDeleteKeyW};` 里也有花括号；
+        /// ③ **片段必须不含 `use` 行**——`use` 里出现的 `RegDeleteTreeW` 是「导入这个名字」，
+        ///    不是「调用它」；把它算进位置比较，形态闸（真正的前置判定）就会显得
+        ///    「排在 Win32 调用之后」⇒ 顺序断言假红。
+        ///
+        /// 所以：从标记起**逐行跳过 `use ` 开头的行**，找到的第一个带 `{` 的行是函数体起点；
+        /// 返回的片段从该行开始（`use` 行已被跳过，不会进片段）。
+        fn body_of(prod: &str, marker: &str) -> String {
+            let start = prod.find(marker).unwrap_or_else(|| panic!("找不到 {marker}"));
+            let mut open = None;
+            let mut cursor = start;
+            for line in prod[start..].lines() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("use ") {
+                    cursor += line.len() + 1;
+                    continue;
+                }
+                if let Some(i) = line.find('{') {
+                    open = Some(cursor + i);
+                    break;
+                }
+                cursor += line.len() + 1;
+            }
+            let open = open.unwrap_or_else(|| panic!("{marker} 之后找不到函数体的 {{"));
+            let mut depth = 0usize;
+            let mut end = prod.len();
+            for (i, ch) in prod[open..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = open + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // 片段起点取**函数体 `{` 所在行**的开头。`use` 行已在上面被跳过，
+            // 但 `use …::{A, B};` 里的 `{` 落在 use 行本身 ⇒ 该行仍会被 rfind 命中，
+            // 所以这里显式判一次：起点行含 "use " ⇒ 从 `{` 之后开始。
+            let body_start = prod[..open].rfind('\n').map(|i| i + 1).unwrap_or(start);
+            let body_start = if prod[body_start..open].contains("use ") {
+                open
+            } else {
+                body_start
+            };
+            prod[body_start..end].to_string()
+        }
+
+        // ① 删树原语：入口必须是 checked，且形态闸必须在任何 Win32 调用之前
+        let remove_fn = body_of(prod, "pub fn reg_key_remove_checked");
+        assert!(
+            remove_fn.contains("to_wide_checked(subkey)"),
+            "删树原语入口必须吃 to_wide_checked（换回 to_wide ⇒ 判定字节≠执行字节，红线⑨）"
+        );
+        assert!(
+            remove_fn.contains("reg_delete_subkey_shape_is_malformed(subkey)"),
+            "删树原语入口必须过空子键形态闸（RegDeleteTreeW 的空路径口径 = 删整棵子树，红线①②）"
+        );
+        let shape_at = remove_fn
+            .find("reg_delete_subkey_shape_is_malformed(subkey)")
+            .expect("找不到形态闸调用");
+        // 找**调用形态** `RegDeleteTreeW(`（带左括号）——注释里提到这个名字时不带括号，
+        // 那是「说明」不是「调用」，算进位置比较会让顺序断言假红。
+        let first_win32 = remove_fn
+            .find("RegDeleteTreeW(")
+            .expect("找不到 RegDeleteTreeW 调用");
+        assert!(
+            shape_at < first_win32,
+            "形态闸必须排在任何 Win32 调用之前（RegDeleteTreeW 之后判就晚了）"
+        );
+
+        // ② 建面原语
+        let ensure_fn = body_of(prod, "pub fn reg_key_ensure_checked");
+        assert!(
+            ensure_fn.contains("to_wide_checked(subkey)"),
+            "建面原语（reg_key_ensure_checked）必须吃 to_wide_checked"
+        );
+
+        // ③ 写值面：键路径与值名**都要**过闸
+        let write_fn = body_of(prod, "pub(super) unsafe fn reg_write_value_checked");
+        assert!(
+            write_fn.contains("to_wide_checked(subkey)"),
+            "写值面（reg_write_value_checked）的键路径必须吃 to_wide_checked"
+        );
+        assert!(
+            write_fn.contains("to_wide_checked(value_name)"),
+            "写值面（reg_write_value_checked）的值名必须吃 to_wide_checked（值名方向此前全仓零闸）"
+        );
+
+        // ④ 删值面：键路径与值名都要过闸（两个出口各钉一次）
+        let restore_del = body_of(prod, "pub fn reg_restore_delete");
+        assert!(
+            restore_del.contains("to_wide_checked(subkey)")
+                && restore_del.contains("to_wide_checked(value_name)"),
+            "删值面（reg_restore_delete）必须对键路径与值名都吃 to_wide_checked"
+        );
+        let del_value = body_of(prod, "pub(super) unsafe fn reg_delete_value");
+        assert!(
+            del_value.contains("to_wide_checked(&subkey)")
+                && del_value.contains("to_wide_checked(value_name)"),
+            "删值面（reg_delete_value）必须对键路径与值名都吃 to_wide_checked"
+        );
+    }
 
     /// R5b-M01：删值入口的「键不存在」判定必须只认 2/3，其余失败码一律判失败。
     #[test]
@@ -1030,6 +1321,12 @@ mod tests {
     }
 
     /// R5b-M21：删键失败原因必须四分，不许折回一句「失败」。
+    ///
+    /// R5c-M01（v7.2 B1-1/B1-2）：**87 升格为专属码** —— 它现在是「目标名非法」
+    /// （含 NUL/控制字符，或子键路径为空/畸形）的专用错误码，回执必须能说清
+    /// 为什么被拒，不能落回 `win32=87` 让用户自己猜。
+    /// 通用兜底路径另用一个未登记的码验（`12345`）—— 兜底行为没消失，
+    /// 只是不再拿 87 来代表它。
     #[test]
     fn 删键失败原因四种不折成一句() {
         let denied = remove_cause_label(5);
@@ -1040,6 +1337,12 @@ mod tests {
         assert!(missing.contains('2'), "{missing}");
         assert_ne!(denied, has_children);
         assert_ne!(has_children, missing);
-        assert_eq!(remove_cause_label(87), "win32=87");
+        // 87 = 目标名非法（专属文案，必须点名形态问题，不能与通用兜底同形）
+        let malformed = remove_cause_label(87);
+        assert!(malformed.contains("87"), "87 必须点名错误码: {malformed}");
+        assert!(malformed.contains("NUL") || malformed.contains("畸形"), "87 必须说清形态问题: {malformed}");
+        assert_ne!(malformed, remove_cause_label(12345), "87 不得与通用兜底折成同一句");
+        // 通用兜底仍在（未登记的码走 win32=N 形态）
+        assert_eq!(remove_cause_label(12345), "win32=12345");
     }
 }

@@ -281,6 +281,12 @@ fn scan_task_files() -> Vec<Value> {
                 "name": task_name,
                 "command": task_to_run,
                 "source": "task",
+                // R5a-M01 ②：来源标记。扫描**现读**得到的行打 `origin:"scan"`；
+                // 并入 disabled.json 的行打 `origin:"disabled-ledger"`（见 startup_scan
+                // 的合并段）。执行侧只收 `origin:"scan"` 的 task 行 —— 容器判据
+                // （`task_container_verdict`）挡不住「`taskPath:"\\"` + 任意任务名」
+                // 这一形态（`\` 是合法的根容器形态），必须由来源校验这条腿挡住。
+                "origin": "scan",
                 "hive": "",
                 "regPath": "",
                 "valueName": "",
@@ -434,6 +440,129 @@ fn registry_container_verdict(hive_tag: &str, subkey: &str) -> Result<(), String
     }
 }
 
+/// 计划任务容器准入（R5a-M01 / A1，纯函数、可测）。
+///
+/// **为什么必须有这道**：`toggle_task_item` 与 `startup_delete` 的 `"task"` 臂此前
+/// 直接吃 `taskPath + taskName` 拼出 `schtasks /TN`（全链零判据），而同域的
+/// registry 臂有 [`registry_container_verdict`]、folder 臂有 [`folder_source_verdict`]。
+/// 台账（`disabled.json`，`%APPDATA%` 可写）被篡改后注入一行 `source:"task"`，
+/// 命令层的快照校验只核「id 在快照内 + `filePath` 两侧同值」（task 项两侧皆空串
+/// ⇒ 注入行自证一致）⇒ 提权态 Trim 会对**任意任务名**执行 `schtasks /Change|/Delete`，
+/// 包括扫描面刻意排除的 `\Microsoft\` 系统子树。
+///
+/// 判据（与扫描面同源，见 `_修法判据复核.md` M3-2 的样本表）：
+/// - `taskPath`：空 ⇒ 拒；不以 `\` 开头 ⇒ 拒；不以 `\` 结尾 ⇒ 拒；含 `..` / `:` / NUL ⇒ 拒；
+/// - `task_name`：空 ⇒ 拒；含 `\` / `/` / `:` / `*` / `?` / NUL ⇒ 拒；
+/// - 拼出的 `/TN` 命中 `\Microsoft\` 前缀（大小写不敏感）⇒ 拒。
+///
+/// 前两条是**容器形状**（扫描面只产 `\根\` 与 `\子目录\` 两种 `taskPath`，
+/// `task_name` 是任务 XML 文件名、不含 `\`）；第三条是**系统子树排除**
+/// （扫描面 `scan_task_files` 显式 `continue` 掉 `Microsoft\` 子树，执行侧必须同口径）。
+///
+/// 判据只此一份（AGENTS §5.16/N6）：两臂共用本函数，不在两处各写一遍。
+fn task_container_verdict(task_path: &str, task_name: &str) -> Result<(), String> {
+    if task_path.is_empty() {
+        return Err("计划任务路径为空，已拒绝".into());
+    }
+    if !task_path.starts_with('\\') || !task_path.ends_with('\\') {
+        return Err("计划任务路径形状非法（须形如 \\ 或 \\子目录\\），已拒绝".into());
+    }
+    if task_path.contains("..") || task_path.contains(':') || task_path.contains('\0') {
+        return Err("计划任务路径含非法字符（.. / : / NUL），已拒绝".into());
+    }
+    if task_name.is_empty() {
+        return Err("缺少任务名".into());
+    }
+    if task_name.contains('\\')
+        || task_name.contains('/')
+        || task_name.contains(':')
+        || task_name.contains('*')
+        || task_name.contains('?')
+        || task_name.contains('\0')
+    {
+        return Err("任务名含非法字符（\\ / : * ? / NUL），已拒绝".into());
+    }
+    // 系统子树排除：拼出的 /TN 命中 \Microsoft\ 前缀即拒（大小写不敏感）。
+    let full = format!("{task_path}{task_name}");
+    if full.to_ascii_lowercase().starts_with("\\microsoft\\") {
+        return Err("计划任务位于系统子树（\\Microsoft\\），不在本工具管理范围内，已拒绝".into());
+    }
+    Ok(())
+}
+
+/// 现读核对：这条任务确实**在本域扫描树里**，且是扫描面会列出的那类启动任务。
+///
+/// 与 [`task_container_verdict`] 的分工：前者判**形状**（纯函数、可离线测），
+/// 本函数判**存在性与同源性**（要读盘）。
+///
+/// 为什么要有这一条（`_修法判据复核.md` M3-2 的「追加（更强的正解）」）：
+/// 形状闸挡得住「畸形路径 / 系统子树」，挡不住「形状合法但指向别的东西」。
+/// 而台账（`%APPDATA%` 可写）与扫描缓存（同样在用户目录）都能被同用户改写，
+/// 于是「行内字段」一律不可信 —— 唯一可信的是**此刻现读磁盘看到的事实**。
+///
+/// 三条核对，全部与扫描面 `scan_task_files` **同源**（同一 root、同一 reparse
+/// 判据、同一 XML 解码、同一触发器判据）：
+/// 1. 逐段下潜到任务目录：每段必须是真实目录且**不是 reparse 点**
+///    （跟随链接会把核对引出 Tasks 树 —— 扫描侧同款判据）；
+/// 2. 任务文件存在且是文件；
+/// 3. XML 含 `<LogonTrigger` 或 `<BootTrigger` —— 即它确实是扫描面会列出的
+///    那类「启动项任务」。非启动项任务（本工具不管理）不许被台账行驱动删掉。
+fn task_scan_tree_check(task_path: &str, task_name: &str) -> Result<(), String> {
+    let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let root = std::path::Path::new(&sysroot).join(r"System32\Tasks");
+    // task_path 形如 `\`（根）或 `\Sub\`（子目录）
+    let rel = task_path.trim_start_matches('\\').trim_end_matches('\\');
+    let mut cur = root.clone();
+    if !rel.is_empty() {
+        for seg in rel.split('\\') {
+            if seg.is_empty() || seg == "." || seg == ".." {
+                return Err("计划任务路径含非法段（空段 / . / ..），已拒绝".into());
+            }
+            cur = cur.join(seg);
+            // 目录判 reparse：跟随链接会把核对引出 Tasks 树（与扫描侧同判据）
+            let Ok(m) = std::fs::symlink_metadata(&cur) else {
+                return Err("计划任务目录不存在于本域任务树内，已拒绝".into());
+            };
+            if !m.is_dir() || crate::engine::protect::is_reparse(&m) {
+                return Err("计划任务目录不是本域任务树内的真实目录（reparse 点），已拒绝".into());
+            }
+        }
+    }
+    let file = cur.join(task_name);
+    let Ok(m) = std::fs::symlink_metadata(&file) else {
+        return Err("计划任务不存在于本域任务树内，已拒绝".into());
+    };
+    if !m.is_file() {
+        return Err("计划任务路径不是文件，已拒绝".into());
+    }
+    let Ok(bytes) = std::fs::read(&file) else {
+        return Err("计划任务文件不可读，已拒绝".into());
+    };
+    let text = decode_task_xml(&bytes);
+    if !text.contains("<LogonTrigger") && !text.contains("<BootTrigger") {
+        return Err("该计划任务不是启动项任务（无登录/开机触发器），不在本工具管理范围内，已拒绝".into());
+    }
+    Ok(())
+}
+
+/// R5a-M01 ②：来源校验 —— 只收**本次扫描现读得到**的行（`origin == "scan"`）。
+///
+/// 为什么不采信行内其它字段：台账（`%APPDATA%` 可写）能被篡改，而命令层的快照校验
+/// 只核「id 在快照内 + `filePath` 两侧同值」（task 项两侧皆空串 ⇒ 注入行自证一致）。
+/// `origin` 是**扫描侧现读时打的**，台账行里的同名字段已被合并段强制覆盖成
+/// `disabled-ledger` ⇒ 这里读到的值只可能是扫描侧写的。
+///
+/// 判据只此一份（AGENTS §5.16/N6）：两臂（toggle / delete）共用本函数。
+fn require_scan_origin(item: &Value) -> Result<(), String> {
+    match item.get("origin").and_then(|v| v.as_str()) {
+        Some("scan") => Ok(()),
+        Some("disabled-ledger") => {
+            Err("该项来自本工具的禁用台账而非本次扫描结果，计划任务不支持按台账驱动启停/删除，已拒绝".into())
+        }
+        _ => Err("启动项缺少来源标记（非本次扫描结果），已拒绝".into()),
+    }
+}
+
 /// K04：由**真实 hive**（regPath 解析结果）推导台账对账用的 tag。
 /// 台账行自带的 hive/scope 只作对账、不作为授权（v6-K04：HKLM 前置门与真正
 /// 写入的 hive 必须同源，否则台账行谎报 HKCU 即可骗过提权门）。
@@ -533,6 +662,8 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                     "name": vp,
                     "command": value_data,
                     "source": "registry",
+                    // R5a-M01 ②：来源标记（与 task 行同口径，见 scan_task_files）。
+                    "origin": "scan",
                     "hive": hive_tag,
                     "regPath": reg_path_full,
                     "valueName": vp,
@@ -583,6 +714,8 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                     "id": format!("folder|{full_path}"),
                     "name": name_stem,
                     "source": "folder",
+                    // R5a-M01 ②：来源标记（与 task 行同口径，见 scan_task_files）。
+                    "origin": "scan",
                     "hive": scope,
                     "regPath": "",
                     "valueName": "",
@@ -619,6 +752,19 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
     // ---------- 合并 disabled.json ----------
     // R5a-L06：与 read_disabled_records 共用同一三态读器；读失败只告警、按无附加项处理
     //（扫描不能因台账损坏整页失败，但也不能再静默当「没有」）。
+    //
+    // R5a-M01 ②：并入的台账行**打 `origin:"disabled-ledger"` 标记**。
+    // 为什么必须打：台账文件（`%APPDATA%` 可写）被篡改后可以注入任意一行
+    // （例如 `{"source":"task","taskPath":"\\","taskName":"<任意>"}`），而本段此前
+    // 是**原样**并入、保留 `source` ⇒ 命令层的快照校验（只核 id 在快照内 +
+    // `filePath` 两侧同值，task 项两侧皆空串）自证一致 ⇒ 提权态 Trim 会对任意
+    // 任务名执行 `schtasks /Change|/Delete`。
+    //
+    // 两条腿缺一条等于没修：
+    // - 腿① `task_container_verdict` 挡「形状非法 / 系统子树」，但 `taskPath:"\\"`
+    //   是**合法**的根容器形态（扫描面真会产出），它挡不住注入的任意任务名；
+    // - 腿②（本段打的来源标记）挡住「不是本次扫描现读得到的」那一类 —— 执行侧
+    //   只收 `origin:"scan"` 的 task 行。
     match read_disabled_records() {
         Ok(records) => {
             for r in records {
@@ -628,6 +774,8 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                 if let Some(o) = item.as_object_mut() {
                     o.insert("enabled".into(), json!(false));
                     o.insert("disabledBy".into(), json!("trim"));
+                    // 来源标记覆盖台账行自带的任何值（台账行里的 `origin` 不可信）。
+                    o.insert("origin".into(), json!("disabled-ledger"));
                 }
                 results.push(item);
             }
@@ -1420,6 +1568,15 @@ unsafe fn toggle_folder_item(item: &Value, enable: bool, records: &mut Vec<Value
 unsafe fn toggle_task_item(item: &Value, enable: bool) -> Result<String, String> {
     let task_path = item.get("taskPath").and_then(|v| v.as_str()).unwrap_or("");
     let task_name = item.get("taskName").and_then(|v| v.as_str()).unwrap_or("");
+    // R5a-M01 ①：容器准入（形状 + 系统子树排除），在拼 /TN 与调 schtasks **之前**。
+    task_container_verdict(task_path, task_name)?;
+    // R5a-M01 ②：来源校验 —— 只收本次扫描现读得到的 task 行。
+    // 台账行（`origin:"disabled-ledger"`）不许驱动 task 臂：`taskPath:"\\"` 是合法
+    // 根容器形态，容器判据挡不住「任意任务名」，必须由来源这条腿挡。
+    require_scan_origin(item)?;
+    // R5a-M01 ①+追加：现读核对「这条任务确实在本域扫描树里且是启动项任务」。
+    // 与形状闸分工：形状闸管字段合法性，本条管「此刻磁盘上真的有这么个任务」。
+    task_scan_tree_check(task_path, task_name)?;
     if task_name.is_empty() { return Err("缺少任务名".into()); }
     let full_name = format!("{task_path}{task_name}");
     let arg = if enable { "/ENABLE" } else { "/DISABLE" };
@@ -1699,6 +1856,25 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
             "task" => {
                 let task_path = item.get("taskPath").and_then(|v| v.as_str()).unwrap_or("");
                 let task_name = item.get("taskName").and_then(|v| v.as_str()).unwrap_or("");
+                // R5a-M01 ①：容器准入（形状 + 系统子树排除），在拼 /TN 与调 schtasks **之前**。
+                // 与 `toggle_task_item` 共用同一个判据函数（§5.16/N6：两处不许各写一遍）。
+                if let Err(reason) = task_container_verdict(task_path, task_name) {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": reason}));
+                    continue;
+                }
+                // R5a-M01 ②：来源校验 —— 只收本次扫描现读得到的 task 行。
+                if let Err(reason) = require_scan_origin(item) {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": reason}));
+                    continue;
+                }
+                // R5a-M01 ①+追加：现读核对「这条任务确实在本域扫描树里且是启动项任务」。
+                if let Err(reason) = task_scan_tree_check(task_path, task_name) {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": reason}));
+                    continue;
+                }
                 if task_name.is_empty() {
                     failed += 1;
                     results.push(json!({"id": id, "name": name, "status": "error", "message": "缺少任务名"}));
@@ -2055,6 +2231,184 @@ mod k09_tests {
             "越界恢复目标不得被创建"
         );
         eprintln!("探针通过：篡改台账启用被拒且台账已恢复（{msg}）");
+    }
+}
+
+#[cfg(test)]
+mod r5a_m01_task_guard_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// R5a-M01 ①：任务容器形状闸。
+    ///
+    /// 覆盖样本表（`_修法判据复核.md` M3-2）：
+    /// - 覆盖：扫描面能产出的全部合法行（`taskPath ∈ {"\\", "\\子目录\\"}` 且
+    ///   `taskName` 无 `\`）⇒ 新增判据不会把正常启用/禁用/删除打死；
+    /// - 排除：`taskPath` 缺失或含 `..`/`:`/不以 `\` 开头/不以 `\` 结尾；
+    ///   `taskName` 含 `\`/`/`/`:`/`*`/`?`/NUL 或为空；拼出的 `/TN` 命中
+    ///   `\Microsoft\` 前缀（大小写不敏感）。
+    ///
+    /// 判红自证：把 `task_container_verdict` 改成恒 `Ok(())` ⇒ ②~⑥ 全红；
+    /// 把 `\Microsoft\` 那一条删掉 ⇒ ⑥ 红。
+    #[test]
+    fn 任务容器形状闸_放行扫描面形态拒系统子树与畸形() {
+        // ① 扫描面真会产出的两种合法形态 ⇒ 放行
+        assert!(task_container_verdict("\\", "MyTask").is_ok(), "根容器形态必须放行");
+        assert!(task_container_verdict("\\Vendor\\", "MyTask").is_ok(), "子目录形态必须放行");
+        // ② taskPath 畸形四形态 ⇒ 拒
+        assert!(task_container_verdict("", "MyTask").is_err(), "空路径必须拒");
+        assert!(task_container_verdict("Vendor\\", "MyTask").is_err(), "不以 \\ 开头必须拒");
+        assert!(task_container_verdict("\\Vendor", "MyTask").is_err(), "不以 \\ 结尾必须拒");
+        assert!(task_container_verdict("\\..\\Evil\\", "MyTask").is_err(), "含 .. 必须拒");
+        assert!(task_container_verdict("\\C:evil\\", "MyTask").is_err(), "含 : 必须拒");
+        // ③ taskName 畸形六形态 ⇒ 拒
+        assert!(task_container_verdict("\\", "").is_err(), "空任务名必须拒");
+        assert!(task_container_verdict("\\", "a\\b").is_err(), "含 \\ 必须拒");
+        assert!(task_container_verdict("\\", "a/b").is_err(), "含 / 必须拒");
+        assert!(task_container_verdict("\\", "a:b").is_err(), "含 : 必须拒");
+        assert!(task_container_verdict("\\", "a*b").is_err(), "含 * 必须拒");
+        assert!(task_container_verdict("\\", "a?b").is_err(), "含 ? 必须拒");
+        assert!(task_container_verdict("\\", "a\0b").is_err(), "含 NUL 必须拒");
+        // ④ 系统子树 ⇒ 拒（大小写不敏感）
+        assert!(task_container_verdict("\\Microsoft\\", "Windows").is_err(), "\\Microsoft\\ 必须拒");
+        assert!(task_container_verdict("\\MICROSOFT\\Windows\\", "Task").is_err(), "大小写不敏感");
+        assert!(task_container_verdict("\\microsoft\\", "Task").is_err(), "小写形态必须拒");
+        // ⑤ 名字里含 microsoft 但不在子树根 ⇒ 不误伤（只按 \\Microsoft\\ 前缀判）
+        assert!(task_container_verdict("\\Vendor\\", "microsoft-update").is_ok(), "普通子目录不得误伤");
+    }
+
+    /// R5a-M01 ②：来源校验 —— 只收本次扫描现读得到的行。
+    ///
+    /// 这是**两条腿里的第二条**，缺它则注入行会通过：容器形状闸挡得住「畸形路径 /
+    /// 系统子树」，但 `taskPath:"\\"` 是**合法**的根容器形态（扫描面真会产出），
+    /// 它挡不住「`\\` + 任意任务名」这一形态。
+    ///
+    /// 判红自证：把 `require_scan_origin` 改成恒 `Ok(())` ⇒ ②③ 红。
+    #[test]
+    fn 任务行只收扫描来源台账行与无标记行都拒() {
+        // ① 扫描现读得到的行 ⇒ 放行
+        assert!(require_scan_origin(&json!({ "origin": "scan" })).is_ok());
+        // ② 台账并入的行 ⇒ 拒（这正是被注入的那一行）
+        let err = require_scan_origin(&json!({
+            "source": "task", "origin": "disabled-ledger",
+            "taskPath": "\\", "taskName": "任意任务"
+        }))
+        .unwrap_err();
+        assert!(err.contains("台账"), "台账来源必须点名台账: {err}");
+        // ③ 无来源标记 ⇒ 拒（fail-closed：来源不可证就不许驱动 task 臂）
+        assert!(require_scan_origin(&json!({ "source": "task", "taskPath": "\\" })).is_err());
+    }
+
+    /// R5a-M01 ①+追加：现读核对 —— 这条任务必须真的在本域 `System32\Tasks` 树内，
+    /// 且确实是带登录/开机触发器的启动项任务。
+    ///
+    /// 本用例用**真实存在的系统任务文件**做正样本需要管理员读 `C:\Windows\System32\Tasks`
+    /// （普通用户可读，但内容受限），故此处只断言「负样本」与「树外必拒」——
+    /// 正样本的行为由真机探针覆盖（`#[ignore]`）。**这不削弱断言**：负样本正是
+    /// 注入形态（树外/不存在的任务名），是本条闸要挡的那一类。
+    ///
+    /// 判红自证：把 `task_scan_tree_check` 里的存在性检查删掉 ⇒ ②③ 的「不存在」
+    /// 断言会从「拒」变成别的错误文案（仍拒，但文案变了）⇒ 断言用文案区分。
+    #[test]
+    fn 现读核对_树外与不存在任务必拒() {
+        // ① 树外路径 ⇒ 拒（目录不存在）
+        let err = task_scan_tree_check("\\不存在的目录\\", "MyTask").unwrap_err();
+        assert!(err.contains("不存在"), "树外目录必须点名不存在: {err}");
+        // ② 根容器下不存在的任务名 ⇒ 拒
+        let err = task_scan_tree_check("\\", "Trim-不存在的任务-探针-9f3a").unwrap_err();
+        assert!(err.contains("不存在"), "不存在的任务必须被拒: {err}");
+        // ③ 路径段含 .. ⇒ 拒（不得借 .. 跳出任务树）
+        let err = task_scan_tree_check("\\..\\..\\Windows\\", "System32").unwrap_err();
+        assert!(err.contains("非法段") || err.contains("不存在"), "含 .. 必须被拒: {err}");
+    }
+
+    /// R5a-M01 ②：**端到端验收** —— 台账注入的 task 行必须被拒（方案 §4.1 B1-3）。
+    ///
+    /// 走真实链路：写 `disabled.json` → 跑 `startup_scan()`（含台账合并段）
+    /// → 取出那行 → 交给 task 执行臂 ⇒ 必须 Err。
+    ///
+    /// 为什么这条不能省：上面三条各自测的是**判据函数**；这条测的是「判据挂在链路上」。
+    /// 链路任一环没接上（合并段没打标记 / 执行臂忘了调 / 快照层把它换掉了），
+    /// 三条判据函数照样全绿，而注入行照样能驱动 `schtasks`。
+    ///
+    /// 判红自证：
+    /// - 把扫描合并段的 `o.insert("origin", "disabled-ledger")` 去掉 ⇒ ② 红；
+    /// - 把 `require_scan_origin` 改成恒 `Ok(())` ⇒ ④ 红。
+    #[test]
+    fn 台账注入的task行扫描后必须带台账标记且被执行臂拒() {
+        // ① 准备台账：注入一行 `source:"task"` 且 taskPath 是**合法**的根容器形态
+        let evil_id = "task|\\TrimEvilTask";
+        let evil = json!({
+            "id": evil_id,
+            "name": "TrimEvilTask",
+            "source": "task",
+            "hive": "", "scope": "HKLM",
+            "regPath": "", "valueName": "", "valueType": "", "valueData": "",
+            "filePath": "",
+            "taskPath": "\\",
+            "taskName": "TrimEvilTask",
+            "enabled": false, "disabledBy": "trim",
+            "location": "计划任务",
+        });
+        let payload = serde_json::to_vec(&vec![evil.clone()]).expect("台账序列化");
+        // **两本都写**：`startup_ledger_file()` 按 mtime 在「新根 + 老根兜底」两个候选里
+        // 选最新的一本，只写新根的话，机器上若残留一本更新的老根台账，选中的就不是
+        // 我们写的那本 ⇒ 用例变成「看运气」（本机实测踩过：清理残留前一直红）。
+        // 两本都写 ⇒ 选中的必然是我们写的这一份内容。
+        let mut written: Vec<std::path::PathBuf> = Vec::new();
+        for f in startup_disabled_file_candidates() {
+            let _ = std::fs::create_dir_all(
+                f.parent().unwrap_or_else(|| std::path::Path::new(".")),
+            );
+            std::fs::write(&f, &payload).expect("台账写入");
+            written.push(f);
+        }
+        // Drop 守卫：断言提前 panic 时也要清干净（不留残迹污染后续轮次）
+        struct Cleanup(Vec<std::path::PathBuf>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                for f in &self.0 {
+                    let _ = std::fs::remove_file(f);
+                }
+            }
+        }
+        let _cleanup = Cleanup(written);
+
+        // ② 扫描：台账行必须被并入，且带上 `origin:"disabled-ledger"` 标记
+        let scanned = startup_scan().expect("扫描应成功");
+        let row = scanned
+            .iter()
+            .find(|r| r.get("id").and_then(|v| v.as_str()) == Some(evil_id))
+            .unwrap_or_else(|| panic!("台账行必须被并入扫描结果（否则台账注入就够不着执行臂）"));
+
+        // ③ 标记必须是台账档（不是 scan）
+        assert_eq!(
+            row.get("origin").and_then(|v| v.as_str()),
+            Some("disabled-ledger"),
+            "台账并入的行必须打 origin:\"disabled-ledger\"（否则来源闸形同虚设）"
+        );
+
+        // ④ 执行臂必须拒（不调 schtasks）
+        let err = unsafe { toggle_task_item(row, false) }.unwrap_err();
+        assert!(
+            err.contains("台账") || err.contains("拒绝"),
+            "台账注入的 task 行必须被拒，实得: {err}"
+        );
+
+        // ⑤ 删除臂同样必须拒
+        let del = startup_delete(&vec![row.clone()]).expect("删除入口应返回回执");
+        assert_eq!(
+            del["failed"].as_i64(),
+            Some(1),
+            "删除臂必须把台账注入的 task 行记为失败，实得: {del}"
+        );
+        assert!(
+            del["results"][0]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("台账"),
+            "删除臂的拒因必须点名台账，实得: {del}"
+        );
     }
 }
 

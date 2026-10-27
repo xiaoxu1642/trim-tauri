@@ -25,11 +25,42 @@ fn cache_file() -> std::path::PathBuf {
     paths::scan_cache_file("startup-scan.json")
 }
 
+/// 读扫描缓存。**缺来源标记的缓存视为不可用**（返回 `None` ⇒ 触发重扫）。
+///
+/// 为什么（R5a-M01 ②）：扫描缓存 `startup-scan.json` 落在用户目录（可写），
+/// 且**跨版本存活** —— 升级前写的缓存里没有 `origin` 字段。执行侧对「缺 origin」
+/// 一律拒（fail-closed），若仍把这种缓存喂进快照，用户升级后第一次打开启动项页
+/// 会发现所有 task 项「点不动」（快照里没有可信来源）。
+///
+/// 所以这里的处置是「**旧缓存整体作废、当场重扫**」，而不是「给旧行补一个标记」：
+/// - 补标记只会让旧缓存的 task 行被拒（与作废同结果），却让 registry/folder 行
+///   继续用一份来源不可证的旧数据 —— 治标不治本；
+/// - 作废重扫只发生一次（旧缓存被新缓存覆盖，此后每行都带 `origin`），
+///   代价是一次扫描，而扫描已是纯文件读（毫秒级）。
+///
+/// 注：**缓存本身不可信**（用户可写 ⇒ 攻击者可以写 `origin:"scan"`）。
+/// 所以 `origin` 这条腿不是最终防线，它挡的是「台账注入 → 扫描合并 → 缓存 →
+/// 执行」这条**不需要改缓存**的链（台账注入的行在扫描合并时被打成
+/// `disabled-ledger`，落进缓存也带着这个标记）。真正的最终防线是 native 侧的
+/// `task_scan_tree_check`：**执行前现读磁盘**，确认这条任务文件真的在本域
+/// `System32\Tasks` 树内、不是 reparse 点、且确实是带登录/开机触发器的启动项
+/// 任务 —— 台账与缓存都伪造不出这个事实。
 fn load_cache() -> Option<(Vec<Value>, i64)> {
     let v = crate::security::read_json_or_default(&cache_file());
     let obj = v.as_object()?;
     let data = obj.get("data")?.as_array()?.clone();
     let ts = obj.get("timestamp")?.as_i64()?;
+    // 缺来源标记 ⇒ 旧版缓存 ⇒ 来源不可证 ⇒ 整体作废（触发重扫）
+    if data
+        .iter()
+        .any(|it| it.get("origin").and_then(|v| v.as_str()).is_none())
+    {
+        log::write_log(
+            "warn",
+            "启动项扫描缓存缺少来源标记（旧版缓存），已作废并重新扫描",
+        );
+        return None;
+    }
     Some((data, ts))
 }
 
@@ -91,12 +122,33 @@ fn needs_hklm(item: &Value) -> bool {
     // 只作对账、不作为授权。同用户篡改 disabled.json 把 HKLM 项标成 HKCU，即可骗过
     // 这道提权前置门（真正写入的 hive 由 regPath 决定，见 native::toggle_registry_item）。
     // 前缀口径与 parse_reg_path 一致（它认什么，这里就判什么）。
-    // task 项无 regPath，仍按 scope 判（Tasks 目录恒机器级，禁用要提权）。
     if item.get("source").and_then(|v| v.as_str()) == Some("registry") {
         if let Some(rp) = item.get("regPath").and_then(|v| v.as_str()) {
             let up = rp.trim().to_ascii_uppercase();
             return up.starts_with("HKEY_LOCAL_MACHINE") || up.starts_with("HKLM");
         }
+    }
+    // R5a-M01 ①：task 项改按**反解出的任务文件位置**判机器级/用户级，不采信台账
+    // `scope`/`hive`。为什么必须改：注入行可省略 `scope` 字段直接绕过这道提权前置门
+    // （v6-K04 的第二条腿）—— 而 `scope`/`hive` 来自可写的 `disabled.json`。
+    //
+    // 判据（与 native 侧 `task_container_verdict` / `task_scan_tree_check` 同源，
+    // §5.16/N6：口径只此一份）：计划任务文件**恒**落在
+    // `%SystemRoot%\System32\Tasks` 之下 ⇒ 恒为机器级 ⇒ 恒需提权。
+    // `\Microsoft\` 子树（系统任务）更需提权，是它的子集。
+    //
+    // 为什么不用「`\Microsoft\` 前缀 ⇒ 机器级、其余 ⇒ 用户级」那种更宽松的写法：
+    // 任务计划里**所有**任务文件都在 `System32\Tasks` 下（`\Microsoft\` 只是系统任务
+    // 的子树名，不是「机器级 vs 用户级」的分界）。旧实现按台账行自带的 `scope` 判，
+    // 而扫描侧给所有 task 行写死 `"scope":"HKLM"`（`scan_task_files`）⇒ 旧行为是
+    // 「task 一律要提权」；改成前缀宽松判会**降低**现有提权门槛（未提权态就去
+    // schtasks 改系统树下的任务），那是回归而不是修复。
+    //
+    // 形状非法（taskPath/taskName 缺失或畸形）⇒ 判不出机器级 ⇒ 同样按需提权处理
+    // （fail-closed）；真正的形状闸在 native 侧（那里会拒），这里只保证不因
+    // 「读不到机器级属性」而在未提权态放行一个可能属于系统子树的任务操作。
+    if item.get("source").and_then(|v| v.as_str()) == Some("task") {
+        return true;
     }
     matches!(
         item.get("hive").and_then(|v| v.as_str()),
@@ -629,7 +681,7 @@ mod tests {
     /// v6-K04：提权前置门按 regPath 解析出的真实 hive 判——台账行自带的 hive/scope
     /// 只作对账。同用户篡改 disabled.json 把 HKLM 项谎报成 HKCU，旧判法会跳过提权
     /// 门（真正写入的 hive 由 regPath 决定，见 native::toggle_registry_item）。
-    /// 判红自证：把 needs_hklm 里的 regPath 分支删掉 ⇒ 第 1、3 条红。
+    /// 判红自证：把 needs_hklm 里的 regPath 分支删掉 ⇒ 本用例红。
     #[test]
     fn hklm前置门按regpath判而非台账hive字段() {
         assert!(needs_hklm(&json!({
@@ -650,6 +702,32 @@ mod tests {
         })), "HKLM 缩写形态必须判需提权");
         // folder/task 项无 regPath，仍按 hive/scope 判（ Tasks 目录恒机器级）
         assert!(needs_hklm(&json!({ "source": "folder", "hive": "HKLM", "filePath": r"C:\x.lnk" })));
+    }
+
+    /// R5a-M01 ①：task 臂改按**反解出的任务文件位置**判机器级，不采信台账
+    /// `scope`/`hive`。注入行可省略 `scope` 直接绕过旧的提权前置门（v6-K04 第二条腿）。
+    ///
+    /// 判红自证：把 `needs_hklm` 里 task 臂的 `return true` 去掉（退回读台账
+    /// `scope`）⇒ 本用例红。
+    #[test]
+    fn 任务项提权门不采信台账scope字段() {
+        // ① 正常扫描行：scope 恒为 HKLM ⇒ 需提权（与旧行为一致，不降低门槛）
+        assert!(needs_hklm(&json!({
+            "source": "task", "scope": "HKLM", "hive": "",
+            "taskPath": "\\", "taskName": "MyTask"
+        })), "扫描产出的任务项必须仍判需提权");
+        // ② 注入行省略 scope/hive ⇒ 旧判法会放行（false），新判法仍判需提权
+        assert!(needs_hklm(&json!({
+            "source": "task",
+            "taskPath": "\\", "taskName": "任意任务"
+        })), "省略 scope 的注入行不得绕过提权前置门");
+        // ③ 注入行谎报 scope=HKCU ⇒ 同样不得绕过
+        assert!(needs_hklm(&json!({
+            "source": "task", "scope": "HKCU", "hive": "HKCU",
+            "taskPath": "\\", "taskName": "任意任务"
+        })), "谎报 HKCU 的任务行不得绕过提权前置门");
+        // ④ 形状非法（taskPath/taskName 缺失）⇒ fail-closed 判需提权
+        assert!(needs_hklm(&json!({ "source": "task" })), "读不出机器级属性时按需提权处理");
     }
 
     #[test]

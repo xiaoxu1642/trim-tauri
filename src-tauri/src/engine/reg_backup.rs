@@ -1639,6 +1639,22 @@ pub fn reg_import_apply_sections(sections: &[RegSection]) -> Result<RegImportSta
         };
         let full = sec.full_key();
         if sec.delete_key {
+            // 删树出口的**本地**禁删面（R5c-M02 / B1-1）：执行臂自己过一道。
+            //
+            // 为什么不能只靠上游：上游（`reg_backup_restore_guards_with` /
+            // `peripheral_restore_admit`）确实整段拒 `delete_key` 形态，但那是**调用方**
+            // 的判据 —— 本函数是 `pub`，将来任何一个新调用方忘了走闸，
+            // `RegDeleteTreeW` 就直接落到「删整棵子树」上（红线①②）。
+            // 「判据必须落在被执行的那一层」：闸在调用方 ⇒ 调用方一换就失守。
+            //
+            // 判据只此一份（AGENTS §5.16/N6）：直接调 `protect::reg_target_block_reason`，
+            // 与上游同一函数、同一口径。
+            if let Some(reason) = crate::engine::protect::reg_target_block_reason(&full) {
+                return Err(RegImportFailure {
+                    stat,
+                    reason: format!("删除键失败（受保护面）: {full} —— {reason}"),
+                });
+            }
             if crate::engine::native::reg_key_remove(hive, &sec.subkey, true) {
                 stat.keys_deleted += 1;
             } else {

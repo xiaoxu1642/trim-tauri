@@ -99,6 +99,11 @@ const MUST_RUN = [
   // P1-04（2026-10-26 复审 v2）：finder 扫描回执的「丢根 / 根截断」必须被前端读成提示。
   // 字段名读错不会报错，只会让提示少一条 —— 只能机检拦。
   'check-finder-scan-notes',
+  // B1（2026-10-27 全仓重审 P0）：注册表**递归删树**出口的容器准入与名字形态闸。
+  // 三条各有独立判据：禁删面（删树点必须位于 `protect::reg_target_block_reason` 之后）、
+  // 空子键形态闸（`RegDeleteTreeW` 的空路径口径 = 删整棵子树）、名字形态闸
+  // （`PCWSTR` 以第一个 NUL 为串尾 ⇒ 判定字节 ≠ 执行字节）。
+  'check-registry-delete-guard',
 ];
 
 // 少数门禁需要非默认参数；登记在这里，`--run` 会照实传。

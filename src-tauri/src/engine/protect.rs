@@ -876,6 +876,14 @@ pub fn validate_mutation_target(p: &str) -> Result<(), String> {
     if p.is_empty() {
         return Err("目标路径为空".to_string());
     }
+    // 名字形态闸（A6-M05）：内嵌 NUL / 控制字符一律拒，放在**最前面** ——
+    // 后面每道闸的比较键（`path_key` / `normalize_for_compare`）都把 NUL 当普通字符
+    // 折进比较键，而执行侧（`std::fs` / `Path::new(p)`）按 NUL 之前的前缀落点，
+    // 于是「判定吃的字节」与「执行吃的字节」不是同一个串（红线⑨）。
+    // 早于其余各闸：形态非法的输入不该再被拿去解引用/解析。
+    if name_has_control_chars(p) {
+        return Err(format!("目标路径含 NUL 或控制字符，已拒绝：{p:?}"));
+    }
     if is_path_protected(p) {
         return Err(format!("受保护的系统/用户路径，已拒绝：{p}"));
     }
@@ -917,9 +925,26 @@ pub fn json_of(r: &ProtectRoots) -> String {
     )
 }
 
-// ==================== 注册表禁删面（A1） ====================
-//
-// 为什么单独一套清单：`uninstall_residue_execute` 对 `reg_key` 走的是
+/// 名字形态闸：**内嵌 NUL 或控制字符一律拒**（红线⑨「判定字节 ≠ 执行字节」的共用判据）。
+///
+/// 为什么需要这一份而不是各入口各写：Win32 的 `PCWSTR` 以**第一个 NUL** 为串尾 ⇒
+/// 交给 Win32 的「执行用名字」永远是「判定用名字」的前缀。`"a\0b"` 的判定结果是
+/// 「一个叫 `a\0b` 的键」，执行结果却是「删掉叫 `a` 的键」——两个不同的目标。
+/// 文件面同形态：`std::fs` 系列的路径在遇到 NUL 时按前缀落点。
+///
+/// 判据只此一份（AGENTS §5.16/N6：看起来等价的两套判据不许并存）：
+/// - 注册表写/删/建面 → `native::common::to_wide_checked`；
+/// - 文件写/删面 → [`validate_mutation_target`]。
+///
+/// 控制字符一并拒：注册表值名与键名里出现 `\r`/`\n` 会让 `.reg` 备份文本与回执串行错位
+/// （`reg_backup::parse_reg_text` 按行切段），路径里出现控制字符同理。
+pub fn name_has_control_chars(s: &str) -> bool {
+    s.chars().any(|c| c.is_control())
+}
+
+/// 注册表禁删面（A1）
+///
+/// 为什么单独一套清单：`uninstall_residue_execute` 对 `reg_key` 走的是
 // `native::reg_key_remove(hive, subkey, true)` → `RegDeleteTreeW`，**递归删整棵树**，
 // 而目标字符串来自「可被外部替换 + 需过验签」的残留规则库 JSON。文件系统面有
 // `is_path_protected` 挡着，注册表面此前一个判定都没有（方案 §4.1 的证据链），
@@ -1998,16 +2023,61 @@ mod tests {
     }
 
     /// P0-4（R4-M09）④：父链元数据读失败（非「不存在」）→ 拒，不按「干净」处理。
-    /// 免落盘的可构造形态：父级段内含 NUL 字节——std 在系统调用层直接返回
-    /// 错误（kind 非 NotFound），真实创建链同样无法穿过这种形态，拒即 fail-closed。
+    /// 免落盘的可构造形态：**父级段名过长**（300 字符）——std 在系统调用层返回
+    /// `InvalidFilename`(123)，kind 非 NotFound，真实创建链同样无法穿过这种形态，
+    /// 拒即 fail-closed。
+    ///
+    /// **为什么不再用「父级段内含 NUL」**：R5c-M01（B1-2）在 `validate_mutation_target`
+    /// 入口新增了名字形态闸（含 NUL/控制字符一律拒），它比父链闸**更早**命中。
+    /// 若本用例继续用 NUL 样本，它就不再检验父链闸了 —— 把父链的「读失败 ⇒ 拒」
+    /// 分支改成 `continue`（当干净处理）本用例**仍然绿** ⇒ 父链闸丧失判红能力
+    /// （假绿）。改用「父级段过长」这条**不含 NUL** 的形态后，两条闸各有各的
+    /// 独立样本，互不遮蔽：名字形态闸由 `名字形态闸_含nul或控制字符一律拒` 钉，
+    /// 父链读失败闸由本用例钉。
+    ///
     /// 判红自证：把读失败分支改成 `continue`（当干净处理）⇒ 本用例红。
     #[cfg(windows)]
     #[test]
     fn p0_4_父链元数据读失败必须拒() {
-        let bad = "C:\\__trim_p04__\\\0ghost\\probe.bin";
+        let long = "z".repeat(300);
+        let bad = format!("C:\\Users\\{long}\\probe.bin");
         let err = validate_mutation_target(&bad)
             .expect_err("父级元数据读取失败不得按干净放行");
         assert!(err.contains("无法证明无链接"), "拒因必须点名读失败闸，实得: {err}");
+    }
+
+    /// R5c-M01（B1-2）：名字形态闸 —— 内嵌 NUL 或控制字符一律拒（红线⑨）。
+    ///
+    /// 为什么这道闸必须**在父链闸之前**：后面每道闸的比较键（`path_key` /
+    /// `normalize_for_compare`）都把 NUL 当**普通字符**折进比较键，而执行侧
+    /// （`std::fs` / `Path::new(p)`）按 NUL 之前的前缀落点 ⇒「判定的字节」与
+    /// 「执行的字节」不是同一个串。
+    ///
+    /// 判红自证：把本闸的 `if name_has_control_chars(p)` 删掉 ⇒ ②③ 的
+    /// 「必须点名形态闸」断言红（父链闸会以别的拒因接管，措辞不同 ⇒ 仍红）。
+    #[test]
+    fn 名字形态闸_含nul或控制字符一律拒() {
+        // ① NUL 在末段 ⇒ 拒，且拒因点名形态闸（不是父链闸的措辞）
+        let err = validate_mutation_target("C:\\probe\\a\0b.bin")
+            .expect_err("含 NUL 的目标必须被拒");
+        assert!(
+            err.contains("NUL") || err.contains("控制字符"),
+            "拒因必须点名名字形态闸，实得: {err}"
+        );
+        // ② NUL 在祖先段 ⇒ 同样点名形态闸
+        let err = validate_mutation_target("C:\\probe\\\0ghost\\x.bin")
+            .expect_err("祖先段含 NUL 的目标必须被拒");
+        assert!(
+            err.contains("NUL") || err.contains("控制字符"),
+            "拒因必须点名名字形态闸，实得: {err}"
+        );
+        // ③ 其它控制字符（\r \n \t）同样拒 —— 它们会让 .reg 备份文本与回执串行错位
+        let err = validate_mutation_target("C:\\probe\\a\rb.bin")
+            .expect_err("含控制字符的目标必须被拒");
+        assert!(
+            err.contains("NUL") || err.contains("控制字符"),
+            "拒因必须点名名字形态闸，实得: {err}"
+        );
     }
 
     /// P0-2A 判据表：四种根形态各钉一次（方案 §2 P0-2A 验收明列的四种）。

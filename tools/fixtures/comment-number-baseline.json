@@ -43,7 +43,7 @@
   "src-tauri/src/commands/residue.rs": 1,
   "src-tauri/src/commands/runtimes.rs": 1,
   "src-tauri/src/commands/settings.rs": 10,
-  "src-tauri/src/commands/startup.rs": 2,
+  "src-tauri/src/commands/startup.rs": 1,
   "src-tauri/src/commands/state.rs": 1,
   "src-tauri/src/commands/syspanel.rs": 1,
   "src-tauri/src/commands/uninstall/appx.rs": 1,

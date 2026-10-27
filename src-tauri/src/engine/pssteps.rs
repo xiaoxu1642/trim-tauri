@@ -124,6 +124,24 @@ fn parse_ps_reg_path(p: &str) -> Option<(Hive, String)> {
     None
 }
 
+/// 本解释器**只放行 HKLM / HKCU 两个 hive**（R5c-M02 / A1 fail-closed）。
+///
+/// 为什么收窄：[`crate::engine::protect::reg_target_block_reason`] 的注册表禁删面
+/// 只认 HKLM/HKCU（`normalize_reg_target` 对其它 hive 返回 `None` ⇒ 判不出来 ⇒ 按拒绝处理）。
+/// 本文件原先的 `parse_ps_reg_path` 放行 5 个 hive（取数：`rg -n 'Hive::(Cr|U|Cc)' src-tauri/src/engine/pssteps.rs`），
+/// 于是 `Hive::Cr`（HKCR）/ `Hive::U`（HKU）/ `Hive::Cc`（HKCC）这三条链**既不在禁删面的判定面内、又能走到
+/// 原生删树出口** —— 判据缺席 + 出口可达 = 无闸可达形态。
+///
+/// 为什么不扩 `protect` 的真源去认这三个 hive：那是 R6a 面（禁删面本身的覆盖面问题），
+/// 本轮不碰。**在 pssteps 侧 fail-closed** 是本轮的处置：判不出来的目标一律拒绝，
+/// 与 `dir_delete_blocked` 的「读不到属性即拒」同口径。
+///
+/// 判据只此一份（AGENTS §5.16/N6）：本函数是 pssteps 侧 hive 准入的唯一实现，
+/// 读、写、删三个方向都吃它。
+fn hive_admitted(h: Hive) -> bool {
+    matches!(h, Hive::Lm | Hive::Cu)
+}
+
 /// PS 引号字面量。**双引号串只在内容不含 `$`/反引号时接受** —— 依赖展开的串超出
 /// 字面量范围，必须回退 PS（`unquote` 返回 None）。
 fn unquote(s: &str) -> Option<String> {
@@ -2036,15 +2054,44 @@ fn task_op_result(silent: bool, run: &native::TaskRun) -> Result<String, String>
 
 fn exec_one(op: &PsOp) -> Result<String, String> {
     match op {
-        PsOp::KeyCreate { hive, subkey } => native::reg_key_ensure_checked(hive_handle(*hive), subkey)
+        PsOp::KeyCreate { hive, subkey } => {
+            if !hive_admitted(*hive) {
+                return Err(format!(
+                    "创建注册表键失败: {subkey} —— hive {} 不在本工具的注册表准入面内（只支持 HKLM/HKCU），已拒绝",
+                    hive_prefix(*hive)
+                ));
+            }
+            native::reg_key_ensure_checked(hive_handle(*hive), subkey)
             .map(|_| String::new())
-            .map_err(|c| format!("创建注册表键失败: {subkey} —— {}", reg_err(c))),
+            .map_err(|c| format!("创建注册表键失败: {subkey} —— {}", reg_err(c)))
+        }
         PsOp::KeyRemove { hive, subkey, recurse } => {
+            // R5c-M02 / A1：pssteps 这条链原先**一道禁删面都没有**
+            // （取数：`rg -n 'reg_target_block_reason|is_reg_target_protected' src-tauri/src/engine/pssteps.rs`），
+            // 而删树出口是 `RegDeleteTreeW`（删整棵子树）。
+            // 现在在调原生之前过判据：目标落在受保护容器 / 系统命名空间 / 容器祖先 ⇒ 拒。
+            //
+            // 判据只此一份（AGENTS §5.16/N6）：直接调 `protect::reg_target_block_reason`，
+            // 不在本文件另写一份等价实现。
+            //
+            // 注：禁删面的管辖语义是**递归删树**（`reg_key` 形态）。`recurse=false`
+            // 的 `Remove-Item` 只删最末段、不删子树，仍按同一判据拒（保守方向：
+            // 宁可多拒一次，也不在同一出口留一个「换个参数就绕过」的形态）。
+            let target = format!("{}\\{}", hive_prefix(*hive), subkey);
+            if let Some(reason) = crate::engine::protect::reg_target_block_reason(&target) {
+                return Err(format!("删除注册表键失败: {target} —— 已拒绝：{reason}"));
+            }
             native::reg_key_remove_checked(hive_handle(*hive), subkey, *recurse)
                 .map(|_| String::new())
                 .map_err(|c| format!("删除注册表键失败: {subkey} —— {}", native::remove_cause_label(c)))
         }
         PsOp::ValueWrite { hive, subkey, name, kind, data } => {
+            if !hive_admitted(*hive) {
+                return Err(format!(
+                    "写注册表值失败: {subkey}\\{name} —— hive {} 不在本工具的注册表准入面内（只支持 HKLM/HKCU），已拒绝",
+                    hive_prefix(*hive)
+                ));
+            }
             match native::reg_restore_write_checked(hive_handle(*hive), subkey, name, kind_of(*kind), data) {
                 Ok(()) => Ok(String::new()),
                 // **终态判定，不是动作判定**：写被拒时读回现值，类型与字节都已等于目标 ⇒ 目标本就达成。
@@ -2062,6 +2109,12 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
             }
         }
         PsOp::ValueRemove { hive, subkey, name } => {
+            if !hive_admitted(*hive) {
+                return Err(format!(
+                    "删注册表值失败: {subkey}\\{name} —— hive {} 不在本工具的注册表准入面内（只支持 HKLM/HKCU），已拒绝",
+                    hive_prefix(*hive)
+                ));
+            }
             if native::reg_restore_delete(hive_handle(*hive), subkey, name) {
                 Ok(String::new())
             } else {
