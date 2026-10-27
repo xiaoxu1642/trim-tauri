@@ -78,6 +78,27 @@ check(
   allSame ? '' : `不一致：${JSON.stringify([...csps.entries()].filter(([, v]) => v !== null).map(([f, v]) => [f, v.stripped]))}`,
 );
 
+// T1a-M24：指令内容地板 —— 「N 份逐字相等」的基准取 values[0]，**五份同步放宽照样绿**
+//（探针实测：没有一条断言在读指令内容）。关键指令的最小集合在此钉死；确需放宽必须
+// 逐条来本表改（放宽=显式动作，与 FRAME_SRC_BASELINE 同纪律）。
+const CSP_INSTRUCTION_FLOOR = [
+  ["script-src 'self'", 'script-src 只认同源（内联脚本与外线全禁）'],
+  ["object-src 'none'", 'object-src 全禁（插件面归零）'],
+  ["base-uri 'self'", 'base-uri 只认同源（防 base 标签劫持相对路径）'],
+  ["style-src 'self' 'unsafe-inline'", 'style-src 现状形态（token 化样式表需要内联样式）'],
+  ['default-src \'self\'', 'default-src 在场（未列指令的兜底必须显式）'],
+  ['connect-src \'self\' ipc: http://ipc.localhost', 'connect-src 的 IPC 通道形状'],
+];
+{
+  const baseline = values[0]?.stripped ?? '';
+  const floorBad = CSP_INSTRUCTION_FLOOR.filter(([expr]) => !baseline.includes(expr));
+  check(
+    floorBad.length === 0,
+    `CSP 指令内容地板（关键指令 ${CSP_INSTRUCTION_FLOOR.length} 条在场；T1a-M24）`,
+    floorBad.length ? `同步放宽被抓：${floorBad.map(([e, why]) => `${e}（${why}）`).join('；')}` : '',
+  );
+}
+
 // L-3：conf 的 app.security.csp 必须显式 null（CSP 唯一真源在 index.html meta）
 const conf = JSON.parse(readFileSync(join(REPO_ROOT, 'src-tauri', 'tauri.conf.json'), 'utf8'));
 check(

@@ -208,19 +208,26 @@ function judgeCoverageLedger(ledger, knownIds, unitsWithClaims) {
   const gaps = [];
   const overclaims = [];
   const noCommands = [];
+  const noCounts = [];
+  // T1a-M14：covered 条目是「src/…（1905 行，全读）」这种**带注解的字符串**——与认领
+  // 路径精确相等会 19/19 恒假红。两侧都归一成「路径前缀」再比对。
+  const pathOf = (s) => (String(s).match(/[\w./\\-]+/) || [''])[0].replace(/\\/g, '/').replace(/\/+$/, '');
   for (const [id, rec] of Object.entries(ledger)) {
     if (!knownIds.has(id)) continue;
     const unit = unitsWithClaims.find((u) => u.id === id);
     if (!unit) continue;
-    const covered = new Set(rec.covered ?? []);
-    const claimed = new Set(unit.claimed || []);
+    // T1a-M14：coverage 契约把 counts 写成必填，但本判定器从不校验 ⇒ 「必填」只有文字
+    // 纪律（现算 19 份里 9 份缺）。缺失/非对象即进 noCounts。
+    if (!rec.counts || typeof rec.counts !== 'object' || Array.isArray(rec.counts)) noCounts.push(id);
+    const covered = new Set((rec.covered ?? []).map(pathOf));
+    const claimed = new Set((unit.claimed || []).map(pathOf));
     const missed = [...claimed].filter((f) => !covered.has(f));
     if (missed.length) gaps.push(`${id} 漏 ${missed.length}：${missed.slice(0, 3).join(',')}`);
-    const extra = [...covered].filter((f) => !claimed.has(f));
+    const extra = [...covered].filter((f) => f && !claimed.has(f));
     if (extra.length) overclaims.push(`${id} over-claim ${extra.length}：${extra.slice(0, 3).join(',')}`);
     if (!Array.isArray(rec.commandsRun) || rec.commandsRun.length === 0) noCommands.push(id);
   }
-  return { unknown, gaps, overclaims, noCommands };
+  return { unknown, gaps, overclaims, noCommands, noCounts };
 }
 
 // ── 正向对照自检（§4.1：能判红 + 真样本不假红，两向都要）──────────────────────
@@ -299,26 +306,39 @@ const POSITIVE_CONTROLS = [
     expect: (v) => v === true,
   },
   {
-    label: 'U6 coverage：未知单元 / 漏读 / over-claim / 空命令必判红，干净台账放行',
+    label: 'U6 coverage：未知单元 / 漏读 / over-claim / 空命令 / 缺 counts 必判红；注解 covered 归一放行',
     run: () => {
       const known = new Set(['T1a']);
       const unitsWithClaims = [{ id: 'T1a', claimed: ['a.mjs', 'b.mjs'] }];
+      const counts = { filesRead: 2, linesRead: 100 };
       const bad = judgeCoverageLedger(
-        { T1a: { covered: ['a.mjs'], commandsRun: ['x'] }, R99: { covered: [], commandsRun: ['x'] } },
+        { T1a: { covered: ['a.mjs'], commandsRun: ['x'], counts }, R99: { covered: [], commandsRun: ['x'], counts } },
         known, unitsWithClaims,
       );
       const over = judgeCoverageLedger(
-        { T1a: { covered: ['a.mjs', 'b.mjs', 'ghost.mjs'], commandsRun: [] } },
+        { T1a: { covered: ['a.mjs', 'b.mjs', 'ghost.mjs'], commandsRun: [], counts } },
         known, unitsWithClaims,
       );
       const clean = judgeCoverageLedger(
+        { T1a: { covered: ['a.mjs', 'b.mjs'], commandsRun: ['x'], counts } },
+        known, unitsWithClaims,
+      );
+      // T1a-M14 两条新腿：注解 covered 归一后放行（真实交付形状不再恒假红）；
+      // counts 缺失必红（「必填」从文字纪律变成机检）。
+      const annotated = judgeCoverageLedger(
+        { T1a: { covered: ['a.mjs（1905 行，全读）', 'b.mjs（310 行）'], commandsRun: ['x'], counts } },
+        known, unitsWithClaims,
+      );
+      const noCountsRec = judgeCoverageLedger(
         { T1a: { covered: ['a.mjs', 'b.mjs'], commandsRun: ['x'] } },
         known, unitsWithClaims,
       );
       return bad.unknown.length === 1 && bad.gaps.length === 1
         && over.overclaims.length === 1 && over.noCommands.length === 1
         && clean.unknown.length === 0 && clean.gaps.length === 0
-        && clean.overclaims.length === 0 && clean.noCommands.length === 0;
+        && clean.overclaims.length === 0 && clean.noCommands.length === 0
+        && annotated.gaps.length === 0 && annotated.overclaims.length === 0
+        && noCountsRec.noCounts.length === 1;
     },
     expect: (v) => v === true,
   },
@@ -488,17 +508,52 @@ if (!covPath) {
 } else if (!existsSync(covPath)) {
   skip('U6 分报告 coverage 对账', `--coverage 指向的文件不存在：${covPath}，本节未校验`);
 } else {
-  const ledger = JSON.parse(readFileSync(covPath, 'utf8'));
-  const { unknown, gaps, overclaims, noCommands } =
+  // T1a-M14：--coverage 支持逗号分隔多路径与目录 —— 按记录的 unit 字段归并；
+  // 归并前 isFile() 检查，缺失/损坏逐件显式列出（不再 EISDIR 崩溃）。单单元交付
+  // 形状（顶层 unit/covered/...）与 {ID: rec} 形状都收。
+  const ledger = {};
+  const badParts = [];
+  const absorb = (obj) => {
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
+    if (typeof obj.unit === 'string' && obj.unit) {
+      const id = obj.unit;
+      if (!ledger[id]) ledger[id] = { covered: [], commandsRun: [] };
+      ledger[id].covered.push(...(obj.covered ?? []));
+      ledger[id].commandsRun.push(...(obj.commandsRun ?? []));
+      if (obj.counts && typeof obj.counts === 'object') ledger[id].counts = { ...(obj.counts ?? {}), ...ledger[id].counts };
+    } else {
+      for (const [id, rec] of Object.entries(obj)) {
+        if (!ledger[id]) ledger[id] = { covered: [], commandsRun: [] };
+        ledger[id].covered.push(...(rec.covered ?? []));
+        ledger[id].commandsRun.push(...(rec.commandsRun ?? []));
+        if (rec.counts && typeof rec.counts === 'object') ledger[id].counts = { ...(rec.counts ?? {}), ...ledger[id].counts };
+      }
+    }
+  };
+  for (const cp of covPath.split(',').map((s) => s.trim()).filter(Boolean)) {
+    if (!existsSync(cp)) { badParts.push(`${cp} 不存在`); continue; }
+    if (!statSync(cp).isFile()) {
+      for (const f of readdirSync(cp).filter((n) => n.endsWith('.json')).sort()) {
+        try { absorb(JSON.parse(readFileSync(join(cp, f), 'utf8'))); }
+        catch (e) { badParts.push(`${f} JSON 损坏（${e.message.slice(0, 60)}）`); }
+      }
+      continue;
+    }
+    try { absorb(JSON.parse(readFileSync(cp, 'utf8'))); }
+    catch (e) { badParts.push(`${cp} JSON 损坏（${e.message.slice(0, 60)}）`); }
+  }
+  const { unknown, gaps, overclaims, noCommands, noCounts } =
     judgeCoverageLedger(ledger, floor.ids, unitsWithClaims);
   check(
-    unknown.length === 0 && gaps.length === 0 && overclaims.length === 0 && noCommands.length === 0,
-    `U6 coverage 台账对拍（${Object.keys(ledger).length} 份）`,
+    unknown.length === 0 && gaps.length === 0 && overclaims.length === 0 && noCommands.length === 0 && noCounts.length === 0,
+    `U6 coverage 台账对拍（${Object.keys(ledger).length} 份，来源 ${covPath.split(',').length} 路径）`,
     [
+      ...badParts.map((b) => `台账读取失败：${b}`),
       ...unknown.map((u) => `台账里出现未知单元 ${u}`),
       ...gaps,
       ...overclaims.map((o) => `台账 covered 超出本单元认领面：${o}`),
       ...noCommands.map((id) => `${id} 的 commandsRun 为空（没跑命令的台账不算取证）`),
+      ...noCounts.map((id) => `${id} 的 counts 缺失或非对象（契约必填项，T1a-M14）`),
     ].join(' | '),
   );
 }

@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { walkRs } from './lib/fs-walk.mjs';
 import { gate } from './lib/gate.mjs';
 import { DELETE_APIS } from './lib/delete-apis.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BASELINE_PATH = join(ROOT, 'tools', 'fixtures', 'delete-callsites-baseline.json');
@@ -28,50 +29,6 @@ const SCAN_ROOTS = [join(ROOT, 'src-tauri', 'src'), join(ROOT, 'native-scanner',
 // T1a-M07：名单唯一真源见 tools/lib/delete-apis.mjs（与 check-delete-exits 共用）。
 const APIS = DELETE_APIS;
 
-/** 剥 Rust 注释与字符串字面量（与 check-delete-exits 的 stripRustComments 同口径） */
-function stripRustComments(src) {
-  let out = '', i = 0;
-  const n = src.length;
-  while (i < n) {
-    const c = src[i], d = i + 1 < n ? src[i + 1] : '';
-    if (c === '/' && d === '/') { while (i < n && src[i] !== '\n') i++; continue; }
-    if (c === '/' && d === '*') {
-      let depth = 1; i += 2;
-      while (i < n && depth > 0) {
-        if (src[i] === '/' && src[i + 1] === '*') { depth++; i += 2; }
-        else if (src[i] === '*' && src[i + 1] === '/') { depth--; i += 2; }
-        else i++;
-      }
-      out += ' ';
-      continue;
-    }
-    if (c === '"') {
-      i++;
-      while (i < n && src[i] !== '"') { if (src[i] === '\\') i++; i++; }
-      i++; out += '""';
-      continue;
-    }
-    if (c === 'r' && (d === '"' || d === '#')) {
-      let hashes = 0, j = i + 1;
-      while (src[j] === '#') { hashes++; j++; }
-      if (src[j] === '"') {
-        const close = '"' + '#'.repeat(hashes);
-        const end = src.indexOf(close, j + 1);
-        i = end < 0 ? n : end + close.length;
-        out += '""';
-        continue;
-      }
-    }
-    if (c === "'") {
-      const m = /^'(\\.|[^'\\])'/.exec(src.slice(i, i + 5));
-      if (m) { i += m[0].length; out += "''"; continue; }
-      out += c; i++;
-      continue;
-    }
-    out += c; i++;
-  }
-  return out;
-}
 
 // ---- 现算调用点：api → { "rel/path.rs": count } ----
 const current = {};
@@ -79,7 +36,7 @@ let scanned = 0;
 for (const root of SCAN_ROOTS) {
   for (const f of walkRs(root)) {
     scanned++;
-    const clean = stripRustComments(readFileSync(f, 'utf8'));
+    const clean = blankNonCode(readFileSync(f, 'utf8'));
     const rel = relative(ROOT, f).replace(/\\/g, '/');
     for (const api of APIS) {
       const re = new RegExp(`\\b${api}\\s*\\(`, 'g');

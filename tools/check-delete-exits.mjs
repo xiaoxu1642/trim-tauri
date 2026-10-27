@@ -26,6 +26,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { walkRs } from './lib/fs-walk.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 import { DELETE_APIS as DELETE_MARKERS } from './lib/delete-apis.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri');
@@ -192,51 +193,6 @@ const srcFiles = walkRs(path.join(ROOT, 'src'));
 // v2-L4P-31（E-6 同族）：剥离 Rust 注释与字符串字面量后再做标记匹配。实测教训：
 // appearance_bg_delete 的说明注释里写了 API 名，`body.includes()` 被注释文本洗白——
 // 状态机剥除（处理块注释/行注释/字符串/字符/生存期撇号）后，断言只看真实代码。
-function stripRustComments(src) {
-  let out = '', i = 0;
-  const n = src.length;
-  while (i < n) {
-    const c = src[i], d = i + 1 < n ? src[i + 1] : '';
-    if (c === '/' && d === '/') { while (i < n && src[i] !== '\n') i++; continue; }
-    if (c === '/' && d === '*') {
-      let depth = 1; i += 2;
-      while (i < n && depth > 0) {
-        if (src[i] === '/' && src[i + 1] === '*') { depth++; i += 2; }
-        else if (src[i] === '*' && src[i + 1] === '/') { depth--; i += 2; }
-        else i++;
-      }
-      out += ' ';
-      continue;
-    }
-    if (c === '"') {
-      i++;
-      while (i < n && src[i] !== '"') { if (src[i] === '\\') i++; i++; }
-      i++; out += '""';
-      continue;
-    }
-    if (c === 'r' && (d === '"' || d === '#')) {
-      // raw string r"..." / r#"..."#
-      let hashes = 0, j = i + 1;
-      while (src[j] === '#') { hashes++; j++; }
-      if (src[j] === '"') {
-        const close = '"' + '#'.repeat(hashes);
-        const end = src.indexOf(close, j + 1);
-        i = end < 0 ? n : end + close.length;
-        out += '""';
-        continue;
-      }
-    }
-    if (c === "'") {
-      // 字符字面量或生存期（'a）：看第二个引号前的形态
-      const m = /^'(\\.|[^'\\])'/.exec(src.slice(i, i + 5));
-      if (m) { i += m[0].length; out += "''"; continue; }
-      out += c; i++;
-      continue;
-    }
-    out += c; i++;
-  }
-  return out;
-}
 
 function extractBody(name) {
   // T1a-M20：同名 fn 跨文件（现算多条命令同名，如 cleanup_execute 在命令层与引擎层）
@@ -263,7 +219,7 @@ function extractBody(name) {
   const m = src.match(re);
   // 从 fn 起始做花括号配平（在剥离注释/字符串后的文本上做，防止字符串里的
   // 花括号截断函数体——E-6 的判绿方向风险）
-  const clean = stripRustComments(src);
+  const clean = blankNonCode(src);
   const mc = clean.match(re);
   let i = mc ? clean.indexOf('{', mc.index) : -1;
   if (i < 0) return null;
@@ -282,7 +238,7 @@ function extractBody(name) {
 function resolveHelperBody(helper, file) {
   if (!file) {
     const all = srcFiles
-      .filter((f) => new RegExp(`\\bfn\\s+${helper}\\s*[<(]`).test(stripRustComments(fs.readFileSync(f, 'utf8'))))
+      .filter((f) => new RegExp(`\\bfn\\s+${helper}\\s*[<(]`).test(blankNonCode(fs.readFileSync(f, 'utf8'))))
       .map((f) => path.relative(ROOT, f).replace(/\\/g, '/'));
     if (all.length > 1) {
       return { err: `helper ${helper} 在 ${all.length} 个文件里同名（${all.join(' / ')}）——必须登记第三段 file 指名` };
@@ -293,7 +249,7 @@ function resolveHelperBody(helper, file) {
   if (!fs.existsSync(abs)) return { err: `helper ${helper} 登记的文件 ${file} 不存在` };
   const src = fs.readFileSync(abs, 'utf8');
   const re = new RegExp(`\\bfn\\s+${helper}\\s*[<(]`);
-  const clean = stripRustComments(src);
+  const clean = blankNonCode(src);
   const mc = clean.match(re);
   if (!mc) return { err: `${file} 里找不到 fn ${helper}（改名/搬走了？）` };
   const start = clean.indexOf('{', mc.index);
@@ -404,7 +360,7 @@ if (missing.length > missingCmds.length) {
   // C01-a/b：组合闸本体（protect.rs::validate_mutation_target，指名文件——
   // 同名判定不许歧义）。
   const validatorPath = path.join(ROOT, 'src', 'engine', 'protect.rs');
-  const validatorSrc = stripRustComments(fs.readFileSync(validatorPath, 'utf8'));
+  const validatorSrc = blankNonCode(fs.readFileSync(validatorPath, 'utf8'));
   const vm = validatorSrc.match(/\bfn\s+validate_mutation_target\s*[<(]/);
   let validatorBody = '';
   if (vm) {
@@ -428,7 +384,7 @@ if (missing.length > missingCmds.length) {
   const pairFiles = srcFiles.filter((f) => /uninstall[/\\](residue|pending_delete)/.test(path.relative(ROOT, f)));
   const pairIssues = [];
   for (const f of pairFiles) {
-    for (const issue of judgeProtectPair(stripRustComments(fs.readFileSync(f, 'utf8')))) {
+    for (const issue of judgeProtectPair(blankNonCode(fs.readFileSync(f, 'utf8')))) {
       pairIssues.push(`${path.relative(ROOT, f).replace(/\\/g, '/')}: ${issue}`);
     }
   }
@@ -453,10 +409,10 @@ if (fail > 0) {
 const POSITIVE_CONTROLS = (() => {
   const checks = [];
   // ① 剥注释后，注释里的 API 名不得再命中标记
-  const sample = stripRustComments('fn x() {\n    // remove_file 不算\n    let s = "remove_dir_all 也不算";\n}');
+  const sample = blankNonCode('fn x() {\n    // remove_file 不算\n    let s = "remove_dir_all 也不算";\n}');
   checks.push(['注释/字符串被剥离', !sample.includes('remove_file') && !sample.includes('remove_dir_all')]);
   // ② 真实调用仍然命中
-  const sample2 = stripRustComments('fn y() { let _ = remove_file(p); }');
+  const sample2 = blankNonCode('fn y() { let _ = remove_file(p); }');
   checks.push(['真实调用仍命中', sample2.includes('remove_file')]);
   // ②b T1a-L07：核心判据 bodyHasProtect 的两向样本（此前只有 tokenizer 对照）
   checks.push(['删除体无 protect 判红', !bodyHasProtect('fn z() { remove_file(p); }')]);
@@ -464,13 +420,13 @@ const POSITIVE_CONTROLS = (() => {
   // ③ C01-a：四闸俱全的组合闸放行
   const goodValidator =
     'fn validate_mutation_target(p: &str) -> Result<(), String> { if is_path_protected(p) { return Err("x".into()); } if final_path_protected(p) { return Err("x".into()); } if is_system_namespace(p) { return Err("x".into()); } if is_reparse(&md) { return Err("x".into()); } Ok(()) }';
-  checks.push(['C01 四闸俱全的组合闸放行', judgeValidatorBody(stripRustComments(goodValidator)).length === 0]);
+  checks.push(['C01 四闸俱全的组合闸放行', judgeValidatorBody(blankNonCode(goodValidator)).length === 0]);
   // ④ C01-a：缺系统面闸必须红（R1d-K01 的病灶形态）
   const missingSystem = goodValidator.replace('if is_system_namespace(p) { return Err("x".into()); } ', '');
-  checks.push(['C01 缺 is_system_namespace 判红', judgeValidatorBody(stripRustComments(missingSystem)).length > 0]);
+  checks.push(['C01 缺 is_system_namespace 判红', judgeValidatorBody(blankNonCode(missingSystem)).length > 0]);
   // ⑤ C01-b：组合闸里塞删除原语必须红（共同判据吞出口形态）
   const swallowing = goodValidator.replace('Ok(())', 'let _ = remove_file(p); Ok(())');
-  checks.push(['C01 组合闸含删除原语判红', judgeValidatorBody(stripRustComments(swallowing)).length > 0]);
+  checks.push(['C01 组合闸含删除原语判红', judgeValidatorBody(blankNonCode(swallowing)).length > 0]);
   // ⑥ C01-c：成对棘轮两向（孤立即红 / 成对放行）
   checks.push(['C01 成对棘轮：孤立 protect 判红', judgeProtectPair('fn a() { is_path_protected(p); }').length > 0]);
   checks.push(['C01 成对棘轮：两闸共现放行', judgeProtectPair('fn a() { is_path_protected(p); is_system_namespace(p); }').length === 0]);

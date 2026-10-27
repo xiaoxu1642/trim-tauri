@@ -32,6 +32,7 @@ import { join, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { walkRs } from './lib/fs-walk.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 import { gate } from './lib/gate.mjs';
 import { handleApiRe } from './lib/rust-parse.mjs';
 
@@ -39,58 +40,6 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ROOTS = [join(ROOT, 'src-tauri', 'src'), join(ROOT, 'native-scanner', 'src')];
 
 /** 剥 Rust 注释与字符串字面量（与 check-delete-callsites 同口径的简化版） */
-function stripRust(src) {
-  let out = '';
-  let i = 0;
-  const n = src.length;
-  while (i < n) {
-    const c = src[i];
-    const d = i + 1 < n ? src[i + 1] : '';
-    if (c === '/' && d === '/') { while (i < n && src[i] !== '\n') i++; continue; }
-    if (c === '/' && d === '*') {
-      let depth = 1; i += 2;
-      while (i < n && depth > 0) {
-        if (src[i] === '/' && src[i + 1] === '*') { depth++; i += 2; }
-        else if (src[i] === '*' && src[i + 1] === '/') { depth--; i += 2; }
-        else i++;
-      }
-      out += ' ';
-      continue;
-    }
-    // v6-P2：Rust **原始串** `r"..."` / `r#"..."#`——不处理转义，`r"\\?\"` 的尾部 `\`
-    // 不是转义引号。旧实现把它当普通串的 \" 消费，一个 raw 串就把后面整段吃进
-    // "字符串"（N1-N4/N8/N10 对路径密集文件集体失明——diskbench.rs 实测全文件
-    // 只剩一个 ""）。`r` 前面必须是非标识符字符（防把 `for`/变量名 `r` 当串前缀）。
-    if (c === 'r' && (d === '"' || d === '#')) {
-      const prev = i > 0 ? src[i - 1] : '';
-      if (!/[A-Za-z0-9_]/.test(prev)) {
-        const m = /^r(#*)"/.exec(src.slice(i, i + 16));
-        if (m) {
-          // 终止符 = 哈希 + **单个**引号（r"…" → '"'；r#"…"# → '"#"'）。曾错写成
-          // `"${m[1]}"`（两侧都包引号）⇒ 单哈希串找的是连续两个引号，一个 raw 串
-          // 就把后面整段吃进"字符串"。
-          const close = `${m[1]}"`;
-          const end = src.indexOf(close, i + m[0].length);
-          i = end === -1 ? n : end + close.length;
-          out += '""';
-          continue;
-        }
-      }
-    }
-    if (c === '"') {
-      i++;
-      while (i < n && src[i] !== '"') { if (src[i] === '\\') i++; i++; }
-      i++; out += '""';
-      continue;
-    }
-    if (c === "'") {
-      const m = /^'(\\.|[^'\\])'/.exec(src.slice(i, i + 5));
-      if (m) { i += m[0].length; out += "''"; continue; }
-    }
-    out += c; i++;
-  }
-  return out;
-}
 
 /** 从 `(` 起取平衡括号内的全文（返回 [content, endIndex]；不匹配返回 null） */
 function balanced(text, openIdx) {
@@ -212,7 +161,7 @@ function regReaderViolations(clean, original = clean) {
 // 三个已知失明/假阳性形态（写判据时踩过，勿放宽）：
 //   ① `snapshots(` 不加前缀守卫会命中 `residue_snapshots()` / `fn snapshots()` 定义
 //      ——本组用「域前缀限定 + 取用点必须带 .lock()」两个条件排除；
-//   ② 取用点扫描必须跑在 stripRust() 之后（本脚本已立该纪律），否则 command/state.rs
+//   ② 取用点扫描必须跑在 blankNonCode() 之后（本脚本已立该纪律），否则 command/state.rs
 //      里「只提及不使用」的注释会自撞；
 //   ③ `commands/finder.rs` 也有同名 `fn snapshots()`（它自己的 FINDER_SNAPSHOTS 表）
 //      ——B 组**按 `commands/cleanup/` 前缀限定**，别卷进 finder 的表；这条限定是
@@ -254,7 +203,7 @@ function n9TableDeclIssues(readFile, entries) {
       out.push(`${e.file} 读不到 —— 文件被搬走了？`);
       continue;
     }
-    if (!stripRust(text).includes(`static ${e.token}`)) {
+    if (!blankNonCode(text).includes(`static ${e.token}`)) {
       out.push(`${e.file} 的 ${e.token}（${e.name}）声明不见了 —— 被合进 engine::snapshot 了吗？槽键现在带域（domain_key）吗？`);
     }
   }
@@ -300,7 +249,7 @@ console.log('=== 原生层卫生门禁（N1 裸 output / N2 定长解码 / N3 �
       'let h = match OpenProcess(PROCESS_TERMINATE, false, pid) { Ok(h) => h, Err(_) => return };\n' +
       'if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok() { }\n', // out-param 合法
   };
-  const badV = hygieneViolations(stripRust('// quiet_cmd(system_tool("x")).output() 是旧形态（注释不算数）\n' + POSITIVE_CONTROLS.bad));
+  const badV = hygieneViolations(blankNonCode('// quiet_cmd(system_tool("x")).output() 是旧形态（注释不算数）\n' + POSITIVE_CONTROLS.bad));
   const goodV = hygieneViolations(POSITIVE_CONTROLS.good);
   check(badV.length >= 3, `对照N1-N3a：三类违例样本合计命中 ${badV.length} 条（应 ≥3；注释里的提及不算数）`);
   check(goodV.length === 0, '对照N1-N3b：合规样本（timeout 版 / wide_str / match 接句柄 / out-param）全部放行', goodV.join('；'));
@@ -328,13 +277,13 @@ console.log('=== 原生层卫生门禁（N1 裸 output / N2 定长解码 / N3 �
   // N4 判定器：同窗口代码出现 .reg 的读取必须判红；JSON 清单读取不得假红
   check(
     regReaderViolations(
-      stripRust('let Ok(text) = std::fs::read_to_string(&p) else { continue };\nif name.ends_with(".reg") { use_text(text); }'),
+      blankNonCode('let Ok(text) = std::fs::read_to_string(&p) else { continue };\nif name.ends_with(".reg") { use_text(text); }'),
       'let Ok(text) = std::fs::read_to_string(&p) else { continue };\nif name.ends_with(".reg") { use_text(text); }',
     ).length === 1,
     '对照N4a：读 .reg 文本的样本判红',
   );
   check(
-    regReaderViolations(stripRust('let Ok(text) = std::fs::read_to_string(&manifest_path) else { continue };\nlet Ok(v) = serde_json::from_str::<Value>(&text) else { continue };')) .length === 0,
+    regReaderViolations(blankNonCode('let Ok(text) = std::fs::read_to_string(&manifest_path) else { continue };\nlet Ok(v) = serde_json::from_str::<Value>(&text) else { continue };')) .length === 0,
     '对照N4b：JSON 清单读取不假红',
   );
   // N9 判定器：A（origin 字面量）/ B（锚点唯一性）/ C（表声明在位）
@@ -376,7 +325,7 @@ let n9locks = 0;
 for (const f of files) {
   const rel = relative(ROOT, f).replace(/\\/g, '/');
   const original = readFileSync(f, 'utf8');
-  const clean = stripRust(original);
+  const clean = blankNonCode(original);
   n8sites += [...clean.matchAll(/snapshot::(?:set|get|clear)\s*\(/g)].length;
   for (const v of hygieneViolations(clean)) {
     if (v.startsWith('裸 quiet_cmd')) n1++;
@@ -439,7 +388,7 @@ function stripRustProduction(src) {
   // 只认外层 `#[cfg(test)]` 会把这种文件当成全生产面，于是测试守卫里的 `.expect()`
   // 被 N10 记成「生产面 panic」——那是判据失明，不是缺陷。
   const cut = src.search(/^\s*#!?\s*\[cfg\(test\)\]/m);
-  return stripRust(cut === -1 ? src : src.slice(0, cut));
+  return blankNonCode(cut === -1 ? src : src.slice(0, cut));
 }
 let n7sites = 0;
 {
@@ -476,7 +425,7 @@ let n7sites = 0;
     relative(ROOT, f).replace(/\\/g, '/').startsWith('src-tauri/src/commands/cleanup/'),
   );
   for (const f of cleanupDomain) {
-    n9locks += [...stripRust(readFileSync(f, 'utf8')).matchAll(SNAPSHOT_LOCK_CALL)].length;
+    n9locks += [...blankNonCode(readFileSync(f, 'utf8')).matchAll(SNAPSHOT_LOCK_CALL)].length;
   }
   if (n9locks !== CLEANUP_SNAPSHOT_SITES.length) {
     g.fail(
@@ -569,7 +518,7 @@ const PANIC_ALLOW = [
     // 识别。新形态出现（不叫 *_tests.rs 的整文件测试模块）会被 N10 当生产面
     // 未登记点名，届时改命名或在这里补规则——两个方向都必须被看见。
     if (/_tests\.rs$/.test(rel)) continue;
-    const vs = panicViolations(stripRust(readFileSync(f, 'utf8')));
+    const vs = panicViolations(blankNonCode(readFileSync(f, 'utf8')));
     if (vs.length) counts.set(rel, vs);
   }
   for (const [rel, vs] of counts) {
@@ -637,7 +586,7 @@ function rustFns(src) {
   for (const rel of N11_FILES) {
     const f = join(ROOT, rel);
     if (!existsSync(f)) { g.fail(`N11：${rel} 读不到（文件面漂移，同步 N11_FILES）`); continue; }
-    const src = stripRust(readFileSync(f, 'utf8'));
+    const src = blankNonCode(readFileSync(f, 'utf8'));
     for (const fn of rustFns(src)) {
       if (!N11_WRITE_RE.test(fn.body) || N11_VERDICT_RE.test(fn.body)) continue;
       const allow = N11_ALLOW.find((a) => a.file === rel && a.fn === fn.name);
