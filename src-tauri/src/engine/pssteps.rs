@@ -2157,9 +2157,14 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
             if !native::reg_key_exists(hive_handle(*hive), subkey) {
                 return Ok(String::new());
             }
-            let subs = native::reg_enum_subkeys_pub(hive_handle(*hive), subkey);
+            let (subs, incomplete) = native::reg_enum_subkeys_pub_scan(hive_handle(*hive), subkey);
             let mut out = String::new();
             let mut errs: Vec<String> = Vec::new();
+            if incomplete {
+                // 清单不完整（键打不开 / 枚举中途报错）⇒ 本组**没有跑完**，
+                // 继续执行也只覆盖了部分子键，必须如实说清而不是报成功。
+                errs.push(format!("注册表子键清单不完整（键 {subkey}），本组未覆盖全部子键"));
+            }
             for name in subs {
                 let full = format!("{}:\\{}\\{}", hive_prefix(*hive), subkey, name);
                 let mut v = vars.clone();
@@ -2871,5 +2876,19 @@ mod tests {
         assert!(err2.contains("BOM") || err2.contains("FEFF"), "{err2}");
         let ops = compile("#requires -Version 5.1\nGet-AppxPackage -Name 'X'").expect("requires 不应被拒");
         assert!(matches!(ops.as_slice(), [PsOp::PsInline { .. }]), "{ops:?}");
+    }
+
+    /// R5c-M05 回归钉：`ForSubKey` 必须走带 incomplete 位的枚举出口，
+    /// 且清单不完整时**如实上报**（不能当成功）。
+    ///
+    /// 判据打在源码形态上：`include_str!` 读到的是**源码文本**，所以期望串必须用
+    /// `concat!` 拼 —— 否则断言自己那行字面量会被扫到，变成恒真的假绿。
+    #[test]
+    fn for子键必须用带不完整位的枚举出口() {
+        let src = include_str!("pssteps.rs");
+        let needle = concat!("reg_enum_subkeys_pub_", "scan");
+        assert!(src.contains(needle), "ForSubKey 必须走带 incomplete 的枚举出口");
+        let marker = concat!("注册表子键清", "单不完整");
+        assert!(src.contains(marker), "清单不完整时必须如实上报，不得当成功");
     }
 }

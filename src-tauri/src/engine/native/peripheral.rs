@@ -226,15 +226,7 @@ pub fn peripheral_restore() -> Result<Value, String> {
     // 全部被拒且拒因都是「不可验证/含删除段」⇒ 单独一档，回执能说清是"备份不可信"
     // 而不是"导入失败/文件损坏"（两者的处置完全不同：前者找 Trim 生成的备份，
     // 后者重试）。部分导入成功仍走 partial（既有文案）。
-    let reason = if ok {
-        String::new()
-    } else if imported == 0 && !rejected.is_empty() {
-        "unverifiable".to_string()
-    } else if imported == 0 {
-        "import-failed".into()
-    } else {
-        "partial".into()
-    };
+    let reason = peripheral_restore_reason(imported, total, rejected.len(), unreadable_dirs);
 
     Ok(json!({
         "ok": ok,
@@ -243,7 +235,28 @@ pub fn peripheral_restore() -> Result<Value, String> {
         "total": total,
         "file": latest_name,
         "rejected": rejected,
+        "unreadableDirs": unreadable_dirs,
     }))
+}
+
+/// 还原回执的 reason 判定（纯函数 —— 文件系统那部分难在单测里复现，判定本身不该依赖它）。
+///
+/// `ok` 为真但另有备份根**读不动** ⇒ `partial-unknown`：外设备份按父键分片
+/// （新根可读、老根读不动 ⇒ 同批次的另一片消失），而 `total` 会跟着变小 ⇒
+/// 「已还原 1/1」是假完整（回归条 R5b-M26）。
+pub(super) fn peripheral_restore_reason(
+    imported: i64,
+    total: i64,
+    rejected: usize,
+    unreadable_dirs: usize,
+) -> &'static str {
+    if !(imported > 0 && imported == total) {
+        if imported == 0 && rejected > 0 { return "unverifiable"; }
+        if imported == 0 { return "import-failed"; }
+        return "partial";
+    }
+    if unreadable_dirs > 0 { return "partial-unknown"; }
+    ""
 }
 
 fn regex_capture(text: &str, pattern: &str) -> Option<String> {
@@ -337,6 +350,17 @@ mod k11_restore_admit_tests {
         std::fs::write(&f, format!("{HDR}{LEGIT}\"Extra\"=dword:00000001\r\n")).unwrap();
         let err = peripheral_restore_admit(&f).unwrap_err();
         assert!(err.contains("与封条哈希不符"), "改后必须点明哈希不符: {err}");
+    }
+
+    /// R5b-M26 回归钉：`ok` 为真但另有备份根读不动 ⇒ reason 必须是 partial-unknown，
+    /// 否则回执把「只还原了一部分」说成「已全部还原」。
+    #[test]
+    fn 另有备份根读不动时回执不得说全部还原() {
+        assert_eq!(peripheral_restore_reason(1, 1, 0, 0), "", "一切正常时无 reason");
+        assert_eq!(peripheral_restore_reason(1, 1, 0, 2), "partial-unknown", "有读不动的根必须标不完整");
+        assert_eq!(peripheral_restore_reason(1, 2, 0, 0), "partial", "只导进一部分仍是 partial");
+        assert_eq!(peripheral_restore_reason(0, 2, 1, 0), "unverifiable", "全部被拒且有拒因");
+        assert_eq!(peripheral_restore_reason(0, 2, 0, 0), "import-failed", "全部失败且无拒因");
     }
 }
 

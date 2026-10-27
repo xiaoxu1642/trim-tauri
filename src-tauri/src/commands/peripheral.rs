@@ -296,12 +296,24 @@ pub async fn peripheral_restore_backup<R: tauri::Runtime>(
             "data": { "restored": restored, "total": total },
         }));
     }
+    // R5b-M26：这一组都导入成功，但另有备份根读不动 ⇒ 不能说「已全部还原」。
+    // 外设备份按父键分片（新根可读、老根读不动 ⇒ 同批次的另一片消失），
+    // 而 total 会跟着变小 ⇒ 「已还原 1/1」是假完整，必须把「可能不完整」透给用户。
+    let unreadable = v.get("unreadableDirs").and_then(|x| x.as_i64()).unwrap_or(0);
+    let partial_unknown = v.get("reason").and_then(|x| x.as_str()) == Some("partial-unknown");
     Ok(json!({
         "success": true,
+        "message": if partial_unknown {
+            format!("已导入备份，但另有 {unreadable} 个备份目录未能读取，本次还原可能不完整")
+        } else {
+            String::new()
+        },
         "data": {
             "file": v.get("file"),
             "restored": v.get("restored"),
             "total": v.get("total"),
+            "unreadableDirs": unreadable,
+            "partialUnknown": partial_unknown,
         }
     }))
 }
@@ -389,5 +401,20 @@ mod tests {
         assert_eq!(backup_batch_of("backup_20260924_123000.reg.bak"), None);
         assert_eq!(backup_batch_of("evil.reg"), None);
         assert_eq!(backup_batch_of("notes.txt"), None);
+    }
+
+    /// R5b-M26 回归钉：命令层必须把「另有备份根读不动」透给前端，
+    /// 否则渲染层只会念「已导入备份，还原完成」。
+    ///
+    /// 期望串与断言消息都必须避开完整字面量 —— `include_str!` 读到的是源码文本，
+    /// 期望串或消息里出现它都会让断言扫到自己（恒真的假绿）。
+    #[test]
+    fn 还原回执必须透出读不动的备份根() {
+        let src = include_str!("peripheral.rs");
+        let needle = concat!("partial", "Unknown");
+        assert!(src.contains(needle), "命令层必须透出「另有备份根读不动」的 camelCase 字段");
+        let ui = include_str!("../../../src/scripts/peripheral.js");
+        let ui_needle = concat!("partial", "Unknown");
+        assert!(ui.contains(ui_needle), "渲染层必须按「另有备份根读不动」字段分流提示");
     }
 }

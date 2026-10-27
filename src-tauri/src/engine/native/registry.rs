@@ -156,7 +156,7 @@ pub(super) unsafe fn reg_enum_values_scan(hk: HKEY) -> (Vec<String>, bool) {
             crate::engine::log::write_log("warn", &format!("注册表值枚举非正常结束（index={index}, err={}）", r.0));
             return (names, true);
         }
-        let name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+        let name = decode_name_lossy_with_warn(&name_buf[..name_len as usize]);
         if !name.is_empty() { names.push(name); }
         index += 1;
     }
@@ -168,12 +168,18 @@ pub(super) unsafe fn reg_enum_values(hk: HKEY) -> Vec<String> {
     reg_enum_values_scan(hk).0
 }
 
-/// 枚举注册表键的所有子键名。错误处置同 [`reg_enum_values_scan`]（M-2）。
+/// 枚举注册表键的所有子键名，**并区分「这个键没有子键」与「没枚举完」**。
 ///
-/// 与值名的区别要写清（P1-6G 复核时容易混）：`RegEnumKeyExW` 的子键名上限确实是 255 字符
-/// （Win32 硬限制），260 缓冲够用；**值名**的上限是 `KEY_MAX_VALUE_NAME_LEN` = 16367，
-/// 所以只有值名枚举需要按需增长缓冲，这里保持定长、不照抄过去。
-pub(super) unsafe fn reg_enum_subkeys(hk: HKEY) -> Vec<String> {
+/// 与值名侧的 [`reg_enum_values_scan`] 同一口径（P1-6G 只补了值名那一半，子键侧原封不动）：
+/// 开键失败与枚举中途报错都**不是**「没有子键」，而是「读不动」—— 两者在调用方同形时，
+/// 「少迭代」会被念成「跑完了」，回执仍像完整。
+///
+/// 返回 `(names, incomplete)`：`incomplete = true` 表示清单可能不全（开键失败 / 中途报错）。
+///
+/// 缓冲仍用定长 260：`RegEnumKeyExW` 的子键名上限确实是 255 字符（Win32 硬限制），
+/// 260 缓冲够用；**值名**的上限是 `KEY_MAX_VALUE_NAME_LEN` = 16367，所以只有值名枚举
+/// 需要按需增长缓冲，这里不照抄那一套。
+pub(super) unsafe fn reg_enum_subkeys_scan(hk: HKEY) -> (Vec<String>, bool) {
     let mut names = Vec::new();
     let mut index = 0u32;
     loop {
@@ -186,16 +192,21 @@ pub(super) unsafe fn reg_enum_subkeys(hk: HKEY) -> Vec<String> {
             None, None, None, None,
         );
         if r == ERROR_NO_MORE_ITEMS {
-            break;
+            return (names, false);
         }
         if r.is_err() {
             crate::engine::log::write_log("warn", &format!("注册表子键枚举非正常结束（index={index}, err={}）", r.0));
-            break;
+            return (names, true);
         }
-        names.push(String::from_utf16_lossy(&name_buf[..name_len as usize]));
+        names.push(decode_name_lossy_with_warn(&name_buf[..name_len as usize]));
         index += 1;
     }
-    names
+}
+
+/// 只读枚举出口（右键菜单、路径扫描等「少一条只是显示不全」的调用方）。
+/// 需要区分「没有」与「没枚举完」的调用方一律走 [`reg_enum_subkeys_scan`]。
+pub(super) unsafe fn reg_enum_subkeys(hk: HKEY) -> Vec<String> {
+    reg_enum_subkeys_scan(hk).0
 }
 
 /// 读注册表字符串值（默认值或命名值），返回 Option<String>
@@ -213,7 +224,7 @@ pub(super) unsafe fn reg_read_string(hk: HKEY, name: &str) -> Option<String> {
     }
     let wide: Vec<u16> = buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
     let end = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
-    let s = String::from_utf16_lossy(&wide[..end]);
+    let s = decode_utf16_strict(&wide[..end])?;
     if ty == REG_EXPAND_SZ { Some(expand_env(&s)) } else { Some(s) }
 }
 
@@ -346,16 +357,26 @@ pub fn reg_key_remove(hive: HKEY, subkey: &str, recurse: bool) -> bool {
 
 /// 枚举子键名（v3-K1：`Get-ChildItem <注册表键>` 的等价物）。
 /// 键不存在 → 空集（对齐 PS `-ErrorAction SilentlyContinue`：无迭代即无操作）。
+///
+/// ⚠ 这个出口**丢掉了「没枚举完」这一位**：调用方拿到空集时分不出「这个键没有子键」与
+/// 「键打不开 / 枚举中途报错」。执行链（`ForSubKey`）一律走 [`reg_enum_subkeys_pub_scan`]。
 pub fn reg_enum_subkeys_pub(hive: HKEY, subkey: &str) -> Vec<String> {
+    reg_enum_subkeys_pub_scan(hive, subkey).0
+}
+
+/// 枚举子键名，**并区分「没有子键」与「没枚举完」**（与值名侧 `reg_enum_value_names_pub` 同口径）。
+///
+/// 开键失败同样算 `incomplete`（它不是「这个键没有子键」）；枚举中途报错也算。
+pub fn reg_enum_subkeys_pub_scan(hive: HKEY, subkey: &str) -> (Vec<String>, bool) {
     let sk = to_wide(subkey);
     let mut hk = HKEY::default();
     unsafe {
         if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
-            return Vec::new();
+            return (Vec::new(), true);
         }
-        let names = reg_enum_subkeys(hk);
+        let (names, incomplete) = reg_enum_subkeys_scan(hk);
         let _ = RegCloseKey(hk);
-        names
+        (names, incomplete)
     }
 }
 
@@ -468,10 +489,11 @@ pub fn read_reg_string(hive: HKEY, subkey: &str, value: &str) -> Option<String> 
         if r.is_err() {
             return None;
         }
-        // 去掉结尾 NUL，按 UTF-16 解码
-        let bytes = &buf[..buf.len().saturating_sub(2)];
-        let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        Some(String::from_utf16_lossy(&units))
+        // 按 UTF-16 严格解码，尾部 NUL 用字符级裁剪（不再按字节削两字节 ——
+        // 那样遇到奇数字节的畸形值会把半个字符削掉）
+        let units: Vec<u16> = buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let s = decode_utf16_strict(&units)?;
+        Some(s.trim_end_matches('\0').to_string())
     }
 }
 
@@ -670,6 +692,36 @@ pub fn read_reg_value_faithful(hive: HKEY, subkey: &str, name: &str) -> Option<(
     }
 }
 
+/// UTF-16 **严格**解码：非法序列（孤立代理项）不做有损替换。
+///
+/// 为什么不能有损：`from_utf16_lossy` 会把孤立代理项换成 U+FFFD，而这条链的输出会
+/// **写回注册表**（备份 → 还原）⇒ 有损替换等于把原值永久改成另一个值，回执却说「已还原」。
+/// 解不出来就判 `None`（上层落 `Unknown("decode_failed")`），让「读不出」保持可辨。
+fn decode_utf16_strict(units: &[u16]) -> Option<String> {
+    match String::from_utf16(units) {
+        Ok(s) => Some(s),
+        Err(_) => {
+            crate::engine::log::write_log("warn", "注册表值含非法 UTF-16 序列（孤立代理项），本次解码判失败（不写回任何替换字符）");
+            None
+        }
+    }
+}
+
+/// 名称（键名 / 值名）的 UTF-16 解码：**畸形不吞掉名字**。
+///
+/// 名称路径与值内容路径的取舍不同：值内容解码失败会被写回注册表（有损即永久变形），
+/// 而名称解码失败若直接跳过就等于「这一项凭空消失」。所以这里退回有损读法，
+/// 但必须留一条告警（红线：畸形必须计数或告警）。
+fn decode_name_lossy_with_warn(units: &[u16]) -> String {
+    match String::from_utf16(units) {
+        Ok(s) => s,
+        Err(_) => {
+            crate::engine::log::write_log("warn", "注册表名称含非法 UTF-16 序列，已按有损方式读取（该名称可能无法精确定位）");
+            String::from_utf16_lossy(units)
+        }
+    }
+}
+
 /// 值字节 → (类型标签, 字符串)。两条口径的唯一解码处，不碰注册表句柄，
 /// 因此能与 `optimizer::restore_write_bytes` 成对钉在单测里（读写两端同一条链）。
 pub fn decode_reg_value_bytes(
@@ -683,13 +735,20 @@ pub fn decode_reg_value_bytes(
     let units = |b: &[u8]| -> Vec<u16> {
         b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
     };
+    // 奇数字节的畸形值：`chunks_exact(2)` 会静默丢掉末字节 ⇒ 先计数告警再解码
+    if buf.len() % 2 != 0 {
+        crate::engine::log::write_log("warn", &format!("注册表值字节长度为奇数（{} 字节），末字节不参与 UTF-16 解码", buf.len()));
+    }
     match ty {
-        REG_DWORD if buf.len() >= 4 => {
+        // 长度闸是**严格相等**：短的一侧判 decode_failed 是 P0-3 立的那道闸，
+        // 长的一侧同样判失败 —— 放行长值会让还原按短字节写回，原值的高位永久消失，
+        // 而回执说「已还原」（交叉形态按 Corrupt 口径，两侧必须同形）。
+        REG_DWORD if buf.len() == 4 => {
             let raw = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
             // .NET 把 DWORD 读成 int（有符号），`[int]$v` 再转字符串 —— 保留该口径
             Some(("REG_DWORD", (raw as i32).to_string()))
         }
-        REG_QWORD if buf.len() >= 8 => {
+        REG_QWORD if buf.len() == 8 => {
             let raw = u64::from_le_bytes(buf[..8].try_into().ok()?);
             Some(("REG_QWORD", (raw as i64).to_string()))
         }
@@ -698,11 +757,12 @@ pub fn decode_reg_value_bytes(
         }
         REG_SZ => {
             let u = units(buf);
-            Some(("REG_SZ", String::from_utf16_lossy(&u).trim_end_matches('\0').to_string()))
+            let s = decode_utf16_strict(&u)?;
+            Some(("REG_SZ", s.trim_end_matches('\0').to_string()))
         }
         REG_EXPAND_SZ => {
             let u = units(buf);
-            let raw = String::from_utf16_lossy(&u);
+            let raw = decode_utf16_strict(&u)?;
             let raw = raw.trim_end_matches('\0');
             if !flatten {
                 return Some(("REG_EXPAND_SZ", raw.to_string()));
@@ -715,13 +775,14 @@ pub fn decode_reg_value_bytes(
                 raw.to_string() // 展开失败/过长 → 原样保留，不造一个错值
             } else {
                 let u16s = &out[..(n as usize - 1).max(0)];
-                String::from_utf16_lossy(u16s)
+                // 展开结果由系统拼出，理论上合法；万一非法也不造替换字符，退回原值
+                decode_utf16_strict(u16s).unwrap_or_else(|| raw.to_string())
             };
             Some(("REG_SZ", s))
         }
         REG_MULTI_SZ => {
             let u = units(buf);
-            let text = String::from_utf16_lossy(&u);
+            let text = decode_utf16_strict(&u)?;
             let parts: Vec<&str> = text
                 .trim_end_matches('\0')
                 .split('\0')
@@ -957,6 +1018,7 @@ mod tests {
     use super::{
         open_key_missing_is_idempotent, win_reg_err_label, read_reg_value_state, reg_key_remove,
         reg_restore_write, reg_enum_value_names_pub, to_wide, RegReadState, remove_cause_label,
+        decode_reg_value_bytes, reg_enum_subkeys_pub_scan, hive_hklm,
     };
 
     /// R5c-M01（B1-2）：**判定字节 = 执行字节**（红线⑨）—— 名字形态闸的真机验收。
@@ -1344,5 +1406,69 @@ mod tests {
         assert_ne!(malformed, remove_cause_label(12345), "87 不得与通用兜底折成同一句");
         // 通用兜底仍在（未登记的码走 win32=N 形态）
         assert_eq!(remove_cause_label(12345), "win32=12345");
+    }
+
+    /// R5c-M04 回归钉：类型长度闸必须**严格相等** —— 长值同样判失败。
+    ///
+    /// 旧写法 `buf.len() >= 4` 只把「短」挡成 decode_failed，「长」的一侧放行并静默丢尾字节：
+    /// 八个字节的 REG_DWORD 会解码成前四字节的 Value，还原时按四字节写回 ⇒ 原值高位永久消失，
+    /// 而回执说「已还原」。
+    #[test]
+    fn 定长类型的长度闸必须严格相等() {
+        use windows::Win32::System::Registry::{REG_DWORD, REG_QWORD};
+        assert_eq!(
+            decode_reg_value_bytes(REG_DWORD, &[0u8; 4], true).map(|(t, d)| (t, d)),
+            Some(("REG_DWORD", "0".to_string())),
+            "四字节 DWORD 必须正常解码"
+        );
+        assert!(
+            decode_reg_value_bytes(REG_DWORD, &[0u8; 8], true).is_none(),
+            "八字节 DWORD 必须判 decode_failed（不能按前四字节解码）"
+        );
+        assert!(
+            decode_reg_value_bytes(REG_DWORD, &[0u8; 2], true).is_none(),
+            "两字节 DWORD 必须判 decode_failed"
+        );
+        assert_eq!(
+            decode_reg_value_bytes(REG_QWORD, &[0u8; 8], true).map(|(t, d)| (t, d)),
+            Some(("REG_QWORD", "0".to_string())),
+            "八字节 QWORD 必须正常解码"
+        );
+        assert!(
+            decode_reg_value_bytes(REG_QWORD, &[0u8; 16], true).is_none(),
+            "十六字节 QWORD 必须判 decode_failed（不能按前八字节解码）"
+        );
+    }
+
+    /// R5c-M06 回归钉：UTF-16 **严格**解码 —— 孤立代理项判失败，不做有损替换。
+    ///
+    /// `from_utf16_lossy` 会把孤立代理项换成 U+FFFD，而这条链的输出会写回注册表
+    /// （备份 → 还原）⇒ 有损替换等于把原值永久改成另一个值，回执却说「已还原」。
+    #[test]
+    fn 非法utf16序列必须判解码失败() {
+        use windows::Win32::System::Registry::REG_SZ;
+        // U+D800（孤立高代理项）+ 结尾 NUL
+        let lone_surrogate: Vec<u8> = [0x00u8, 0xD8, 0x00, 0x00].to_vec();
+        assert!(
+            decode_reg_value_bytes(REG_SZ, &lone_surrogate, true).is_none(),
+            "孤立代理项必须判解码失败（不得替换成 U+FFFD）"
+        );
+        // 正常中文串必须照旧解出
+        let ok: Vec<u8> = "中".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        assert_eq!(
+            decode_reg_value_bytes(REG_SZ, &ok, true).map(|(t, d)| (t, d)),
+            Some(("REG_SZ", "中".to_string())),
+            "合法 UTF-16 必须照旧解码"
+        );
+    }
+
+    /// R5c-M05 回归钉：子键枚举必须区分「没有子键」与「没枚举完」。
+    ///
+    /// 开键失败不是「这个键没有子键」—— 两者在调用方同形时，「少迭代」会被念成「跑完了」。
+    #[test]
+    fn 子键枚举必须报出没枚举完() {
+        let (names, incomplete) = reg_enum_subkeys_pub_scan(hive_hklm(), r"Software\Trim不存在的键_枚举探针");
+        assert!(names.is_empty(), "不存在的键不应枚举出子键");
+        assert!(incomplete, "开键失败必须算 incomplete（不是「没有子键」）");
     }
 }

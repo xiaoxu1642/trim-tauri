@@ -318,7 +318,11 @@
           return;
         }
         if (resp && resp.success) {
-          toast('success', '已导入最近一份备份，还原修改前的注册表值');
+          // R5b-M26：另有备份根读不动时后端会给 partialUnknown ⇒ 这一批不能报「已全部还原」
+          const incomplete = !!(resp.data && resp.data.partialUnknown);
+          toast(incomplete ? 'warning' : 'success', incomplete
+            ? (resp.message || '本次还原可能不完整（部分备份目录未能读取）')
+            : '已导入最近一份备份，还原修改前的注册表值');
           await loadCurrent(ctrl.backdrop);
         } else {
           toast('warning', resp?.message || '还原失败');

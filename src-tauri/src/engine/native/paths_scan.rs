@@ -15,7 +15,6 @@ use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHI
 use super::common::*;
 use super::registry::*;
 // ==================== B7 paths_scan：安装路径自动扫描 ====================
-
 /// 路径出口（v5-K02 批次 1，R5b-M09）：本域所有「把路径交给下游 / 落盘」的值都过这里。
 ///
 /// `canonicalize` 成功时返回 verbatim 形态（实测 `C:\Windows\System32 →
@@ -136,12 +135,13 @@ unsafe fn build_inventory() -> Vec<InventoryEntry> {
             let ssk2 = to_wide(&sub_path);
             let mut shk2 = HKEY::default();
             if RegOpenKeyExW(hive, PCWSTR(ssk2.as_ptr()), Some(0), KEY_READ, &mut shk2).is_ok() {
-                let sys_comp = reg_read_string(shk2, "SystemComponent").unwrap_or_default();
+                // SystemComponent 是 DWORD（值 1 = 系统组件）：原先按字符串读，类型闸恒不过 ⇒
+                // `"" == "1"` 恒假 ⇒ 「跳过系统组件」这道过滤器**从来没生效过**，
+                // 卸载清单被系统组件条目放大（QQ/微信/抖音的安装路径可能被当成系统组件目录）。
+                let sys_comp = reg_read_dword_val(shk2, "SystemComponent").unwrap_or(0);
                 let release_type = reg_read_string(shk2, "ReleaseType").unwrap_or_default();
                 let _ = RegCloseKey(shk2);
-                if sys_comp == "1" { continue; }
-                let rt = release_type.to_lowercase();
-                if rt.contains("update") || rt.contains("hotfix") || rt.contains("security") { continue; }
+                if uninstall_entry_is_hidden(sys_comp, &release_type) { continue; }
             }
             // 解析安装路径
             let ssk3 = to_wide(&sub_path);
@@ -424,8 +424,42 @@ pub fn paths_scan(rules_json: &str) -> Result<Value, String> {
             "scanVersion": 2,
             // 时间戳**不在这里产生**：本函数只负责找路径。扫描时间由命令层
             // （`commands::paths`）统一以 ISO-8601 写入 —— 此前这里塞的是
-            // `format!("{:?}", SystemTime::now())` 的 Debug 形态，JS `new Date()`
-            // 解析不了，页脚恒显 "Invalid Date"（用户 2026-10-07 反馈）。
+                // `format!("{:?}", SystemTime::now())` 的 Debug 形态，JS `new Date()`
+                // 解析不了，页脚恒显 "Invalid Date"（用户 2026-10-07 反馈）。
         }))
+    }
+}
+
+// ==================== 卸载条目可见性判据（纯函数） ====================
+
+/// 卸载条目的「不可见」判据（纯函数 —— 不依赖真实注册表，才能在单测里钉住）。
+///
+/// `SystemComponent` 是 **DWORD**（值 `1` = 系统组件）：原先按字符串读，类型闸恒不过 ⇒
+/// `"" == "1"` 恒假 ⇒ 「跳过系统组件」这道过滤器从来没生效过（回归条 R5b-M15），
+/// 卸载清单被系统组件条目放大。`ReleaseType` 是字符串，含 update / hotfix / security
+/// 的同样属系统侧条目。
+pub(super) fn uninstall_entry_is_hidden(sys_comp: u32, release_type: &str) -> bool {
+    if sys_comp == 1 { return true; }
+    let rt = release_type.to_lowercase();
+    rt.contains("update") || rt.contains("hotfix") || rt.contains("security")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uninstall_entry_is_hidden;
+
+    /// R5b-M15 回归钉：`SystemComponent` 是 DWORD，按字符串读时判据恒假 ⇒ 过滤器失效。
+    #[test]
+    fn 系统组件过滤器必须认dword值() {
+        assert!(uninstall_entry_is_hidden(1, ""), "DWORD 值 1 必须判为系统组件");
+        assert!(!uninstall_entry_is_hidden(0, ""), "DWORD 值 0 不是系统组件");
+        assert!(!uninstall_entry_is_hidden(2, ""), "其它 DWORD 值不是系统组件");
+    }
+
+    #[test]
+    fn 发布类型过滤器保持原口径() {
+        assert!(uninstall_entry_is_hidden(0, "Security Update"));
+        assert!(uninstall_entry_is_hidden(0, "hotfix"));
+        assert!(!uninstall_entry_is_hidden(0, "Full Application"));
     }
 }
