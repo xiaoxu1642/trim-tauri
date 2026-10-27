@@ -527,12 +527,20 @@ pub(super) unsafe fn collect_service_entries(cap: usize) -> (Vec<ServiceEntry>, 
         return (Vec::new(), false, notes);
     }
     let mut out = Vec::with_capacity(names.len());
+    // R2b-M35：逐条失败必须可见 —— 打不开 / 落点解析不出都会让 referenced_landings 变小，
+    // 「没有任何服务引用」的孤儿判据方向是**扩大删除面**，与截断风险是同一条因果链。
+    let mut open_failed = 0usize;
+    let mut landing_unresolved = 0usize;
     for name in names {
         let Some(hk) = open_key_read(HKEY_LOCAL_MACHINE, &format!("{SERVICES_ROOT}\\{name}")) else {
+            open_failed += 1;
             continue;
         };
         let image_raw = reg_sz(hk, "ImagePath").unwrap_or_default();
         let landing = if image_raw.trim().is_empty() { None } else { dead_landing(&image_raw) };
+        if landing.is_none() {
+            landing_unresolved += 1;
+        }
         out.push(ServiceEntry {
             name,
             image_raw,
@@ -542,6 +550,16 @@ pub(super) unsafe fn collect_service_entries(cap: usize) -> (Vec<ServiceEntry>, 
             depends: reg_multi_sz(hk, "DependOnService"),
         });
         let _ = RegCloseKey(hk);
+    }
+    if open_failed > 0 {
+        notes.push(format!(
+            "服务表有 {open_failed} 个子键本轮打不开（ACL/IO），它们的 ImagePath 未进引用集合（本组结果不完整，孤儿驱动判据据此会偏宽）"
+        ));
+    }
+    if landing_unresolved > 0 {
+        notes.push(format!(
+            "服务表有 {landing_unresolved} 个服务的 ImagePath 解析不出落点，未进引用集合（本组结果不完整，孤儿驱动判据据此会偏宽）"
+        ));
     }
     (out, true, notes)
 }

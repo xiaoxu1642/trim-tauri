@@ -523,7 +523,13 @@
       // 有界重试仍按裁定不做（要真机 MSI/NSIS 样本才定策略），这里只把已知语义说清楚。
       const meaning = d.exitMeaning ? `（退出码 ${d.exitCode}：${d.exitMeaning}）` : '';
       if (isAppx) {
-        window.app?.toast?.('success', `「${app.displayName}」已移除`);
+        if (d.exitCode == null) {
+          // R2b-M34：AppX 超时是独立结局（移除由 Appx Deployment Service 承接，结果未确认），
+          // 不是失败 —— 不能播「已移除」，也不能进「卸载失败」分支。
+          window.app?.toast?.('warning', d.message || '移除请求超时，结果未确认（未强制终止厂商侧操作）');
+        } else {
+          window.app?.toast?.('success', `「${app.displayName}」已移除`);
+        }
       } else if (d.elevationDeclined) {
         // R9/J6（2026-10-15）：用户拒绝了 UAC —— 卸载器从未启动。本分支必须排在
         // null 分支之前：新回执的 exitCode 同为 null，晚一步就会被「等待卸载器超时」吞掉。
@@ -535,6 +541,10 @@
         // 并照样打开残留窗，把「进程可能还在跑」播报成「已完成」。超时必须最先判，
         // 且只播报后端那句如实结论，不在这里合成「成功/仍在列表中」的结论。
         window.app?.toast?.('warning', d.message || '等待卸载器超时，卸载状态未知（未强制终止）');
+      } else if (d.watchTimedOut) {
+        // R2b-M31：监视预算用尽 ≠ 已执行完毕 —— 主进程带码退出，但其派生的提权接力/
+        // 家族进程在预算内没绝迹，卸载器可能仍在写盘；不能走 usedSilent 的成功分支。
+        window.app?.toast?.('warning', d.message || '监视预算用尽，卸载器家族可能仍在运行（未强制终止）');
       } else if (d.stillListed) {
         window.app?.toast?.('warning', `卸载器已退出，但该程序仍在卸载列表中${meaning}。可稍后再试一次卸载`);
       } else if (Number(d.exitCode) === 3010) {
@@ -550,7 +560,9 @@
       // 审查 M-07 订正：超时态**不**自动开残留副窗——卸载器可能还在写盘，
       // 此时扫描到的「残留」是卸载中途的半成品，照着删会和安装器抢文件。
       // 用户等卸载真正结束（或重启后）再手动点扫描即可，入口在残留副窗自己那里。
-      if (d.exitCode == null && !isAppx) {
+      if ((d.exitCode == null || d.watchTimedOut) && !isAppx) {
+        // R2b-M31：watchTimedOut 与 exitCode==null 同判 —— 卸载器家族可能仍在跑，
+        // 此时扫残留会扫到半成品、并与安装器抢文件。
         // R9/J6：拒权回执的 exitCode 同为 null，但它不是超时——卸载器从未启动，
         // 「请等卸载器自行结束」对它不成立；同样不自动开残留副窗（J6）。
         if (d.elevationDeclined) return;

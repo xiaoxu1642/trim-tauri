@@ -72,9 +72,33 @@ pub(super) fn install_date_from_epoch(secs: u32) -> Option<String> {
     Some(format!("{y:04}-{m:02}-{d:02}"))
 }
 
+/// 卸载条目的「可见性」判据 —— **列表与执行共用同一份**（R2b-M30）。
+///
+/// 旧形态：列表按三道判据把系统组件/更新补丁藏起来，执行侧却只验键路径形状 ⇒
+/// 列表刻意不展示的 OS 组件与补丁，只要渲染层给出键路径就能被静默 msiexec 移除
+/// （红线⑤：「列表与执行必须同一份准入判据」）。ReleaseType 按 lowercase 比对，
+/// 与 paths_scan 的 `uninstall_entry_is_hidden` 同口径。
+pub(super) fn uninstall_entry_admissible(
+    display_name: &str,
+    system_component: u32,
+    release_type: &str,
+) -> Result<(), String> {
+    if display_name.trim().is_empty() {
+        return Err("该卸载键没有 DisplayName（不是可交互的已安装程序条目）".to_string());
+    }
+    if system_component == 1 {
+        return Err("该条目标记为系统组件（SystemComponent），不在卸载目录展示，也不受理静默卸载".to_string());
+    }
+    let rt = release_type.to_lowercase();
+    if rt.contains("update") || rt.contains("hotfix") || rt.contains("security") {
+        return Err("该条目是更新补丁（ReleaseType），不在卸载目录展示，也不受理静默卸载".to_string());
+    }
+    Ok(())
+}
+
 /// 枚举一个 hive 根下的卸载条目。root 不存在 → 空集。
-/// 过滤口径（与 build_inventory 同源）：空 DisplayName / SystemComponent=1 /
-/// ReleaseType 含 update|hotfix|security 的跳过（系统组件与更新不是「已安装程序」）。
+/// 过滤口径与执行侧共用 [`uninstall_entry_admissible`]（R2b-M30）：空 DisplayName /
+/// SystemComponent=1 / ReleaseType 含 update|hotfix|security 的跳过（系统组件与更新不是「已安装程序」）。
 pub(super) unsafe fn enum_uninstall_root(hive: windows::Win32::System::Registry::HKEY, root: &str) -> Vec<Value> {
     use windows::Win32::System::Registry::{RegOpenKeyExW, RegCloseKey, KEY_READ};
     let mut out = Vec::new();
@@ -110,13 +134,7 @@ pub(super) unsafe fn enum_uninstall_root(hive: windows::Win32::System::Registry:
             .unwrap_or_else(|| unsafe { reg_key_last_write_date(hk) });
         let _ = RegCloseKey(hk);
 
-        if display_name.trim().is_empty() {
-            continue;
-        }
-        if system_component == 1 {
-            continue;
-        }
-        if release_type.contains("update") || release_type.contains("hotfix") || release_type.contains("security") {
+        if let Err(_) = uninstall_entry_admissible(&display_name, system_component, &release_type) {
             continue;
         }
         let (installer_kind, product_code) = detect_installer(&sub, &uninstall_string);
@@ -819,8 +837,13 @@ pub(super) unsafe fn shell_run_wait(exe: &str, args: &str) -> Result<ShellRunRes
     let h = sei.hProcess;
     // U-A5-M04：NULL 与 INVALID_HANDLE_VALUE 都算拿不到句柄；is_invalid() 只判后者。
     if h.is_invalid() || h.0.is_null() {
-        // 拿不到句柄（目标拒绝 NOCLOSEPROCESS 等）：无法等待，如实上报
-        return Err("卸载器已启动但无法等待其完成（未返回进程句柄）".to_string());
+        // R2b-M07：拿不到句柄（目标拒绝 NOCLOSEPROCESS 等）**不是启动失败** ——
+        // 卸载器已经启动，只是无法等待。走 Err 会被上层 `Err(e) if used_silent`
+        // 接去**再拉一次原厂界面** = 同一条卸载并发跑两次（红线①字面命中）。
+        // 如实归入「已启动、退出码未知」（与 WAIT_FAILED 同一结局）；
+        // pid 拿不到（GetProcessId 需要句柄）⇒ 记 0，监视器按 exe 名匹配家族。
+        log::write_log("warn", "卸载器已启动但无法等待其完成（未返回进程句柄），按退出码未知处理");
+        return Ok(ShellRunResult { pid: 0, outcome: UninstallerWait::ExitCodeUnknown });
     }
     let pid = windows::Win32::System::Threading::GetProcessId(h);
     let r = WaitForSingleObject(h, UNINSTALLER_WAIT_TIMEOUT_MS);
@@ -1188,7 +1211,20 @@ pub async fn uninstall_run<R: tauri::Runtime>(
                 "exitCode": 0, "stillListed": false, "installerKind": "appx",
                 "message": "已从当前用户移除该 Windows 应用",
             }}),
-            Ok(Err(e)) => json!({ "success": false, "message": e }),
+            Ok(Err(AppxRemoveOutcome::TimedOut { tree_reclaimed })) => {
+                // R2b-M34：超时 ≠ 失败 —— 移除由 Appx Deployment Service 承接，结果未确认。
+                // 与 Win32 分支的超时回执同形（exitCode/stillListed = null），
+                // 前端已有的「超时不自动开残留窗」护栏直接复用。
+                json!({ "success": true, "data": {
+                    "exitCode": Value::Null, "stillListed": Value::Null, "installerKind": "appx",
+                    "message": if tree_reclaimed {
+                        "移除请求超时，结果未确认（未强制终止厂商侧操作）；Appx 服务可能仍在后台完成移除".to_string()
+                    } else {
+                        "移除请求超时，且子进程树未能收回：请先确认无残留安装进程再重试（重试可能与残留进程并发）".to_string()
+                    },
+                }})
+            }
+            Ok(Err(AppxRemoveOutcome::Failed(e))) => json!({ "success": false, "message": e }),
             Err(e) => json!({ "success": false, "message": format!("卸载执行异常: {e}") }),
         };
     }
@@ -1218,6 +1254,15 @@ pub async fn uninstall_run<R: tauri::Runtime>(
         let uninstall_string = reg_sz(hk, "UninstallString").unwrap_or_default();
         let quiet_string = reg_sz(hk, "QuietUninstallString").unwrap_or_default();
         let install_location = reg_sz(hk, "InstallLocation").unwrap_or_default();
+        // R2b-M30：列表侧用来隐藏的三道判据，执行侧同调一份（「同一份准入判据」红线⑤）。
+        // 没有这道复核时，列表刻意不展示的系统组件与更新补丁，只要渲染层给出键路径
+        // 就能被静默 msiexec 移除。
+        let system_component = reg_dword(hk, "SystemComponent").unwrap_or(0);
+        let release_type = reg_sz(hk, "ReleaseType").unwrap_or_default();
+        if let Err(reason) = uninstall_entry_admissible(&display_name, system_component, &release_type) {
+            let _ = RegCloseKey(hk);
+            return Err(reason);
+        }
         let key_name = key_path.rsplit('\\').next().unwrap_or("").to_string();
         let (mut kind, product_code) = detect_installer(&key_name, &uninstall_string);
         let _ = RegCloseKey(hk);
@@ -1430,6 +1475,9 @@ pub async fn uninstall_run<R: tauri::Runtime>(
             "exitMeaning": exit_meaning,
             "silentSource": silent_source,
             "stillListed": still_listed,
+            // R2b-M31：监视预算用尽与退出码是否可得是两个正交维度 —— 带码退出但其派生的
+            // 提权接力/家族进程在预算内没绝迹时，不能把「可能还在跑」播成「已执行完毕」。
+            "watchTimedOut": timed_out,
             "installerKind": kind,
             "usedSilent": used_silent,
             "fellBack": fell_back,
@@ -1446,6 +1494,10 @@ pub async fn uninstall_run<R: tauri::Runtime>(
                 } else {
                     "卸载进程已结束，但该程序仍出现在卸载列表中（可能未完成或已取消）".to_string()
                 }
+            } else if timed_out {
+                // R2b-M31：监视预算用尽 ≠ 已执行完毕 —— 卸载器家族可能仍在写盘，
+                // 此时立刻扫残留会扫到半成品、并与安装器抢文件（前端据本档不开残留窗）。
+                "卸载器已退出，但监视预算用尽，卸载器家族可能仍在运行（未强制终止）；稍后再查残留更稳妥".to_string()
             } else if fell_back {
                 "静默卸载未完成，已自动回退原厂卸载界面并执行完毕".to_string()
             } else {
@@ -1553,10 +1605,12 @@ mod wait_outcome_tests {
             ru.contains("用户取消了权限请求（{label}未启动）"),
             "uninstall_modify 缺 declined 臂（跑进 TimedOut 口径会报「状态未知」）"
         );
-        // ④ 前端：认领分支必须排在 exitCode==null 分支之前（新回执 exitCode 同为 null）
+        // ④ 前端：认领分支必须排在 exitCode==null 分支之前（新回执 exitCode 同为 null）。
+        // nullb 锚点取 toast 认领链的 `else if` 形态 —— R2b-M34 后 AppX 分支里另有一处
+        // 独立的 `if (d.exitCode == null)`（AppX 走 pwsh 通道，与拒权互斥，不参与认领链）。
         let js = include_str!("../../../../src/scripts/uninstall.js");
         let decl = js.find("d.elevationDeclined").expect("uninstall.js 没认领 elevationDeclined");
-        let nullb = js.find("d.exitCode == null").expect("找不到 null 分支");
+        let nullb = js.find("else if (d.exitCode == null)").expect("找不到 null 分支（toast 认领链形态变了）");
         assert!(decl < nullb, "拒权分支必须排在 null 分支之前，否则被「等待卸载器超时」吞掉");
     }
 
@@ -1767,5 +1821,53 @@ mod exec_surface_tests {
         );
         assert!(watch_budget_remaining(std::time::Duration::from_secs(1500)).is_zero());
         assert!(watch_budget_remaining(std::time::Duration::from_secs(1600)).is_zero(), "超预算饱和为 0");
+    }
+}
+
+/// R2b 批次（2026-10-28 P1-c）的回归钉。
+///
+/// 形态类断言一律 `include_str!` 读源码；**期望串与断言消息都必须避开完整字面量**
+/// —— 期望串或消息里出现它，断言就会扫到自己那行，变成恒真的假绿（首版实测踩过）。
+#[cfg(test)]
+mod r2b_p1_receipt_tests {
+    use super::uninstall_entry_admissible;
+
+    /// R2b-M30 回归钉：可见性判据的三道闸（列表与执行共用同一份）。
+    #[test]
+    fn 卸载条目准入判据三道都拦() {
+        assert!(uninstall_entry_admissible("", 0, "").is_err(), "空 DisplayName 必须拦");
+        assert!(uninstall_entry_admissible("某组件", 1, "").is_err(), "系统组件必须拦");
+        assert!(uninstall_entry_admissible("某补丁", 0, "Security Update").is_err(), "更新补丁必须拦");
+        assert!(uninstall_entry_admissible("某补丁", 0, "HOTFIX").is_err(), "ReleaseType 按 lowercase 比对");
+        assert!(uninstall_entry_admissible("正常程序", 0, "").is_ok(), "普通条目放行");
+    }
+
+    /// R2b-M31 / M07 / M34 / M35 的形态钉。
+    #[test]
+    fn 回执与结局的形态钉() {
+        let src = include_str!("list_run.rs");
+        assert!(
+            src.contains(concat!("\"watchTimedOut\"", ": timed_out")),
+            "卸载回执必须带 watchTimedOut（监视预算用尽不得折成「已执行完毕」）"
+        );
+        assert!(
+            !src.contains(concat!("Err(", "\"卸载器已启动但无法等待")),
+            "拿不到句柄不得再以 Err 上抛（会被上层接去重拉原厂界面 = 同条卸载并发两次）"
+        );
+        let appx = include_str!("appx.rs");
+        assert!(
+            appx.contains(concat!("enum AppxRemove", "Outcome")),
+            "AppX 移除必须区分「确定失败」与「超时状态未知」两种结局"
+        );
+        let svc = include_str!("services_orphan.rs");
+        assert!(
+            svc.contains(concat!("本组结果不", "完整")),
+            "服务表逐条失败必须计数并汇进 notes"
+        );
+        let drv = include_str!("drivers_orphan.rs");
+        assert!(
+            drv.contains(concat!("本轮不做孤儿驱动判", "定")),
+            "服务表不完整时孤儿驱动判定必须整组不产候选"
+        );
     }
 }

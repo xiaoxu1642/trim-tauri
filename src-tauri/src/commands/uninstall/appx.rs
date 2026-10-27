@@ -245,7 +245,20 @@ pub(super) fn enum_appx_store_extras(seen: &std::collections::HashSet<String>) -
 
 /// Appx 移除（当前用户，对齐 HiBit 的 `powershell Remove-AppxPackage` 实测口径）。
 /// 返回 Ok(()) 或带原因的 Err。NonRemovable 的包系统会拒绝，由这里如实转述。
-pub(super) fn remove_appx(fullname: &str) -> Result<(), String> {
+/// AppX 移除的结局 —— **超时 ≠ 失败**（R2b-M34）。
+///
+/// `Remove-AppxPackage` 的实际移除由 Appx Deployment Service 承接，超时**不等于**没移除；
+/// 把「确定失败」与「超时状态未知」压成同一个 `Err(String)`，渲染层会统一播
+/// 「卸载程序没有执行完成」，而「子进程树未能收回」这条本机可能残留 PowerShell 的
+/// 强提示会被降级成 toast 里的一句话。
+pub(super) enum AppxRemoveOutcome {
+    /// 确定失败（脚本报错 / 非零退出且非超时），载荷是给用户看的原因。
+    Failed(String),
+    /// 超时：结果未确认。`tree_reclaimed = false` 表示子进程树未能收回（本机可能残留 PowerShell）。
+    TimedOut { tree_reclaimed: bool },
+}
+
+pub(super) fn remove_appx(fullname: &str) -> Result<(), AppxRemoveOutcome> {
     let script = format!(
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; \
 try {{ Remove-AppxPackage -Package '{}' -ErrorAction Stop; exit 0 }} \
@@ -253,28 +266,19 @@ catch {{ Write-Output ('ERR:' + $_.Exception.Message); exit 1 }}",
         fullname
     );
     let out = crate::pwsh::run_inbox_script(&script, APPX_REMOVE_TIMEOUT, None)
-        .map_err(|e| format!("powershell 启动失败: {e}"))?;
+        .map_err(|e| AppxRemoveOutcome::Failed(format!("powershell 启动失败: {e}")))?;
     if out.code == 0 {
         Ok(())
+    } else if out.timed_out {
+        // R2b-M34：超时是独立结局，形状信息必须活着走到渲染层
+        Err(AppxRemoveOutcome::TimedOut { tree_reclaimed: !out.tree_terminate_failed })
     } else {
         let text = out.stdout.trim().to_string();
-        Err(if out.timed_out {
-            if out.tree_terminate_failed {
-                format!(
-                    "Remove-AppxPackage 超时（{}s），且子进程树未能收回：请先确认无残留安装进程再重试（重试可能与残留进程并发）",
-                    APPX_REMOVE_TIMEOUT.as_secs()
-                )
-            } else {
-                format!(
-                    "Remove-AppxPackage 超时（{}s），子进程树已终止，可在卸载界面重试",
-                    APPX_REMOVE_TIMEOUT.as_secs()
-                )
-            }
-        } else if text.starts_with("ERR:") {
+        Err(AppxRemoveOutcome::Failed(if text.starts_with("ERR:") {
             text[4..].trim().to_string()
         } else {
             format!("Remove-AppxPackage 失败（退出码 {}）", out.code)
-        })
+        }))
     }
 }
 
