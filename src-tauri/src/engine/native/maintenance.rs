@@ -3,6 +3,12 @@
 //! `dir_delete_blocked` 是跨命令复用的公判据（diskbench / uninstall 都在用），
 //! maint_reparse_tests 与实现同在本文件。maint_run 内跑子进程一律走 `system_tool`，
 //! 且有 `MAINT_CMD_TIMEOUT` 上限。
+//!
+//! B2-7（2026-10-27）：`maint_run` 的 `search` / `wu` 两支**不再**用 `dir_delete_blocked`
+//! —— 删前判定换成 `protect::validate_mutation_target`（四道组合闸），删除动作换成
+//! `trim_finder::scan::recycle::send_to_trash_os`（回收站优先、失败不回退永久删）。
+//! `dir_delete_blocked` 只剩 diskbench / uninstall 两个消费方，与维护链已非同口径，
+//! 别再拿它当「维护任务怎么判」的依据。
 
 
 use crate::engine::systembin::system_tool;
@@ -38,6 +44,91 @@ mod maint_reparse_tests {
     fn unreadable_path_is_refused() {
         let r = dir_delete_blocked(Path::new(r"C:\TrimNoSuchDir-9f3a\DataStore"));
         assert!(r.is_some(), "不存在的路径必须拒绝删除，实测: {r:?}");
+    }
+
+    // ==================== B2-7：维护链删前判定 + 回收站 ====================
+
+    /// B2-7 验收：`wu` 支必须回「系统区域拒绝」，**不许**回「已清空」。
+    ///
+    /// 判红自证：把 `cache_delete_blocked` 换成裸 `is_path_protected` ⇒ 该判据对
+    /// `SoftwareDistribution\DataStore` 恒放行 ⇒ 回执退化成兜底措辞（不含「系统命名空间」）
+    /// ⇒ 本用例红。这一条同时证明「它不是一条永不触发的断言」。
+    #[test]
+    fn b2_7_wu_支回系统区域拒绝而不是已清空() {
+        let (ok, msg) = maint_run("wu").expect("maint_run 必须返回回执");
+        assert!(!ok, "wu 支的功能已下线，不许报成功: {msg}");
+        assert!(msg.contains("系统区域"), "回执必须点名「属系统区域」: {msg}");
+        assert!(msg.contains("系统命名空间"), "拒因必须来自组合闸（不是兜底文本）: {msg}");
+        assert!(!msg.contains("已清空"), "下线支不许出现「已清空」这种恒真措辞: {msg}");
+    }
+
+    /// B2-7：两支的目标都来自**注入的基目录**，不再硬编码 `C:\ProgramData` / `C:\Windows`。
+    ///
+    /// 判红自证：把 `cache_dir_in` 改成 `Path::new(r"C:\ProgramData").join(...)` ⇒ 第一条红。
+    #[test]
+    fn b2_7_维护目标由基目录注入而非硬编码() {
+        let pd = cache_dir_in(r"D:\AltProgramData", "search").expect("search 目标应可拼出");
+        assert_eq!(
+            pd,
+            std::path::PathBuf::from(r"D:\AltProgramData\Microsoft\Search\Data\Applications\Windows"),
+            "search 目标必须跟随 PROGRAMDATA 基目录（非系统盘机器才不会指错位）"
+        );
+        let win = cache_dir_in(r"E:\AltWindows", "wu").expect("wu 目标应可拼出");
+        assert_eq!(
+            win,
+            std::path::PathBuf::from(r"E:\AltWindows\SoftwareDistribution\DataStore")
+        );
+        // 基目录为空 / 未知目标一律拒绝 —— 不退回硬编码
+        assert!(cache_dir_in("", "search").is_err());
+        assert!(cache_dir_in("  ", "wu").is_err());
+        assert!(cache_dir_in(r"C:\x", "no_such_task").is_err());
+        // 现算：真实环境取到的就是 env 下那一条（同时钉住变量名没写错）
+        let real = maintenance_cache_dir("search").expect("本机应有 PROGRAMDATA");
+        let pd_env = std::env::var("PROGRAMDATA").expect("本机应有 PROGRAMDATA");
+        assert_eq!(
+            real,
+            std::path::PathBuf::from(&pd_env).join(r"Microsoft\Search\Data\Applications\Windows")
+        );
+    }
+
+    /// B2-7 验收：删除目标本身被换成链接 ⇒ 必拒（组合闸的 reparse 面），且链接另一头零改动。
+    /// 正向对照：普通目录必须放行 —— 否则「恒拒」也能让上面那条绿。
+    #[test]
+    fn b2_7_目标被换成链接时判据必拒() {
+        let sb = crate::testutil::Sandbox::new(&format!("maint-b27-{}", std::process::id()));
+        let real = sb.path().join("idx");
+        std::fs::create_dir_all(&real).unwrap();
+        assert!(cache_delete_blocked(&real).is_ok(), "普通目录必须放行（正对照）");
+        let link = sb.path().join("idx_link");
+        if std::os::windows::fs::symlink_dir(&real, &link).is_err() {
+            println!("SKIP：本机 symlink_dir 失败（需开发者模式/提权），reparse 一面未校验");
+            return;
+        }
+        let why = cache_delete_blocked(&link).expect_err("链接必须被拒");
+        assert!(
+            why.contains("reparse") || why.contains("链接"),
+            "拒因必须点名 reparse: {why}"
+        );
+        // 判定只判定不删：链接另一头还在
+        assert!(real.is_dir(), "判定期不得动链接另一头");
+    }
+
+    /// B2-7：维护链只走回收站，本文件不许再出现永久删目录（失败也不回退）。
+    ///
+    /// 判红自证：把 `send_to_trash_os` 换回 `fs::remove_dir_all` ⇒ 两条断言都红。
+    #[test]
+    fn b2_7_维护链只走回收站不永久删() {
+        let src = include_str!("maintenance.rs");
+        assert!(
+            src.contains("trim_finder::scan::recycle::send_to_trash_os("),
+            "search 支必须走回收站原语"
+        );
+        // needle 必须**拼接**构造：本断言自身就在被扫的源码里，写字面量会让它自指恒红
+        let needle = concat!("std::fs::", "remove_dir_all");
+        assert!(
+            !src.contains(needle),
+            "本文件不许再有永久删目录的调用（B2-7：改回收站、失败不回退永久删）"
+        );
     }
 
     /// P1-01 真机探针：管理员会话实跑完整计数器链，断言成功路径（rc 分档）。
@@ -407,12 +498,60 @@ fn reg_import(reg_content: &str) -> bool {
     ok
 }
 
+/// 维护链两支的删除目标（**路径取源唯一出口**）。
+///
+/// B2-7：旧写法把 `C:\ProgramData` / `C:\Windows` 硬编码在两个分支里 —— 非系统盘、或改过
+/// `PROGRAMDATA` 的机器会指到错位置（同名目录在别的盘上，删的是不相干的东西）。
+/// 现在只认环境变量；取不到就**拒绝执行**，不退回硬编码 —— 猜一个系统目录去删，
+/// 猜错的方向就是删数据。
+fn maintenance_cache_dir(which: &str) -> Result<std::path::PathBuf, String> {
+    let var = match which {
+        "search" => "PROGRAMDATA",
+        "wu" => "WINDIR",
+        other => return Err(format!("未知维护目标 {other}")),
+    };
+    let base = std::env::var(var)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| format!("环境变量 {var} 取不到，不猜系统目录位置"))?;
+    cache_dir_in(&base, which)
+}
+
+/// 目标拼接的纯函数部分（基目录由调用方给），单测因此能证明「基目录是注入的、不是硬编码」。
+fn cache_dir_in(base: &str, which: &str) -> Result<std::path::PathBuf, String> {
+    let tail = match which {
+        "search" => r"Microsoft\Search\Data\Applications\Windows",
+        "wu" => r"SoftwareDistribution\DataStore",
+        other => return Err(format!("未知维护目标 {other}")),
+    };
+    if base.trim().is_empty() {
+        return Err("基目录为空，不猜系统目录位置".to_string());
+    }
+    Ok(std::path::Path::new(base).join(tail))
+}
+
+/// 维护链「删前判定」的唯一出口（B2-7）：与 fileclean 删除走**同一个**组合闸。
+///
+/// 为什么不再用 `dir_delete_blocked`：它只查 reparse（本仓的第三套判定），既不判受保护面
+/// 也不判系统命名空间 —— `%WINDIR%` 子孙直接穿过去，这正是「清空更新缓存」这一支的现状。
+/// 也**不许**在这里写裸 `is_path_protected`：受保护清单的 `subtree` 只有 `{APPDATA}\Trim`
+/// 与 `{WINDIR}\System32\config` 两棵，对 `SoftwareDistribution\DataStore` 恒假，
+/// 加它等于加一条永不触发的断言（假绿）。
+fn cache_delete_blocked(dir: &std::path::Path) -> Result<(), String> {
+    crate::engine::protect::validate_mutation_target(&dir.to_string_lossy())
+}
+
 /// 删除固定目录前的重解析点（junction / 符号链接）校验
 ///
 /// 审查 v2-L1：`maint_run` 的 search / wu 两条会对**固定系统目录**做 `remove_dir_all`，
 /// 此前不查属性位。若目标或其任一上级被换成指向别处的 junction（误操作、软件搬家、
 /// 恶意替换都可能），`remove_dir_all` 会顺着链接把目标位置的内容删掉——「清缓存」
 /// 变成删数据。因此删前从自身到盘符根逐层查 `FILE_ATTRIBUTE_REPARSE_POINT`。
+///
+/// **B2-7 起 `maint_run` 不再调用本函数**：维护链改走 `cache_delete_blocked` →
+/// `protect::validate_mutation_target`（四道闸，其中已含 reparse 与父链闸）。
+/// 本函数保留是因为 diskbench 与 uninstall 残留链还在用（两处各自有独立口径），
+/// 但「维护任务怎么判」请只看 `cache_delete_blocked`。
 ///
 /// 返回 `Some(原因)` = 拒绝删除（含属性读不到：fail-closed，不许「查不到就当安全」）。
 pub(crate) fn dir_delete_blocked(path: &std::path::Path) -> Option<String> {
@@ -593,8 +732,10 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
         "search" => {
             // 审查 v2-L1：删前校验放在**停服务之前** —— 校验不通过就整条不执行，
             // 免得服务停了却什么也没清（用户只看到「搜索服务重启失败」）。
-            let idx = std::path::PathBuf::from(r"C:\ProgramData\Microsoft\Search\Data\Applications\Windows");
-            if let Some(reason) = dir_delete_blocked(&idx) {
+            // B2-7：判据换成 `protect::validate_mutation_target`（受保护面 / 别名面 /
+            // is_system_namespace / reparse 四道闸），路径取源换成环境变量。
+            let idx = maintenance_cache_dir("search")?;
+            if let Err(reason) = cache_delete_blocked(&idx) {
                 crate::engine::log::write_log("warn", &format!("维护：search 索引目录删除被拒 — {reason}"));
                 return Ok((false, format!("搜索索引目录未通过删除前校验，已取消：{reason}")));
             }
@@ -603,42 +744,30 @@ pub fn maint_run(task_id: &str) -> Result<(bool, String), String> {
             if !stop_service_wait("WSearch", std::time::Duration::from_secs(20)) {
                 return Ok((false, "WSearch 未能在时限内停止，已取消删除（避免删半个索引库），请稍后重试".into()));
             }
-            let removed = std::fs::remove_dir_all(&idx);
+            // B2-7：改**回收站**（`SHFileOperationW` + `FOF_ALLOWUNDO`，与 fileclean 同一个原语）。
+            // 失败如实报错、**不回退永久删**（v7.2 `R1d-L02` 口径）：索引目录动辄数 GB，
+            // 回收站放不下时它会失败 —— 那时盘上文件仍在，回执说「没清成」，不许谎称已清空。
+            let removed = trim_finder::scan::recycle::send_to_trash_os(idx.as_os_str());
             let started = start_service_wait("WSearch");
             let ok = removed.is_ok() && started;
             let rm_msg = match &removed {
-                Ok(()) => "索引已清空，将在后台重建".to_string(),
-                Err(e) => format!("索引删除失败: {e}"),
+                Ok(()) => "索引已移入回收站，将在后台重建".to_string(),
+                Err(e) => format!("索引移入回收站失败（未回退永久删除，盘上文件仍在）: {e}"),
             };
             Ok((ok, format!("{rm_msg}；服务{}", if started { "已重启" } else { "重启失败" })))
         }
         "wu" => {
-            let cache = std::path::PathBuf::from(r"C:\Windows\SoftwareDistribution\DataStore");
-            if let Some(reason) = dir_delete_blocked(&cache) {
-                crate::engine::log::write_log("warn", &format!("维护：wu 缓存目录删除被拒 — {reason}"));
-                return Ok((false, format!("更新缓存目录未通过删除前校验，已取消：{reason}")));
-            }
-            // 停止更新服务，清理缓存，启动（v5 S-2：同上，逐个轮询到 STOPPED 再删）
-            for svc in ["wuauserv", "bits", "cryptsvc"] {
-                if !stop_service_wait(svc, std::time::Duration::from_secs(20)) {
-                    // 已经停掉的几个要恢复启动，别把它们留在停止态
-                    for done in ["wuauserv", "bits", "cryptsvc"] {
-                        if done == svc { break; }
-                        let _ = start_service_wait(done);
-                    }
-                    return Ok((false, format!("{svc} 未能在时限内停止，已取消删除更新缓存").into()));
-                }
-            }
-            let removed = std::fs::remove_dir_all(&cache);
-            let mut ok = removed.is_ok();
-            for svc in ["wuauserv", "bits", "cryptsvc"] {
-                ok &= start_service_wait(svc);
-            }
-            let rm_msg = match &removed {
-                Ok(()) => "更新缓存已清空".to_string(),
-                Err(e) => format!("更新缓存删除失败: {e}"),
-            };
-            Ok((ok, format!("{rm_msg}；服务{}", if ok { "已重启" } else { "重启部分失败" })))
+            // B2-7（D-1 裁定）：这一支**功能下线**。目标
+            // `%WINDIR%\SoftwareDistribution\DataStore` 是 `%WINDIR%` 子孙 ⇒
+            // `validate_mutation_target` 的 `is_system_namespace` **永久拒绝**，而 D-1 已
+            // 明确否掉「受控例外」。所以这里不再有任何删除动作，只回一句说得清为什么的回执：
+            // 不许表现为「点了没反应」，更不许回「已清空」（v5 S-1 治过同一形状的恒真回执）。
+            let cache = maintenance_cache_dir("wu")?;
+            let reason = cache_delete_blocked(&cache)
+                .err()
+                .unwrap_or_else(|| "目标位于系统区域".to_string());
+            crate::engine::log::write_log("warn", &format!("维护：wu 支已下线（系统区域不清理）— {reason}"));
+            Ok((false, format!("更新缓存目录属系统区域，本工具不再清理：{reason}")))
         }
         "tf_net_tcp" => {
             let reg = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile]\r\n\"NetworkThrottlingIndex\"=dword:ffffffff\r\n\"SystemResponsiveness\"=dword:0000000a\r\n";

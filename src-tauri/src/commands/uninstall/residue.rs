@@ -1284,9 +1284,13 @@ pub(super) fn classify_residue_op_in(kind: &str, target: &str, snap_finding: Opt
                 // 「没删」与「不需要删」必须在批次报告里可区分
                 return OpVerdict::Skip("目标已不存在（未执行删除）".to_string());
             }
-            // C1（方案 §5·C1）：目录送删前过「自身→盘符根」逐层重解析点校验，与维护任务
-            // (`native::maint_run`)、diskbench 同口径。上级被换成 junction 时回收站会顺着链接
-            // 把链接目标整棵搬走。file / shortcut 不查：单文件删除只删链接本身，不递归。
+            // C1（方案 §5·C1）：目录送删前过「自身→盘符根」逐层重解析点校验。上级被换成
+            // junction 时回收站会顺着链接把链接目标整棵搬走。
+            // file / shortcut 不查：单文件删除只删链接本身，不递归。
+            //
+            // B2-7 起**不再与维护任务同口径**：维护链的 search/wu 两支已改走
+            // `protect::validate_mutation_target`（四道组合闸），本处仍是 `dir_delete_blocked`
+            // 这套 reparse 逐层判定。两处判据面不同，别互相引用当依据（要统一是后面的事）。
             //
             // J12（2026-10-16）：**自身是断链**的重解析点改判可删——目标已不存在，删链接
             // 本体不波及任何真实内容（回收站原语实测可处理断链 junction）；但上级链仍是
