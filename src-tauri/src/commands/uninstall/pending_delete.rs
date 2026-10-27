@@ -762,7 +762,6 @@ pub async fn uninstall_pending_list<R: tauri::Runtime>(window: WebviewWindow<R>)
                 };
                 json!({
                     "target": t,
-                    "batchId": e["batchId"],
                     "addedAt": e["addedAt"],
                     "status": status,
                 })
@@ -774,7 +773,6 @@ pub async fn uninstall_pending_list<R: tauri::Runtime>(window: WebviewWindow<R>)
         let degraded = doc.get("degraded").and_then(Value::as_bool).unwrap_or(false);
         Ok(json!({
             "entries": rows,
-            "pfroReadable": true,
             // M-6：台账损坏时前端不能把撤回按钮隐藏 —— 要置灰并显示提示
             "degraded": degraded,
         }))
@@ -787,9 +785,11 @@ pub async fn uninstall_pending_list<R: tauri::Runtime>(window: WebviewWindow<R>)
     }
 }
 
-/// uninstall:pending-revoke — 撤回。不传 batchId = 撤回本机全部登记项。
+/// uninstall:pending-revoke — 撤回本机全部登记项。
 ///
 /// v6-K06/K13：档位同 add/list（`PENDING_DELETE_WINDOWS`，主窗 + 残留副窗）。
+/// X0-6 S1：原 `batchId` 可选参数没有任何调用方传值（「按批撤回」UI 从未落地），
+/// 已删除；台账内部仍保留 batchId 用于摘账与保留期裁剪。
 /// 执行序（域锁内）：**先摘系统队列、后动台账**——摘除失败（未提权：Session
 /// Manager 键只有管理员可写）时明确报错且**不动台账**，两边必须一致；反向
 /// （账没了、系统还在删）才是不可逆的。系统队列侧走 `pfro_remove_deletes`
@@ -797,7 +797,6 @@ pub async fn uninstall_pending_list<R: tauri::Runtime>(window: WebviewWindow<R>)
 #[tauri::command]
 pub async fn uninstall_pending_revoke<R: tauri::Runtime>(
     window: WebviewWindow<R>,
-    batch_id: Option<String>,
 ) -> Value {
     if let Err(msg) = guard::guard(&window, guard::PENDING_DELETE_WINDOWS) {
         return json!({ "success": false, "message": msg });
@@ -810,7 +809,6 @@ pub async fn uninstall_pending_revoke<R: tauri::Runtime>(
             .as_array()
             .unwrap_or(&Vec::new())
             .iter()
-            .filter(|e| batch_id.as_deref().map(|b| e["batchId"].as_str() == Some(b)).unwrap_or(true))
             .filter_map(|e| e["target"].as_str().map(|s| pfro_norm(s)))
             .filter(|s| !s.is_empty())
             .collect();

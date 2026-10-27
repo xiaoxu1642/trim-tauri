@@ -109,68 +109,24 @@
 
   // v3.7.0 议题六 P1：网卡高级属性只读枚举（方案 §7.5 第一阶段）
   // 只呈现真实枚举结果，不提供任何写入入口；虚拟网卡单独列出并标注不可写。
-  const NIC_KIND_TEXT = { ethernet: '有线', wlan: '无线', other: '其他物理网卡' };
-
+  // NC-01：后端 `nicProps.physical` 是空桩（驱动级高级属性枚举属未接入项），
+  // 物理网卡的七字段读取面（kind/status/speed/rss/csum/pmOff/wolMagic/props）
+  // 已整体删除 —— 留着就是「后端永不产出、前端照样渲染」的不可达代码。
   function renderNicProps() {
     const box = document.getElementById('netcheckNicProps');
     if (!box) return;
     const nic = nicProps;
     if (!nic) { box.innerHTML = ''; return; }
-    const phys = Array.isArray(nic.physical) ? nic.physical : [];
     const virt = Array.isArray(nic.virtual) ? nic.virtual : [];
-    // 后端 nicProps.physical 目前是空桩（驱动级高级属性枚举属 S2 未接入项）。
-    // 此时不能对物理网卡说「未枚举到」——那是把「没测」说成「没有」；
-    // 只有虚拟网卡是真实数据，单独列出并如实说明物理高级属性本版不提供。
-    if (!phys.length) {
-      if (!virt.length) { box.innerHTML = ''; return; }
-      box.innerHTML = '<div class="netcheck-item card" data-nic-readonly="1">' +
-        '<div class="netcheck-head">' +
-        '<div class="netcheck-copy"><strong>虚拟网卡（只读）</strong>' +
-        '<span>物理网卡高级属性本版暂不提供（后续版本接入驱动枚举），这里只列出虚拟网卡</span></div>' +
-        '<span class="netcheck-badge ok">只读</span>' +
-        '</div>' +
-        '<div class="netcheck-detail">虚拟网卡（VPN / 虚拟交换机等）' + virt.length +
-        ' 张：' + escapeHtml(virt.map(v => v.name).join('、')) + ' —— 只展示，不开放写入。</div>' +
-        '</div>';
-      return;
-    }
-    const valLines = [];
-    for (const a of phys) {
-      const head = `${escapeHtml(a.name)}（${escapeHtml(NIC_KIND_TEXT[a.kind] || '物理网卡')}）` +
-        ` · ${escapeHtml(a.status || '')}` + (a.speed ? ` · ${escapeHtml(a.speed)}` : '');
-      valLines.push('<span class="netcheck-evidence-line nic-prop-head">' + head + '</span>');
-      const st = [];
-      if (a.rss === true || a.rss === false) st.push('RSS ' + (a.rss ? '开' : '关'));
-      if (a.csum) st.push('校验和卸载 ' + escapeHtml(a.csum));
-      if (a.pmOff === true || a.pmOff === false) st.push('允许关闭设备节能 ' + (a.pmOff ? '是' : '否'));
-      if (a.wolMagic === true || a.wolMagic === false) st.push('魔术包唤醒 ' + (a.wolMagic ? '开' : '关'));
-      if (st.length) {
-        valLines.push('<span class="netcheck-evidence-line nic-prop-sub">' + escapeHtml(st.join(' · ')) + '</span>');
-      }
-      const props = Array.isArray(a.props) ? a.props : [];
-      if (!props.length) {
-        valLines.push('<span class="netcheck-evidence-line nic-prop-sub">该网卡驱动未暴露可枚举高级属性</span>');
-      } else {
-        for (const p of props) {
-          const valid = Array.isArray(p.valid) && p.valid.length ? `（可选：${p.valid.join(' / ')}）` : '';
-          valLines.push('<span class="netcheck-evidence-line nic-prop-item">' +
-            escapeHtml(`${p.name}：${p.value}${valid}`) + '</span>');
-        }
-      }
-    }
-    let virtHtml = '';
-    if (virt.length) {
-      virtHtml = '<div class="netcheck-detail">虚拟网卡（VPN / 虚拟交换机等）' + virt.length +
-        ' 张：' + escapeHtml(virt.map(v => v.name).join('、')) + ' —— 第一版只展示，不开放写入。</div>';
-    }
+    if (!virt.length) { box.innerHTML = ''; return; }
     box.innerHTML = '<div class="netcheck-item card" data-nic-readonly="1">' +
       '<div class="netcheck-head">' +
-      '<div class="netcheck-copy"><strong>网卡高级属性（只读）</strong>' +
-      '<span>按驱动真实枚举显示物理网卡的高级属性与 RSS / 校验卸载 / 电源管理状态，第一版不提供写入</span></div>' +
+      '<div class="netcheck-copy"><strong>虚拟网卡（只读）</strong>' +
+      '<span>物理网卡高级属性本版暂不提供（后续版本接入驱动枚举），这里只列出虚拟网卡</span></div>' +
       '<span class="netcheck-badge ok">只读</span>' +
       '</div>' +
-      '<div class="netcheck-evidence">' + valLines.join('') + '</div>' +
-      virtHtml +
+      '<div class="netcheck-detail">虚拟网卡（VPN / 虚拟交换机等）' + virt.length +
+      ' 张：' + escapeHtml(virt.map(v => v.name).join('、')) + ' —— 只展示，不开放写入。</div>' +
       '</div>';
   }
 

@@ -80,6 +80,7 @@ const REGISTRY = [
   // 判据都打在语义差上（M12 打「锁与解锁同函数且解锁在 finally 之后」，M14 打「清空态真定义 +
   // 进条件 + 确认件有清空分支」），只查关键字出现的写法一律视为判定器失真。
   { file: 'check-receipt-tri-state.mjs', reason: 'P1-a 回执三态：五条判据共用同一组正反对照（M10 有 else 且置 lossRate:null / M17 时长先绑定不再内联 / M18 三处写侧都读回执 / M12 锁在同一函数的 finally 里放 / M14 清空密钥也走红色确认件）；对照样本必须能把「修好」与「改坏」分开，改坏后门禁 exit≠0 并点名条目' },
+  { file: 'check-pending-receipt-fields.mjs', reason: 'X0-6 S1/S3/NC-01 回执字段 ⇄ 前端消费：7 条判据各配一个坏样本正向对照（缺 addedAt / pfroReadable 回潮 / batch_id 形参 / pendingRevoke 形参 / 未消费 addedAt / 未读 malformed / 物理七字段回潮）；真破坏三条源文件时逐条报红（2026-10-28 P3 施工实测）' },
   // P1-a（2026-10-27 全仓重审 P1 · D1-M08）：用户可见文案的禁语判据与真仓扫描共用同一
   // violations()；退役 id / 退役标题 / 轮次术语三类命中都必须报红并点名条目与字段。
   { file: 'check-user-copy-policy.mjs', reason: 'P1-a 用户文案纪律：合规样本放行、指向退役项 + 夹带轮次术语的样本必红（对照块每次运行都跑）；真仓扫描走同一判据，命中即点名条目与字段；判定只作用在活跃目录（item-intro.json 故意保留已退役项介绍，不在判据面内）' },

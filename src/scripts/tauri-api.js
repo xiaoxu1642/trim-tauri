@@ -471,7 +471,7 @@
       modify: function (appId, mode) { return invokeChannel('uninstall:modify', { appId: appId, mode: mode }); },
       pendingAdd: function (targets) { return invokeChannel('uninstall:pending-add', { targets: targets }); },
       pendingList: function () { return invokeChannel('uninstall:pending-list'); },
-      pendingRevoke: function (batchId) { return invokeChannel('uninstall:pending-revoke', { batchId: batchId }); },
+      pendingRevoke: function () { return invokeChannel('uninstall:pending-revoke'); },
       residueScan: function (appId) { return invokeChannel('uninstall:residue-scan', { appId: appId }); },
       residueExecute: function (appId, targets, backup) { return invokeChannel('uninstall:residue-execute', { appId: appId, targets: targets, backup: !!backup }); },
       dirSize: function (path) { return invokeChannel('uninstall:dir-size', { path: path }); },

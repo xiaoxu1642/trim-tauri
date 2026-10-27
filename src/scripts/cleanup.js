@@ -1338,8 +1338,13 @@
     if (killText) killText.textContent = killable.length ? `结束进程（${killable.length}）` : '结束进程';
     const scanned = Number(resp.scanned) || 0;
     const truncNote = resp.truncated ? '；目录文件数超过 2 万上限，结果已截断' : '';
+    // X0-6 S3：同一回执的另一个消费方（清理前占用检测）已提示畸形行数，
+    // 查询卡片此前不读 malformed —— 协议被打断时界面会照常显示「没有发现占用」。
+    const malformed = Number(resp.malformed) || 0;
+    const partialText = malformed > 0
+      ? `占用查询有 ${malformed} 条输出畸形已跳过，结果可能不完整。` : '';
     if (!procs.length) {
-      box.innerHTML = `<div class="empty-state"><p>没有发现占用${scanned > 0 ? `（已检查 ${scanned} 个文件${truncNote}）` : '（目录内没有可查询的文件）'}。</p></div>`;
+      box.innerHTML = `<div class="empty-state"><p>没有发现占用${scanned > 0 ? `（已检查 ${scanned} 个文件${truncNote}）` : '（目录内没有可查询的文件）'}。${escapeHtml(partialText)}</p></div>`;
       return;
     }
     // 进程行复用清理前占用检测弹窗的既有样式（lock-app-*，零新增视觉 token）
@@ -1355,7 +1360,8 @@
       ? `<div class="lock-critical-note">${criticalCount} 个系统关键进程只展示、不提供结束入口，结束进程时会被跳过。</div>`
       : '';
     box.innerHTML = `<p class="opt-hint">共 ${procs.length} 个占用进程（已检查 ${scanned} 个文件${truncNote}）：</p>`
-      + `<div class="lock-app-list">${rows}</div>${note}`;
+      + `<div class="lock-app-list">${rows}</div>${note}`
+      + (partialText ? `<p class="opt-hint">${escapeHtml(partialText)}</p>` : '');
   }
 
   async function runLockQuery(presetPath) {
@@ -2472,6 +2478,15 @@
     missing: '文件已不在'
   };
 
+  /// 登记时间（X0-6 S1）：回执带秒级 addedAt；格式化失败不显示，不编造时间。
+  function fmtPendingAddedAt(v) {
+    const secs = Number(v);
+    if (!Number.isFinite(secs) || secs <= 0) return '';
+    const d = new Date(secs * 1000);
+    const p2 = (n) => String(n).padStart(2, '0');
+    return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  }
+
   /// 刷新「重启后删除」入口按钮：有待删条目才显示；台账损坏时置灰并明示（M-6 同口径）。
   function refreshPendingBadge() {
     const btn = document.getElementById('btnPendingList');
@@ -2541,9 +2556,11 @@
     const rows = entries.map(e => {
       // R2a-U01（B 方案）：orphanSource = PFRO 挂着但台账无凭据的对补行（可能来自
       // 更早批次或第三方软件，归属不可信）——「撤回全部」摘不到它，标签必须明示。
-      const label = e.orphanSource
+      const added = fmtPendingAddedAt(e.addedAt);
+      const base = e.orphanSource
         ? '挂起删除（来源不明·不可撤回）'
         : (PENDING_STATUS_LABELS[e.status] || e.status || '未知');
+      const label = base + (added ? ` · 登记于 ${added}` : '');
       const tip = e.orphanSource
         ? `${e.target || ''}\n系统重启队列仍挂着这条删除，但 Trim 没有它的登记凭据（可能来自更早批次或其它软件）；「撤回全部」只摘除 Trim 登记的条目。`
         : (e.target || '');

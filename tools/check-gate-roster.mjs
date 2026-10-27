@@ -111,6 +111,7 @@ const MUST_RUN = [
   // else 缺失就等于「失败无声」。本门禁钉住五条形态（丢包失败沿用旧值 / 批量锁无 finally /
   // 时长参数未绑定 / 三处写侧不读回执 / 清空密钥零确认），每条自带正向对照。
   'check-receipt-tri-state',
+  'check-pending-receipt-fields',
   // P1-a（2026-10-27 全仓重审 P1 · D1-M08）：活跃优化目录的用户可见文案不得指向已退役项，
   // 也不得夹带内部 id / 轮次术语 / 评审日期（那段字会出现在高危确认框正文里）。
   'check-user-copy-policy',
