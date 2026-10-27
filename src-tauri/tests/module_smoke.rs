@@ -808,6 +808,9 @@ fn pending_add_only_accepts_delete_failed_receipt_targets() {
         RESIDUE_LABEL,
         trim_tauri_lib::engine::delete_failed::DOMAIN_RESIDUE,
         vec![failed.to_string()],
+        // B2-8：残留域是回收站链 ⇒ 可登记。本用例的判据正是「有回执才放行」，
+        // 所以这里必须给 true，否则它测的会变成「被 recyclable 闸拒掉」
+        true,
     );
     let res = invoke(
         &w,

@@ -1769,15 +1769,20 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             // 「登记重启后删除」的第一道约束（只收删除失败项）从此有命令体判据 ——
             // 旧写法这道约束只在渲染层（residue-window.js 的失败文件筛选）维持，
             // 命令体内没有任何判据，换一个消费方即整条绕过。
-            // 口径与渲染层同源：`status != ok && kind == file`（目录后端本就拒登记）。
+            // 口径：`status == fail && kind == file`（目录后端本就拒登记）。
+            // B2-8：从 `!= "ok"` 收成 `== "fail"` —— skip 行（「目标位于系统目录」
+            // 「目标已不存在」）**从未被尝试删除**，把它记成「删除失败」语义不成立；
+            // 台账里多这一类条目，就等于把一个从没删过的路径喂进「重启后删除」的候选面。
             crate::engine::delete_failed::record(
                 &label,
                 crate::engine::delete_failed::DOMAIN_RESIDUE,
                 details
                     .iter()
-                    .filter(|d| d["status"] != "ok" && d["kind"] == "file")
+                    .filter(|d| d["status"] == "fail" && d["kind"] == "file")
                     .filter_map(|d| d["target"].as_str().map(str::to_string))
                     .collect(),
+                // B2-8：残留链走回收站优先 ⇒ 失败项可登记
+                true,
             );
             json!({ "success": true, "data": {
                 "details": details, "okCount": ok_count, "failCount": fail_count,

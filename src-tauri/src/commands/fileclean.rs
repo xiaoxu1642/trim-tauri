@@ -850,6 +850,9 @@ pub async fn fileclean_execute<R: Runtime>(
             .filter(|d| d.get("status").and_then(|v| v.as_str()) != Some("ok"))
             .filter_map(|d| d.get("path").and_then(|v| v.as_str()).map(str::to_string))
             .collect(),
+        // B2-8：本链走回收站 ⇒ 失败项可以在「重启后删除」里重试（那一步也是永久删，
+        // 但用户已经在回收站界面上确认过一次，语义是「已同意删掉这个文件」）
+        true,
     );
 
     if !manifest_entries.is_empty() {

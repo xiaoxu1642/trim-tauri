@@ -842,6 +842,9 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
                     .map(|a| a.as_slice())
                     .unwrap_or(&[]),
             ),
+            // B2-8：常规清理是 v3.3.0 固定的**永久删**链 ⇒ 这条失败回执不得进
+            // 「重启后删除」登记面（登记同样是永久删，连回收站都不经过）
+            false,
         );
         // 成功判据（v6-K10 收口）：硬失败（error ∪ fail，见上面 v5 C-3）为 0
         // **且确实删了东西**——failed==0 但 success/partial 全 0 = 全 skip（太新/
