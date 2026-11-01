@@ -503,7 +503,27 @@ pub(super) fn state_label(state: Option<u32>) -> &'static str {
     }
 }
 
-/// 枚举服务表（只读）。返回 (条目, 是否至少读到一个键, 残缺注记)。
+/// 服务表本轮的完整性（R2b-L05）：跨模块契约走结构位，消费方不再拿中文注记做子串
+/// 判定 —— 注记措辞一改，子串判据会静默恒 false，孤儿驱动判定就带着偏宽的引用集合
+/// 继续跑（方向是扩大删除面）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ServiceTableIntegrity {
+    /// 子键打不开（ACL/IO）的条数
+    pub(super) open_failed: usize,
+    /// ImagePath 解析不出落点的条数
+    pub(super) landing_unresolved: usize,
+    /// 枚举触顶（服务表被截断）
+    pub(super) truncated: bool,
+}
+
+impl ServiceTableIntegrity {
+    /// 任一为真 ⇒ 引用集合偏小 ⇒「没有任何服务引用」的孤儿判据偏宽 ⇒ 整组不判。
+    pub(super) fn incomplete(self) -> bool {
+        self.truncated || self.open_failed > 0 || self.landing_unresolved > 0
+    }
+}
+
+/// 枚举服务表（只读）。返回 (条目, 是否至少读到一个键, 完整性, 残缺注记)。
 ///
 /// `ok=false` = 连 `Services` 根都打不开，调用方必须整组不产候选并写 note：
 /// 拿空清单去做「已卸载」判定，等于把全部服务算成残留。
@@ -511,12 +531,16 @@ pub(super) fn state_label(state: Option<u32>) -> &'static str {
 /// R2b-L01：枚举上限此前静默生效（读满就当「本机服务就这些」），现在按「多问一条」
 /// 现算触顶并回注记 —— 服务表被截断时，`drivers_orphan` 的「没有任何服务引用」判据
 /// 会把截掉的那批驱动全算成孤儿，方向是**扩大删除面**，比少报更危险。
-pub(super) unsafe fn collect_service_entries(cap: usize) -> (Vec<ServiceEntry>, bool, Vec<String>) {
+/// R2b-L05：触顶/打不开/解析不出这三个事实同时以结构位外露（[`ServiceTableIntegrity`]），
+/// 注记只负责人话，跨模块判据读结构位。
+pub(super) unsafe fn collect_service_entries(cap: usize) -> (Vec<ServiceEntry>, bool, ServiceTableIntegrity, Vec<String>) {
     use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RegCloseKey};
     let limit = cap.min(SERVICE_ENUM_CAP);
     let names = reg_enum_subkeys(HKEY_LOCAL_MACHINE, SERVICES_ROOT, limit + 1);
     let mut notes = Vec::new();
+    let mut integrity = ServiceTableIntegrity::default();
     if names.len() > limit {
+        integrity.truncated = true;
         notes.push(format!(
             "服务表子键数达到枚举上限 {limit}（实际列到 {}），本轮只判前 {limit} 条（服务表不完整，孤儿驱动判据据此会偏宽）",
             names.len()
@@ -524,7 +548,7 @@ pub(super) unsafe fn collect_service_entries(cap: usize) -> (Vec<ServiceEntry>, 
     }
     let names: Vec<String> = names.into_iter().take(limit).collect();
     if names.is_empty() {
-        return (Vec::new(), false, notes);
+        return (Vec::new(), false, integrity, notes);
     }
     let mut out = Vec::with_capacity(names.len());
     // R2b-M35：逐条失败必须可见 —— 打不开 / 落点解析不出都会让 referenced_landings 变小，
@@ -561,7 +585,9 @@ pub(super) unsafe fn collect_service_entries(cap: usize) -> (Vec<ServiceEntry>, 
             "服务表有 {landing_unresolved} 个服务的 ImagePath 解析不出落点，未进引用集合（本组结果不完整，孤儿驱动判据据此会偏宽）"
         ));
     }
-    (out, true, notes)
+    integrity.open_failed = open_failed;
+    integrity.landing_unresolved = landing_unresolved;
+    (out, true, integrity, notes)
 }
 
 /// 全部服务落点的归一集合（小写、去尾 `\`）—— `drivers_orphan` 用它反查未被引用的 sys。
@@ -597,6 +623,7 @@ pub(super) unsafe fn service_findings(
     let mut protected: Vec<Value> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     let mut no_evidence = 0usize;
+    let mut landing_unknown = 0usize;
     // M-12（审查 2026-10-07）：SCM 句柄整轮开一次复用（原先每个服务都 Open/Close 一轮）。
     let scm = open_scm();
     for e in entries {
@@ -606,7 +633,15 @@ pub(super) unsafe fn service_findings(
             }
             continue;
         };
-        let landing_exists = Path::new(landing).exists();
+        // R2b-L01：显示面与删除面同一套三态判据 —— `exists()` 把权限/IO/离线盘
+        // 都报成「不存在」，会把仍在用的服务显示成 dead_landing（删除侧仍会拒，
+        // 但报告是错的）。Unknown 一律按「无法判断」计 no_evidence，不回候选。
+        let landing_state = classify_landing(std::fs::symlink_metadata(landing));
+        if matches!(&landing_state, LandingState::Unknown(_)) {
+            landing_unknown += 1;
+            continue;
+        }
+        let landing_exists = matches!(&landing_state, LandingState::Exists);
         let stem = e.image_stem_lc();
         let ac = anticheat_marker(&e.name, &stem);
         let owner = index.owner_of(landing);
@@ -700,6 +735,11 @@ pub(super) unsafe fn service_findings(
     }
     if no_evidence > 0 {
         notes.push(format!("{no_evidence} 个服务因证据不足未进候选（ImagePath 解析不出 / 无法归因到某个已卸载程序）"));
+    }
+    if landing_unknown > 0 {
+        notes.push(format!(
+            "{landing_unknown} 个服务的落点读不到元数据（ACL/IO/离线盘），按「无法判断」处理：既不当残留，也不算在用"
+        ));
     }
     if let Some(dirs) = process_dirs {
         if dirs.is_empty() {

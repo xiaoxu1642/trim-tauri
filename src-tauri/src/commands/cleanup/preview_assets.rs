@@ -26,6 +26,11 @@
 //! （原 `fileclean:read-image` 已随预览链退役，重开属 fileclean 域）。
 //! 拿 cleanup 域的槽去核 fileclean 域的路径 = 把磁盘清理页的预览锁死，
 //! 属 AGENTS §3「档位/闸写错方向会锁死功能」的同型错误，不硬改。
+//!
+//! R4-L09 复核（2026-11-01）：比上面登记的口径**还宽一层** —— `filter_preview_paths`
+//! 只挡空值、长度与 NUL，连 `..` 段与设备/verbatim 前缀形态都不判，所以「任意绝对路径
+//! 都能进 asset scope」在**绑定快照之前**就已经成立。这一层与绑定快照是同一件事的两个
+//! 缺口，按模块头登记的两条路径之一落地时一并补上。
 
 use crate::engine::{guard, log};
 use serde_json::{json, Value};

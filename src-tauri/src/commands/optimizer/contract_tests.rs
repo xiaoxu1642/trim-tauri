@@ -204,6 +204,26 @@ fn strip_js_comments(src: &str) -> String {
         );
     }
 
+    /// R3-L01：`startType:"disabled"` 与 `disable:true` 同语义 —— 必须停服。
+    ///
+    /// 数据层目前没有这个取值，判据落在两轨共用的 [`service_need_stop`] 与 PS 轨
+    /// 生成物上（native 轨直接调同一判据）。旧实现只认 `disable` / 「没指定」，
+    /// 显式禁用一个仍在跑的服务时既改了启动类型又让它跑到下次重启 —— 文案说「禁用」、
+    /// 事实是「下次开机才不启动」。
+    #[test]
+    fn starttype_disabled_与disable同语义停服() {
+        let step = json!({ "label": "禁用演示服务", "service": "TrimProbeSvc", "startType": "disabled" });
+        let script = build_script(&[step]);
+        assert!(script.contains("Stop-Service"), "startType=disabled 没生成停服命令:\n{script}");
+        assert!(script.contains("-StartupType 'Disabled'"), "启动类型必须改成 Disabled:\n{script}");
+        use crate::engine::native::{SVC_START_AUTO, SVC_START_DISABLED, SVC_START_MANUAL};
+        assert!(service_need_stop(false, Some(SVC_START_DISABLED)), "显式 disabled 必须停服");
+        assert!(!service_need_stop(false, Some(SVC_START_MANUAL)), "manual 不停服（对齐「不立即停止」）");
+        assert!(!service_need_stop(false, Some(SVC_START_AUTO)), "automatic 不停服");
+        assert!(service_need_stop(true, Some(SVC_START_MANUAL)), "disable:true 仍要停服");
+        assert!(service_need_stop(false, None), "纯停服步仍要停服");
+    }
+
     /// R0-a 判据 4：未知 `startType` 值必须 fail-closed。
     ///
     /// 猜一个默认值 = 凭空造一个静默盲区（这正是 v0.5.0 的病根）。解析函数是
@@ -657,6 +677,7 @@ fn strip_js_comments(src: &str) -> String {
         assert!(!step_has_engine_field(&bad), "四字段全缺却被判为有引擎字段");
         assert_eq!(step_exec_mode(&bad), "unsupported", "预检侧判据与执行链不同结论");
         let reason = unrecognized_step_reason(
+            0,
             bad.get("label").and_then(Value::as_str).unwrap_or_default(),
         );
         assert!(reason.contains("四字段全缺的畸形步骤"), "回执文案没点名步骤: {reason}");
@@ -695,15 +716,32 @@ fn strip_js_comments(src: &str) -> String {
     }
 
     /// R3-L07：`"path": ""` 与「缺 path」「解析失败」同归畸形；重复行只去重不计畸形。
+    /// R3-L06：合法行必须把 `id` / `isDir` 归因一起带出来（失败文案与日志靠它定位）。
     #[test]
     fn r3_l07_回收站协议空路径计入畸形() {
         let mut seen = std::collections::HashSet::new();
         let mut reached: Vec<String> = Vec::new();
         assert_eq!(
             classify_recycle_line(r#"{"path":"C:\\a"}"#, &mut seen),
-            RecycleLine::Path("C:\\a".into())
+            RecycleLine::Path(RecycleTarget { path: "C:\\a".into(), id: None, is_dir: None })
         );
         reached.push("合法路径".into());
+        let with_id = classify_recycle_line(
+            r#"{"id":"tf_appx","path":"C:\\b","isDir":true}"#,
+            &mut seen,
+        );
+        assert_eq!(
+            with_id,
+            RecycleLine::Path(RecycleTarget {
+                path: "C:\\b".into(),
+                id: Some("tf_appx".into()),
+                is_dir: Some(true),
+            }),
+            "协议行的 id / isDir 必须被带出来（失败时没有归因就查不到是哪个附带项）"
+        );
+        let RecycleLine::Path(t) = with_id else { panic!("应判为合法路径") };
+        assert_eq!(t.attribution(), "（id=tf_appx，isDir=true）");
+        reached.push("带归因路径".into());
         assert!(matches!(
             classify_recycle_line(r#"{"path":""}"#, &mut seen),
             RecycleLine::Malformed("path 为空字符串")
@@ -725,7 +763,7 @@ fn strip_js_comments(src: &str) -> String {
             "重复行是正常收敛，不得混进畸形计数"
         );
         reached.push("重复行".into());
-        assert_eq!(reached.len(), 5, "五种形状必须逐条命中: {reached:?}");
+        assert_eq!(reached.len(), 6, "六种形状必须逐条命中: {reached:?}");
     }
 
     /// R3-L04：`option_targets` 上方那段 R3-M03 注释曾被粘贴两遍。
@@ -911,6 +949,11 @@ fn strip_js_comments(src: &str) -> String {
         assert_eq!(iso, "2026-09-24T04:30:00.000Z");
         assert!(parse_dmtf("garbage").is_none());
         assert!(parse_dmtf("20260924123000.000+480").is_none());
+        // R3-L05：非 ASCII 的等长输入按字节切片会切在字符中间（旧实现 panic），
+        // 分量越界会算出「合法但错误」的时间 —— 两者都必须落 None。
+        assert!(parse_dmtf("2026０4123000.000000+480").is_none(), "非 ASCII 等长输入不得进入按字节切片");
+        assert!(parse_dmtf("20261324123000.000000+480").is_none(), "月份 13 必须拒");
+        assert!(parse_dmtf("20260924123000.000000*480").is_none(), "偏移符号非 ± 必须拒");
     }
 
     #[test]

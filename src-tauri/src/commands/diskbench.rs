@@ -39,6 +39,10 @@ use crate::engine::{guard, log};
 /// 剩余空间下限（测速峰值写约 384 MB + 缓冲余量，照抄 main.js 5384）
 const DISKBENCH_MIN_FREE_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// 残留目录占位的最多换号次数（R1d-L05）：同名碰撞是异常场景，换几次号够用即可，
+/// 不做无界重试。
+const DISKBENCH_DIR_CLAIM_TRIES: usize = 8;
+
 /// 单飞位的 RAII 释放（v7.2 `R1d-M09`）：`?`/早退/panic 三条出口都必须把位放回去，
 /// 手写在每个 return 前迟早漏一条 ⇒ 之后永远判「测速进行中」。
 struct RunGuard;
@@ -111,6 +115,9 @@ fn free_bytes(path: &Path) -> Option<u64> {
 }
 
 /// 残留测试目录递归清理（应用自产临时数据；失败只记日志，不影响结果）
+///
+/// R1d-L05：调用方在调原生**之前**已 `create_dir` 占位成功，所以这里的 `dir` 只可能是
+/// 本场亲手建的那个（同名目录的碰撞在占位处已换号，不会删到别人的目录）。
 ///
 /// 审查 v3-L1：删前先过 `dir_delete_blocked`。
 /// **注意**（B2-7 起）：维护任务的搜索索引 / 更新缓存两支已改走
@@ -218,6 +225,29 @@ fn bench_response(data: Value, mut warn: Vec<String>) -> Value {
         out["warn"] = json!(warn);
     }
     out
+}
+
+/// 等待结果的两类失败必须说成两句话（R1d-L04）：`Timeout` 是「还在盘上跑」，
+/// `Disconnected` 是 sender 随工作线程结束被丢弃（多半 panic）——旧写法用 `Err(_)`
+/// 把后者也说成超时，排查方向直接错。返回 (给用户的话, 日志级别)。
+fn wait_failure(kind: mpsc::RecvTimeoutError) -> (&'static str, &'static str) {
+    match kind {
+        mpsc::RecvTimeoutError::Timeout => ("磁盘测速超时（原生引擎）", "warn"),
+        mpsc::RecvTimeoutError::Disconnected => {
+            ("磁盘测速线程异常结束，未返回结果（详见日志）", "error")
+        }
+    }
+}
+
+/// 工作线程的 panic 载荷 → 可写日志的一句话（载荷可能不是字符串，别 downcast 失败就丢）
+fn panic_payload(p: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = p.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "无法读取的 panic 载荷".to_string()
+    }
 }
 
 /// diskbench:run — 磁盘测速（原生引擎优先）
@@ -331,8 +361,38 @@ pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options:
     //    文件写进固定名 `Trim-DiskBench`（`native-scanner/src/perf.rs`），于是清理动作
     //    落在一个根本不存在的目录上——残留一个没清、隔离也没生效，成功分支每次跑完都在
     //    用户目录留一个空目录。现在目录名由这里唯一决定，并以 `--bench-dir` 交给原生。
-    let generation = DISKBENCH_GEN.fetch_add(1, Ordering::Relaxed) + 1;
-    let residue_dir = resolved.join(format!("Trim-DiskBench-{generation}"));
+    //    R1d-L05：世代号只解决「别撞上野线程正在写的目录」，「这个目录是不是本场建的」
+    //    另需一条证据。旧清理判据只有「名字像本场产物」⇒ 上轮进程遗留或用户自建的同名
+    //    目录会被整棵 `remove_dir_all`。现在先自己 `create_dir` 占位：占不到（已存在）
+    //    就换下一个世代号，仍占不到才拒绝运行——清理因此只可能删本场亲手建的那个空目录。
+    let mut residue_dir = PathBuf::new();
+    let mut claim_err: Option<std::io::Error> = None;
+    for _ in 0..DISKBENCH_DIR_CLAIM_TRIES {
+        let generation = DISKBENCH_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+        let candidate = resolved.join(format!("Trim-DiskBench-{generation}"));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => {
+                residue_dir = candidate;
+                claim_err = None;
+                break;
+            }
+            // 同名目录已存在：不是本场建的，换号重试
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => claim_err = Some(e),
+            // 其它失败（路径不可写等）换号也没用
+            Err(e) => {
+                claim_err = Some(e);
+                break;
+            }
+        }
+    }
+    if residue_dir.as_os_str().is_empty() {
+        let why = claim_err.map(|e| e.to_string()).unwrap_or_else(|| "同名目录已存在".to_string());
+        log::write_log("warn", &format!("磁盘测速临时目录占位失败: {} -> {why}", resolved.display()));
+        return Ok(json!({
+            "success": false,
+            "message": "测速临时目录不可用（同名目录已存在或路径不可写），请换一个测速目录再试",
+        }));
+    }
 
     let args: Vec<String> = vec![
         "diskbench".to_string(),
@@ -353,11 +413,11 @@ pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options:
     ];
 
     // 原生引擎在工作线程内执行：进度行 JSON → diskbench:progress 事件；
-    // 主线程用 recv_timeout 模拟 Electron 的进程超时中止。
+    // 主侧等待模拟 Electron 的进程超时中止。
     let handle = window.clone();
     let (tx, rx) = mpsc::channel::<String>();
     let worker_guard = run_guard;
-    std::thread::spawn(move || {
+    let worker = std::thread::spawn(move || {
         let _worker_guard = worker_guard;
         let mut emit = |line: &str| {
             if let Ok(v) = serde_json::from_str::<Value>(line) {
@@ -368,12 +428,34 @@ pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options:
         let _ = tx.send(out);
     });
 
-    let out = match rx.recv_timeout(bench_timeout) {
-        Ok(o) => o,
-        Err(_) => {
+    // R1d-L04：`recv_timeout` 要一直等完整场测速时长加收尾余量，是同步阻塞 ⇒
+    // 整段丢进阻塞池，不再占住一个 async worker 整场测速。
+    let recv = tauri::async_runtime::spawn_blocking(move || rx.recv_timeout(bench_timeout)).await;
+    let out = match recv {
+        Ok(Ok(o)) => o,
+        Ok(Err(kind)) => {
+            let (message, level) = wait_failure(kind);
+            // Disconnected ⇒ sender 已随线程结束被丢弃，join 立刻返回，只借它取 panic 载荷；
+            // Timeout 时工作线程仍在盘上跑（进程内原生调用拦不住），不能 join。
+            let detail = match kind {
+                mpsc::RecvTimeoutError::Disconnected => match worker.join() {
+                    Ok(()) => "工作线程未返回结果即结束".to_string(),
+                    Err(p) => format!("工作线程 panic: {}", panic_payload(&*p)),
+                },
+                mpsc::RecvTimeoutError::Timeout => String::new(),
+            };
             cleanup_residue(&residue_dir, true);
-            log::write_log("warn", "磁盘测速超时（原生引擎）");
-            return Ok(json!({ "success": false, "message": "磁盘测速超时（原生引擎）" }));
+            if detail.is_empty() {
+                log::write_log(level, message);
+            } else {
+                log::write_log(level, &format!("{message}（{detail}）"));
+            }
+            return Ok(json!({ "success": false, "message": message }));
+        }
+        Err(e) => {
+            cleanup_residue(&residue_dir, true);
+            log::write_log("error", &format!("磁盘测速等待任务异常: {e}"));
+            return Ok(json!({ "success": false, "message": format!("磁盘测速等待任务异常: {e}") }));
         }
     };
 
@@ -472,6 +554,19 @@ mod p1_6e_diskbench_param_tests {
         assert!(src.contains(concat!("let run_guard", " = RunGuard;")), "命令体持有 guard 以覆盖早退路径");
         assert!(src.contains(concat!("let worker_guard", " = run_guard;")), "spawn 前把 guard 移进闭包");
         assert!(src.contains(concat!("let _worker_guard", " = worker_guard;")), "工作线程收尾才放位");
+    }
+
+    /// R1d-L04：线程异常结束（sender 丢弃）不许再说成「超时」。
+    /// 判红自证：把 `wait_failure` 的 `Disconnected` 臂并回 Timeout ⇒ 前三条断言红。
+    #[test]
+    fn 超时与线程异常结束不是同一句话() {
+        use std::sync::mpsc::RecvTimeoutError;
+        let (t_msg, t_level) = super::wait_failure(RecvTimeoutError::Timeout);
+        let (d_msg, d_level) = super::wait_failure(RecvTimeoutError::Disconnected);
+        assert_ne!(t_msg, d_msg, "两种失败必须给两句话");
+        assert!(!d_msg.contains("超时"), "线程结束不是超时: {d_msg}");
+        assert!(t_msg.contains("超时"), "超时那条要说得出来是超时: {t_msg}");
+        assert_eq!((t_level, d_level), ("warn", "error"), "线程异常要按 error 记账");
     }
 
 }

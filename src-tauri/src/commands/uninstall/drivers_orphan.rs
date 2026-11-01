@@ -182,14 +182,15 @@ pub(super) fn driver_findings(
 /// 其中无引用的通常只有几个，把便宜的集合运算放在前面，Authenticode 的开销就只有几毫秒级。
 pub(super) unsafe fn collect_driver_findings(
     service_entries: &[super::services_orphan::ServiceEntry],
-    service_notes: &[String],
+    integrity: super::services_orphan::ServiceTableIntegrity,
 ) -> (Vec<Value>, Vec<Value>, Vec<String>, usize) {
     let (files, mut notes) = driver_files();
     let count = files.len();
     // R2b-M35：服务表逐条打不开 / 落点解析不出时，`referenced_landings` 偏小 ⇒
     // 「没有任何服务引用」的候选方向是**扩大删除面** —— 与截断是同一条因果链，
     // 此时整组不产候选（宁可这轮不判，也不带着偏宽的引用集合继续判）。
-    let service_incomplete = service_notes.iter().any(|s| s.contains("本组结果不完整"));
+    // R2b-L05：判据读结构位（`ServiceTableIntegrity`），不拿注记中文子串当契约。
+    let service_incomplete = integrity.incomplete();
     let referenced = referenced_landings(service_entries);
     let (c, p, mut n) = if service_incomplete {
         notes.push("服务表本轮不完整（有子键打不开或落点解析不出），本轮不做孤儿驱动判定".to_string());

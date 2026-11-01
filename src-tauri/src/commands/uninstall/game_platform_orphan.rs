@@ -546,8 +546,10 @@ unsafe fn collect_wegame(index: &mut PlatformIndex, notes: &mut Vec<String>) {
                 || name.to_lowercase().contains("we 游戏")
                 || pubr.to_lowercase().contains("wegame");
             if owned {
-                let l = loc.trim().trim_end_matches('\\').to_string();
-                if !l.is_empty() && !installs.iter().any(|i| i.eq_ignore_ascii_case(&l)) {
+                // R2b-L08：与本文件其余三平台同一条清洗 —— 相对路径会落进进程 CWD
+                // （应用 exe 目录），UNC 会触发 SMB 外连；读别的程序的注册表值统一 fail-closed。
+                let Some(l) = clean_install_dir_value(&loc) else { continue };
+                if !installs.iter().any(|i| i.eq_ignore_ascii_case(&l)) {
                     installs.push(l);
                 }
             }

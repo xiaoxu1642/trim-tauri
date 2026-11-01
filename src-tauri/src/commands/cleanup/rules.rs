@@ -54,12 +54,33 @@ pub(super) fn data_rules_file() -> PathBuf {
     paths::data_file_for_read("cleanup/rules.json")
 }
 
+/// 新根规则文件才允许做隔离（R4-L02）。
+///
+/// `security::quarantine_file` 不是搬到隔离区，而是**同目录就地改名** —— 在老根上执行
+/// 就等于往 `%APPDATA%\Trim\cleanup` 写入，与「老根只作只读兜底」正相反。判据只看路径
+/// 是否落在新根之下，四个隔离调用点共用这一处，避免逐个调用点各判一次根。
+fn quarantine_data_rules_if_fresh(file: &Path, why: &str) {
+    if !file.starts_with(paths::app_data_dir()) {
+        log::write_log(
+            "warn",
+            &format!("{why}：该文件来自老根（只读兜底），不做就地隔离，仅本次拒绝: {}", file.display()),
+        );
+        return;
+    }
+    security::quarantine_file(file, why);
+}
+
 pub(super) fn custom_rules_dir() -> PathBuf {
     paths::data_subdir_for_read("cleanup/custom")
 }
 
+/// 防回滚水位线文件（**写入侧的账**，只读新根；R4-L02）。
+///
+/// 此前走 `data_file_for_read`：老根若留着 Electron 期水位线（可能高于内置 `rulesVersion`），
+/// 会把地板抬到内置版本之上，此后每轮装载都恒用内置副本 —— fail-closed 方向没错，但那是
+/// 「拿另一个根的账抬这一根的门槛」。水位线只由本进程写，读也只读自己那份。
 pub(super) fn watermark_file() -> PathBuf {
-    paths::data_file_for_read("cleanup/rules-watermark.json")
+    paths::app_data_dir().join("cleanup/rules-watermark.json")
 }
 
 /// 规则缓存（键 = 数据 mtime|size|custom 数量|各 custom mtime；对照 RULES_CACHE_SIG）
@@ -1043,7 +1064,7 @@ pub(super) fn read_verified_data_rules() -> Option<Value> {
                 file.display()
             ),
         );
-        security::quarantine_file(&file, "cleanup-rules 验签通过但解析失败");
+        quarantine_data_rules_if_fresh(&file, "cleanup-rules 验签通过但解析失败");
         return None;
     };
     if !parsed.get("groups").map(|g| g.is_array()).unwrap_or(false) {
@@ -1054,7 +1075,7 @@ pub(super) fn read_verified_data_rules() -> Option<Value> {
                 file.display()
             ),
         );
-        security::quarantine_file(&file, "cleanup-rules groups 形状不合（验签已通过）");
+        quarantine_data_rules_if_fresh(&file, "cleanup-rules groups 形状不合（验签已通过）");
         return None;
     }
     // R4-L02：防回滚地板读的必须是**严格数字**（与 validate_cleanup_package 的 rulesVersion
@@ -1066,7 +1087,7 @@ pub(super) fn read_verified_data_rules() -> Option<Value> {
             "error",
             "数据目录规则的 rulesVersion 不是严格数字（防回滚地板无从比对），已整包拒绝并隔离",
         );
-        security::quarantine_file(&file, "cleanup-rules rulesVersion 非严格数字");
+        quarantine_data_rules_if_fresh(&file, "cleanup-rules rulesVersion 非严格数字");
         return None;
     };
     let builtin_version = safe_read_json_from_str(BUILTIN_RULES_JSON)
@@ -1087,7 +1108,7 @@ pub(super) fn read_verified_data_rules() -> Option<Value> {
             "error",
             &format!("数据目录规则语义校验未通过，已整包拒绝并回退内置规则: {reason}"),
         );
-        security::quarantine_file(&file, "cleanup-rules 语义校验未通过");
+        quarantine_data_rules_if_fresh(&file, "cleanup-rules 语义校验未通过");
         return None;
     }
     Some(parsed)
@@ -1138,12 +1159,25 @@ pub(super) fn apply_custom_toggles(rules: &mut Value, parsed: &Value, file_label
         }
     }
     // 第二遍：逐条应用开关；未知 id 只忽略该条
+    // R4-L03：类型错 / 缺字段不再裸 `continue` —— 字段白名单通过但语义被静默忽略，
+    // 用户会说「我明明关了它，它还在清理列表里」而日志一条没有。逐条点名文件与条目。
     for g in &parsed_groups {
-        for it in collect_group_items(g) {
+        for (idx, it) in collect_group_items(g).iter().enumerate() {
             let Some(id) = it.get("id").and_then(|v| v.as_str()) else {
+                log::write_log(
+                    "warn",
+                    &format!("[cleanup] 自定义规则 {file_label} 的第 {} 个条目缺少字符串 id，该条开关已忽略", idx + 1),
+                );
                 continue;
             };
             let Some(enabled) = it.get("enabled").and_then(|v| v.as_bool()) else {
+                let raw = it.get("enabled").map(|v| v.to_string()).unwrap_or_else(|| "缺失".to_string());
+                log::write_log(
+                    "warn",
+                    &format!(
+                        "[cleanup] 自定义规则 {file_label} 条目 {id} 的 enabled 不是布尔值（值为 {raw}），该条开关已忽略"
+                    ),
+                );
                 continue;
             };
             if !set_enabled_by_id(rules, id, enabled) {
@@ -1210,7 +1244,7 @@ pub fn rules_value_arc() -> Result<Arc<Value>, String> {
 ///
 /// 单独成函数是为了让「顺序无关」这条判据有可直接构造的反例（打乱输入 → 输出必同），
 /// 而不用等某个真实文件系统的枚举顺序恰好变化。
-fn sort_custom_paths(custom: &mut [(PathBuf, f64)]) {
+fn sort_custom_paths(custom: &mut [(PathBuf, u64, f64)]) {
     custom.sort_by(|a, b| a.0.cmp(&b.0));
 }
 
@@ -1221,25 +1255,39 @@ fn sort_custom_paths(custom: &mut [(PathBuf, f64)]) {
 /// 签名没变 ⇒ 那份合并结果被当成合法缓存一直用。返回清单而不是让装载侧再读一次目录，
 /// 既保住这个口径也少触一次盘。
 fn rules_cache_sig() -> (String, Vec<PathBuf>) {
-    let mut custom: Vec<(PathBuf, f64)> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(custom_rules_dir()) {
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if !name.to_lowercase().ends_with(".json") {
-                continue;
+    // 每项 = (路径, 大小, mtime 毫秒)。R4-L01：文件名与大小必须进签名 —— 只算个数 + mtime
+    // 时，「内容被替换但时间戳保持不变」（同步/还原工具保留时间戳、COPY /B 类操作，
+    // 以及 FAT32 2 秒粒度）会命中旧缓存，新开关要到进程重启才生效且全程无日志。
+    let mut custom: Vec<(PathBuf, u64, f64)> = Vec::new();
+    match std::fs::read_dir(custom_rules_dir()) {
+        Ok(rd) => {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if !name.to_lowercase().ends_with(".json") {
+                    continue;
+                }
+                let meta = e.metadata().ok();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let mtime = meta
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as f64)
+                    .unwrap_or(0.0);
+                custom.push((e.path(), size, mtime));
             }
-            let mtime = e
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as f64)
-                .unwrap_or(0.0);
-            custom.push((e.path(), mtime));
+        }
+        // 目录不存在 = 没有自定义规则，正常态；其余读失败 = 开关静默全失效，必须留痕
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            log::write_log(
+                "warn",
+                &format!("[cleanup] custom 规则目录不可读（{e}），本轮自定义开关全部失效"),
+            );
         }
     }
     // R4-U04：`read_dir` 的枚举顺序无保证（跨盘/跨机可不同），而同一规则 id 分散在多个
-    // custom 文件时「谁后应用谁赢」直接取决于这个顺序；签名里的 mtime 列表也按同一顺序
+    // custom 文件时「谁后应用谁赢」直接取决于这个顺序；签名里的逐项信息也按同一顺序
     // 拼接，顺序抖动会让同一份内容算出两个签名、白掉一次缓存。文件路径是不可变键。
     sort_custom_paths(&mut custom);
     let (data_mtime, data_size) = std::fs::metadata(data_rules_file())
@@ -1256,9 +1304,16 @@ fn rules_cache_sig() -> (String, Vec<PathBuf>) {
     let sig = format!(
         "{data_mtime}|{data_size}|{}|{}",
         custom.len(),
-        custom.iter().map(|(_, m)| m.to_string()).collect::<Vec<_>>().join(",")
+        custom
+            .iter()
+            .map(|(p, size, m)| format!(
+                "{}|{size}|{m}",
+                p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+            ))
+            .collect::<Vec<_>>()
+            .join(",")
     );
-    (sig, custom.into_iter().map(|(p, _)| p).collect())
+    (sig, custom.into_iter().map(|(p, _, _)| p).collect())
 }
 
 /// 未命中时的装载：验签数据目录 > 内置副本 > 空集，再逐个套 custom 开关。
@@ -1376,17 +1431,17 @@ mod tests {
     #[test]
     fn 自定义规则文件顺序与目录枚举顺序无关() {
         let mut first = vec![
-            (PathBuf::from(r"C:\rules\b.json"), 2.0),
-            (PathBuf::from(r"C:\rules\a.json"), 1.0),
+            (PathBuf::from(r"C:\rules\b.json"), 2u64, 2.0),
+            (PathBuf::from(r"C:\rules\a.json"), 1u64, 1.0),
         ];
         let mut second = vec![
-            (PathBuf::from(r"C:\rules\a.json"), 1.0),
-            (PathBuf::from(r"C:\rules\b.json"), 2.0),
+            (PathBuf::from(r"C:\rules\a.json"), 1u64, 1.0),
+            (PathBuf::from(r"C:\rules\b.json"), 2u64, 2.0),
         ];
         sort_custom_paths(&mut first);
         sort_custom_paths(&mut second);
-        let names = |v: &[(PathBuf, f64)]| -> Vec<String> {
-            v.iter().map(|(p, _)| p.to_string_lossy().to_string()).collect()
+        let names = |v: &[(PathBuf, u64, f64)]| -> Vec<String> {
+            v.iter().map(|(p, _, _)| p.to_string_lossy().to_string()).collect()
         };
         assert_eq!(names(&first), names(&second), "枚举顺序不同的两次收集必须给出同一顺序");
         assert_eq!(names(&first), vec![r"C:\rules\a.json", r"C:\rules\b.json"]);

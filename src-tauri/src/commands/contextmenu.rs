@@ -85,6 +85,7 @@ fn normalize_ids(items: Vec<Value>) -> Vec<Value> {
     // 于是界面上两行都能点，而 toggle/remove 拿到的永远是同一个坐标（写错项）。
     // 扫描端当前不产重复 id，但去重键（category|name|clsid|enabled）比 id 的构成更宽，
     // 这个覆盖只隔着「上游改一次去重规则」的距离 —— 唯一性在这里就地上锁，不指望上游。
+    // 唯一化本身与启动项域共用 `snapshot::unique_snapshot_id`（§5.16 只留一份）。
     let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     items
         .into_iter()
@@ -109,11 +110,8 @@ fn normalize_ids(items: Vec<Value>) -> Vec<Value> {
             // 哈希前缀带序号）。P2-2 起快照侧（`engine::snapshot::by_id`）已不再按长度
             // 剔除长 id，这里保留短哈希是为了 id 在日志/缓存里可读，并避免长注册表路径
             // 被下游误当成路径处理。
-            let mut id = if base.len() > 160 { format!("id{index}-{:x}", fnv1a(base.as_bytes())) } else { base };
-            if !used.insert(id.clone()) {
-                id = format!("{id}#{index}");
-                used.insert(id.clone());
-            }
+            let base = if base.len() > 160 { format!("id{index}-{:x}", fnv1a(base.as_bytes())) } else { base };
+            let id = snapshot::unique_snapshot_id(&mut used, &base, index);
             if let Some(obj) = it.as_object_mut() {
                 obj.insert("id".into(), json!(id));
             }
@@ -234,13 +232,15 @@ pub async fn contextmenu_scan<R: Runtime>(
     snapshot::clear(&snapshot::domain_key(&label, "contextmenu"));
     log::write_log("info", "扫描右键菜单");
 
-    // S3：纯 Rust 原生
-    let data: Vec<Value> = match crate::engine::native::cm_scan() {
-        Ok(items) => {
+    // S3：纯 Rust 原生 —— 注册表整树扫描是秒级同步块，留在 async 体内会占住 tauri 的
+    // worker 线程，同页其它命令一起排队（与 `contextmenu_restart_explorer` 同姿势）。
+    let data: Vec<Value> = match tauri::async_runtime::spawn_blocking(native::cm_scan).await {
+        Ok(Ok(items)) => {
             log::write_log("info", &format!("右键菜单原生扫描完成: {} 项", items.len()));
             items
         }
-        Err(e) => return json!({ "success": false, "message": format!("原生扫描失败: {e}") }),
+        Ok(Err(e)) => return json!({ "success": false, "message": format!("原生扫描失败: {e}") }),
+        Err(e) => return json!({ "success": false, "message": format!("扫描任务异常: {e}") }),
     };
     let normalized = normalize_ids(data);
     log::write_log("info", &format!("扫描右键菜单完成: {} 项", normalized.len()));
@@ -325,13 +325,14 @@ pub async fn contextmenu_toggle<R: Runtime>(
 
     log::write_log("info", &format!("切换右键菜单启停: {} 项", toggle_items.len()));
 
-    // S3：纯 Rust 原生
-    let data = match crate::engine::native::cm_toggle(&toggle_items) {
-        Ok(d) => {
+    // S3：纯 Rust 原生 —— 逐键写注册表是同步阻塞块，挪进阻塞线程（判据同 `contextmenu_scan`）
+    let data = match tauri::async_runtime::spawn_blocking(move || native::cm_toggle(&toggle_items)).await {
+        Ok(Ok(d)) => {
             log::write_log("info", "右键菜单切换原生完成");
             d
         }
-        Err(e) => return json!({ "success": false, "message": format!("原生切换失败: {e}") }),
+        Ok(Err(e)) => return json!({ "success": false, "message": format!("原生切换失败: {e}") }),
+        Err(e) => return json!({ "success": false, "message": format!("切换任务异常: {e}") }),
     };
 
     // CM-12：回写新路径/屏蔽态到快照 + 缓存
@@ -464,47 +465,56 @@ pub async fn contextmenu_icons<R: Runtime>(
     // 那是本域最后一个外部 PowerShell 入口。换成原生 `ExtractIconExW` 索引 0 ——
     // 三件系统 PE 实机对拍像素和与 .NET 完全相等（见 shellicon 的 live_probe 注释）。
     // 图标提取失败不影响主流程，恒返回 success（与旧行为一致：缺图只是没图）。
-    let mut data = serde_json::Map::new();
-    for it in &icon_items {
-        let clsid = it.get("clsid").and_then(|v| v.as_str()).unwrap_or("").trim();
-        if clsid.starts_with('{') {
-            let Some(server) = clsid_inproc_server(clsid) else {
+    // 逐项 ExtractIconEx + 注册表读是同步 IO，整段挪进阻塞线程（判据同 `contextmenu_scan`）。
+    let data = tauri::async_runtime::spawn_blocking(move || {
+        let mut data = serde_json::Map::new();
+        for it in &icon_items {
+            let clsid = it.get("clsid").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if clsid.starts_with('{') {
+                let Some(server) = clsid_inproc_server(clsid) else {
+                    continue;
+                };
+                if let Ok(url) = shellicon::first_icon_data_url(&server) {
+                    data.insert(clsid.to_string(), json!(url));
+                }
+                continue;
+            }
+            // 兜底腿（经典 shell 项）：command 一律以快照为准。`exe_from_command` 是纯形状
+            // 解析，返回的路径形态必然盘符开头含反斜杠；裸名（`cmd.exe` 这类）没有可靠落点，
+            // 保持占位不猜。提取前过 paths 域那份来源命名空间白名单（R6b-M11 同判据，
+            // 不留第二份）——「让外壳去解析这个路径」的副作用面与 InprocServer32 链一致。
+            let reg_path = it
+                .get("regPath")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let Some(cmd) = known_shell.get(&reg_path.to_lowercase()) else {
                 continue;
             };
-            if let Ok(url) = shellicon::first_icon_data_url(&server) {
-                data.insert(clsid.to_string(), json!(url));
+            let Some(exe) = crate::engine::native::exe_from_command(cmd) else {
+                continue;
+            };
+            if !exe.contains('\\') {
+                continue;
             }
-            continue;
+            let exe_path = std::path::PathBuf::from(&exe);
+            if let Some(reason) = crate::commands::paths::icon_source_reject_reason(&exe_path) {
+                log::write_log("warn", &format!("右键项图标来源不受信，跳过: {reason}"));
+                continue;
+            }
+            if let Ok(url) = shellicon::first_icon_data_url(&exe_path) {
+                // 返回键与前端 iconKey 的无 CLSID 分支逐字一致（`reg:` 前缀 + regPath 原文）
+                data.insert(format!("reg:{reg_path}"), json!(url));
+            }
         }
-        // 兜底腿（经典 shell 项）：command 一律以快照为准。`exe_from_command` 是纯形状
-        // 解析，返回的路径形态必然盘符开头含反斜杠；裸名（`cmd.exe` 这类）没有可靠落点，
-        // 保持占位不猜。提取前过 paths 域那份来源命名空间白名单（R6b-M11 同判据，
-        // 不留第二份）——「让外壳去解析这个路径」的副作用面与 InprocServer32 链一致。
-        let reg_path = it
-            .get("regPath")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let Some(cmd) = known_shell.get(&reg_path.to_lowercase()) else {
-            continue;
-        };
-        let Some(exe) = crate::engine::native::exe_from_command(cmd) else {
-            continue;
-        };
-        if !exe.contains('\\') {
-            continue;
-        }
-        let exe_path = std::path::PathBuf::from(&exe);
-        if let Some(reason) = crate::commands::paths::icon_source_reject_reason(&exe_path) {
-            log::write_log("warn", &format!("右键项图标来源不受信，跳过: {reason}"));
-            continue;
-        }
-        if let Ok(url) = shellicon::first_icon_data_url(&exe_path) {
-            // 返回键与前端 iconKey 的无 CLSID 分支逐字一致（`reg:` 前缀 + regPath 原文）
-            data.insert(format!("reg:{reg_path}"), json!(url));
-        }
-    }
+        data
+    })
+    .await
+    .unwrap_or_else(|e| {
+        log::write_log("warn", &format!("右键菜单图标提取任务异常: {e}"));
+        serde_json::Map::new()
+    });
     json!({ "success": true, "data": Value::Object(data) })
 }
 

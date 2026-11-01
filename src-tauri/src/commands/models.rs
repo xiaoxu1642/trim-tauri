@@ -9,7 +9,8 @@
 //! - **保存即校验**：向该模型发一条确认消息，只有返回内容才置 `verified`；
 //!   密钥为空时不校验、强制 `verified=false`/`enabled=false`（与 Electron 同语义）；
 //! - 作用域权威校验在 Rust 侧：`key` 必须属于 `AI_MODEL_KEYS`，
-//!   `set-scope` 只接受「已验证且已启用」的模型，且**只写全局槽位**（`aiScopes.global`）；
+//!   槽位（`set-scope` 与 `save` 带 scope 时）只接受「已验证且已启用」的模型，
+//!   且只写本次点名的那一个槽（`aiScopes[scope]`，缺省/`global` 写全局槽）；
 //! - `models:open-window` 窗口参数照抄 main.js：720×680 / 最小 600×520 / 父窗 main /
 //!   `modal: false` / 标题「大模型管理」/ 背景 `#f3f3f3` / 先隐藏等首帧再 show；
 //!   窗口 label 固定 `"models"`（guard::APP_WINDOWS 已含该 label）。
@@ -109,6 +110,25 @@ fn apply_model_edit(
 /// （与退役前的 `build_next` 同口径）。
 fn save_slot(scope: &str) -> Option<&str> {
     if AI_SCOPES.contains(&scope) { Some(scope) } else { None }
+}
+
+/// 槽位写面判据（与 `models_set_scope` 的前置同一条，§5.16 只留一份）：
+/// 槽位只许指向已验证且已启用的模型 —— 否则 AI 简介会把请求打到一个从未通过校验、
+/// 或用户已停用的模型上。
+fn slot_write_allowed(entry: &Value) -> bool {
+    js_truthy(entry.get("enabled")) && js_truthy(entry.get("verified"))
+}
+
+/// 读-改-写闭包的前置：盘上根不是对象时拒绝写入。
+///
+/// 缺了它，`apply_model_edit` 第一句就原样返回、闭包仍然 `Ok(())` ⇒ 回执 `success:true`
+/// 而盘上一个字节没变（`settings.json` 根是合法 JSON 但非对象时可达）。与 fonts 三处同形。
+fn require_settings_object(next: &Value) -> Result<(), String> {
+    if next.is_object() {
+        Ok(())
+    } else {
+        Err("设置结构异常".into())
+    }
 }
 
 /// models:save — 保存单个模型项（含连通性校验，落盘携带密钥的配置）
@@ -214,8 +234,11 @@ pub async fn models_save<R: tauri::Runtime>(
         // v4 组 1：读-改-写收口 —— update_settings 内部的「最新盘上值」替代旧 current 克隆
         let touched = models.get(&key).cloned().unwrap_or_else(|| json!({}));
         let full_models = models.clone();
+        // 无密钥的模型必然 verified=false ⇒ 槽位一律不动（判据见 `slot_write_allowed`）
+        let slot = if slot_write_allowed(&touched) { save_slot(scope.as_deref().unwrap_or("")) } else { None };
         let saved = settings::update_settings(|next| {
-            *next = apply_model_edit(next, &key, Some(&touched), save_slot(scope.as_deref().unwrap_or("")), Some(&full_models));
+            require_settings_object(next)?;
+            *next = apply_model_edit(next, &key, Some(&touched), slot, Some(&full_models));
             Ok(())
         })
         .is_ok();
@@ -261,9 +284,12 @@ pub async fn models_save<R: tauri::Runtime>(
     }
     // v4 组 1：读-改-写收口（同上）
     let touched = models.get(&key).cloned().unwrap_or_else(|| json!({}));
-        let full_models = models.clone();
+    let full_models = models.clone();
+    // 校验失败 / 用户停用的模型不接管槽位（与 `models_set_scope` 的前置同一条）
+    let slot = if slot_write_allowed(&touched) { save_slot(scope.as_deref().unwrap_or("")) } else { None };
     let saved = settings::update_settings(|next| {
-        *next = apply_model_edit(next, &key, Some(&touched), save_slot(scope.as_deref().unwrap_or("")), Some(&full_models));
+        require_settings_object(next)?;
+        *next = apply_model_edit(next, &key, Some(&touched), slot, Some(&full_models));
         Ok(())
     })
     .is_ok();
@@ -286,10 +312,11 @@ pub async fn models_save<R: tauri::Runtime>(
     }))
 }
 
-/// models:set-scope — 设置 AI 简介全局模型（统筹全局：只写 global 槽位）
+/// models:set-scope — 把某个模块槽位指向所选模型
 ///
-/// 适配层载荷为 `{ scope, key }`（modelpicker 传所选模块），但 Electron 侧 handler 只读
-/// `key` 且**只写 `aiScopes.global`**——此处保持同一语义，`scope` 仅用于接收载荷。
+/// 载荷为 `{ scope, key }`（modelpicker 传所选模块）：`scope` 命中 `AI_SCOPES` 时写
+/// 该槽，缺省或 `global` 写全局槽（与 `models_save` 带 scope 时同一写入口径）；
+/// 只有已验证且已启用的模型能接管槽位。
 #[tauri::command]
 pub fn models_set_scope<R: tauri::Runtime>(
     window: WebviewWindow<R>,
@@ -316,6 +343,7 @@ pub fn models_set_scope<R: tauri::Runtime>(
     // 写入口径与 models_save 同一条（apply_model_edit 的 entry=None 分支）。
     let slot_owned = slot.to_string();
     let ok = settings::update_settings(|next| {
+        require_settings_object(next)?;
         *next = apply_model_edit(next, &key, None, Some(slot_owned.as_str()), None);
         Ok(())
     })
@@ -569,5 +597,20 @@ mod p1_5_concurrency_tests {
         );
         assert_eq!(out["models"]["baidu"]["model"], json!("b-live"), "已有段时不得被旧快照整表顶掉");
         assert_eq!(out["models"]["metaso"]["model"], json!("m-new2"));
+    }
+
+    /// R1b-L03/L06 钉：槽位只许指向已验证且已启用的模型；盘上根不是对象时闭包必须 Err
+    /// （缺了就是回执 success:true 而盘上一个字节没变）。
+    /// 判红自证：删掉 `slot_write_allowed` 任一条件、或把 `require_settings_object`
+    /// 改回恒 Ok ⇒ 对应断言红。
+    #[test]
+    fn 槽位前置与根对象校验不得放开() {
+        assert!(!slot_write_allowed(&json!({ "verified": true, "enabled": false })), "停用模型不得接管槽位");
+        assert!(!slot_write_allowed(&json!({ "verified": false, "enabled": true })), "未校验模型不得接管槽位");
+        assert!(!slot_write_allowed(&json!({})), "缺字段按未通过处理");
+        assert!(slot_write_allowed(&json!({ "verified": true, "enabled": true })));
+        assert!(require_settings_object(&json!({})).is_ok());
+        assert!(require_settings_object(&json!([])).is_err(), "根是数组必须拒绝");
+        assert!(require_settings_object(&json!("x")).is_err(), "根是字符串必须拒绝");
     }
 }

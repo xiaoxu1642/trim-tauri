@@ -187,10 +187,21 @@ pub fn bench_history_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
 pub fn bench_history_delete<R: tauri::Runtime>(window: WebviewWindow<R>, id: Option<String>) -> Result<Value, String> {
     guard::guard(&window, guard::MAIN)?;
     let id = id.unwrap_or_default();
+    // 缺 id 时 retain 会把每条记录都保留（记录 id 恒非空），旧实现却回 success:true ——
+    // 前端据 success 把条目移出列表，磁盘上还在。成功位必须由「真删到了几条」派生。
+    if id.is_empty() {
+        return Ok(json!({ "success": false, "message": "缺少记录 id" }));
+    }
+    let mut removed = 0usize;
     if let Err(msg) = update_bench_history(|records| {
+        let before = records.len();
         records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
+        removed = before - records.len();
     }) {
         return Ok(json!({ "success": false, "message": format!("记录未删除：{msg}") }));
+    }
+    if removed == 0 {
+        return Ok(json!({ "success": false, "message": "未找到该记录（可能已被删除）" }));
     }
     Ok(json!({ "success": true }))
 }

@@ -38,6 +38,11 @@ const REDIST_HOST_WHITELIST: &[&str] = &[
 /// 单包上限兜底（防白名单主机被挂大文件）
 const REDIST_MAX_BYTES: u64 = 300 * 1024 * 1024;
 
+/// 并发下载的临时名序号：同一 action_id 被并发调用时（连点 / 注入）两条链不得写同一个
+/// 临时文件 —— 先完成者的 rename 会把另一条还在写的文件搬进缓存，后者的校验随后对着
+/// 半成品判「校验未通过」，用户看到的是一条误导性回执。
+static REDIST_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn redist_cache_dir() -> PathBuf {
     paths::app_data_dir().join("redist")
 }
@@ -246,7 +251,9 @@ fn download_redist<R: tauri::Runtime>(window: &WebviewWindow<R>, action_id: &str
     }
 
     emit_progress(window, json!({ "phase": "download", "percent": 0 }));
-    let tmp_path = PathBuf::from(format!("{}.downloading", cache_path.to_string_lossy()));
+    // 临时名带进程内序号：并发下载同一包时各写各的，rename 不再搬走别人还在写的文件
+    let seq = REDIST_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_path = PathBuf::from(format!("{}.downloading-{seq}", cache_path.to_string_lossy()));
 
     // 流式进度 → 事件（percent 封顶 99，单调不倒退；对齐 main.js 7589-7605）
     let last_pct = std::cell::Cell::new(0i64);
@@ -404,7 +411,7 @@ fn do_install<R: tauri::Runtime>(window: &WebviewWindow<R>, action_id: &str, lab
 pub async fn runtimes_install<R: tauri::Runtime>(window: WebviewWindow<R>, action_id: String) -> Result<Value, String> {
     // R1b-L08：来源校验必须是第一判据，不能先给非主窗来源返回「未知动作」这类语义差。
     let label = guard::guard(&window, guard::MAIN)?;
-    if action_id.is_empty() || action_id.len() > 40 {
+    if action_id.is_empty() || crate::engine::paths::exceeds_char_len(&action_id, 40) {
         return Ok(json!({ "success": false, "message": "参数不合法" }));
     }
     if !is_allowed_action(&action_id) {

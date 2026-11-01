@@ -114,13 +114,9 @@ pub(super) fn build_script(steps: &[Value]) -> String {
             // 未知 startType 同样 fail-closed：生成不出合法脚本就别生成。
             // 注意 `raw` 是数据层原值、`verb` 是已解析的合法档位，二者都要 ps_quote —
             // 错误文案里带数据层原串，不转义会把引号带进脚本。
-            let mut start_ps = match start_label {
+            let mut start_val = match start_label {
                 Some(raw) => match crate::engine::native::start_type_from_label(raw) {
-                    Ok(_) => Some(ps_quote(match raw {
-                        "manual" => "Manual",
-                        "automatic" => "Automatic",
-                        _ => "Disabled",
-                    })),
+                    Ok(v) => Some(v),
                     Err(reason) => {
                         l.push(format!("Write-TFDiag -Stage 'optimizer.service' -Mutation 'failed' -Detail {}", ps_quote(&reason)));
                         l.push("$failedSteps++".into());
@@ -129,14 +125,20 @@ pub(super) fn build_script(steps: &[Value]) -> String {
                 },
                 None => None,
             };
-            if want_disable && start_ps.is_none() {
-                start_ps = Some(ps_quote("Disabled"));
+            if want_disable && start_val.is_none() {
+                start_val = Some(crate::engine::native::SVC_START_DISABLED);
             }
-            // 显式 startType 且非 Disabled ⇒ 不停服（对齐「不立即停止」文案）
-            if want_disable || start_ps.is_none() {
+            // 停服判据与 native 轨共用 [`service_need_stop`]（R3-L01）：`startType:"disabled"`
+            // 与 `disable:true` 同语义都要停服；其余显式档位不停（对齐「不立即停止」文案）。
+            if service_need_stop(want_disable, start_val) {
                 l.push(format!("Stop-Service -Name {svc_ps} -Force -ErrorAction SilentlyContinue"));
             }
-            if let Some(st) = start_ps {
+            if start_val.is_some() {
+                let st = ps_quote(match start_label {
+                    Some("manual") => "Manual",
+                    Some("automatic") => "Automatic",
+                    _ => "Disabled",
+                });
                 l.push(format!("Set-Service -Name {svc_ps} -StartupType {st} -ErrorAction SilentlyContinue"));
             }
             l.push(format!("if (-not (Get-Service -Name {svc_ps} -ErrorAction SilentlyContinue)) {{ $failedSteps++; Write-TFDiag -Stage 'optimizer.service' -Mutation 'rolled_back' -Detail ('step ' + ({i} + 1) + ' [' + {label_ps} + '] 服务不存在: ' + {svc_ps}) }}"));
@@ -198,10 +200,58 @@ pub(super) fn step_has_engine_field(s: &Value) -> bool {
         || s.get("pwsh").and_then(Value::as_str).is_some()
 }
 
+/// 服务步骤「是否停服」的唯一判据（R3-L01），native 轨与 PS 轨共用。
+///
+/// 三种形态要停服：`disable:true`；没指定启动类型（纯停服步）；`startType:"disabled"`
+/// —— 显式禁用一个仍在跑的服务，若不停服就是文案说「禁用」而进程跑到下次重启。
+/// 其余显式档位只改启动类型，不停服（对齐「不立即停止」与「当前运行不受影响」文案）。
+pub(super) fn service_need_stop(want_disable: bool, expected_start: Option<u32>) -> bool {
+    want_disable
+        || expected_start.is_none()
+        || expected_start == Some(crate::engine::native::SVC_START_DISABLED)
+}
+
+/// 原生轨失败原因的**唯一构造器**（R3-L08）：前置步骤序号。
+/// 同一 label 在同一项的多步里重复并不罕见，只说 label 时分不清是第几步出的问题；
+/// PS 轨的 `Write-TFDiag` 早已带 `(i+1)`，两轨回执口径由此对齐。
+pub(super) fn step_reason(index: usize, label: &str, why: &str) -> String {
+    format!("第 {} 步「{label}」: {why}", index + 1)
+}
+
 /// 「形态未识别」步骤的失败原因文案（执行链末尾 else 与契约测试共用同一份措辞）。
 /// 点名 label 是硬要求：回执里说不出是哪一步，用户与审计者都无从下手。
-pub(super) fn unrecognized_step_reason(label: &str) -> String {
-    format!("步骤「{label}」: 步骤形态未识别（reg/cmd/service/pwsh 四个引擎字段均缺失）")
+pub(super) fn unrecognized_step_reason(index: usize, label: &str) -> String {
+    step_reason(index, label, "步骤形态未识别（reg/cmd/service/pwsh 四个引擎字段均缺失）")
+}
+
+/// 一条合法的 `@@RECYCLE@@` 协议体：路径 + 数据层自报的归因（`id` / `isDir`）。
+///
+/// R3-L06：协议行此前只留 `path`，失败时用户与审计者不知道是哪个附带项、哪类目标
+/// 没进回收站（`subitems.rs` 的 OneDrive 步已自报 `id` / `isDir`，被丢弃）。
+/// 归因缺失时照常工作，只少一段尾巴 —— 老脚本的协议行仍全部有效。
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct RecycleTarget {
+    pub(super) path: String,
+    pub(super) id: Option<String>,
+    pub(super) is_dir: Option<bool>,
+}
+
+impl RecycleTarget {
+    /// 失败文案/日志用的归因尾巴；协议行没带归因时为空串。
+    pub(super) fn attribution(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(id) = &self.id {
+            parts.push(format!("id={id}"));
+        }
+        if let Some(is_dir) = self.is_dir {
+            parts.push(format!("isDir={is_dir}"));
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("（{}）", parts.join("，"))
+        }
+    }
 }
 
 /// 一行 `@@RECYCLE@@` 协议体的分类结果（只判形状，落地前的四道闸在调用方）。
@@ -211,8 +261,8 @@ pub(super) enum RecycleLine {
     Malformed(&'static str),
     /// 同一路径已在本批出现过 —— 去重是正常收敛，不算畸形。
     Duplicate,
-    /// 形状合法的路径。
-    Path(String),
+    /// 形状合法的路径（含可选归因）。
+    Path(RecycleTarget),
 }
 
 /// 协议体形状判定。抽成纯函数是给 R3-L07 留判据面：`"path": ""` 与「缺 path」
@@ -230,7 +280,11 @@ pub(super) fn classify_recycle_line(rest: &str, seen: &mut std::collections::Has
     if !seen.insert(p.to_string()) {
         return RecycleLine::Duplicate;
     }
-    RecycleLine::Path(p.to_string())
+    RecycleLine::Path(RecycleTarget {
+        path: p.to_string(),
+        id: entry.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string),
+        is_dir: entry.get("isDir").and_then(Value::as_bool),
+    })
 }
 
 /// 原生执行优化步骤（对应 optimizer_build.ps1 模板，S1）
@@ -280,6 +334,9 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
             let mut reg_bytes = vec![0xFFu8, 0xFEu8];
             reg_bytes.extend(reg.encode_utf16().flat_map(|u| u.to_le_bytes()));
             let mut reg_path: Option<std::path::PathBuf> = None;
+            // R3-L02：写入句柄活到 import 结束 —— 写完先 sync_all 落盘，再改名到第二个
+            // 随机名后按名导入；句柄在导入完成前不释放，名字也不再是「可预测时间戳」。
+            let mut reg_hold: Option<std::fs::File> = None;
             let mut write_err: Option<String> = None;
             for _ in 0..3 {
                 // B2-1：名字由 `engine::tmpnames` 的形态声明拼出，与清扫白名单共用同一份
@@ -295,12 +352,29 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
                 {
                     Ok(mut f) => {
                         use std::io::Write;
-                        match f.write_all(&reg_bytes) {
+                        match f.write_all(&reg_bytes).and_then(|_| f.sync_all()) {
                             Ok(_) => {
-                                reg_path = Some(candidate);
+                                let renamed = tmp_dir.join(crate::engine::tmpnames::OPTIMIZER_REG.build(
+                                    crate::engine::now_ms(),
+                                    &crate::pwsh::random_token(),
+                                ));
+                                match std::fs::rename(&candidate, &renamed) {
+                                    Ok(_) => {
+                                        reg_path = Some(renamed);
+                                        reg_hold = Some(f);
+                                    }
+                                    Err(e) => {
+                                        // 改名失败：本进程刚建的那个文件由自己清掉（不留孤儿）
+                                        drop(f);
+                                        let _ = std::fs::remove_file(&candidate);
+                                        write_err = Some(e.to_string());
+                                    }
+                                }
                                 break;
                             }
                             Err(e) => {
+                                drop(f);
+                                let _ = std::fs::remove_file(&candidate);
                                 write_err = Some(e.to_string());
                                 break;
                             }
@@ -325,18 +399,19 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
                             // P2-05：失败回执带统计（已写入/已删除多少），
                             // 文案只陈述事实，不承诺「可直接重试」。
                             failed += 1;
-                            failed_reasons.push(format!("步骤「{label}」: {}", e.user_message()));
+                            failed_reasons.push(step_reason(i, label, &e.user_message()));
                         }
                     }
+                    drop(reg_hold); // 导入完成才释放写入句柄（R3-L02）
                     let _ = std::fs::remove_file(&reg_path);
                 }
                 (_, Some(e)) => {
                     failed += 1;
-                    failed_reasons.push(format!("步骤「{label}」: .reg 临时文件写入失败: {e}"));
+                    failed_reasons.push(step_reason(i, label, &format!(".reg 临时文件写入失败: {e}")));
                 }
                 (None, None) => {
                     failed += 1;
-                    failed_reasons.push(format!("步骤「{label}」: .reg 临时文件写入失败: 文件名连续碰撞"));
+                    failed_reasons.push(step_reason(i, label, ".reg 临时文件写入失败: 文件名连续碰撞"));
                 }
             }
         } else if let Some(cmd) = s.get("cmd").and_then(|v| v.as_str()) {
@@ -352,7 +427,7 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
             };
             if !ok {
                 failed += 1;
-                failed_reasons.push(format!("步骤「{label}」: 命令返回非零"));
+                failed_reasons.push(step_reason(i, label, "命令返回非零"));
             }
         } else if let Some(service) = s.get("service").and_then(|v| v.as_str()) {
             // service 类型。三种形态，语义各不相同（R0-a 起）：
@@ -376,7 +451,7 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
                     Ok(v) => Some(v),
                     Err(reason) => {
                         failed += 1;
-                        failed_reasons.push(format!("步骤「{label}」: {reason}"));
+                        failed_reasons.push(step_reason(i, label, &reason));
                         None
                     }
                 },
@@ -386,25 +461,26 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
                 expected_start = Some(crate::engine::native::SVC_START_DISABLED);
             }
 
-            // 是否需要停服：只有「要 disabled」或「没指定启动类型」才停。
-            // 显式 startType 且非 disabled ⇒ 用户要的是「下次开机别自动起」，
-            // 停服是副作用，不做（对齐 label「不立即停止」与 desc「当前运行不受影响」）。
-            let need_stop = want_disable || expected_start.is_none();
+            // 停服判据与 PS 轨共用 [`service_need_stop`]（R3-L01）：`disable:true`、
+            // 纯停服步、`startType:"disabled"` 都要停；其余显式档位只改启动类型。
+            let need_stop = service_need_stop(want_disable, expected_start);
 
             if need_stop {
                 // 终态语义走 native 原语（v5 O-1）：1062 本就未启动 / 1060 本机没装
                 // 都等于目标达成，判 Ok。旧的 `sc stop` 直调把退出码非零一律当失败。
                 if let Err(reason) = crate::engine::native::service_stop_pub(service) {
                     failed += 1;
-                    failed_reasons.push(format!("服务「{service}」: {reason}"));
+                    failed_reasons.push(step_reason(i, label, &format!("服务「{service}」: {reason}")));
                 }
             }
             if let Some(want) = expected_start {
                 // 审查 2026-09-27 L5 的等价物：被策略拒绝不再静默，计入失败原因。
                 if let Err(reason) = crate::engine::native::service_set_start_pub(service, want) {
                     failed += 1;
-                    failed_reasons.push(format!(
-                        "服务「{service}」: {reason}（可能被组策略锁定）"
+                    failed_reasons.push(step_reason(
+                        i,
+                        label,
+                        &format!("服务「{service}」: {reason}（可能被组策略锁定）"),
                     ));
                 }
             }
@@ -412,7 +488,11 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
             // 不停服，拿运行态当判据会把它误判成失败。
             if !crate::engine::native::service_exists(service) {
                 failed += 1;
-                failed_reasons.push(format!("服务「{service}」不存在（可能已被卸载或精简）"));
+                failed_reasons.push(step_reason(
+                    i,
+                    label,
+                    &format!("服务「{service}」不存在（可能已被卸载或精简）"),
+                ));
             }
         } else if let Some(pwsh) = s.get("pwsh").and_then(|v| v.as_str()) {
             // pwsh 类型：交给解释器（v3-K1）。原生可编译 → 原生执行；白名单内
@@ -424,7 +504,7 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
                     // 审查 2026-09-27 M2：与 reg/cmd/service 同口径——失败计数继续，
                     // 不再 return Err 中止整批（此前前置步骤已落盘、后置永不执行）
                     failed += 1;
-                    failed_reasons.push(format!("pwsh 步骤「{label}」: {reason}"));
+                    failed_reasons.push(step_reason(i, label, &format!("pwsh 执行失败: {reason}")));
                 }
             }
         } else if step_has_engine_field(s) {
@@ -432,18 +512,20 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
             // `step_has_engine_field` 分叉了（新增字段只改了一边）。同样计失败，
             // 不静默跳过——静默是 R3-L01 那条缺陷的成因，不是解决方案。
             failed += 1;
-            failed_reasons.push(format!(
-                "步骤「{label}」: 步骤字段形状异常（引擎字段存在但未进入任何执行分支）"
+            failed_reasons.push(step_reason(
+                i,
+                label,
+                "步骤字段形状异常（引擎字段存在但未进入任何执行分支）",
             ));
         } else {
             // R3-L01（v7.2 C04）：四个引擎字段全都不匹配的形态**必须计入失败**。旧链没有
             // 末尾 else ⇒ 这一步既没执行也不计数，进度照发、回执照报成功，用户看到的是
             // 「做完了」，事实是「一个字没改」。与 reg/cmd/service/pwsh 各分支的
             // 「失败计数继续」语义对齐，不再让未知形态享受静默待遇。
-            // 现算盘上 301 个步骤全部单字段合法 ⇒ 本分支暂不可达；不可达不等于不修，
+            // 现算盘上全部数据层步骤都是单字段合法 ⇒ 本分支暂不可达；不可达不等于不修，
             // 数据层一旦增补漏字段的步骤就会落在这里（判据面见 contract_tests 的合成用例）。
             failed += 1;
-            failed_reasons.push(unrecognized_step_reason(label));
+            failed_reasons.push(unrecognized_step_reason(i, label));
         }
 
         // 推送进度
@@ -830,6 +912,19 @@ pub(super) fn recycle_summary(rec_ok: i64, rec_fail: i64, rec_malformed: i64) ->
     Some(s)
 }
 
+/// 执行**后**记账结果的统一出口（R3-L07）。
+///
+/// 执行前记账是 fail-closed，执行后的转正 / 销账 / 摘灰写不进去时没人看返回值 ——
+/// 界面会一直挂着 pending 或「未完成还原」，用户重试还会二次写入。`ok=false` 时
+/// 落一行 warn，并返回一句可直接拼进回执 `message` 的说明；成功时返回空串。
+pub(super) fn ledger_note(action: &str, ok: bool) -> String {
+    if ok {
+        return String::new();
+    }
+    log::write_log("warn", &format!("优化状态记账未落盘（{action}），界面状态可能滞后"));
+    format!("（{action}记账失败，界面状态可能滞后，详见日志）")
+}
+
 #[tauri::command]
 pub async fn optimizer_run<R: Runtime>(
     window: WebviewWindow<R>,
@@ -1018,10 +1113,14 @@ pub async fn optimizer_run<R: Runtime>(
             // 旧代码在这里 mark_applied("unknown") 谎报 applied，违反记账不变式②；
             // 改落 partial，由 optimizer_state_overview 如实呈现。
             // 根治（2026-10-03）：失败原因一并记账，横幅/详情里能看出败在哪。
-            let _ = opt_state::mark_partial_with_reasons(
-                &option_id,
-                &[format!("执行链整体失败: {e}")],
+            let note = ledger_note(
+                "失败记账",
+                opt_state::mark_partial_with_reasons(
+                    &option_id,
+                    &[format!("执行链整体失败: {e}")],
+                ),
             );
+            return json!({ "success": false, "message": format!("{e}{note}") });
         }
         return json!({ "success": false, "message": e });
     };
@@ -1053,7 +1152,7 @@ pub async fn optimizer_run<R: Runtime>(
             // R3-L07（v7.2 C04）：形状判定收进 `classify_recycle_line` 一处 ——
             // `"path": ""` 过去与「重复行」共用一个 `continue`，既不计数也不告警，
             // 与本条自述相反；现在它和「缺 path」「解析失败」同归畸形。
-            let p = match classify_recycle_line(rest, &mut seen) {
+            let target = match classify_recycle_line(rest, &mut seen) {
                 RecycleLine::Malformed(why) => {
                     rec_malformed += 1;
                     log::write_log("warn", &format!("优化回收站协议畸形行（{why}）: {rest}"));
@@ -1061,31 +1160,35 @@ pub async fn optimizer_run<R: Runtime>(
                 }
                 // 重复行按「同一个目录只投一次」去重，属正常收敛，不计畸形。
                 RecycleLine::Duplicate => continue,
-                RecycleLine::Path(p) => p,
+                RecycleLine::Path(t) => t,
             };
+            // R3-L06：失败文案带上协议行的归因（id / isDir）与具体路径 —— 只报数字
+            // 时用户不知道是哪个附带项没清干净。
+            let p = target.path.as_str();
+            let who = target.attribution();
             // R3-M03（v7.2 C01）：单批上限——PS 输出被截断/掺噪声/失控时，回收站出口
             // 不能无界吞路径。口径对齐 finder 的 FINDER_DELETE_MAX(500)。
             if rec_seen >= RECYCLE_EXIT_MAX_ITEMS {
                 rec_fail += 1;
-                log::write_log("warn", &format!("优化回收站协议超出单批上限 {RECYCLE_EXIT_MAX_ITEMS}，已拒: {p}"));
+                log::write_log("warn", &format!("优化回收站协议超出单批上限 {RECYCLE_EXIT_MAX_ITEMS}，已拒: {p}{who}"));
                 continue;
             }
             rec_seen += 1;
             // C01（v7.2 R3-M03）：此前只过 `is_path_protected` 第一道闸——
             // %WINDIR% 子孙（exact 语义管不到）与 reparse 件都会进回收站。
             // 四道组合闸收口到 validate_mutation_target（拒因唯一真源）。
-            if let Err(why) = protect::validate_mutation_target(&p) {
+            if let Err(why) = protect::validate_mutation_target(p) {
                 rec_fail += 1;
-                log::write_log("warn", &format!("优化回收站协议拒绝: {why}"));
+                log::write_log("warn", &format!("优化回收站协议拒绝: {why}（{p}{who}）"));
                 continue;
             }
             // 审查 v2-F1：走 `_os` 版。路径来自 PS stdout 的 @@RECYCLE@@ 协议，
             // 含孤立代理项的名字经 `&str` 往返会被改写，导致删错或删不到。
-            match trim_finder::scan::recycle::send_to_trash_os(std::path::Path::new(&p).as_os_str()) {
+            match trim_finder::scan::recycle::send_to_trash_os(std::path::Path::new(p).as_os_str()) {
                 Ok(()) => rec_ok += 1,
                 Err(e) => {
                     rec_fail += 1;
-                    log::write_log("warn", &format!("优化项目标移入回收站失败: {p} -> {e}"));
+                    log::write_log("warn", &format!("优化项目标移入回收站失败: {p}{who} -> {e}"));
                 }
             }
         }
@@ -1140,10 +1243,10 @@ pub async fn optimizer_run<R: Runtime>(
             let verify = verify_option_restored(&option_id, opt);
             if verify == "partial" {
                 log::write_log("warn", &format!("还原后回读校验不符（可能被组策略/安全软件覆盖）: {title}"));
-                let _ = opt_state::set_detected_entry(&option_id, true);
+                let note = ledger_note("未完成标记", opt_state::set_detected_entry(&option_id, true));
                 return json!({
                     "success": true,
-                    "message": "还原已执行但未完全生效（回读不符），可重试",
+                    "message": format!("还原已执行但未完全生效（回读不符），可重试{note}"),
                     "verify": verify
                 });
             }
@@ -1158,9 +1261,12 @@ pub async fn optimizer_run<R: Runtime>(
                     "verify": verify
                 });
             }
-            let _ = opt_state::remove(&option_id);
-            let _ = opt_state::set_detected_entry(&option_id, false);
-            return json!({ "success": true, "message": ok_message, "verify": verify });
+            let note = format!(
+                "{}{}",
+                ledger_note("还原销账", opt_state::remove(&option_id)),
+                ledger_note("摘灰", opt_state::set_detected_entry(&option_id, false)),
+            );
+            return json!({ "success": true, "message": format!("{ok_message}{note}"), "verify": verify });
         }
     } else if ok {
         let mut verify = verify_applied(&option_id, opt, &p);
@@ -1173,15 +1279,15 @@ pub async fn optimizer_run<R: Runtime>(
         if verify == "partial" {
             log::write_log("warn", &format!("执行后回读校验不符（可能被组策略/安全软件覆盖）: {title}"));
         }
-        let _ = opt_state::mark_applied(&option_id, verify);
+        let mut note = ledger_note("转正", opt_state::mark_applied(&option_id, verify));
         if verify != "unknown" {
-            let _ = opt_state::set_detected_entry(&option_id, verify == "pass");
+            note.push_str(&ledger_note("摘灰", opt_state::set_detected_entry(&option_id, verify == "pass")));
         }
         // P1-02：成功时若有本机不存在而被跳过的目标，message 点名数量、完整名单随 skipped 下发
         let final_message = if skipped.is_empty() {
-            ok_message
+            format!("{ok_message}{note}")
         } else {
-            format!("{ok_message}（{} 个本机不存在，已跳过，完整名单见操作日志）", skipped.len())
+            format!("{ok_message}（{} 个本机不存在，已跳过，完整名单见操作日志）{note}", skipped.len())
         };
         return json!({
             "success": true,
@@ -1201,14 +1307,17 @@ pub async fn optimizer_run<R: Runtime>(
         if let Some(s) = &rec_summary {
             ledger_reasons.push(s.clone());
         }
-        let _ = opt_state::mark_partial_with_reasons(&option_id, &ledger_reasons);
+        let note = ledger_note(
+            "失败记账",
+            opt_state::mark_partial_with_reasons(&option_id, &ledger_reasons),
+        );
         log::write_log(
             "warn",
             &format!("优化项部分步骤失败（{} 项），已记账为 partial: {title}", failed_reasons.len()),
         );
         return json!({
             "success": false,
-            "message": ok_message,
+            "message": format!("{ok_message}{note}"),
             "failedSteps": failed_reasons
         });
     }

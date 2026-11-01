@@ -8,6 +8,7 @@
 use crate::engine::{guard, log, optimization_state as opt_state, sysinfo};
 use serde_json::{Value, json};
 use tauri::{Runtime, WebviewWindow};
+use super::apply::ledger_note;
 use super::catalog::*;
 use super::overview::*;
 // ==================== 值级注册表备份与还原 ====================
@@ -30,7 +31,10 @@ pub(super) fn load_opt_backups() -> Value {
 
 /// 还原入口专用的三态读取（A1-M04，v7.2 C06）：台账读不动时不能回「无备份记录」——
 /// 那会让用户以为从来没备份过，而真相是「不知道有没有」。`Absent` 才是确无台账。
-fn load_opt_backups_state() -> Result<Value, String> {
+///
+/// 还原点频率回收链也走这条（R3-L03）：两条值级还原链共用同一个读器，`Err` 不再被
+/// 宽松读器折叠成空表。
+pub(super) fn load_opt_backups_state() -> Result<Value, String> {
     match crate::security::read_json_state(&opt_backup_file()) {
         crate::security::JsonState::Ok(v) => Ok(v),
         crate::security::JsonState::Absent => Ok(json!({})),
@@ -534,10 +538,14 @@ pub async fn optimizer_restore_reg<R: Runtime>(
         log::write_log("error", &format!("优化项还原后清理备份记录失败: {option_id} {e}"));
         return json!({ "success": false, "message": format!("还原完成但备份记录清理失败: {e}") });
     }
-    let _ = opt_state::remove(&option_id);
-    let _ = opt_state::set_detected_entry(&option_id, false);
+    // R3-L07：销账与摘灰写不进去时不静默 —— 成功回执里点名「界面状态可能滞后」。
+    let note = format!(
+        "{}{}",
+        ledger_note("还原销账", opt_state::remove(&option_id)),
+        ledger_note("摘灰", opt_state::set_detected_entry(&option_id, false)),
+    );
     log::write_log("info", &format!("优化项注册表已按备份还原: {option_id}（{restored} 项）"));
-    json!({ "success": true, "restored": restored })
+    json!({ "success": true, "restored": restored, "message": format!("已按备份还原{note}") })
 }
 
 /// 还原操作（B11：不再生成「交给 pwsh 的脚本正文」，而是生成结构化操作，

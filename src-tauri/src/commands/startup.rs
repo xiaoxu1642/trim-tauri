@@ -72,23 +72,31 @@ fn save_cache(items: &[Value]) {
 }
 
 /// id 缺省回退链：id || regPath || filePath || taskName || index
+///
+/// 回退之后还要**唯一化**（`snapshot::unique_snapshot_id`，与右键菜单域共用一份）：
+/// 快照是 `id → 项` 的 Map，同 id 的两条里后一条静默覆盖前一条（界面上两行都能点，
+/// 禁用/删除只打到一个坐标）。同值多行（同名文件、同 regPath 的两个值）就会撞。
 fn normalize_ids(items: Vec<Value>) -> Vec<Value> {
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     items
         .into_iter()
         .enumerate()
         .map(|(index, mut it)| {
-            let has_id = it.get("id").and_then(|v| v.as_str()).is_some();
-            if !has_id {
-                let fallback = it
-                    .get("regPath")
-                    .or_else(|| it.get("filePath"))
-                    .or_else(|| it.get("taskName"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| index.to_string());
-                if let Some(o) = it.as_object_mut() {
-                    o.insert("id".into(), json!(fallback));
-                }
+            let base = it
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    it.get("regPath")
+                        .or_else(|| it.get("filePath"))
+                        .or_else(|| it.get("taskName"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| index.to_string())
+                });
+            let id = snapshot::unique_snapshot_id(&mut used, &base, index);
+            if let Some(o) = it.as_object_mut() {
+                o.insert("id".into(), json!(id));
             }
             it
         })
@@ -517,9 +525,19 @@ fn task_coordinate_problem(s: &str) -> Option<&'static str> {
 /// regedit 的 LastKey 期望「计算机\HKEY_…」全形态；只认四个 hive 根，防拼任意串。
 fn regedit_last_key(reg_path: &str) -> Option<String> {
     let p = reg_path.trim().replace('/', "\\");
+    // 控制字符（含 NUL）必须在判定前拒：这一串随后按 UTF-16 编进 REG_SZ，而 regedit
+    // 读到第一个 NUL 就截断 —— 放行等于「判定通过的串」与「实际落点的串」不是同一串
+    // （`HKEY_CURRENT_USER\A\0…` 判定为子键 A 下的长路径，regedit 实际落在 A）。
+    if p.chars().any(|c| c.is_control()) {
+        return None;
+    }
     let roots = ["HKEY_CURRENT_USER", "HKEY_LOCAL_MACHINE", "HKEY_CLASSES_ROOT", "HKEY_USERS"];
+    // 用 `get` 取前缀而不是切片：非 ASCII 前缀的字节边界可能落在字符中间，直接
+    // `p[..r.len()]` 会 panic（本函数吃的是 IPC 入参，不能靠输入形状保证）。
     let hit = roots.iter().any(|r| {
-        p.len() > r.len() + 1 && p[..r.len()].eq_ignore_ascii_case(r) && p.as_bytes()[r.len()] == b'\\'
+        p.len() > r.len() + 1
+            && p.get(..r.len()).map(|head| head.eq_ignore_ascii_case(r)).unwrap_or(false)
+            && p.as_bytes()[r.len()] == b'\\'
     });
     if !hit {
         return None;
@@ -819,6 +837,32 @@ mod tests {
         assert!(regedit_last_key("Software\\Foo").is_none(), "缺 hive 根必须拒");
         assert!(regedit_last_key("HKEY_CURRENT_USER").is_none(), "裸根键（无子键）拒：regedit 打开根没有定位意义");
         assert!(regedit_last_key("HKEY_CURRENT_USERX\\A").is_none(), "前缀相同的根名不算命中");
+        // 控制字符：判定串与写进 REG_SZ 的串必须是同一串（regedit 在第一个 NUL 处截断）
+        assert!(regedit_last_key("HKEY_CURRENT_USER\\A\0B").is_none(), "NUL 必须拒");
+        assert!(regedit_last_key("HKEY_CURRENT_USER\\A\nB").is_none(), "换行等控制字符必须拒");
+        // 非 ASCII 前缀：前缀比较不得按字节切片 panic（本函数吃 IPC 入参）
+        assert!(regedit_last_key("a中中中中中中\\x").is_none(), "多字节前缀只许判不命中，不许 panic");
+    }
+
+    /// 同值多行 / 兜底名撞既有 id 时，快照键必须仍两两不同 ——
+    /// `by_id` 是 Map，同 id 后一条覆盖前一条（重叠的启动项会永远写错目标）。
+    /// 判红自证：把 `normalize_ids` 的唯一化去掉（只做缺省回退）⇒ 本用例红。
+    #[test]
+    fn normalize_ids_makes_snapshot_keys_unique() {
+        let out = normalize_ids(vec![
+            json!({ "id": "task|\\" }),
+            json!({ "id": "task|\\" }),
+            json!({ "regPath": "HKCU\\Run" }),
+            json!({ "regPath": "HKCU\\Run" }),
+            json!({}),
+        ]);
+        let ids: Vec<&str> = out
+            .iter()
+            .filter_map(|v| v.get("id").and_then(|x| x.as_str()))
+            .collect();
+        let uniq: std::collections::HashSet<&str> = ids.iter().copied().collect();
+        assert_eq!(ids.len(), uniq.len(), "id 必须唯一: {ids:?}");
+        assert_eq!(snapshot::by_id(&out).len(), 5, "快照必须收全五条");
     }
 
     /// 正向对照：把白名单里的 `..` 段判定删掉，上面的穿越用例必须红（防恒绿）。

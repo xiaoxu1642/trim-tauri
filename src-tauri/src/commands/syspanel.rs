@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Runtime, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::engine::guard;
+use crate::engine::{guard, log};
 use crate::engine::native::{
     PagefileEntry, PowerSettingChange, pagefile_apply, pagefile_state, power_high_performance_hide,
     power_high_performance_restore, power_plan_apply, power_plan_delete, power_plan_duplicate,
@@ -129,6 +129,9 @@ pub fn syspanel_power_plan_delete<R: Runtime>(
     if !confirmed_high_risk {
         return Err("删除电源方案需要二次确认后重试".to_string());
     }
+    // 危险操作前刷盘（AGENTS §4.3）：紧随其后的方案删除若让进程异常退出，
+    // 这条「谁删了哪个方案」的日志是唯一追溯线索。
+    log::flush_sync();
     power_plan_delete(&guid).and_then(syspanel_ok)
 }
 
@@ -202,6 +205,8 @@ pub fn syspanel_power_hide_high_performance<R: Runtime>(
     if !confirmed_high_risk {
         return Err("隐藏「高性能」会从系统移除该方案，需要二次确认后重试".to_string());
     }
+    // 危险操作前刷盘（AGENTS §4.3）：导出后删除是同一条命令，回溯只能靠日志。
+    log::flush_sync();
     power_high_performance_hide().and_then(syspanel_ok)
 }
 
@@ -316,5 +321,8 @@ pub fn syspanel_pagefile_apply<R: Runtime>(
     if !confirmed_high_risk {
         return Err("虚拟内存改动风险高（关错配置可能导致蓝屏），需要二次确认后重试".into());
     }
+    // 危险操作前刷盘（AGENTS §4.3）：写错虚拟内存可能以蓝屏收场，
+    // 「本次写了什么」必须先落盘再动系统。
+    log::flush_sync();
     pagefile_apply(managed, &entries).map(|state| json!({ "success": true, "data": state }))
 }

@@ -6,7 +6,7 @@
 
 use crate::engine::guard;
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::WebviewWindow;
 pub(crate) fn valid_appx_fullname(fullname: &str) -> bool {
     !fullname.is_empty()
@@ -207,12 +207,11 @@ pub(super) fn enum_appx_store_extras(seen: &std::collections::HashSet<String>) -
                     Some((dir, _)) => dir.to_string(),
                     None => String::new(),
                 };
-                if !install_dir.is_empty() {
-                    // 再判一次：当前用户已注册的同名包会在上面 seen 里被跳过，这里挡的是
-                    // 「同一个包全名在两个子树里都出现」的重叠，避免一行出两次
-                    if out.iter().any(|r| r["id"].as_str() == Some(format!("APPX|{full}").as_str())) {
-                        continue;
-                    }
+                // R2b-L07：同一个包全名可能在 Staged 与 Applications 两个子树都出现 ——
+                // 按 id 先到先得去重，与 install_dir 是否解析出来无关（Applications 支路
+                // 没有 Path 值，install_dir 恒空，旧写法把那支的整段去重跳过了）。
+                if out.iter().any(|r| r["id"].as_str() == Some(format!("APPX|{full}").as_str())) {
+                    continue;
                 }
                 out.push(json!({
                     "id": format!("APPX|{full}"),
@@ -323,7 +322,21 @@ pub fn uninstall_appx_logo<R: tauri::Runtime>(window: WebviewWindow<R>, logo_pat
     let Ok(canon) = std::fs::canonicalize(&path) else {
         return json!({ "success": false, "message": "logo 文件不存在" });
     };
-    if !canon.to_string_lossy().to_lowercase().contains("\\windowsapps\\") {
+    // R2b-L06：字符串 contains 只是预筛 —— 任意自建 `…\WindowsApps\` 目录同样能过，
+    // 而本命令的 MAIN 裁档前提正是「只读 WindowsApps 资产」。真身必须落在
+    // %ProgramFiles%\WindowsApps 之下；ProgramFiles 缺失或根解析不出时一律拒（fail-closed）。
+    let Some(pf) = std::env::var_os("ProgramFiles") else {
+        return json!({ "success": false, "message": "读不到 %ProgramFiles%，logo 路径归属无法确认" });
+    };
+    let Ok(wa_root) = std::fs::canonicalize(Path::new(&pf).join("WindowsApps")) else {
+        return json!({ "success": false, "message": "logo 路径不在 Appx 安装资产范围内" });
+    };
+    let mut root_lc = wa_root.to_string_lossy().to_lowercase();
+    if !root_lc.ends_with('\\') {
+        root_lc.push('\\');
+    }
+    // 目录边界：`WindowsApps\` 带尾分隔符，避免 `WindowsAppsBackup\` 这类同前缀邻目录混入
+    if !canon.to_string_lossy().to_lowercase().starts_with(&root_lc) {
         return json!({ "success": false, "message": "logo 路径不在 Appx 安装资产范围内" });
     }
     let Ok(meta) = std::fs::metadata(&path) else {

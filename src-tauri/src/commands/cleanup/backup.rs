@@ -33,11 +33,20 @@ pub(super) fn valid_backup_file_name(name: &str) -> bool {
 }
 
 /// cleanup:reg-backup-list — 列出清理域注册表备份（只读；≤50 条按 mtime 倒序）
+///
+/// R4-L05：与姊妹命令 `cleanup_file_backup_list` 同形改 async + spawn_blocking ——
+/// 该目录可写、条数没有硬上限，逐条 `metadata()` 曾是同步主线程 I/O。
 #[tauri::command]
-pub fn cleanup_reg_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+pub async fn cleanup_reg_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
+    tauri::async_runtime::spawn_blocking(collect_reg_backup_list)
+        .await
+        .unwrap_or_else(|e| json!({ "success": false, "message": format!("备份清单读取任务异常: {e}") }))
+}
+
+fn collect_reg_backup_list() -> Value {
     // N1：跨根列举（新根在前、同名只留新根那份）。老根那份必须标来源，否则用户会以为
     // 当前版本偷偷写了它；总数与总体积按**全量**算，列表只截最近 50 份。
     let mut items: Vec<Value> = Vec::new();

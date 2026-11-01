@@ -144,20 +144,31 @@ pub(super) unsafe fn image_executable_present(name_lc: &str) -> bool {
     false
 }
 
-/// 采集 IFEO 子键（只读）。返回 (条目, 是否至少在一个视图里枚举到)。
+/// 采集 IFEO 子键（只读）。返回 (条目, 是否至少在一个视图里枚举到, 残缺注记)。
 ///
 /// R-1a：两个视图**分别**枚举，条目带上自己的 `view`。`any` 的语义是「至少一个视图
 /// 有内容」——两个视图都空（或都打不开）才算「本组未采集」，避免一个视图缺根就整组放弃。
-pub(super) unsafe fn collect_ifeo_raws() -> (Vec<IfeoRaw>, bool) {
+///
+/// R2b-L02：枚举按 `cap + 1` 多问一条，触顶时出注记 —— 静默截断会让用户读到
+/// 「本机 IFEO 就这些」。IFEO 候选是只读的，方向是少报，但同族口径不许分叉。
+pub(super) unsafe fn collect_ifeo_raws() -> (Vec<IfeoRaw>, bool, Vec<String>) {
     use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RegCloseKey};
     let mut out = Vec::new();
     let mut any = false;
+    let mut notes = Vec::new();
     for view in [IfeoView::X64, IfeoView::Wow6432] {
-        let names = reg_enum_subkeys(HKEY_LOCAL_MACHINE, view.root(), IFEO_ENUM_CAP);
+        let names = reg_enum_subkeys(HKEY_LOCAL_MACHINE, view.root(), IFEO_ENUM_CAP + 1);
         if !names.is_empty() {
             any = true;
         }
-        for name in names {
+        if names.len() > IFEO_ENUM_CAP {
+            notes.push(format!(
+                "IFEO 视图 {} 的子键数达到枚举上限 {IFEO_ENUM_CAP}（实际列到 {}），本轮只判前 {IFEO_ENUM_CAP} 条（本组结果不完整）",
+                view.root(),
+                names.len()
+            ));
+        }
+        for name in names.into_iter().take(IFEO_ENUM_CAP) {
             let Some(hk) = open_key_read(HKEY_LOCAL_MACHINE, &format!("{}\\{name}", view.root())) else { continue };
             let debugger = reg_sz(hk, "Debugger");
             let value_names = super::helpers::reg_value_names(hk, 32).into_iter().map(|v| v.to_lowercase()).collect();
@@ -166,7 +177,7 @@ pub(super) unsafe fn collect_ifeo_raws() -> (Vec<IfeoRaw>, bool) {
             let _ = RegCloseKey(hk);
         }
     }
-    (out, any)
+    (out, any, notes)
 }
 
 /// (子键数, 值数)；读不到按 (0, 0) —— 调用方会把「一个值都没有」判成不是 perf-only，

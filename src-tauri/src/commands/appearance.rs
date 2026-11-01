@@ -11,12 +11,12 @@
 //!    建窗参数里设材质）。我们额外清一次 DWM backdrop —— 进程存活期内可能从 mica 切到
 //!    none，不清复位会残留半透明背板。`nativeApplied` 回执仍按上游语义对 'none' 给 false。
 //!
-//! ⚠️ 已知联动缺口：`bg-list` / `bg-import` 回传的绝对路径，渲染层 `pathbinding.js`
-//! 会拼成 `file:///` 作为 `<img src>` 与背景图。Tauri 页源是 `http://tauri.localhost`，
-//! Chromium 拦 `file:` 子资源 —— 与已登记的 P1 项（fonts copyUrl / 背景图 file: 直链）
-//! 同因，需启用 asset 协议（`tauri.conf.json` assetProtocol scope + index.html CSP 的
-//! `img-src asset: http://asset.localhost`）后才会真正显示。本模块**保持上游返回契约不变**，
-//! 不改成 dataURL（那是渲染层共享代码，改一处要动两侧）。
+//! 历史缺口（已闭合，勿按旧结论施工）：`bg-list` / `bg-import` 回传的绝对路径，渲染层
+//! `pathbinding.js` 现经 `tauri-api.js` 的 `pathToUrl`（`convertFileSrc`）转 `asset:`，
+//! 配合 `tauri.conf.json` 的 assetProtocol 与 `lib.rs` 运行期 `allow_directory` 生效；
+//! 此前页源是 `http://tauri.localhost`，Chromium 拦 `file:` 子资源，现缺口已闭合，别再按
+//! 旧注释「再开一次 asset 协议」。本模块**保持上游返回契约不变**，不改成 dataURL
+//! （那是渲染层共享代码，改一处要动两侧）。
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -89,7 +89,7 @@ fn should_swap_to_mica(material: &str, material_enabled: bool, on_battery: bool)
     on_battery && material_enabled && swappable
 }
 
-/// 电池供电：亚克力系临时降级为 mica，接电恢复用户设置。
+/// 电池供电：亚克力系临时降级为 mica；接电后只有电源事件会重新求值（最大化变化无回调），
 /// 窗口最大化时跳过 —— Win11 27H2 运行中重设原生材质可能黑屏，等下次事件再试。
 fn apply_battery_material_swap<R: Runtime>(app: &AppHandle<R>, on_battery: bool) {
     let ap = crate::engine::appearance::load_appearance();
@@ -113,10 +113,11 @@ fn apply_battery_material_swap<R: Runtime>(app: &AppHandle<R>, on_battery: bool)
         apply_material_all(app, "mica");
         broadcast_material(app, "mica");
         BATTERY_SWAPPED.store(true, Ordering::Relaxed);
-        log::write_log("info", "电池供电：窗口材质临时降级为 mica（接电自动恢复）");
+        log::write_log("info", "电池供电：窗口材质临时降级为 mica（下次电源状态变化时恢复）");
     } else if !on_battery && BATTERY_SWAPPED.load(Ordering::Relaxed) {
         if main_maximized {
-            return; // 还原路径同上跳过：保持 swapped 标志，等下一次非最大化事件
+            // 还原同样跳过：保持 swapped 标志，等下一次电源状态变化事件（最大化变化无回调）
+            return;
         }
         BATTERY_SWAPPED.store(false, Ordering::Relaxed);
         let effective = effective_of(&material, material_enabled);

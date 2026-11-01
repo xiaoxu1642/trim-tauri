@@ -885,6 +885,19 @@ fn save_baidu_usage(u: &Value) -> Result<(), String> {
         .map_err(|e| format!("百度日限额写入失败: {e}"))
 }
 
+/// 限额计数归一（R1d-L03）：缺字段 / 非数 / 非有限 / 负数都判「不可判定 ⇒ Err」。
+/// 旧写法 `.unwrap_or(0.0)` 把「可解析但缺 count」的坏文件读成 0 —— 当日额度被静默
+/// 清零后继续外呼，与 `load_baidu_usage` 的「损坏不得重置额度」自述相反。
+fn baidu_count_of(u: &Value) -> Result<i64, String> {
+    u.get("count")
+        // `js_number(null)` 按 `Number(null)` 口径给 0——那不是「计数为 0」，是缺值
+        .filter(|v| !v.is_null())
+        .map(settings::js_number)
+        .filter(|n| n.is_finite() && *n >= 0.0)
+        .map(|n| n as i64)
+        .ok_or_else(|| "百度日限额文件缺少可解析的 count，本次不重置额度".to_string())
+}
+
 /// 读限额 → 判上限 → 自增 → 落盘，全程同一把锁（R1d-M04：旧实现分两次调用，
 /// 两个并发请求可能都读到 99 而各写 100）。
 fn try_increment_baidu_daily_count() -> Result<bool, String> {
@@ -895,17 +908,32 @@ fn try_increment_baidu_daily_count() -> Result<bool, String> {
         u["date"] = json!(today);
         u["count"] = json!(0);
     }
-    let count = u
-        .get("count")
-        .map(settings::js_number)
-        .filter(|n| n.is_finite())
-        .unwrap_or(0.0) as i64;
+    let count = baidu_count_of(&u)?;
     if count >= BAIDU_DAILY_LIMIT {
         return Ok(false);
     }
     u["count"] = json!(count + 1);
     save_baidu_usage(&u)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod baidu_count_tests {
+    use super::baidu_count_of;
+    use serde_json::json;
+
+    /// R1d-L03：坏 count 必须拒（宁可不外呼，也不能把额度静默归零）。
+    /// 判红自证：把 `baidu_count_of` 换回 `.unwrap_or(0.0)` ⇒ 后四条断言红。
+    #[test]
+    fn 缺count不得读成零额度() {
+        assert_eq!(baidu_count_of(&json!({ "count": 7 })).unwrap(), 7);
+        assert_eq!(baidu_count_of(&json!({ "count": "8" })).unwrap(), 8);
+        assert!(baidu_count_of(&json!({ "count": 0 })).is_ok());
+        assert!(baidu_count_of(&json!({})).is_err(), "缺 count 必须拒");
+        assert!(baidu_count_of(&json!({ "count": "昨天" })).is_err(), "非数必须拒");
+        assert!(baidu_count_of(&json!({ "count": -1 })).is_err(), "负数必须拒");
+        assert!(baidu_count_of(&json!({ "count": null })).is_err(), "null 必须拒");
+    }
 }
 
 // ==================== 命令 ====================

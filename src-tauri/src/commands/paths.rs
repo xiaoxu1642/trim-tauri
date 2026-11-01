@@ -314,20 +314,34 @@ fn scan_install_paths() -> serde_json::Value {
     if let Some(dmap) = data.as_object_mut() {
         dmap.insert("scannedAt".into(), serde_json::Value::String(scanned_at.clone()));
     }
+    // R1a-L05：落盘值与 `paths_save` 过**同一道**形态闸（判据唯一真源 `path_value_problem`）。
+    // 扫描值的来源是 HKCU 可写的 InstallLocation / DisplayIcon，缺这层就只剩 protect 的
+    // fail-closed 兜底；同一份配置的两条写路径安全边际必须一致，不能一条有闸、一条没闸。
+    let mut keepers: Vec<(String, serde_json::Value)> = Vec::new();
+    for (key, value) in &dmap_snapshot {
+        match value {
+            // 空串 = 本次没扫到，保持既有绑定不动（与旧落盘口径相同）
+            serde_json::Value::String(s) if s.is_empty() => {}
+            serde_json::Value::String(s) => match path_value_problem(s) {
+                Some(why) => {
+                    log::write_log(
+                        "warn",
+                        &format!("路径扫描：{key} 的形态不安全，本次未落盘（{why}）"),
+                    );
+                }
+                None => keepers.push((key.clone(), value.clone())),
+            },
+            serde_json::Value::Array(_) => keepers.push((key.clone(), value.clone())),
+            _ => {}
+        }
+    }
     let persisted = security::update_json(&paths::paths_config_file(), |persisted| {
         let Some(pmap) = persisted.as_object_mut() else {
             return Err("路径配置结构异常（非对象）".into());
         };
         pmap.remove("softwareInventory"); // 软件清单不落盘（同 load_paths_config 口径）
-        for (key, value) in &dmap_snapshot {
-            let keep = match value {
-                serde_json::Value::String(s) => !s.is_empty(),
-                serde_json::Value::Array(_) => true,
-                _ => false,
-            };
-            if keep {
-                pmap.insert(key.clone(), value.clone());
-            }
+        for (key, value) in &keepers {
+            pmap.insert(key.clone(), value.clone());
         }
         pmap.insert("scannedAt".into(), serde_json::Value::String(scanned_at.clone()));
         Ok(())

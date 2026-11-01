@@ -52,6 +52,8 @@ pub(super) fn pending_delete_path() -> std::path::PathBuf {
 }
 
 pub(super) fn pending_load() -> Value {
+    // R2a-L04（2026-11-01 重审）：本函数**会隔离**损坏台账，只给 list 的显式展示用；
+    // 写入路径（add）必须先走 `pending_peek`，否则隔离后空表重建会让旧条目失去撤回凭据。
     let p = pending_delete_path();
     let bytes = match std::fs::read(&p) {
         Ok(b) => b,
@@ -73,6 +75,27 @@ pub(super) fn pending_load() -> Value {
             log::write_log("error", &format!("重启后删台账损坏，已隔离并降级: {reason}"));
             json!({ "version": 1, "entries": [], "degraded": true })
         }
+    }
+}
+
+/// R2a-L04（2026-11-01 重审）：写入路径的只读快照——损坏时**不隔离**、直接 `Err`。
+///
+/// `pending_load` 的隔离语义只留给 list 的显式展示（用户看得见“已隔离”）。
+/// add 若先走 `pending_load`，损坏台账会在判定之前被改名成隔离件，随后
+/// `pending_update` 看到的是「文件不存在」⇒ 建空表继续写，旧 PFRO 条目当场失去
+/// 撤回凭据（只剩不可撤回的 orphanSource 行）——与 `pending_update` 文档注释里
+/// 「损坏拒绝写入」的承诺相反。写入路径先过这里：宁可整批拒绝，也不隔离后拿空表跑。
+pub(super) fn pending_peek() -> Result<Value, String> {
+    let p = pending_delete_path();
+    let bytes = match std::fs::read(&p) {
+        Ok(b) => b,
+        // 文件不存在 = 首次使用（与 pending_load 同一口径，不告警）
+        Err(_) => return Ok(json!({ "version": 1, "entries": [] })),
+    };
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(v) if v.get("version").and_then(Value::as_u64) == Some(1) => Ok(v),
+        Ok(_) => Err("待删台账版本不符（version != 1），拒绝登记；请先在待删清单查看并处理隔离件".into()),
+        Err(_) => Err("待删台账已损坏，拒绝登记；请先在待删清单查看并处理隔离件".into()),
     }
 }
 
@@ -205,14 +228,15 @@ pub(super) fn read_pfro() -> Result<Vec<String>, String> {
 
 /// PFRO 条目 → 可比对的目标路径（纯函数，可测）。
 ///
-/// 为什么要归一：同一个文件在 PFRO 里有三种字面形态——普通/verbatim Win32 路径
-/// （Trim 台账与直接注册表写）、`\??\` 设备路径、以及**会话前缀** `*<会话号>\??\`
+/// 为什么要归一：同一个文件在 PFRO 里有多种字面形态——普通/verbatim Win32 路径
+/// （Trim 台账与直接注册表写）、`\??\` 设备路径、**会话前缀** `*<会话号>\??\`
 /// （未提权进程 MoveFileExW 登记时系统写的就是这一形态；本机现存 4 对第三方条目
-/// 全是它）。不剥这三层，MoveFileExW 登记的条目在「已登记过」检查、list 三态、
-/// 撤回摘除里全部失配——用户看着「未登记」再登记一次，或撤不回（K06 同族病）。
-/// 只做**同实体归并**（三种前缀是同一路径的三种写法），不与任何保护判据耦合。
+/// 全是它），以及其中两种前缀的 UNC 变体（`\\?\UNC\` / `\??\UNC\`，R2a-L06，
+/// 2026-11-01 重审）。不剥这几层，MoveFileExW 登记的条目在「已登记过」检查、
+/// list 三态、撤回摘除里全部失配——用户看着「未登记」再登记一次，或撤不回（K06 同族病）。
+/// 只做**同实体归并**（这些前缀是同一路径的不同写法），不与任何保护判据耦合。
 /// PFRO 里"删除 target"的登记形态：src=target、紧随其后的 dst 为空串。
-/// 匹配走 [`pfro_norm`]（会话前缀/设备路径/verbatim 三形态同实体）。
+/// 匹配走 [`pfro_norm`]（会话前缀/设备路径/verbatim 及 UNC 变体同实体）。
 pub(super) fn pfro_has_delete(entries: &[String], target: &str) -> bool {
     let t = pfro_norm(target);
     if t.is_empty() {
@@ -358,6 +382,15 @@ fn pfro_strip_prefixes(entry: &str) -> String {
                 // 从 idx 处切（不是 idx+1），否则设备路径前缀被啃掉一口、永远剥不掉
                 s = &rest[idx..];
             }
+        }
+    }
+    // R2a-L06（2026-11-01 重审）：UNC 两形态先于单前缀判定——`\\?\UNC\srv\share\x` /
+    // `\??\UNC\srv\share\x` 与台账里的 `\\srv\share\x` 是同一实体。若先剥 `\\?\` /
+    // `\??\`，剩下的是 `UNC\…`，与 `\\srv\…` 永不相等（判重 / list 三态 / 撤回三处失配，
+    // 撤不回）。UNC 没有盘符段，直接返回归一结果，跳过下面的盘符前导斜杠折叠。
+    for pre in [r"\\?\UNC\", r"\??\UNC\"] {
+        if let Some(rest) = s.strip_prefix(pre) {
+            return format!(r"\\{rest}");
         }
     }
     // `\\?\` / `\??\` 两种设备/verbatim 前缀（长的在前，避免 `\\?\` 被 `\??\` 分支吃掉）
@@ -540,8 +573,10 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
         let _lock = PENDING_DELETE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // ① PFRO 现值：类型异常（非 REG_MULTI_SZ）在这里就失败，不进半登记状态
         let pfro = read_pfro()?;
-        // 台账快照（只读）：判「已登记过」用；写路径走 pending_update
-        let doc = pending_load();
+        // 台账快照（只读、**不隔离**）：判「已登记过」用；写路径走 pending_update。
+        // R2a-L04（2026-11-01 重审）：损坏必须在这里整批拒绝——用 pending_load 会在
+        // 判定之前把台账改名隔离，pending_update 随后看到空表并继续写。
+        let doc = pending_peek()?;
         let known = doc["entries"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
         let batch = format!(
             "p{}",
@@ -964,6 +999,21 @@ mod tests {
         assert_eq!(n, 2, "add 与 revoke 都必须在 PENDING_DELETE_LOCK 内做 RMW，实得上锁点 {n} 处");
     }
 
+    /// R2a-L04（2026-11-01 重审）：add 路径先走**不隔离**的 `pending_peek` ——
+    /// 若回到 `pending_load`，损坏台账会在判定之前被改名隔离，`pending_update`
+    /// 随后看到空表并继续写，旧 PFRO 条目当场失去撤回凭据。
+    /// 判红自证：把 add 体内的 `pending_peek()?` 改回 `pending_load()` 即红。
+    #[test]
+    fn r2a_l04_登记路径不隔离损坏台账() {
+        let src = include_str!("pending_delete.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let i_add = prod.find("pub async fn uninstall_pending_add").expect("找不到 add 入口");
+        let i_list = prod.find("pub async fn uninstall_pending_list").expect("找不到 list 入口");
+        let add_body = &prod[i_add..i_list];
+        assert!(add_body.contains("pending_peek()?"), "add 必须先走不隔离的 pending_peek（损坏即整批拒绝）");
+        assert!(!add_body.contains("pending_load()"), "add 不得调用会隔离损坏台账的 pending_load");
+    }
+
     /// K06：PFRO 条目三形态归一——普通/verbatim Win32、`\??\` 设备路径、以及
     /// `*<会话号>\??\` 会话前缀（未提权 MoveFileExW 登记时系统写的正是这一形态，
     /// 本机现存 4 对第三方条目全是它）。不归一 = MoveFileExW 登记的条目在
@@ -986,6 +1036,15 @@ mod tests {
         // ④ 尾分隔符不敏感；非数字会话号不误剥
         assert_eq!(pfro_norm(r"*1\??\C:\Users\me\x.tmp\"), pfro_norm(r"C:\Users\me\x.tmp"));
         assert_ne!(pfro_norm(r"*x\C:\a"), pfro_norm(r"C:\a"), "会话号必须是数字，*x\\ 不是会话前缀");
+        // ⑤ R2a-L06（2026-11-01 重审）：UNC 两形态与台账的 `\\srv\share\…` 同一实体；
+        // 判红自证：删掉 pfro_strip_prefixes 的 UNC 分支 ⇒ 这三条当场红
+        assert_eq!(pfro_norm(r"\\?\UNC\srv\share\x.tmp"), pfro_norm(r"\\srv\share\x.tmp"));
+        assert_eq!(pfro_norm(r"\??\UNC\srv\share\x.tmp"), pfro_norm(r"\\srv\share\x.tmp"));
+        assert_eq!(
+            pfro_norm(r"*1\??\UNC\srv\share\x.tmp"),
+            pfro_norm(r"\\srv\share\x.tmp"),
+            "会话前缀 + UNC 设备路径必须归并到同一目标"
+        );
         // 空串归一后为空 ⇒ 匹配侧必须拒（pfro_has_delete 的空串闸）
         assert!(pfro_norm("").is_empty());
     }

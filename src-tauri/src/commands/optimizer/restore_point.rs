@@ -7,6 +7,7 @@
 use crate::engine::{civil_from_days, guard, log, optimization_state as opt_state, sysinfo};
 use serde_json::{Value, json};
 use tauri::{Runtime, WebviewWindow};
+use super::apply::ledger_note;
 use super::backup_restore::*;
 // ==================== 系统还原点 ====================
 
@@ -14,7 +15,10 @@ use super::backup_restore::*;
 pub(super) fn parse_dmtf(raw: &str) -> Option<String> {
     let s = raw.trim();
     // yyyy mm dd HH MM SS . mmmmmm ± UUU
-    if s.len() != 25 || s.as_bytes()[14] != b'.' {
+    // 定宽 ASCII 是按字节切片的前提（R3-L05）：非 ASCII 落进 `s[a..z]` 会切在字符
+    // 中间直接 panic；分量越界（月 0/13、时 24）会经 `days_from_civil` 算出「合法但
+    // 错误」的时间 —— 两者都只能由畸形输入触发，所以在这里一次判掉。
+    if s.len() != 25 || !s.is_ascii() || s.as_bytes()[14] != b'.' {
         return None;
     }
     let b = |a: usize, z: usize| -> Option<i64> { s[a..z].parse().ok() };
@@ -26,7 +30,18 @@ pub(super) fn parse_dmtf(raw: &str) -> Option<String> {
         b(10, 12)?,
         b(12, 14)?,
     );
+    if !(1..=12).contains(&mo)
+        || !(1..=31).contains(&d)
+        || !(0..=23).contains(&hh)
+        || !(0..=59).contains(&mi)
+        || !(0..=59).contains(&ss)
+    {
+        return None;
+    }
     let sign = s.as_bytes()[21] as char;
+    if sign != '+' && sign != '-' {
+        return None;
+    }
     let off: i64 = s[22..25].parse().ok()?;
     let offset_minutes = if sign == '-' { -off } else { off };
 
@@ -241,29 +256,72 @@ pub(super) fn restore_freq_target() -> RegTarget {
     }
 }
 
+/// 频率覆写回收的失败理由（R3-L03）。台账读不动必须与「确无备份记录」分开 ——
+/// 前者指向「记录不知道有没有」，后者才是真没记录；折叠成一个理由会把用户
+/// 引去点一个必然失败的按钮。
+#[derive(Debug)]
+pub(super) enum FreqRestoreError {
+    /// 台账损坏 / IO 失败：现状未知
+    LedgerUnreadable(String),
+    /// 确无备份记录（含记录为空）
+    NoBackup,
+    /// 备份在，但构造不出还原操作
+    BadBackup,
+    /// 写回或回读校验失败
+    WriteFailed(String),
+}
+
+impl FreqRestoreError {
+    pub(super) fn message(&self) -> String {
+        match self {
+            Self::LedgerUnreadable(e) => e.clone(),
+            Self::NoBackup => "没有可用于恢复的备份记录".to_string(),
+            Self::BadBackup => "备份数据无法解析成还原操作".to_string(),
+            Self::WriteFailed(e) => e.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for FreqRestoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
 /// 把频率覆写值恢复为修改前的原值；原值不存在（备份 `exists=false`）则删除该值
 /// （= 恢复系统默认的 24 小时限制）。`Ok(描述)` = 干了什么；`Err(原因)` = 失败原因。
 ///
 /// 创建流程（无论成败）与弹窗「恢复默认创建频率」命令**共用这一处实现**（§5.16：
 /// 同一判定只许一处定义）——两个调用方各写一份「写回/删值」逻辑，漂移时谁也发现不了。
-pub(super) fn recycle_freq_override() -> Result<String, String> {
-    let map = load_opt_backups();
+pub(super) fn recycle_freq_override() -> Result<String, FreqRestoreError> {
+    // R3-L03：三态读器 —— 台账读不动时不能回「没有可用于恢复的备份记录」。
+    let map = load_opt_backups_state().map_err(FreqRestoreError::LedgerUnreadable)?;
     let some_values = map
         .get("tf_restore_point")
         .and_then(|e| e.get("values"))
         .and_then(|v| v.as_array())
         .cloned();
     let Some(values) = some_values.filter(|a| !a.is_empty()) else {
-        return Err("没有可用于恢复的备份记录".to_string());
+        return Err(FreqRestoreError::NoBackup);
     };
-    // M-11：构造还原操作只做一次，写回与（调用方后续）回读核对共用同一份 ops。
-    let Ok(ops) = build_restore_ops(&values) else {
-        return Err("备份数据无法解析成还原操作".to_string());
-    };
+    // M-11：构造还原操作只做一次，写回与回读核对共用同一份 ops。
+    let ops = build_restore_ops(&values).map_err(|_| FreqRestoreError::BadBackup)?;
     // R3-M02（v7.2 C04，AGENTS §3）：马上要写 HKLM 注册表，日志先强制落盘。
     log::flush_sync();
     if !restore_backup_values(&ops) {
-        return Err("写回注册表失败".to_string());
+        return Err(FreqRestoreError::WriteFailed("写回注册表失败".to_string()));
+    }
+    // R3-L03：写完独立回读 —— `RegSetValueExW` 返回成功不等于值写对了（与
+    // `optimizer_restore_reg` 同口径）；不一致时如实报失败，备份记录保留可重试。
+    let (checked, mismatched) = verify_restore_ops(&ops);
+    if mismatched > 0 {
+        log::write_log(
+            "warn",
+            &format!("还原点频率覆写回读不一致: 核对 {checked} 条 / 不一致 {mismatched} 条"),
+        );
+        return Err(FreqRestoreError::WriteFailed(format!(
+            "回读校验不一致（{mismatched}/{checked} 条），备份记录已保留可重试"
+        )));
     }
     let any_exists = values
         .iter()
@@ -276,7 +334,7 @@ pub(super) fn recycle_freq_override() -> Result<String, String> {
 }
 
 /// 失败回执 + 频率覆写回收结果（D2：无论成败都回收；回收失败如实报出口，不谎报已回收）。
-fn fail_with_recycle(base: &str, rec: Result<String, String>) -> Value {
+fn fail_with_recycle(base: &str, rec: Result<String, FreqRestoreError>) -> Value {
     let tail = match rec {
         Ok(d) => format!("；创建频率覆写已还原（{d}）"),
         Err(e) => format!(
@@ -404,16 +462,19 @@ Write-Output \"@@DONE@@\"";
     // 轮询侧仍走 count_restore_points()：把「等待还原点可见」改成脚本内 while 需要重定超时预算，
     // 属需小旭裁定的那一半，本轮不动。
     let Some(out) = run_inline_ps(create_ps, 120, Some("optimizer.create-restore")) else {
-        let _ = opt_state::remove("tf_restore_point");
+        let note = ledger_note("撤销 pending", opt_state::remove("tf_restore_point"));
         let rec = recycle_freq_override();
-        return fail_with_recycle("创建还原点执行异常", rec);
+        return fail_with_recycle(&format!("创建还原点执行异常{note}"), rec);
     };
     let ok = out.code == 0 && out.stdout.contains("@@DONE@@");
     if !ok {
-        let _ = opt_state::remove("tf_restore_point");
+        let note = ledger_note("撤销 pending", opt_state::remove("tf_restore_point"));
         log::write_log("warn", &format!("创建系统还原点未成功: code={}", out.code));
         let rec = recycle_freq_override();
-        return fail_with_recycle("系统还原点创建失败，请手动创建（需管理员权限，且至少一个卷已开启系统保护）", rec);
+        return fail_with_recycle(
+            &format!("系统还原点创建失败，请手动创建（需管理员权限，且至少一个卷已开启系统保护）{note}"),
+            rec,
+        );
     }
     // v5 O-5：账本改到**回读之后**再记。旧写法在这里就 mark_applied("pass")，而下面的回读
     // 判失败时只 return、不改账 ⇒ 命令回执 success:false 与账本 applied/pass 同时存在；
@@ -455,11 +516,11 @@ Write-Output \"@@DONE@@\"";
     } else if let (Some(b), Some(a)) = (before, last) {
         if a <= b {
             // 回读判失败必须改账（v5 O-5）：partial 项由 optimizer_state_overview 如实呈现
-            let _ = opt_state::mark_partial("tf_restore_point");
+            let note = ledger_note("未完成记账", opt_state::mark_partial("tf_restore_point"));
             log::write_log("warn", &format!("创建还原点回读未增长: {b} -> {a}，已记账为 partial"));
             let rec = recycle_freq_override();
             return fail_with_recycle(
-                "未检测到新还原点，创建可能被系统限制或仍在进行，请稍后在「系统还原点管理」核对",
+                &format!("未检测到新还原点，创建可能被系统限制或仍在进行，请稍后在「系统还原点管理」核对{note}"),
                 rec,
             );
         }
@@ -478,7 +539,7 @@ Write-Output \"@@DONE@@\"";
         log::write_log("warn", "创建还原点：基线计数取不到，无法比对数量增长，按 unknown 记账");
         ("unknown", "创建命令已完成，但未能比对还原点数量（基线计数不可读），请到「系统还原点管理」核对")
     };
-    let _ = opt_state::mark_applied("tf_restore_point", verify);
+    let note = ledger_note("转正", opt_state::mark_applied("tf_restore_point", verify));
     // 无论成败都回收频率覆写值（D2）：成功也要收 —— 别把「解除 24h 限制」留在机器上。
     let rec = recycle_freq_override();
     let tail = match rec {
@@ -488,7 +549,7 @@ Write-Output \"@@DONE@@\"";
         ),
     };
     log::write_log("info", &format!("已创建系统还原点 ({btxt} -> {atxt}) verify={verify}{tail}"));
-    json!({ "success": true, "message": format!("{msg}{tail}"), "verify": verify })
+    json!({ "success": true, "message": format!("{msg}{tail}{note}"), "verify": verify })
 }
 
 /// optimizer:list-restore —— 还原点列表 + 各卷保护状态
@@ -540,6 +601,8 @@ $out.protection = @(Get-CimInstance Win32_ShadowStorage -ErrorAction SilentlyCon
 })\n\
 Write-Output ('@@RESTORE@@' + ($out | ConvertTo-Json -Depth 4 -Compress))";
     let Some(out) = run_inline_ps(ps, 30, None) else {
+        // R3-L04：本函数每个失败出口都必须落一行（前端不替这条记日志）。
+        log::write_log("warn", "列出还原点失败: 查询脚本未跑成（临时脚本写入或 pwsh 启动失败）");
         return json!({ "success": false, "message": "查询异常" });
     };
     if let Some(fail) = out.stdout.lines().map(str::trim).find(|l| l.starts_with("RPFAIL|")) {
@@ -553,9 +616,25 @@ Write-Output ('@@RESTORE@@' + ($out | ConvertTo-Json -Depth 4 -Compress))";
         .map(str::trim)
         .find(|l| l.starts_with("@@RESTORE@@"));
     let Some(line) = res_line else {
+        log::write_log(
+            "warn",
+            &format!(
+                "列出还原点失败: 无 @@RESTORE@@ 输出（exit={}，stdout {} 行）",
+                out.code,
+                out.stdout.lines().count()
+            ),
+        );
         return json!({ "success": false, "message": "无法解析还原点数据" });
     };
     let Ok(mut data) = serde_json::from_str::<Value>(&line["@@RESTORE@@".len()..]) else {
+        log::write_log(
+            "warn",
+            &format!(
+                "列出还原点失败: @@RESTORE@@ 输出不是合法 JSON（exit={}，stdout {} 行）",
+                out.code,
+                out.stdout.lines().count()
+            ),
+        );
         return json!({ "success": false, "message": "无法解析还原点数据" });
     };
     if let Some(points) = data.get_mut("restorePoints").and_then(|v| v.as_array_mut()) {
@@ -592,8 +671,20 @@ pub async fn optimizer_restore_frequency<R: Runtime>(window: WebviewWindow<R>) -
     match recycle_freq_override() {
         Ok(desc) => json!({ "success": true, "message": desc }),
         Err(e) => {
-            let missing = e.contains("没有可用于恢复");
-            json!({ "success": false, "missing": missing, "message": format!("恢复创建频率失败：{e}") })
+            // R3-L03：台账读不动是独立理由，不许折叠成 missing —— 那会把用户引去
+            // 点一个必然失败的按钮。
+            let (reason, missing) = match &e {
+                FreqRestoreError::LedgerUnreadable(_) => ("unreadable", false),
+                FreqRestoreError::NoBackup => ("absent", true),
+                FreqRestoreError::BadBackup => ("corrupt", false),
+                FreqRestoreError::WriteFailed(_) => ("writeFailed", false),
+            };
+            json!({
+                "success": false,
+                "missing": missing,
+                "reason": reason,
+                "message": format!("恢复创建频率失败：{e}")
+            })
         }
     }
 }

@@ -18,7 +18,8 @@
 //! 整条退役后**保留为内部代码**（只由 residue 的四类扫描复用），不再暴露命令。
 //! 跨契约面的回归网单独放 residue_trace_tests（cfg(test)）。
 //!
-//! 注册（lib.rs generate_handler + CHANNEL_MAP + check-guard-tiers MUST_MAIN 同步落；
+//! 注册（lib.rs generate_handler + CHANNEL_MAP + check-guard-tiers 的档位表同步落；
+//! 档位不止 `MUST_MAIN`，窄窗口集 `RESIDUE_WINDOWS` / `PENDING_DELETE_WINDOWS` 同在这一张表。
 //! 条目数以 lib.rs 注册为准，现算：`rg -c "commands::uninstall::" src-tauri/src/lib.rs`）：
 //! ```text
 //! commands::uninstall::uninstall_list,

@@ -222,6 +222,9 @@ pub async fn maintenance_run<R: Runtime>(
 
 fn run_one<R: Runtime>(window: &WebviewWindow<R>, task_id: &str) -> Value {
     log::write_log("info", &format!("维护任务开始: {task_id}"));
+    // 危险操作前刷盘（AGENTS §4.3）：紧随其后的 sfc/DISM 若以异常退出收场，
+    // 「本次跑的是哪个任务」这条日志必须先落盘，否则事后无从追溯。
+    log::flush_sync();
 
     // S3：纯 Rust 原生，无 PS 回退
     match crate::engine::native::maint_run(task_id) {

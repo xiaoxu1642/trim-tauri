@@ -320,6 +320,18 @@ fn expand_content_roots(root: &Path, rels: &[&str]) -> Vec<PathBuf> {
     kept
 }
 
+/// 回执展示形态（R1d-L06）：剥掉 `canonicalize` 补上的 `\\?\` / `\\?\UNC\` 前缀，
+/// 分隔符仍用反斜杠（渲染层把它直接显示在路径列与 `data-tip` 上）。
+/// 判定形态另有一套：`path_key` 会把两种拼法折成同一个键，`in_scope` 与删除不受影响；
+/// 原生删除侧遇到长路径会自行转 verbatim。
+fn display_form(p: &Path) -> String {
+    let s = p.to_string_lossy().replace('/', "\\");
+    match s.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => s.strip_prefix(r"\\?\").unwrap_or(&s).to_string(),
+    }
+}
+
 /// BFS 扫描（不跟随符号链接），单个根的预算由调用方决定。
 /// 返回 (items, 已归类的文件数, 因文件名无法无损表示而未收录的条目数, 是否截断)。
 ///
@@ -430,7 +442,7 @@ fn scan_dir(
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                let path_str = full.to_string_lossy().replace('/', "\\");
+                let path_str = display_form(&full);
                 items.push(json!({
                     "path": path_str,
                     "name": name,
@@ -509,11 +521,10 @@ pub async fn fileclean_scan<R: Runtime>(
     if exceeds_char_len(&scan_path.to_string_lossy(), MAX_PATH_LEN) {
         return json!({ "success": false, "data": [], "message": "扫描路径过长" });
     }
-    let resolved = scan_path
-        .canonicalize()
-        .unwrap_or_else(|_| scan_path.clone())
-        .to_string_lossy()
-        .replace('/', "\\");
+    let resolved_path = scan_path.canonicalize().unwrap_or_else(|_| scan_path.clone());
+    let resolved = resolved_path.to_string_lossy().replace('/', "\\");
+    // R1d-L06：判定形态（槽键前缀）用带前缀的 `resolved`，回执里的 `scanPath` 只给展示形态
+    let resolved_display = display_form(&resolved_path);
 
     let label = window.label().to_string();
     let ty2 = ty.clone();
@@ -599,7 +610,7 @@ pub async fn fileclean_scan<R: Runtime>(
         }),
     );
 
-    let mut resp = scan_response(items, total_size, resolved, unhandled, truncated);
+    let mut resp = scan_response(items, total_size, resolved_display, unhandled, truncated);
     if let Some(o) = resp.as_object_mut() {
         o.insert("degraded".into(), json!(degraded));
     }
@@ -943,6 +954,23 @@ mod tests {
             path_key(r"\\server\share\A\B")
         );
         assert_ne!(path_key(r"C:\A\B"), path_key(r"C:\A\C"));
+    }
+
+    /// R1d-L06：回执给的是展示形态——`canonicalize` 的 `\\?\`（含 UNC 变体）必须剥掉，
+    /// 分隔符仍为反斜杠。判红自证：删掉 `display_form` 的剥前缀段 ⇒ 前两条红。
+    #[test]
+    fn display_form_strips_verbatim_prefix() {
+        assert_eq!(
+            display_form(Path::new(r"\\?\C:\Users\me\Documents\Tencent Files")),
+            r"C:\Users\me\Documents\Tencent Files"
+        );
+        assert_eq!(
+            display_form(Path::new(r"\\?\UNC\server\share\a.jpg")),
+            r"\\server\share\a.jpg"
+        );
+        assert_eq!(display_form(Path::new("C:/Users/me/a.jpg")), r"C:\Users\me\a.jpg");
+        // 单反斜杠的 `\?\` 不是设备前缀（与 path_key 用例同口径，不许顺手剥掉）
+        assert_eq!(display_form(Path::new(r"\?\C:\a")), r"\?\C:\a");
     }
 
     /// v2 用户裁决 1：customPath 只能确认已保存值，不能覆盖它。

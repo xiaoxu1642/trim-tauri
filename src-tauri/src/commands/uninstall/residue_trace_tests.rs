@@ -39,7 +39,7 @@ use super::residue_update::*;
         assert!(!is_third_party_module("kernel32.dll"));
     }
 
-    /// U-2 反查的前缀语义：值名以已知 exe 开头（MuiCache `<exe>.xxx` / BAM 完整路径），
+    /// U-2 反查的前缀语义：值名以已知 exe 开头（MuiCache `<exe>.xxx`），
     /// 或落在安装目录前缀下；前缀命中不得跨「路径段」误放行。
     #[test]
     fn trace_prefix_hit_matches_exe_and_dir() {
@@ -368,7 +368,7 @@ use super::residue_update::*;
                 s.trim().to_lowercase().replace([' ', '-', '_', '.'], "")
             };
             let contains = |hay: &str, needle: &str| -> bool {
-                // 与 residue_update.rs 的 contains2 同口径：pattern 长���须 ≥ 2 字符
+                // 与 residue_update.rs 的 contains2 同口径：pattern 长必须 ≥ 2 字符
                 let n = norm(needle);
                 n.chars().count() >= NAME_MIN_RULE_WORD && norm(hay).contains(&n)
             };
@@ -1234,12 +1234,17 @@ use super::residue_update::*;
         assert_eq!(rest, r"SOFTWARE\网易大神");
     }
 
-    /// R2a-L11（§5.16/N6）：本单元「按注册表回报长度分配」只许共用同一份上限。
-    /// 判红自证：给任一文件再加一处 `let mut buf = vec![0u8; size as usize];` 而不配
-    /// `> MAX_REG_STR_BYTES` ⇒ 两个计数当场不等。
+    /// R2a-L11（§5.16/N6）+ R2a-L02（2026-11-01 重审）：本单元「按注册表回报长度分配」
+    /// 只许共用同一份上限。旧锚点只数 `size as usize` 这一种写法，把
+    /// `reg_enum_sz_values` 的 `data_len.max(2)` 分配漏在判定面外（旧断言只认其中一种写法，
+    /// 真绿但漏点）。
+    /// 现在按分配前缀点数，四个分配点（helpers 两处 + pending_delete 的 read_pfro +
+    /// residue 的 reg_enum_sz_values）各配一道上限。
+    /// 判红自证：给任一文件再加一处 `let mut buf = vec![0u8;` 分配而不配 `> MAX_REG_STR_BYTES`
+    /// ⇒ 两个计数当场不等。
     #[test]
     fn r2a_l11_按回报长度分配共用同一份上限() {
-        const ALLOC: &str = "let mut buf = vec![0u8; size as usize];";
+        const ALLOC: &str = "let mut buf = vec![0u8;";
         const CEILING: &str = "> MAX_REG_STR_BYTES";
         // 闭包写不出「返回借用入参」的生命周期关系（返回类型会退化成入参的更短那个），
         // 所以这条纯函数用 fn 写：省略号写法把输出生命周期绑到入参上。
@@ -1248,11 +1253,16 @@ use super::residue_update::*;
         }
         let helpers = prod(include_str!("helpers.rs"));
         let pending = prod(include_str!("pending_delete.rs"));
-        let allocs = helpers.matches(ALLOC).count() + pending.matches(ALLOC).count();
-        let ceilings = helpers.matches(CEILING).count() + pending.matches(CEILING).count();
-        // 正向特征：现算的分配点集合必须是「三处」（helpers 两处 + PFRO 一处），
-        // 少一处说明锚点被改写、用例本身已失效，不许悄悄退化成恒等式。
-        assert_eq!(allocs, 3, "分配点锚点失配（helpers reg_sz/reg_multi_sz + pending_delete read_pfro）: {allocs}");
+        let residue = prod(include_str!("residue.rs"));
+        let allocs = helpers.matches(ALLOC).count()
+            + pending.matches(ALLOC).count()
+            + residue.matches(ALLOC).count();
+        let ceilings = helpers.matches(CEILING).count()
+            + pending.matches(CEILING).count()
+            + residue.matches(CEILING).count();
+        // 正向特征：现算的分配点集合必须是「四处」，少一处说明锚点被改写、用例本身已失效，
+        // 不许悄悄退化成恒等式。
+        assert_eq!(allocs, 4, "分配点锚点失配（helpers reg_sz/reg_multi_sz + pending_delete read_pfro + residue reg_enum_sz_values）: {allocs}");
         assert_eq!(allocs, ceilings, "每处按回报长度分配都必须有一道 MAX_REG_STR_BYTES 上限: 分配 {allocs} / 上限 {ceilings}");
     }
 
@@ -1288,8 +1298,9 @@ use super::residue_update::*;
     /// R2a-L02：三个上限现算对账（数字只许有一份出处，关系靠常量算、不手抄）。
     #[test]
     fn r2a_l02_三个上限互相对得上() {
-        // 代码侧各产源臂上限：目录/快捷方式两趟 NAME_HIT_CAP + 五路侧痕 SIDE_TRACE_CAP + 服务桶
-        let code_arms = 2 * NAME_HIT_CAP + 5 * SIDE_TRACE_CAP + SERVICE_RESIDUE_CAP;
+        // 代码侧各产源臂上限：目录/快捷方式两趟 NAME_HIT_CAP + 四路侧痕 SIDE_TRACE_CAP + 服务桶
+        // （BAM 臂已删，R2a-L01，2026-11-01 重审——恒 0 命中的臂不再占上限）
+        let code_arms = 2 * NAME_HIT_CAP + 4 * SIDE_TRACE_CAP + SERVICE_RESIDUE_CAP;
         assert!(
             code_arms <= SNAPSHOT_CAP,
             "各产源臂上限和 {code_arms} 必须 ≤ 快照容量 {SNAPSHOT_CAP}，否则扫描出的候选整批落不进快照"

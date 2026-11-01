@@ -18,7 +18,7 @@ use crate::engine::paths;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use super::rules::*;
 // ==================== 路径绑定配置（对照 loadPathsConfig） ====================
 
@@ -77,10 +77,16 @@ pub(super) fn load_paths_config() -> Value {
 
 // ==================== 分槽快照（对照 cleanupSnapshots / lastLockCheckProcs） ====================
 
-pub(super) static CLEANUP_SNAPSHOTS: OnceLock<Mutex<HashMap<String, HashMap<String, Value>>>> = OnceLock::new();
+pub(super) static CLEANUP_SNAPSHOTS: OnceLock<Mutex<HashMap<String, HashMap<String, Arc<Value>>>>> = OnceLock::new();
 pub(super) static LOCK_WHITELIST: OnceLock<Mutex<HashMap<String, Vec<Value>>>> = OnceLock::new();
 
-pub(super) fn snapshots() -> &'static Mutex<HashMap<String, HashMap<String, Value>>> {
+/// 分槽快照表：槽值按条目 id 存 `Arc<Value>`（R4-L06）。
+///
+/// 执行 / 占用检测取快照时只能拿到 owned 值，而 `MutexGuard` 的临时量会活到整条语句
+/// 结束 —— 直接 `.get().cloned()` 等于把整表（单次扫描最多 `PLAN_CAP_TOTAL` 行 files）
+/// 深克隆**在锁内**完成，四个窗口共用的这张表会因此互相阻塞。值存 `Arc` 后锁内只剩
+/// 引用计数 +1。
+pub(super) fn snapshots() -> &'static Mutex<HashMap<String, HashMap<String, Arc<Value>>>> {
     CLEANUP_SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 pub(super) fn lock_whitelist() -> &'static Mutex<HashMap<String, Vec<Value>>> {
@@ -120,7 +126,7 @@ pub(super) fn store_lock_whitelist(label: &str, whitelist: Vec<Value>) {
 ///
 /// 为什么先定赢家再搬：单遍遍历时无法知道后面的同 id 会不会覆盖；先记最后出现的下标，
 /// 第二遍只搬赢家，落选项原样保留。搬运用 `remove` + 重新插入快照，文件数组不做深拷贝。
-pub(super) fn snapshot_by_id_taking(items: &mut [Value]) -> HashMap<String, Value> {
+pub(super) fn snapshot_by_id_taking(items: &mut [Value]) -> HashMap<String, Arc<Value>> {
     let mut winner: HashMap<String, usize> = HashMap::new();
     for (idx, item) in items.iter().enumerate() {
         let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
@@ -146,7 +152,7 @@ pub(super) fn snapshot_by_id_taking(items: &mut [Value]) -> HashMap<String, Valu
                 obj.insert("files".to_string(), files);
             }
         }
-        map.insert(id, snap);
+        map.insert(id, Arc::new(snap));
     }
     map
 }
@@ -173,7 +179,7 @@ pub(super) fn path_resolve(p: &str) -> String {
 }
 
 /// 对照 `validateSnapshotItems`：全部命中本窗口快照且 path 未被改写才放行
-pub(super) fn validate_snapshot_items(items: Option<&Value>, snapshot: &HashMap<String, Value>) -> Option<Vec<Value>> {
+pub(super) fn validate_snapshot_items(items: Option<&Value>, snapshot: &HashMap<String, Arc<Value>>) -> Option<Vec<Value>> {
     let arr = items?.as_array()?;
     if arr.is_empty() || arr.len() > EXECUTE_MAX_ITEMS {
         return None;
@@ -198,7 +204,7 @@ pub(super) fn validate_snapshot_items(items: Option<&Value>, snapshot: &HashMap<
                 return None;
             }
         }
-        out.push(known.clone());
+        out.push((**known).clone());
     }
     Some(out)
 }
@@ -220,7 +226,7 @@ pub(super) fn validate_snapshot_items(items: Option<&Value>, snapshot: &HashMap<
 /// 「被截断」永远报 false —— 与审计 §3.5 要修的静默失效是同一类，只是方向相反。
 pub(super) fn collect_lock_candidates(
     ids: Option<&Value>,
-    snapshot: &HashMap<String, Value>,
+    snapshot: &HashMap<String, Arc<Value>>,
     max_files: usize,
 ) -> (Vec<Value>, bool) {
     let Some(arr) = ids.and_then(Value::as_array) else {
@@ -264,7 +270,7 @@ pub(super) fn collect_lock_candidates(
 /// `filesTruncated` 时绑定一份残缺清单反而少删），本轮只让差异可见：
 /// 返回逐条 warn 文案（清单被截断的条目、实测清理数超过清单条数的条目），
 /// 由 `scan_execute::cleanup_execute` 原样 `write_log`。
-pub(super) fn plan_delta_warnings(details: &[Value], snapshot: &HashMap<String, Value>) -> Vec<String> {
+pub(super) fn plan_delta_warnings(details: &[Value], snapshot: &HashMap<String, Arc<Value>>) -> Vec<String> {
     let mut out = Vec::new();
     for d in details {
         let Some(id) = d.get("id").and_then(Value::as_str) else {
@@ -347,14 +353,14 @@ pub(super) fn js_truthy(v: &Value) -> bool {
 mod tests {
     use super::*;
 
-    fn snap(files: &[&str]) -> HashMap<String, Value> {
+    fn snap(files: &[&str]) -> HashMap<String, Arc<Value>> {
         let mut m = HashMap::new();
         m.insert(
             "item-a".to_string(),
-            json!({
+            Arc::new(json!({
                 "path": "C:\\Temp",
                 "files": files.iter().map(|p| json!({ "path": p, "size": 1 })).collect::<Vec<_>>(),
-            }),
+            })),
         );
         m
     }
@@ -396,7 +402,7 @@ mod tests {
         let mut s2 = HashMap::new();
         s2.insert(
             "item-a".to_string(),
-            json!({ "path": "C:\\Temp", "files": [{ "path": "", "size": 1 }, { "path": "C:\\Temp\\x" }] }),
+            Arc::new(json!({ "path": "C:\\Temp", "files": [{ "path": "", "size": 1 }, { "path": "C:\\Temp\\x" }] })),
         );
         let (out, _) = collect_lock_candidates(Some(&json!(["item-a"])), &s2, 100);
         assert_eq!(out.len(), 1, "空 path 必须被过滤: {out:?}");
@@ -408,7 +414,7 @@ mod tests {
             for i in 0..600 {
                 m.insert(
                     format!("i{i}"),
-                    json!({ "path": "C:\\Temp", "files": [{ "path": format!("C:\\Temp\\{i}") }] }),
+                    Arc::new(json!({ "path": "C:\\Temp", "files": [{ "path": format!("C:\\Temp\\{i}") }] })),
                 );
             }
             m
@@ -438,9 +444,9 @@ let many: Vec<String> = (0..600).map(|i| format!("i{i}")).collect();
     #[test]
     fn 口径差留痕_截断与删多都要出warn() {
         let mut s = HashMap::new();
-        s.insert("trunc".to_string(), snap_item(3, true));
-        s.insert("grown".to_string(), snap_item(3, false));
-        s.insert("reg".to_string(), json!({ "path": "HKCU\\Foo" })); // 注册表型：无 files
+        s.insert("trunc".to_string(), Arc::new(snap_item(3, true)));
+        s.insert("grown".to_string(), Arc::new(snap_item(3, false)));
+        s.insert("reg".to_string(), Arc::new(json!({ "path": "HKCU\\Foo" }))); // 注册表型：无 files
 
         let details = vec![
             // 截断条目：哪怕删得不多也要报（清单本身不完整）
@@ -464,7 +470,7 @@ let many: Vec<String> = (0..600).map(|i| format!("i{i}")).collect();
 
         // 刚好等于清单条数：不算删多（口径是「多于」）
         let mut s2 = HashMap::new();
-        s2.insert("a".to_string(), snap_item(4, false));
+        s2.insert("a".to_string(), Arc::new(snap_item(4, false)));
         let warns2 = plan_delta_warnings(&[json!({ "id": "a", "status": "ok", "fileCount": 4 })], &s2);
         assert!(warns2.is_empty(), "删除数 == 清单数不得报: {warns2:?}");
     }
@@ -524,7 +530,7 @@ let many: Vec<String> = (0..600).map(|i| format!("i{i}")).collect();
         ];
         let snap = snapshot_by_id_taking(&mut items);
         assert_eq!(snap.len(), 2, "ok 与 nofiles 入快照，超长 id 不入: {}", snap.len());
-        assert_eq!(snap["ok"]["files"].as_array().map(|a| a.len()), Some(1), "快照必须持有完整清单");
+        assert_eq!(snap["ok"].get("files").and_then(|f| f.as_array()).map(|a| a.len()), Some(1), "快照必须持有完整清单");
         assert!(items[0].get("files").is_none(), "入快照条目不得再携带 files");
         assert_eq!(
             items[1]["files"].as_array().map(|a| a.len()),
@@ -536,8 +542,7 @@ let many: Vec<String> = (0..600).map(|i| format!("i{i}")).collect();
         assert!(
             !snap["nofiles"].as_object().unwrap().contains_key("files"),
             "无 files 的快照项不应凭空造字段"
-        );
-    }
+        );    }
 
     /// v2 §4.2 第 4 条：重复 id 延续“后写覆盖”，但落选的前项不得被摘掉 files。
     #[test]
@@ -548,7 +553,7 @@ let many: Vec<String> = (0..600).map(|i| format!("i{i}")).collect();
         ];
         let snap = snapshot_by_id_taking(&mut items);
         assert_eq!(
-            snap["dup"]["files"][0]["path"],
+            (*snap["dup"])["files"][0]["path"],
             json!("C:\\Temp\\second"),
             "重复 id 必须后写覆盖（与旧 snapshot_by_id 同口径）"
         );
@@ -597,7 +602,7 @@ let many: Vec<String> = (0..600).map(|i| format!("i{i}")).collect();
         const FILES: usize = 5_000;
         // 接近真机路径量级（P1 实测平均 206 字符）；克隆成本对路径长度敏感。
         let prefix = "C:\\Users\\probe\\AppData\\Local\\Packages\\Microsoft.SomeVeryLongPackageName_8wekyb3d8bbwe\\LocalCache\\Roaming\\Deep\\";
-        let mut snapshot: HashMap<String, Value> = HashMap::with_capacity(ITEMS);
+        let mut snapshot: HashMap<String, Arc<Value>> = HashMap::with_capacity(ITEMS);
         let mut input: Vec<Value> = Vec::with_capacity(ITEMS);
         for i in 0..ITEMS {
             let id = format!("item{i:02}");
@@ -612,12 +617,12 @@ let many: Vec<String> = (0..600).map(|i| format!("i{i}")).collect();
                 .collect();
             snapshot.insert(
                 id.clone(),
-                json!({
+                Arc::new(json!({
                     "id": id,
                     "path": prefix,
                     "size": (FILES * 1024) as u64,
                     "files": files,
-                }),
+                })),
             );
             input.push(json!({ "id": id, "path": prefix }));
         }

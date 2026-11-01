@@ -536,31 +536,53 @@ pub fn cleanup_scan_headless(cats: Vec<String>) -> Value {
     })
 }
 
+/// `cleanup:scan` 的 `categories` 解析。
+///
+/// R4-L04：四种拒绝原因（缺参 / 非数组 / 空数组 / 超上限 / 非字符串 / 单项过长）
+/// 分别成句，不再合并成一句不可操作的「参数无效」。
+/// R4-L07：保序去重 —— 同一分类扫两遍会让进度分母（cats.len()）与实际条目数对不上，
+/// 回执里还会出两行同 id 条目。
+fn parse_categories(categories: Option<&Value>) -> Result<Vec<String>, String> {
+    let Some(c) = categories else {
+        return Err("缺少 categories 参数".to_string());
+    };
+    let Some(a) = c.as_array() else {
+        return Err("categories 不是数组".to_string());
+    };
+    // 上限 512 与契约 maxItems(400) 对齐并留余量：全量扫描把全部条目 id 传上来，
+    // 规则库扩到 205 条时旧上限 200 直接把全量扫描拒成「清理分类参数无效」
+    // （2026-10-13 真机复检实测引爆）。上限的本意是防滥用，不该比库容量还小。
+    if a.is_empty() {
+        return Err("categories 是空数组".to_string());
+    }
+    if a.len() > 512 {
+        return Err(format!("categories 有 {} 项，超过上限 512", a.len()));
+    }
+    let mut out = Vec::with_capacity(a.len());
+    let mut seen: HashSet<String> = HashSet::new();
+    for (i, v) in a.iter().enumerate() {
+        let Some(s) = v.as_str() else {
+            return Err(format!("categories 第 {} 项不是字符串", i + 1));
+        };
+        if s.chars().count() > 160 {
+            return Err(format!("categories 第 {} 项超过 160 字上限", i + 1));
+        }
+        if seen.insert(s.to_string()) {
+            out.push(s.to_string());
+        }
+    }
+    Ok(out)
+}
+
 /// cleanup:scan — 扫描可清理项（纯原生引擎；进度走 `cleanup:scan-progress`）
 #[tauri::command]
 pub async fn cleanup_scan<R: tauri::Runtime>(window: WebviewWindow<R>, categories: Option<Value>, partial: Option<bool>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg, "data": [] });
     }
-    let cats: Option<Vec<String>> = categories.as_ref().and_then(|c| c.as_array()).and_then(|a| {
-        // 上限 512 与契约 maxItems(400) 对齐并留余量：全量扫描把全部条目 id 传上来，
-        // 规则库扩到 205 条时旧上限 200 直接把全量扫描拒成「清理分类参数无效」
-        // （2026-10-13 真机复检实测引爆）。上限的本意是防滥用，不该比库容量还小。
-        if a.is_empty() || a.len() > 512 {
-            return None;
-        }
-        let mut out = Vec::with_capacity(a.len());
-        for v in a {
-            let s = v.as_str()?;
-            if s.chars().count() > 160 {
-                return None;
-            }
-            out.push(s.to_string());
-        }
-        Some(out)
-    });
-    let Some(cats) = cats else {
-        return json!({ "success": false, "message": "清理分类参数无效", "data": [] });
+    let cats = match parse_categories(categories.as_ref()) {
+        Ok(c) => c,
+        Err(msg) => return json!({ "success": false, "message": format!("清理分类参数无效：{msg}"), "data": [] }),
     };
     let partial = partial.unwrap_or(false);
     let label = window.label().to_string();
@@ -958,11 +980,24 @@ pub async fn cleanup_item_detail<R: tauri::Runtime>(window: WebviewWindow<R>, id
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
+    // R4-L04：缺参 / 空串 / 过长分别成句（原先合并成一句「参数无效」）
     let id = match id {
-        Some(s) if !s.is_empty() && s.chars().count() <= 160 => s,
-        _ => return json!({ "success": false, "message": "参数无效" }),
+        None => return json!({ "success": false, "message": "缺少 id 参数" }),
+        Some(s) if s.is_empty() => return json!({ "success": false, "message": "id 参数为空" }),
+        Some(s) if s.chars().count() > 160 => {
+            return json!({ "success": false, "message": "id 超过 160 字上限" })
+        }
+        Some(s) => s,
     };
-    let rules = rules_value_arc().unwrap_or_else(|_| Arc::new(json!({})));
+    // R4-L04：装载异常不再静默替换成空规则集（下游会把它说成「未找到清理规则」）。
+    // `rules_value_arc` 当前恒 Ok（两条来源都不通时回空规则集），这条分支是显式兜底。
+    let rules = match rules_value_arc() {
+        Ok(r) => r,
+        Err(e) => {
+            log::write_log("error", &format!("cleanup:item-detail 清理规则装载异常: {e}"));
+            return json!({ "success": false, "message": "清理规则装载异常" });
+        }
+    };
     // v2.2 第3批（D13）：fileKeys 条目明细直接读扫描快照里的可删文件清单——明细与执行同源
     let (known_files, has_known) = {
         let buckets = snapshots().lock().unwrap_or_else(|e| e.into_inner());

@@ -411,13 +411,30 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
         }
         Ok(None) => false,
         Err(e) => {
-            log::write_log("warn", &format!("[updater] 下载前复验失败: {e}，已拒绝下载"));
+            // 复验失败同样按 `safe_check` 的口径分流：网络类不得标成签名失败 ——
+            // 那会把断网/线路抖动推成「前往 Releases 手动下载」，正是 `check_once`
+            // 超时文案刻意绕开的出口。下载本身照旧被阻止，安全口径不变。
+            let sig_failed = is_signature_failure(&e);
+            log::write_log(
+                "warn",
+                &format!(
+                    "[updater] 下载前复验失败（{}）: {e}，已拒绝下载",
+                    if sig_failed { "签名类" } else { "网络类" }
+                ),
+            );
+            let message = if sig_failed {
+                "发布签名在本次会话内发生变化或复验失败，已阻止下载。请重新检查更新。"
+            } else {
+                "复验线路暂时不可达（网络问题），本次下载未开始。请稍后重试。"
+            };
             push(
                 &app,
-                json!({ "phase": "error", "sigFailed": true,
-                        "message": "发布签名在本次会话内发生变化或复验失败，已阻止下载。请重新检查更新。" }),
+                json!({ "phase": "error", "sigFailed": sig_failed, "message": message }),
             );
-            return Ok(json!({ "ok": false, "error": "anchor-changed" }));
+            return Ok(json!({
+                "ok": false,
+                "error": if sig_failed { "anchor-changed" } else { "anchor-unreachable" }
+            }));
         }
     };
     if !reverified {
@@ -655,7 +672,8 @@ pub fn updater_install<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, St
     log::flush_sync();
     // 安装参数取自 conf 的 plugins.updater.windows.installMode = "quiet"（NSIS `/S /R`），
     // 等价上游 quitAndInstall(isSilent=true, isForceRunAfter=true)
-    match d.update.install(&d.bytes) {
+    let install_result = d.update.install(&d.bytes);
+    match install_result {
         Ok(()) => Ok(json!({ "ok": true })),
         Err(e) => {
             log::write_log("error", &format!("[updater] 安装失败: {e}"));
@@ -665,7 +683,10 @@ pub fn updater_install<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, St
                     log::write_log("warn", &format!("[updater] 清理更新完成标记失败: {e}"));
                 }
             }
-            Ok(json!({ "ok": false, "error": e.to_string() }))
+            // 已验签的包放回槽里：安装器没起来（UAC 被拒 / 被杀软拦截 / 临时目录满）不是
+            // 包体的问题，用户再点一次「立即重启」即可重试，不必重新下载整包。
+            *lock(&DOWNLOADED) = Some(d);
+            Ok(json!({ "ok": false, "error": e.to_string(), "retryable": true }))
         }
     }
 }

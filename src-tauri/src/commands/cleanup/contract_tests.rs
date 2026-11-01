@@ -979,7 +979,7 @@ fn js_num_str(n: f64) -> String {
         };
         let load = fn_body("fn read_verified_data_rules");
         assert!(
-            load.contains("validate_cleanup_package(&parsed)") && load.contains("quarantine_file(&file"),
+            load.contains("validate_cleanup_package(&parsed)") && load.contains("quarantine_data_rules_if_fresh(&file"),
             "数据目录装载缺语义校验或缺隔离动作：只回退内置不隔离 = 每次扫描重复判同一份坏文件"
         );
         let builtin = fn_body("fn read_builtin_rules");
@@ -1023,7 +1023,7 @@ fn 水位线高水位_两侧接线在位() {
         "rules_watermark 必须把磁盘值抬进进程内高水位（否则文件被删后地板回落，§4.7 复发）"
     );
     assert!(
-        src.contains("watermark_high_get();") || src.contains("watermark_high_get()"),
+        src.contains("let high = watermark_high_get();"),
         "rules_watermark 必须折入进程内高水位"
     );
     // 地板消费点：floor 仍取 max(builtin, rules_watermark())——rules_watermark 现含进程内记忆；
@@ -1375,19 +1375,27 @@ fn 占用检测失败不得留下上一次的名单() {
 }
 
 /// R4-L01 / R4-L02：验签通过后的三条早退必须与语义失败**同处置**（留痕 + 隔离），
-/// 且防回滚地板读的是严格数字。
+/// 且防回滚地板读的是严格数字；隔离只许发生在新根（老根只读兜底，就地改名属写入）。
 ///
-/// 破坏自证：① 把任一 `quarantine_file(&file, …)` 或 `log::write_log("error", …)` 删掉 ⇒ 计数红；
-/// ② 把地板那两行的 `.and_then(Value::as_f64)` 换回 `.map(js_number)` ⇒ 严格数字断言红。
+/// 破坏自证：① 把任一 `quarantine_data_rules_if_fresh(&file, …)` 或 `log::write_log("error", …)` 删掉 ⇒ 计数红；
+/// ② 把地板那两行的 `.and_then(Value::as_f64)` 换回 `.map(js_number)` ⇒ 严格数字断言红；
+/// ③ 把隔离助手里的新根判据删掉 ⇒ 根判据断言红。
 #[test]
 fn 验签通过后的早退必须留痕并隔离() {
     let rules = strip_rust_comments(include_str!("rules.rs"));
     let body = command_fn_body(&rules, "pub(super) fn read_verified_data_rules");
     assert_eq!(
-        body.matches("quarantine_file(&file").count(),
+        body.matches("quarantine_data_rules_if_fresh(&file").count(),
         4,
         "数据目录装载的隔离动作应为 4 处（解析失败 / groups 形状不合 / rulesVersion 非严格数字 / 语义不合规），实到 {}",
-        body.matches("quarantine_file(&file").count()
+        body.matches("quarantine_data_rules_if_fresh(&file").count()
+    );
+    // R4-L02：隔离是「同目录就地改名」，必须先判根 —— 老根只作只读兜底
+    let helper = command_fn_body(&rules, "fn quarantine_data_rules_if_fresh");
+    assert!(
+        helper.contains("file.starts_with(paths::app_data_dir())")
+            && helper.contains("security::quarantine_file(file"),
+        "隔离助手必须先判新根再就地改名，否则会写进只读兜底的老根"
     );
     assert_eq!(
         body.matches("\"error\"").count(),
@@ -1728,6 +1736,11 @@ fn game_redist_回填也受同一条数上限约束() {
 fn 真机_数据目录坏规则必须留下隔离件() {
     use crate::engine::rules_signature;
     let file = data_rules_file();
+    // R4-L02：老根只作只读兜底，隔离（同目录就地改名）只在新根发生 ——
+    // 老根那份即使被判坏也不产隔离件，属预期而不是缺陷。
+    if !file.starts_with(crate::engine::paths::app_data_dir()) {
+        return;
+    }
     let Some(text) = std::fs::read_to_string(&file).ok() else {
         // 数据目录规则不在场（首启动常态）：没有对照对象，如实跳过
         return;

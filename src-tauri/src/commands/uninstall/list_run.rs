@@ -565,6 +565,13 @@ pub(super) fn admit_uninstaller_exec(exe: &str, args: &str) -> Result<String, St
             return Err(format!("参数含 {:?} 形态（重定向/管道/复合命令/变量替换）", c));
         }
     }
+    // R2b-L03：`Path::is_absolute()` 对 UNC（`\\attacker\share\x.exe`）、verbatim（`\\?\`）
+    // 与设备命名空间（`\\.\`）都返回 true —— 原样进 ShellExecuteEx 会把卸载动作带到
+    // 远程/设备路径上（SMB 外连 + 在共享上执行二进制）。与 `uninstall_appx_logo`
+    // 拒 UNC 同一条口径：只收盘符绝对路径。
+    if exe.starts_with(r"\\") {
+        return Err("卸载器路径是 UNC / verbatim / 设备命名空间写法，拒绝执行".to_string());
+    }
     let path = Path::new(exe);
     if path.is_absolute() {
         return Ok(exe.to_string());
@@ -1439,7 +1446,13 @@ pub async fn uninstall_run<R: tauri::Runtime>(
             }
         }
         // 超时（exit_code == None）时不给伪语义：空串让前端 `d.exitMeaning ? ... : ''` 走空分支
-        let (exit_meaning, _) = exit_code.map(classify_exit).unwrap_or(("", false));
+        // R2b-L04：码表语义只对 MSI 成立 —— 展示侧与上面 `by_exit_code` 的 `kind == "msi"`
+        // 同一判据；Inno/NSIS 只回原始退出码（它们与 MSI 的码值空间重叠但语义不同）。
+        let (exit_meaning, _) = if kind == "msi" {
+            exit_code.map(classify_exit).unwrap_or(("", false))
+        } else {
+            ("", false)
+        };
 
         // 进程监视（2026-09-28 用户拍板）：句柄退出 ≠ 卸载结束——继续轮询卸载键与
         // 卸载器家族进程，直到键消失或进程绝迹（总预算扣除已耗时后剩余部分）

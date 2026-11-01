@@ -10,8 +10,8 @@
 //! 落点存在时完全不打扰用户：那是仍在用的程序的正常授权。
 
 use serde_json::{Value, json};
-use std::path::Path;
 use super::residue_update::contribs;
+use super::services_orphan::{classify_landing, LandingState};
 
 /// 能力授权树（HKLM 32/64 两种视图都读，HKCU 作为回退）。
 ///
@@ -73,26 +73,34 @@ pub(super) fn capability_target(hive_label: &str, subkey: &str, value_name: &str
     format!("{hive_label}\\{subkey}::{value_name}")
 }
 
-/// 纯判定：`exists` 注入落点存在性（单测因此不碰注册表与磁盘）。
+/// 纯判定：`exists` 注入落点存在性三态（单测因此不碰注册表与磁盘）。
 ///
+/// R2b-L01：注入值从 bool 改成 [`LandingState`] —— 与 `services_orphan` 删除侧同一口径。
+/// 读不到元数据（ACL/IO/离线盘）**不等于**落点已失踪，按「无法判断」不产候选并留注记。
 /// 返回 (候选, 解不出条数, notes)。
 pub(super) fn capability_findings(
     hive_label: &str,
     subkey: &str,
     value_names: &[String],
-    exists: &dyn Fn(&str) -> bool,
+    exists: &dyn Fn(&str) -> LandingState,
     cap: usize,
 ) -> (Vec<Value>, usize, Vec<String>) {
     let mut out = Vec::new();
     let mut notes = Vec::new();
     let mut undecodable = 0usize;
+    let mut unreadable = 0usize;
     for name in value_names {
         let Some(path) = decode_nonpackaged_name(name) else {
             undecodable += 1;
             continue;
         };
-        if exists(&path) {
-            continue;
+        match exists(&path) {
+            LandingState::Exists => continue,
+            LandingState::Missing => {}
+            LandingState::Unknown(_) => {
+                unreadable += 1;
+                continue;
+            }
         }
         if out.len() >= cap {
             // R2b-L03：`cap` 是「本根剩余额度」，用户要看的却是「本组全局上限」。
@@ -117,6 +125,11 @@ pub(super) fn capability_findings(
     }
     if undecodable > 0 {
         notes.push(format!("{undecodable} 条授权值名解不出可执行文件路径，本轮不判（这棵树里混着多种非路径格式）"));
+    }
+    if unreadable > 0 {
+        notes.push(format!(
+            "{unreadable} 条授权条目的落点读不到元数据（ACL/IO/离线盘），按「无法判断」不判"
+        ));
     }
     (out, undecodable, notes)
 }
@@ -153,7 +166,7 @@ pub(super) unsafe fn collect_capability_findings() -> (Vec<Value>, Vec<String>) 
             continue;
         }
         let (items, undec, inner_notes) =
-            capability_findings(label, &sub, &names, &|p: &str| Path::new(p).exists(), CAPABILITY_FINDING_CAP.saturating_sub(all.len()));
+            capability_findings(label, &sub, &names, &|p: &str| classify_landing(std::fs::symlink_metadata(p)), CAPABILITY_FINDING_CAP.saturating_sub(all.len()));
         total_undecodable += undec;
         // R2b-L03：内层 notes 此前被 `_n` 丢掉 ⇒ 截断只发生在采集侧、渲染层看不见。
         // 三根共用一份注集，同措辞去重（合并后仍各算一次，不会把一个上限报成三条）
@@ -207,8 +220,13 @@ mod tests {
             r"C:\Apps\Alive\a.exe#InternetClient".to_string(),
             "NotAPath#cap".to_string(),
         ];
-        let (out, undec, notes) =
-            capability_findings("HKLM", CONSENT_SUBKEY, &names, &|p: &str| p.contains("Alive"), 80);
+        let (out, undec, notes) = capability_findings("HKLM", CONSENT_SUBKEY, &names, &|p: &str| {
+            if p.contains("Alive") {
+                LandingState::Exists
+            } else {
+                LandingState::Missing
+            }
+        }, 80);
         assert_eq!(out.len(), 1);
         assert_eq!(undec, 1);
         assert!(out[0]["target"].as_str().unwrap_or("").starts_with("HKLM\\") && out[0]["target"].as_str().unwrap_or("").ends_with("#InternetClient"));
@@ -234,12 +252,12 @@ mod tests {
     #[test]
     fn cap_leaves_a_note_and_undecodable_count_is_visible() {
         let names: Vec<String> = (0..5).map(|i| format!(r"C:\Apps\Gone{i}\g.exe#cap")).collect();
-        let (out, _u, notes) = capability_findings("HKLM", CONSENT_SUBKEY, &names, &|_: &str| false, 2);
+        let (out, _u, notes) = capability_findings("HKLM", CONSENT_SUBKEY, &names, &|_: &str| LandingState::Missing, 2);
         assert_eq!(out.len(), 2);
         assert!(notes.iter().any(|n| n.contains("已达上限") && n.contains("本组结果不完整")));
         // R2b-L03：注记里的数字必须是**全局上限**，不是剩余额度（旧写法在额度用尽时
         // 会渲染成「已达上限 0 条」）
-        let used_up = capability_findings("HKLM", CONSENT_SUBKEY, &names, &|_: &str| false, 0);
+        let used_up = capability_findings("HKLM", CONSENT_SUBKEY, &names, &|_: &str| LandingState::Missing, 0);
         assert!(used_up.0.is_empty());
         assert!(
             used_up.2.iter().any(|n| n.contains(&format!("已达上限 {CAPABILITY_FINDING_CAP} 条"))),

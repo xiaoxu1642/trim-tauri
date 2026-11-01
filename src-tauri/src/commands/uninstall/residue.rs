@@ -54,7 +54,10 @@ pub(super) const NAME_MIN_RULE_WORD: usize = 2;
 pub(super) const NAME_MIN_EXACT: usize = 2;
 /// 名称类命中上限（目录与快捷方式共用）：启发式只是提示，膨胀会把用户判断力淹掉
 pub(super) const NAME_HIT_CAP: usize = 20;
-/// 系统侧痕反查上限（MuiCache / BAM / 防火墙 / Tracing / JumpList 各自一条）
+/// 系统侧痕反查上限（MuiCache / 防火墙 / Tracing / JumpList 各自一条）。
+/// BAM 不在其中：它的值类型是 REG_BINARY、值名是 `\Device\HarddiskVolumeN\…` 形态，
+/// 按 REG_SZ 取值的反查永远取不到一条（R2a-L01，2026-11-01 重审）——该臂已删，
+/// 扫描说明里明示不支持，宁可不报也不摆一个恒 0 命中的功能。
 pub(super) const SIDE_TRACE_CAP: usize = 20;
 /// 参与反查的程序 exe 数量上限（collect_program_objects 的产出面）
 pub(super) const PROGRAM_EXE_CAP: usize = 16;
@@ -248,15 +251,15 @@ pub(super) fn collect_program_objects(loc: &str, uninstall_string: &str, display
     (exes, dir)
 }
 
-/// 路径前缀命中：值名以已知 exe 开头（MuiCache 值名形如 `<exe>.FriendlyAppName`、
-/// BAM 值名即完整 exe 路径），或落在安装目录整棵前缀下
+/// 路径前缀命中：值名以已知 exe 开头（MuiCache 值名形如 `<exe>.FriendlyAppName`），
+/// 或落在安装目录整棵前缀下
 pub(super) fn trace_prefix_hit(name_lc: &str, exes_lc: &[String], dir_lc: &str) -> bool {
     exes_lc.iter().any(|e| name_lc.starts_with(e.as_str()))
         || (!dir_lc.is_empty() && name_lc.starts_with(&format!("{dir_lc}\\")))
 }
 
 /// 枚举注册表键的全部值（只收 REG_SZ / REG_EXPAND_SZ，返回 (值名, 数据)）。
-/// 上限 cap 防爆（MuiCache/BAM 可上千条；枚举到 cap 即截断返回）。
+/// 上限 cap 防爆（MuiCache/防火墙规则可上千条；枚举到 cap 即截断返回）。
 pub(super) unsafe fn reg_enum_sz_values(
     hive: windows::Win32::System::Registry::HKEY,
     subkey: &str,
@@ -300,6 +303,12 @@ pub(super) unsafe fn reg_enum_sz_values(
             continue;
         }
         // 再取数据（data_len 为字节数，含终止 NUL）
+        // R2a-L02（2026-11-01 重审）：按注册表回报长度分配前必须过与 `reg_sz` / `read_pfro`
+        // 同一份 `MAX_REG_STR_BYTES` 上限 —— 此前本单元四处分配只有三处有闸，
+        // 这里就是漏的那一处（超限一律按读不到处理，绝不按报告长度分配）。
+        if data_len > MAX_REG_STR_BYTES {
+            continue;
+        }
         let mut buf = vec![0u8; data_len.max(2) as usize];
         let mut got = buf.len() as u32;
         let ok = RegEnumValueW(
@@ -398,24 +407,6 @@ pub(super) unsafe fn firewall_hits(exes_lc: &[String], dir_lc: &str, cap: usize)
             out.push(format!("HKLM\\{SUBKEY}::{name}"));
             if out.len() >= cap {
                 break;
-            }
-        }
-    }
-    out
-}
-
-/// BAM（后台活动记录）反查：`bam\State\UserSettings\<SID>` 下值名 = 完整 exe 路径
-/// （数据是执行序号 DWORD，不参与匹配）。
-pub(super) unsafe fn bam_hits(exes_lc: &[String], dir_lc: &str, cap: usize) -> Vec<String> {
-    const ROOT: &str = r"SYSTEM\CurrentControlSet\Services\bam\State\UserSettings";
-    let mut out = Vec::new();
-    'outer: for sid in reg_enum_subkeys(HKEY_LOCAL_MACHINE, ROOT, 64) {
-        for (name, _) in reg_enum_sz_values(HKEY_LOCAL_MACHINE, &format!("{ROOT}\\{sid}"), 256) {
-            if trace_prefix_hit(&name.to_ascii_lowercase(), exes_lc, dir_lc) {
-                out.push(format!("HKLM\\{ROOT}\\{sid}::{name}"));
-                if out.len() >= cap {
-                    break 'outer;
-                }
             }
         }
     }
@@ -558,6 +549,8 @@ pub(super) fn fill_missing_buckets(findings: &mut [Value]) {
 /// 名称启发式=low（folder，默认不勾）；开始菜单快捷方式=medium（默认勾）；
 /// 固定系统侧痕（U-2）=medium 全默认不勾（拍板口径 2026-09-28：侧痕删除无原厂依据，
 /// 只作候选交用户逐项决定）；应用归属的服务/驱动残留=medium（落点失踪）。
+/// 侧痕反查面**不含 BAM**：其值类型是 REG_BINARY、值名是设备路径形态，按字符串值的
+/// 反查恒取不到（R2a-L01，2026-11-01 重审）——这里明示不支持，不摆一个永不命中的臂。
 #[tauri::command]
 pub async fn uninstall_residue_scan<R: tauri::Runtime>(
     window: WebviewWindow<R>,
@@ -795,16 +788,6 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
                     "contribs": contribs(&items),
                 }));
             }
-            for target in bam_hits(&exes_lc, &dir_lc, SIDE_TRACE_CAP) {
-                let mut items = trace_src.clone();
-                items.push(("bamHit", "BAM 后台执行管理里留着这个程序路径的执行记录".to_string()));
-                findings.push(json!({
-                    "kind": "reg_value", "target": target,
-                    "reason": "BAM 后台执行记录引用此程序路径",
-                    "confidence": "medium", "risk": "low", "defaultChecked": false,
-                    "contribs": contribs(&items),
-                }));
-            }
             for target in tracing_hits(&exes_lc, SIDE_TRACE_CAP) {
                 let mut items = trace_src.clone();
                 items.push(("tracingHit", "诊断跟踪子键以此程序的 exe 文件名命名".to_string()));
@@ -870,7 +853,7 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
         // 落点仍存在的服务是「还在用」，一律不报。服务表读不到（readable=false）时不产候选、
         // 只留 note —— 拿空表去判「已卸载」等于把全部服务算成残留。
         let mut notes: Vec<String> = Vec::new();
-        let (svc_entries, svc_readable, svc_enum_notes) = services_orphan::collect_service_entries(2048);
+        let (svc_entries, svc_readable, _svc_integrity, svc_enum_notes) = services_orphan::collect_service_entries(2048);
         // R2b-L01：服务表枚举触顶的残缺注记必须随表一起可见——截断过的服务表会让下面
         // 「没有任何服务引用」那类判据偏宽（drivers_orphan 同一条 note 里已点名这个方向）。
         notes.extend(svc_enum_notes);
@@ -1198,7 +1181,7 @@ pub(super) fn classify_residue_op_in(kind: &str, target: &str, snap_finding: Opt
             }
             OpVerdict::Ready(ResidueOp::RegKey { target: target.to_string(), hive, rest })
         }
-        // 注册表值：删单值前先整父键备份（U-2 侧痕面 MuiCache/防火墙/BAM）。
+        // 注册表值：删单值前先整父键备份（U-2 侧痕面 MuiCache/防火墙规则）。
         // 值已不存在的幂等语义留给 `reg_restore_delete`（对齐 B11），这里不重复判存在性。
         "reg_value" => {
             let Some((key_part, value_name)) = target.rsplit_once("::") else {
@@ -1212,7 +1195,7 @@ pub(super) fn classify_residue_op_in(kind: &str, target: &str, snap_finding: Opt
             };
             // R-2（2026-10-07）：`reg_value` 的 A1 判据（本分支此前**一道都没有**）。
             //
-            // 为什么现在必须有：既有三类 reg_value 候选（MuiCache / 防火墙规则 / BAM）
+            // 为什么现在必须有：既有两类 reg_value 候选（MuiCache / 防火墙规则）
             // 取自**代码内固定反查**，它们的合法性来自「是谁生成的」；而启动项候选来自
             // **扫描器**（run_keys::run_findings），一旦进了快照就会被删，且 Run 六条根
             // 全在 `REG_MICROSOFT_ROOTS`（A1 整棵默认拒绝）之下。三态语义：
@@ -1470,9 +1453,14 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 let roots = crate::engine::reg_backup::seal_read_roots(&dirs);
                 reconcile_admin_seals("uninstall", &roots);
             }
-            if let Some(p) = pack.as_mut() {
-                let _ = p.include_reg_backup(&file);
-            }
+            // R2a-L03（2026-11-01 重审）：副本入包失败与 reg_value 分支同一口径 ——
+            // 不再静默丢弃，也不再另记一行 skip；写进本条回执的附加说明
+            // （.reg 原件仍在，原还原入口不受影响）。
+            let pack_note = pack
+                .as_mut()
+                .and_then(|p| p.include_reg_backup(&file).err())
+                .map(|e| format!("；副本未进还原包：{e}（.reg 原件仍在，可用原还原入口）"))
+                .unwrap_or_default();
             if crate::engine::native::reg_key_remove(hive, rest, true) {
                 // R2a-L12：回执必须把「备份记的是**删除之前那次 export** 的内容」这件事摊开。
                 // export 与删除之间键内容若被改动，还原是「合并加回」而不是回滚
@@ -1485,16 +1473,16 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                     kind,
                     target,
                     "ok",
-                    &format!("已删除（删除前已导出备份 {backup_file}，还原按该备份内容合并加回）"),
+                    &format!("已删除（删除前已导出备份 {backup_file}，还原按该备份内容合并加回）{pack_note}"),
                 );
                 d["backupFile"] = json!(backup_file);
                 details.push(d);
             } else {
-                details.push(detail(kind, target, "fail", "注册表删除失败"));
+                details.push(detail(kind, target, "fail", &format!("注册表删除失败{pack_note}")));
             }
         }
 
-        // 注册表值：先备份整个父键再删单值（U-2 侧痕面：MuiCache/防火墙规则/BAM）。
+        // 注册表值：先备份整个父键再删单值（U-2 侧痕面：MuiCache/防火墙规则）。
         // 目标格式 `HKCU\<键路径>::<值名>`；删值复用 reg_restore_delete
         // （值已不存在 = 幂等成功，对齐 B11 语义）。
         for op in &ops {
@@ -1545,12 +1533,14 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 let roots = crate::engine::reg_backup::seal_read_roots(&dirs);
                 reconcile_admin_seals("uninstall", &roots);
             }
-            if let Some(p) = pack.as_mut() {
-                // 副本只为「一批一个去处」；写注册表的还原入口仍然只有 uninstall_reg_backup_restore
-                if let Err(e) = p.include_reg_backup(&file) {
-                    details.push(detail(kind, target, "skip", &format!("{e}（.reg 原件仍在，可用原还原入口）")));
-                }
-            }
+            // R2a-L03（2026-11-01 重审）：副本入包失败原先单独记一行 skip、随后同一目标
+            // 再记 ok —— skipCount 虚高且报告自相矛盾。改成 ok/fail 行的附加说明，
+            // `skip` 只保留「未尝试删除」的语义。
+            let pack_note = pack
+                .as_mut()
+                .and_then(|p| p.include_reg_backup(&file).err())
+                .map(|e| format!("；副本未进还原包：{e}（.reg 原件仍在，可用原还原入口）"))
+                .unwrap_or_default();
             if crate::engine::native::reg_restore_delete(hive, rest, value_name) {
                 // R2a-L12：同 reg_key 分支，把对应的备份文件名写进明细（还原是「合并加回」）
                 let backup_file = reg_backup_file_name(&file);
@@ -1558,12 +1548,12 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                     kind,
                     target,
                     "ok",
-                    &format!("已删除（删除前已导出父键备份 {backup_file}，还原按该备份内容合并加回）"),
+                    &format!("已删除（删除前已导出父键备份 {backup_file}，还原按该备份内容合并加回）{pack_note}"),
                 );
                 d["backupFile"] = json!(backup_file);
                 details.push(d);
             } else {
-                details.push(detail(kind, target, "fail", "注册表值删除失败"));
+                details.push(detail(kind, target, "fail", &format!("注册表值删除失败{pack_note}")));
             }
         }
 
@@ -1660,6 +1650,12 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                         "path": path,
                         "status": v.get("status").and_then(|s| s.as_str()).unwrap_or(""),
                         "freed": jnum(v.get("freed")),
+                        // R2a-L03（2026-11-01 重审）：`mode` / `message` 是 finder 删除链
+                        // 区分「占用失败」与「安全拒绝」的唯一载体，此前在这里被丢弃，
+                        // 回执于是把 reparse-ancestor / rejected / unrecoverable-name
+                        // 一律说成「可能被占用」——用户按提示关程序重试必然无效。
+                        "mode": v.get("mode").and_then(|m| m.as_str()).unwrap_or(""),
+                        "message": v.get("message").and_then(|m| m.as_str()).unwrap_or(""),
                     }));
                 }
                 fn progress(&self, _n: u64) {}
@@ -1687,32 +1683,45 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             // P2-D4：只读占用自检只花在真正失败的文件行上，且最多查 3 个——模块枚举是
             // 全进程开销，为拼提示文案不值得在整批全败时查几十次；目录行不查（目录不是
             // 可加载模块，占用的也是里面的文件，逐个查反而把消息拉长）。
+            // R2a-L03（2026-11-01 重审）：占用自检只对 `trash-failed` 有意义；安全拒绝类
+            // 失败（rejected / reparse-ancestor / unrecoverable-name）照扫描器原话回执，
+            // 占用进程查得再准也解释不了它们，反而会把「重试无效」说成「重试有用」。
             let mut probe_budget = 3usize;
             for row in sink.rows.into_inner().unwrap_or_default() {
                 let ok = row["status"] == "ok";
+                let mode = row["mode"].as_str().unwrap_or("");
+                let scanner_msg = row["message"].as_str().unwrap_or("");
                 let message = if ok {
                     "已移入回收站".to_string()
                 } else {
-                    match row["kind"].as_str() {
-                        Some("file") if probe_budget > 0 => {
-                            probe_budget -= 1;
-                            row["path"]
+                    match mode {
+                        "trash-failed" => match row["kind"].as_str() {
+                            Some("file") if probe_budget > 0 => {
+                                probe_budget -= 1;
+                                row["path"]
+                                    .as_str()
+                                    .map(|p| occupancy_note(Path::new(p)))
+                                    .unwrap_or_else(|| "删除失败".to_string())
+                            }
+                            _ => row["path"]
                                 .as_str()
-                                .map(|p| occupancy_note(Path::new(p)))
-                                .unwrap_or_else(|| "删除失败".to_string())
-                        }
-                        _ => row["path"]
-                            .as_str()
-                            .map(|_| "删除失败（可能被占用）".to_string())
-                            .unwrap_or_else(|| "删除失败".to_string()),
+                                .map(|_| "删除失败（可能被占用）".to_string())
+                                .unwrap_or_else(|| "删除失败".to_string()),
+                        },
+                        _ if !scanner_msg.is_empty() => scanner_msg.to_string(),
+                        _ => "删除失败".to_string(),
                     }
                 };
-                details.push(detail(
+                let mut d = detail(
                     row["kind"].as_str().unwrap_or("file"),
                     row["path"].as_str().unwrap_or(""),
                     if ok { "ok" } else { "fail" },
                     &message,
-                ));
+                );
+                if !mode.is_empty() {
+                    d["mode"] = json!(mode);
+                }
+                details.push(d);
             }
         }
         // 收尾：包要落 manifest 才算成。内容已删而包没写成 ⇒ 回执必须带 error，
@@ -1741,7 +1750,10 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             let reports_dir = uninstall_reports_dir();
             let report_path = reports_dir.join(format!("{batch_id}.json"));
             let _ = std::fs::create_dir_all(&reports_dir);
-            let _ = crate::security::atomic_write_json(
+            // R2a-L08（2026-11-01 重审）：落盘失败不能静默——报告是本链唯一的事后凭据，
+            // 写失败还回 `reportPath` 就是在指一份不存在的文件，失败明细随之丢失。
+            // 失败原因进回执 `reportError` 与 error 日志（展示侧归前端单元）。
+            let report_error = match crate::security::atomic_write_json(
                 &report_path,
                 &json!({
                     "batchId": batch_id, "appId": app_id,
@@ -1750,7 +1762,13 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                     // 报告里留一笔：还原包被保留策略裁掉后，报告仍能说明「当时备过什么」
                     "restorePack": pack_out,
                 }),
-            );
+            ) {
+                Ok(()) => Value::Null,
+                Err(e) => {
+                    log::write_log("error", &format!("残留批次报告落盘失败（{batch_id}）: {e}"));
+                    json!(e)
+                }
+            };
             // R2a-L03：写完即裁。这个根此前**只写不裁**（同域两处 `.reg` 备份都调了
             // `paths::prune_backups`，报告根是唯一漏的那个），批次一多就无界涨；
             // 而列表侧最多只显示 REPORT_KEEP 份 ⇒「看不到」与「还留着」两套答案。
@@ -1787,6 +1805,7 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             json!({ "success": true, "data": {
                 "details": details, "okCount": ok_count, "failCount": fail_count,
                 "reportPath": report_path.to_string_lossy(),
+                "reportError": report_error,
                 "restorePack": pack_out,
                 "learnedAdded": learned_added,
             } })

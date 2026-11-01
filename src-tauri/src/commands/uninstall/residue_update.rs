@@ -472,14 +472,21 @@ pub(super) fn load_residue_rules() -> Option<Value> {
                             return Some(v);
                         }
                     } else {
-                        log::write_log("warn", "数据目录残留规则 JSON 解析失败，已回退内置规则库");
+                        // R2a-L07（2026-11-01 重审）：与语义失败同一处置——坏文件留在原地
+                        // 会让每轮扫描重读并重复告警；隔离走配置损坏的标准路径
+                        // （AGENTS §4.3：损坏的配置先 `quarantine_file`）。
+                        log::write_log("warn", "数据目录残留规则 JSON 解析失败，已隔离并回退内置规则库");
+                        crate::security::quarantine_file(&file, "residue-rules JSON 解析失败");
                     }
                 }
                 Err(reason) => {
+                    // R2a-L07（2026-11-01 重审）：验签失败同样隔离——这不是“留着等下次再看”
+                    // 的形态，而是每轮扫描都会重验一遍的坏文件。
                     log::write_log(
                         "warn",
-                        &format!("数据目录残留规则验签未通过，已回退内置规则库: {reason}"),
+                        &format!("数据目录残留规则验签未通过，已隔离并回退内置规则库: {reason}"),
                     );
+                    crate::security::quarantine_file(&file, "residue-rules 验签未通过");
                 }
             }
         }

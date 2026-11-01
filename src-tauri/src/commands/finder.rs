@@ -86,19 +86,23 @@ pub(crate) struct SnapEntry {
     /// 审查 v2-M5：**仅当**该条目的路径名无法无损表示成文本（含孤立代理项，
     /// `unix_path` 已把它换成 U+FFFD）时，登记原生侧交来的 `OsString` 真身。
     /// 正常机器上这张登记恒为 `None`，不额外占内存。
+    ///
+    /// R1d-L02：这类条目**一律不删**（`run_delete_preflight` 首句计 `unhandled` 后跳过），
+    /// 真身只用于两件事：判「这一项是不是 lossy」，以及让两条 lossy 后撞成同一展示串的
+    /// 原生路径不互相覆盖（覆盖等于把界面上那一行的身份悄悄换掉）。
     raw: Option<OsString>,
 }
 
 impl SnapEntry {
-    /// 删除/预检真正作用的目标。
-    /// 根因：`path` 字段是 lossy 后的展示串，`OsString::from(path)` 得到的是
-    /// **另一个**可能的路径 —— 既可能指向一个恰好用 U+FFFD 命名的真实文件（删错对象），
-    /// 也可能谁都指不到（预检恒判 NotFound，却仍回 `success:true`）。
+    /// 本条目的原生路径真身（只有 lossy 条目才会登记）。
+    ///
+    /// 非 lossy 条目的展示串就是可往返文本，返回值与 `path` 同源；lossy 条目进不了
+    /// 删除批（见 `run_delete_preflight` 首句），所以这里的真身今天不承担删除目标。
     fn target(&self) -> OsString {
         self.raw.clone().unwrap_or_else(|| OsString::from(self.path.as_str()))
     }
 
-    /// 文本形态是否丢了信息（决定这一项能不能被安全删除）
+    /// 文本形态是否丢了信息（R1d-L02：丢了信息 ⇒ 一律不删，计 `unhandled`）
     fn is_lossy(&self) -> bool {
         self.raw.is_some()
     }
@@ -178,25 +182,27 @@ fn store_snapshot(
 ///
 /// 同一路径可能同时出现在多个类型槽（如 emptyfolder 与 appdata 都扫到同一目录）：
 /// 优先返回带 `empty` 标记的那条——空树复检闸的凭据不能被后扫类型顶掉；
-/// 都没有标记时返回先命中的一条（kind/path 同源，取哪条语义相同）。
+/// 都没有标记时按 `FINDER_SCAN_TYPES` 的固定顺序取先命中的一条（kind/path 同源，
+/// 取哪条语义相同）。
+///
+/// R1d-L01：槽键只经 `snapshot::domain_key` 取，读侧不再自己拼 `{label}|` 前缀——
+/// 写侧分隔符一改，前缀匹配会静默空命中，删除全部回「删除目标已过期」。
 fn find_label_entry(
     store: &HashMap<String, HashMap<String, SnapEntry>>,
     label: &str,
     key: &str,
 ) -> Option<SnapEntry> {
-    let prefix = format!("{label}|");
     let mut fallback: Option<SnapEntry> = None;
-    for (slot_key, slot) in store.iter() {
-        if !slot_key.starts_with(&prefix) {
+    for ty in FINDER_SCAN_TYPES {
+        let Some(slot) = store.get(&crate::engine::snapshot::domain_key(label, ty)) else {
             continue;
+        };
+        let Some(e) = slot.get(key) else { continue };
+        if e.empty {
+            return Some(e.clone());
         }
-        if let Some(e) = slot.get(key) {
-            if e.empty {
-                return Some(e.clone());
-            }
-            if fallback.is_none() {
-                fallback = Some(e.clone());
-            }
+        if fallback.is_none() {
+            fallback = Some(e.clone());
         }
     }
     fallback
@@ -741,6 +747,12 @@ pub async fn finder_delete<R: tauri::Runtime>(
     // 不对命中项二次调用（别名面一行 canonicalize 的 IO）。
     let mut reject: Option<String> = None;
     for it in &valid_safe {
+        // R1d-L02：lossy 条目一律不删（`run_delete_preflight` 首句计 unhandled 并跳过），
+        // 保护面没有可判的对象——展示串不等于真身，拿它过闸只会给出错误结论
+        // （真身受保护而展示串不受，或反之）。
+        if it.is_lossy() {
+            continue;
+        }
         if let Err(why) = protect::validate_mutation_target(&it.path) {
             reject = Some(why);
             break;
@@ -755,9 +767,9 @@ pub async fn finder_delete<R: tauri::Runtime>(
     }
 
     // 删除前预检（FD-4）：目标不存在/类型不符/空目录已非空 → 跳过
-    // 审查 v2-M5：一律以 `it.target()`（原生侧交来的路径真身）为预检与删除对象，
-    // 不再 `OsString::from(it.path)` —— 展示串是 lossy 后的文本，重建出来的可能是
-    // 另一个真实存在的路径（删错对象），也可能谁都指不到（恒判 NotFound 却仍回 success:true）。
+    // 审查 v2-M5 / R1d-L02：预检与删除的对象是 `it.target()`；lossy 条目在预检首句
+    // 就被剔除（计 unhandled、不删），所以真身不会进入删除批——这不是「真身删除路径被
+    // 跳过」的漏修，而是刻意的最终语义：名字不可无损往返 ⇒ 宁可不删也要明说。
     let safe_total = valid_safe.len();
     // 性能优化 P1：预检逐条 `metadata` / 空树复检 / `read_dir` 全是磁盘 I/O（条目上限
     // 可达 FINDER_DELETE_MAX），整段搬进阻塞池，执行体见 `run_delete_preflight`。
@@ -908,6 +920,10 @@ pub async fn finder_delete<R: tauri::Runtime>(
 }
 
 /// 删除前预检的执行体（FD-4 与审查 v2-M5 的全部判据都在这里，一条没减）。
+///
+/// R1d-L02：首句的 lossy 跳过就是**最终语义**——名字无法无损往返的条目一律不删，
+/// 只计 `unhandled`。`target()` 因此不会带着 `raw` 真身进入删除调用；要改这条语义
+/// （真身也删）必须先让保护面能判 `OsStr`，否则闸门判的还是另一个串。
 ///
 /// 性能优化 P1：这一段逐条做 `metadata` + 空目录树递归复检 + `read_dir`，全是磁盘 I/O
 /// 且条目上限可达 `FINDER_DELETE_MAX`；抽成独立同步函数后由 `finder_delete` 整段丢进
@@ -1303,12 +1319,13 @@ mod tests {
         assert_eq!(t.snapshot().unhandled, 0, "也不该计入「无法处理」");
     }
 
-    /// 审查 v2-M5：删除目标必须是原生侧交来的 `OsString`。
-    /// 拿 lossy 展示串重建会得到**另一个**路径 —— 既可能删不到，也可能删掉一个
-    /// 恰好用 U+FFFD 命名的无关文件。这里同时钉住「键位冲突不覆盖」与「去重计数」。
+    /// 审查 v2-M5 / R1d-L02：lossy 条目只留真身做身份判据，**绝不进删除批**。
+    /// 这里同时钉住「键位冲突不覆盖」与「去重计数」，以及预检那一句真把 lossy 剔掉
+    /// （用例名不再宣称「删除必须打到真身」——那是与代码相反的旧叙述）。
+    /// 判红自证：删掉 `run_delete_preflight` 首句的 `is_lossy` 跳过 ⇒ 最后两条断言红。
     #[cfg(windows)]
     #[test]
-    fn lossy_paths_keep_their_native_target_and_do_not_clobber_each_other() {
+    fn lossy_paths_keep_identity_but_never_enter_the_delete_batch() {
         use std::os::windows::ffi::OsStringExt;
         // 两条不同的孤立代理项名字，lossy 后塌成同一个展示串
         let a = PathBuf::from(OsString::from_wide(&[0x43, 0x3A, 0x5C, 0xD800, 0x61]));
@@ -1338,8 +1355,17 @@ mod tests {
         assert_eq!(slot_size, 1, "同一键位只留一条");
         let stored = snapshots().lock().unwrap_or_else(|e| e.into_inner());
         let entry = find_label_entry(&stored, label, &path_key(&disp_a)).expect("条目应在槽内");
-        assert_eq!(entry.target(), a.as_os_str().to_os_string(), "预检/删除必须打到原生真身上");
+        assert_eq!(
+            entry.target(),
+            a.as_os_str().to_os_string(),
+            "真身仍登记在条目里（撞车判据靠它）"
+        );
         assert!(entry.is_lossy());
+        drop(stored);
+        // R1d-L02：lossy 条目的最终语义是「不删」——预检必须把它剔除并计 unhandled
+        let (kept, unhandled) = run_delete_preflight(vec![entry]);
+        assert!(kept.is_empty(), "lossy 项不得进入删除批");
+        assert_eq!(unhandled, 1, "剔除要计数，不能静默消失");
     }
 
     /// K09：快照槽必须带扫描类型第二维——先扫 emptyfolder、再扫 appdata（同一路径
@@ -1362,9 +1388,13 @@ mod tests {
         let hit = find_label_entry(&stored, &label, &path_key(dir)).expect("跨类型查找必须命中");
         assert!(hit.empty, "empty 标记被后扫类型顶掉了（K09 病灶）");
         assert_eq!(hit.kind, "dir");
-        // 两个类型槽都在（第二维真的生效）
-        let prefix = format!("{label}|");
-        let slots: Vec<&String> = stored.keys().filter(|k| k.starts_with(&prefix)).collect();
+        // 两个类型槽都在（第二维真的生效）。R1d-L01：槽键只经 `domain_key` 取，
+        // 用例里也不许再拼 `{label}|` 前缀字面量（否则读侧真的改回自拼前缀时它跟着一起漂）。
+        let slots: Vec<String> = FINDER_SCAN_TYPES
+            .iter()
+            .map(|ty| crate::engine::snapshot::domain_key(&label, ty))
+            .filter(|k| stored.contains_key(k))
+            .collect();
         assert_eq!(slots.len(), 2, "emptyfolder 与 appdata 必须各占一槽: {slots:?}");
     }
 

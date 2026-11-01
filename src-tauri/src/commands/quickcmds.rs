@@ -305,6 +305,13 @@ fn has_rejected_metachar(s: &str) -> bool {
     s.chars().any(|c| QUICKCMD_METACHAR.contains(&c))
 }
 
+/// 展开后的残留变量识别：`expand_env_path` 的失败语义是**保留原文**，残留的 `%VAR%`
+/// 必须在这里拒绝——否则字面量会被当成参数交给 explorer，spawn 只要成功就回 success，
+/// 用户看到「已打开」而窗口根本没到目标目录。
+fn unexpanded_env_token(toks: &[String]) -> Option<String> {
+    toks.iter().find_map(|t| trim_finder::cleanup_scan::first_unexpanded_token(t))
+}
+
 /// `runQuickCmd`：返回 (ok, message)
 fn run_quick_cmd(id: &str, cmd: &str) -> (bool, String) {
     let raw_toks = tokenize_quick_cmd(cmd);
@@ -315,6 +322,12 @@ fn run_quick_cmd(id: &str, cmd: &str) -> (bool, String) {
         return (false, "指令包含不允许的字符".into());
     }
     let toks: Vec<String> = raw_toks.into_iter().map(|t| expand_quick_env(&t)).collect();
+    // 展开是单趟替换，变量取不到时原文留下（见 `expand_quick_env` 的失败语义）——
+    // 残留即拒绝，不再把 `%KEY%` 字面量当路径下发。
+    if let Some(tok) = unexpanded_env_token(&toks) {
+        log::write_log("error", &format!("快捷指令含未解析的路径变量 {tok}，拒绝执行: {id}"));
+        return (false, format!("无法解析路径变量「{tok}」"));
+    }
     let Some(exe) = toks.first().cloned() else {
         return (false, "空指令".into());
     };
@@ -571,6 +584,40 @@ mod tests {
             trim_finder::cleanup_scan::first_unexpanded_token(&kept).as_deref(),
             Some("TRIM_NO_SUCH_VAR_9F")
         );
+    }
+
+    /// 展开残留必须在生产路径上被拒：`first_unexpanded_token` 以前只出现在测试里，
+    /// 变量缺失时 `%temp%` 字面量被当参数交给 explorer 而回执仍是成功。
+    /// 判红自证：把 `run_quick_cmd` 里那段 `unexpanded_env_token` 判断删掉 ⇒
+    /// 下面的接线断言与识别断言分别变红。
+    #[test]
+    fn unexpanded_env_token_is_rejected() {
+        let missing = vec![
+            expand_quick_env("explorer"),
+            expand_quick_env(r"%TRIM_NO_SUCH_VAR_9F%"),
+        ];
+        assert_eq!(
+            unexpanded_env_token(&missing).as_deref(),
+            Some("TRIM_NO_SUCH_VAR_9F"),
+            "变量取不到时必须能被点名，而不是原样下发"
+        );
+        assert_eq!(unexpanded_env_token(&["explorer".to_string()]), None, "无残留不得误报");
+        // 接线钉：探测一条「整条指令就是缺失变量」——生产路径必须回「未解析」这句回执，
+        // 而不是把它当程序名下发。首令牌不在 PINNED，即便判据被删也只会 spawn 失败、不弹窗。
+        // 断言用整句相等：spawn 失败的回执里也会带这个变量名，只判 contains 抓不到漏接线。
+        let (ok, msg) = run_quick_cmd("probe", "%TRIM_NO_SUCH_VAR_9F%");
+        assert!(!ok, "残留变量不得放行");
+        assert_eq!(msg, "无法解析路径变量「TRIM_NO_SUCH_VAR_9F」", "回执必须是「未解析变量」这一句");
+        // 白名单里用到变量的条目：本机变量存在时必须全部展开干净
+        for (id, _, cmd) in QUICKCMDS {
+            let argv: Vec<String> = tokenize_quick_cmd(cmd).into_iter().map(|t| expand_quick_env(&t)).collect();
+            if let Some(tok) = unexpanded_env_token(&argv) {
+                assert!(
+                    std::env::var_os(&tok).is_none(),
+                    "{id}：本机存在变量 {tok} 却没展开"
+                );
+            }
+        }
     }
 
     /// 2026-10-11 修复的静态前提：控制台系命令（cmd/powershell 首 token）的**首 token 无引号**
