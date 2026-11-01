@@ -150,7 +150,8 @@
       const resp = await window.api.netcheck.collect();
       const items = resp?.success && Array.isArray(resp.data?.items) ? resp.data.items : null;
       if (!items) {
-        setAll('pending');
+        // F4b-L11：失败不能回落成「等待」——那和「从未检测」同形，只剩一条会消失的 toast
+        setAll('unknown');
         renderAll();
         toast('error', resp?.message || '网络检测失败');
         return;
@@ -172,7 +173,7 @@
       if (bad || warn) toast('warning', `检测完成：${bad} 项异常，${warn} 项警告`);
       else toast('success', '检测完成：全部正常');
     } catch (e) {
-      setAll('pending');
+      setAll('unknown');
       renderAll();
       toast('error', '网络检测异常: ' + e.message);
     } finally {

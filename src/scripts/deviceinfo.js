@@ -1,14 +1,11 @@
 // 设置页设备信息展示与扫描
 (function () {
   'use strict';
-  const PREVIEW = {
-    system: 'Windows 11 专业工作站版 64位 版本号 28000.2525',
-    processor: 'AMD Ryzen 7 7800X3D 核心数 8 线程数 16 工艺 5 nm',
-    graphics: 'NVIDIA GeForce RTX 5060 流处理器 3840 显存 8G (GDDR7 Micron)',
-    motherboard: 'B650M-AYW WIFI ASUSTeK 芯片组 AMD B650',
-    disks: 'Lexar SSD THOR PRO 1TB 实际容量 954GB 类型 SSD',
-    monitors: 'SANC G41 分辨率 1920×1080 刷新率 320Hz 屏幕尺寸 24.3英寸',
-    memory: 'Asgard DDR5-6000 (3000 MHz) 8GB；Asgard DDR5-6000 (3000 MHz) 8GB；容量 16 GB，通道 2，频率 6000 MHz，时序 28-38-38-38 1T'
+  // F4c-L02：没有原始数据时不再回填开发者本机机型——那会把别人的硬件当成用户的设备展示。
+  // 占位交给消费侧，normalize 只负责如实说「读不到」。
+  const EMPTY = {
+    system: '--', processor: '--', graphics: '--', motherboard: '--',
+    disks: '--', monitors: '--', memory: '--'
   };
 
   // 💭1：硬件/固件字符串来自 WMI，虽非用户输入，仍按项目惯例转义后再进 innerHTML，保持一致与纵深。
@@ -17,7 +14,7 @@
   // 按「不留死代码」删净；本模块只剩 normalize 供系统概览复用 + init 预热缓存。
 
   function normalize(raw) {
-    if (!raw) return { ...PREVIEW, preview: true };
+    if (!raw) return { ...EMPTY, preview: true };
     const join = (items, fn) => (items || []).map(fn).filter(Boolean).join('；');
     const os = raw.system || {};
     const cpu = raw.processor || {};

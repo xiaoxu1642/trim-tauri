@@ -159,8 +159,11 @@
 
   // ==================== 当前值读取 ====================
   function applyCurrentToSelection(data) {
-    // 当前值命中选项则预选；未命中（如默认值 2 / 100）则不选，应用时跳过该组
+    // 当前值命中选项则预选；未命中（如默认值 2 / 100）则不选，应用时跳过该组。
+    // F4a2-L04：用户已手动选过（或点过「应用推荐设置」）的组不再回填——query 是异步的，
+    // 迟到回执不能把用户刚选的档位整组改掉。
     Object.keys(GROUPS).forEach(key => {
+      if (selected[key] !== null) return;
       const cur = Number(data?.[key]);
       selected[key] = GROUPS[key].options.some(o => o.value === cur) ? cur : null;
     });
@@ -176,7 +179,10 @@
         const d = resp.data || {};
         setNote(root, `当前注册表值：Win32PrioritySeparation = ${d.win32 ?? '未知'} · MouseDataQueueSize = ${d.mouse ?? '未知'}。鼠标队列大小修改后需重启电脑生效。`);
       }
-    } catch (e) { /* 读取失败保持未选状态 */ }
+    } catch (e) {
+      // F4a2-L04：读取失败不能静默——用户至少要能区分「当前值未知」与「当前值不在这几档」。
+      setNote(root, '当前值读取失败，以现有选择为准');
+    }
   }
 
   // ==================== 提权 ====================

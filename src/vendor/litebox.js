@@ -12,17 +12,20 @@
 //      Tab/Shift+Tab 无法离开按钮组，Ctrl+* 也被吞）——其余按键与修饰键交还浏览器；
 //   ⑥ 去掉图片的 title 回退与 `.title=` 赋值：本仓红线「提示用 data-tip 不用 title」，
 //      图片描述走 caption 文本 + img.alt，读屏与视觉提示同源。
+//      注：上游 click() 的 `e.className != 'lightbox-img'` 与模板实际类名 `lightbox-image`
+//      拼写不同而恒真；本仓不改该表达式，在 click() 内用 `classList.contains('lightbox-image')`
+//      代偿（点灯箱自身的图不会被重复打开）。
 //   ⑦ click() 的位置写入 this.currentIndex（原写 this.current，而计数器/翻页读的是
 //      currentIndex——双变量互不相认：计数器恒显示 0/N、首次翻页原地重显同一张。
 //      合一后「当前第几张」单一来源；navigate 经 click({target}) 回填同一索引）；
 //   ⑧ 布局：新增 `.lightbox-stage` 包住容器与左右箭头。上游把左右箭头挂在整窗
 //      fixed 弹层的左右边缘，图片宽度不足时会飘到图片之外；挂在 stage 上才能贴图、
 //      对称、旋转图片时箭头不跟着转。底部工具条固定为「缩放/旋转/重置 → 分隔 →
+//      删除（cleanup.js 运行时注入）→ 关闭」；关闭按钮从上游的纯图标改为图标+文字，
+//      与删除同一档可见文案，避免工具条尾部两个无字图标难以分辨；
 //   ⑨ navigate() 的回绕区间改为 1..total 闭合（F4a1-M14）：原 `<=0 ⇒ total-1 /
 //      >total ⇒ 0` 两处 off-by-one——末张按「下一张」要空按一次、首张按「上一张」
 //      跳过真正的最后一张。
-//      删除（cleanup.js 运行时注入）→ 关闭」；关闭按钮从上游的纯图标改为图标+文字，
-//      与删除同一档可见文案，避免工具条尾部两个无字图标难以分辨；
 // 本仓消费方式见 cleanup.js 的 openPreview：range 收窄到预览容器，全局 img 点击不劫持。
 
 class Litebox {
@@ -166,7 +169,7 @@ class Litebox {
         this.currentIndex = (this.currentIndex || 0) + direction;
         // 受控适配⑨（F4a1-M14）：回绕区间按 1..total 闭合 —— 原形状 `<=0 ⇒ total-1`
         // 会跳过真正的最后一张、`>total ⇒ 0` 落在 img[-1]（末张按下一张要空按一次
-        // 才回第一张）。头注登记与代码分叉即此。
+        // 才回第一张）。头注登记即此。
         if (this.currentIndex < 1) {
             this.currentIndex = this.total;
         } else if (this.currentIndex > this.total) {

@@ -230,7 +230,15 @@
             : [norm(state.adapter)];
           const hit = list.find(a => accept.includes(norm(a.name)));
           if (hit) { up = hit.up || 0; down = hit.down || 0; }
-          else { up = sum(list, 'up'); down = sum(list, 'down'); }
+          else {
+            // F4b-L07：取不到该卡的计数器时不能一边显示卡名、一边展示聚合值。
+            // 回落聚合的同时把下拉切回「所有活动网卡（聚合）」，选择与数字重新同源。
+            up = sum(list, 'up'); down = sum(list, 'down');
+            state.adapter = '';
+            saveStored();
+            const adapterSel = $('realtimeAdapter');
+            if (adapterSel) adapterSel.value = '';
+          }
         } else {
           up = sum(list, 'up'); down = sum(list, 'down');
         }
@@ -383,6 +391,10 @@
   function drawInner() {
     const canvas = $('realtimeChart');
     if (!canvas) return;
+    // F4b-L15：曲线对读屏不可见，用一个随数据更新的 aria-label 给出当前值与区间峰值
+    const peak = state.history.reduce((m, p) => Math.max(m, p.down || 0, p.up || 0), 0);
+    const chartLabel = `实时网速曲线：当前下载 ${formatSpeed(state.down)}，上传 ${formatSpeed(state.up)}，区间峰值 ${formatSpeed(peak)}`;
+    if (canvas.getAttribute('aria-label') !== chartLabel) canvas.setAttribute('aria-label', chartLabel);
     const dim = resizeCanvas();
     if (!dim) return;
     const ctx = canvas.getContext('2d');
@@ -391,9 +403,10 @@
     ctx.clearRect(0, 0, w, h);
 
     const gridColor = cssVar('--border-default', 'rgba(0,0,0,0.08)');
-    const textColor = cssVar('--fg-tertiary', '#888888');
+    // 回退值取浅色 token 同值（F4b-L16）：原 #888888 叠白仅 3.5:1、#16A34A 更暗一档
+    const textColor = cssVar('--fg-tertiary', '#6B657F');
     const downColor = cssVar('--accent', '#6A59C9');
-    const upColor = cssVar('--success', '#16A34A');
+    const upColor = cssVar('--success', '#156B42');
 
     const padL = 56, padR = 12, padT = 10, padB = 22;
     const plotW = w - padL - padR;
@@ -681,9 +694,9 @@
     ctx.clearRect(0, 0, w, h);
 
     const gridColor = cssVar('--border-default', 'rgba(0,0,0,0.08)');
-    const textColor = cssVar('--fg-tertiary', '#888888');
+    const textColor = cssVar('--fg-tertiary', '#6B657F');
     const downColor = cssVar('--accent', '#6A59C9');
-    const upColor = cssVar('--success', '#16A34A');
+    const upColor = cssVar('--success', '#156B42');
 
     const padL = 56, padR = 12, padT = 10, padB = 22;
     const plotW = w - padL - padR, plotH = h - padT - padB;
@@ -747,6 +760,7 @@
 
   function reportStatBody(report) {
     const avg = (report.durationSec > 0) ? Math.round(report.samples.length / Math.max(report.durationSec, 1) * 100) / 100 : 0;
+    const chartLabel = `带宽曲线：最高下载 ${formatSpeed(report.maxDown)}，最高上传 ${formatSpeed(report.maxUp)}，采样 ${report.samples.length} 个`;
     return `
       <div class="rt-report-head">
         <div class="rt-report-title">${escapeHtml(report.adapter || '所有活动网卡（聚合）')}</div>
@@ -766,7 +780,7 @@
           <span class="realtime-legend-item"><i class="rt-dot" style="background:var(--accent)"></i>下载</span>
           <span class="realtime-legend-item"><i class="rt-dot" style="background:var(--success)"></i>上传</span>
         </div>
-        <canvas class="rt-report-canvas"></canvas>
+        <canvas class="rt-report-canvas" role="img" aria-label="${escapeAttr(chartLabel)}"></canvas>
       </div>`;
   }
 
@@ -890,6 +904,14 @@
           window.app?.toast('error', '删除通道不可用，未执行删除');
           return;
         }
+        // F4b-L12：与「清空全部」保持同一档确认，避免点错即不可恢复
+        const ok = await window.app?.confirm?.(
+          '删除网速报告',
+          `将删除报告「${name}」，删除后不可恢复。`,
+          '删除',
+          '取消'
+        );
+        if (!ok) return;
         try {
           const resp = await window.api.realtime.reportDelete(name);
           if (resp && resp.success === false) {

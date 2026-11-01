@@ -109,7 +109,7 @@
       const thinkValues = ['thinking', 'auto_thinking', 'non_thinking'];
       return `
         <section class="mw-group${collapsed[key] ? ' collapsed' : ''}" data-model="${key}">
-          <div class="mw-group-head" data-toggle="${key}">
+          <div class="mw-group-head" data-toggle="${key}" role="button" tabindex="0" aria-expanded="${collapsed[key] ? 'false' : 'true'}">
             <svg class="mw-group-chevron" viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg>
             <span class="mw-group-icon">${meta.icon}</span>
             <div>
@@ -145,7 +145,7 @@
                 <div class="mw-row">
                   <input type="password" class="field-input" data-role="apiKey" data-model="${key}"
                          value="${escapeAttr(cfg.apiKey || '')}" placeholder="请输入密钥（默认留空，保存后校验通过方可启用）" autocomplete="off" />
-                  <button class="btn btn-secondary btn-small" data-role="toggleKey" data-model="${key}" type="button">显示</button>
+                  <button class="btn btn-secondary btn-small" data-role="toggleKey" data-model="${key}" type="button" aria-pressed="false">显示</button>
                 </div>
                 <span class="mw-field-tip">密钥仅保存在本机的应用数据目录内，不会写入日志；留空保存时不会发起校验</span>
               </div>
@@ -190,7 +190,7 @@
               <button class="btn btn-secondary btn-small" data-role="test" data-model="${key}" type="button">测试连接</button>
               <button class="btn btn-secondary btn-small" data-role="reset" data-model="${key}" type="button">恢复默认</button>
             </div>
-            <div class="mw-log" data-role="log" data-model="${key}" hidden></div>
+            <div class="mw-log" data-role="log" data-model="${key}" role="status" aria-live="polite" hidden></div>
           </div>
         </section>`;
     }).join('');
@@ -225,14 +225,26 @@
 
   function bind() {
     if (!body) return;
+    const toggleGroup = head => {
+      const key = head.dataset.toggle;
+      const group = head.closest('.mw-group');
+      collapsed[key] = !group.classList.contains('collapsed');
+      group.classList.toggle('collapsed', !!collapsed[key]);
+      // F4b-L14：折叠态对读屏可见，不再只靠三角图标的视觉旋转
+      head.setAttribute('aria-expanded', collapsed[key] ? 'false' : 'true');
+    };
     body.querySelectorAll('[data-toggle]').forEach(head => {
       head.addEventListener('click', e => {
         // 点标题里的「API 文档 / 去获取API」不触发折叠，交给下面的 openDoc 处理
         if (e.target.closest('a, button')) return;
-        const key = head.dataset.toggle;
-        const group = head.closest('.mw-group');
-        collapsed[key] = !group.classList.contains('collapsed');
-        group.classList.toggle('collapsed', !!collapsed[key]);
+        toggleGroup(head);
+      });
+      // F4b-L14：分组头是 div + click，没有键盘等价就完全无法折叠/展开
+      head.addEventListener('keydown', e => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        if (e.target.closest('a, button')) return;
+        e.preventDefault();
+        toggleGroup(head);
       });
     });
     body.querySelectorAll('[data-doc-key]').forEach(btn => {
@@ -256,6 +268,8 @@
         const show = input.type === 'password';
         input.type = show ? 'text' : 'password';
         btn.textContent = show ? '隐藏' : '显示';
+        // F4b-L14：这是切换按钮而非一次性动作，按下态要能被读屏读到
+        btn.setAttribute('aria-pressed', show ? 'true' : 'false');
       });
     });
     body.querySelectorAll('[data-role="reset"]').forEach(btn => {

@@ -41,6 +41,8 @@
   const RISK_LABELS = { low: '低风险', medium: '中风险', high: '高风险' };
 
   let maximized = false;     // 窗口最大化（指标卡一行展示）
+  // F4a1-L11：init 自身幂等守卫（同 cleanup.js）——不依赖 app.js 的记账。
+  let inited = false;
 
   function escapeHtml(s) { return window.ds.esc(s); }
   function fmtBytes(bytes) { return window.ds.fmtBytes(bytes); } // 审查 M18：真源在 ds
@@ -190,17 +192,20 @@
                  <button class="btn btn-secondary btn-small mem-region-block" data-block="${r.id}" type="button" data-tip="把这些软件的后台服务改为手动并删除更新任务，持久生效且不自动还原">阻止开机自启</button>`
             : `<button class="btn btn-secondary btn-small mem-region-clean" data-clean="${r.id}" type="button">清理该项</button>`;
           return `
-          <div class="mem-region-row row-card" data-id="${r.id}" data-tip="点击查看该区域的详细简介">
+          <div class="mem-region-row row-card" data-id="${r.id}" role="group" tabindex="0" aria-label="${window.ds.escAttr(r.name)} 区域说明">
             <label class="mem-check" data-tip="勾选后可清理该区域">
               <input type="checkbox" data-check="${r.id}" ${r.checked ? 'checked' : ''} />
               <span class="mem-check-box"><svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg></span>
             </label>
             <div class="mem-region-icon" aria-hidden="true">${MEM_REGION_ICON}</div>
             <div class="maint-card-body">
-              <div class="mem-region-title"><span class="mem-region-name">${escapeHtml(r.name)}</span><span class="category-risk ${r.risk}">${RISK_LABELS[r.risk]}</span></div>
+              <div class="mem-region-title"><span class="mem-region-name">${escapeHtml(r.name)}</span><span class="category-risk ${window.ds.escAttr(r.risk)}">${escapeHtml(RISK_LABELS[r.risk] || r.risk)}</span></div>
               <div class="mem-region-desc">${escapeHtml(r.desc)}</div>
             </div>
-            <div class="row-card-actions">${action}</div>
+            <div class="row-card-actions">
+              <button class="btn btn-secondary btn-small mem-region-intro" data-intro="${r.id}" type="button" data-tip="查看该区域的详细简介">简介</button>
+              ${action}
+            </div>
           </div>`;
         }).join('')}
       </div>`;
@@ -221,24 +226,26 @@
     root.querySelectorAll('.mem-region-block').forEach(btn => {
       btn.addEventListener('click', () => withMemBusy(() => runStubbornBlock()));
     });
-    // 点击条目主体（非按钮/勾选框）→ 弹窗展示详细简介（本地 + 联网 AI）
+    // 简介入口（F4a1-L09）：行内已有勾选框与操作钮，整行若再扮 role=button 会把子件
+    // 折进按钮语义（读屏只报「按钮」，里面的勾选框与操作钮失去独立身份）。行的角色降为
+    // group，并保留 Enter/Space 键盘等价；行尾另给显式「简介」钮作为自解释入口。
+    const openIntro = (id) => {
+      const r = REGIONS.find(x => x.id === id);
+      if (r) showRegionIntro(r);
+    };
+    root.querySelectorAll('.mem-region-intro').forEach(btn => {
+      btn.addEventListener('click', () => openIntro(btn.dataset.intro));
+    });
     root.querySelectorAll('.mem-region-row').forEach(row => {
-      // 键盘等价路径（A3-M03）：行本身带 cursor:pointer 且「点击查看简介」是唯一入口，
-      // 但 div 不可聚焦 ⇒ 键盘用户连详情都打不开。补 tabindex/role + Enter/Space 转 click。
-      if (!row.hasAttribute('tabindex')) {
-        row.setAttribute('tabindex', '0');
-        row.setAttribute('role', 'button');
-        row.addEventListener('keydown', (e) => {
-          if ((e.key === 'Enter' || e.key === ' ') && e.target === row) {
-            e.preventDefault();
-            row.click();
-          }
-        });
-      }
       row.addEventListener('click', (e) => {
         if (e.target.closest('button, input, label')) return;
-        const r = REGIONS.find(x => x.id === row.dataset.id);
-        if (r) showRegionIntro(r);
+        openIntro(row.dataset.id);
+      });
+      row.addEventListener('keydown', (e) => {
+        if ((e.key === 'Enter' || e.key === ' ') && e.target === row) {
+          e.preventDefault();
+          openIntro(row.dataset.id);
+        }
       });
     });
     updateRegionCount();
@@ -542,6 +549,8 @@
 
   // ==================== 初始化 ====================
   function init() {
+    if (inited) return;
+    inited = true;
     $('btnMemRefresh')?.addEventListener('click', () => { loadInfo(); });
     $('btnMemProcesses')?.addEventListener('click', () => { openProcessManager(); });
     $('btnMemClean')?.addEventListener('click', () => { withMemBusy(() => runClean()); });

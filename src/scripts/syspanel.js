@@ -946,7 +946,12 @@
     if (state) lastPowerState = state;
     const el = mountPower();
     if (!el) return;
-    editor = null;
+    // F4c-L06：编辑会话的销毁只走 exitEditor()。此处原先无条件 editor = null，
+    // 一旦在编辑态被触发，弹窗的关闭守卫就失去会话，编辑/取消/保存/×/Esc 全部空转
+    if (editor) {
+      window.app?.log?.('warn', '编辑会话进行中，已跳过电源计划列表重渲染');
+      return;
+    }
     const rf = powerRefreshBtn();
     if (rf) rf.style.display = '';
     const st = lastPowerState || {};
@@ -1389,6 +1394,10 @@
         const r = await window.api.elevate?.request?.(data.launchToken);
         if (r && r.success) {
           if (r.alreadyAdmin) { // 防御：unlock 判非管理员、elevate 判已是管理员不应发生
+            // F4c-L07：此时 unlock 只写了意图、回执里没有 sessionId，且 editorBusy 仍为真——
+            // 原递归首行就被自己的防重入闸挡回，用户看到「点了编辑，什么都没发生」。
+            // 放开闸门重取一次会话（后端这次会走管理员分支），而不是空转。
+            editorBusy = false;
             await enterPowerEditor(guid);
             return;
           }

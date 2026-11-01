@@ -132,7 +132,14 @@
     const currentRow = document.getElementById('bgCurrentRow');
     const thumb = document.getElementById('bgThumb');
     if (!listEl || !bodyEl) return;
-    window.api?.appearance?.listBg?.().then(resp => {
+    // F4c-L03：`?.()` 只在方法缺席时给 undefined，后面紧跟的 `.then` 会直接抛 TypeError，
+    // 所谓兜底反而更误导——先判通道在不在，缺席就走同一条失败出口
+    const listing = window.api?.appearance?.listBg?.();
+    if (!listing) {
+      window.pathbinding.bgListReadFailed(listEl, bodyEl);
+      return;
+    }
+    listing.then(resp => {
       // A1-L02：success:false 不能与「没导入过图片」同形（否则整块 display:none）。
       if (!resp || resp.success === false) {
         window.pathbinding.bgListReadFailed(listEl, bodyEl);
@@ -359,19 +366,32 @@
     });
     // 打开背景图片存放目录（需求：点击跳转本地 backgrounds 目录）
     document.getElementById('btnOpenBgDir')?.addEventListener('click', () => {
-      window.api?.appearance?.openBgDir?.()
+      const opening = window.api?.appearance?.openBgDir?.();
+      if (!opening) { window.app?.toast('error', '无法打开背景目录'); return; }
+      opening
         .then(r => { if (r && !r.success) window.app?.toast('error', (r.message) || '无法打开背景目录'); })
         .catch(() => window.app?.toast('error', '无法打开背景目录'));
     });
+    // F4c-L04：视觉即时生效、存储防抖——与下方「背景模糊度」同一口径。
+    // 原先这三个滑块每次 input 都 load()+save()（JSON.stringify + 同步 setItem），
+    // 一次拖动就是上百次同步写，正是 blur 那条注释宣称已根治的形态。
+    let bgPersistTimer = null;
+    const persistBgDebounced = mutate => {
+      clearTimeout(bgPersistTimer);
+      bgPersistTimer = setTimeout(() => {
+        const ap2 = window.pathbindingAppearance.load();
+        mutate(ap2);
+        window.pathbindingAppearance.save(ap2);
+      }, 150);
+    };
     const opacitySlider = document.getElementById('bgOpacity');
     opacitySlider?.addEventListener('input', () => {
       const v = parseInt(opacitySlider.value, 10);
       const val = document.getElementById('bgOpacityVal');
       if (val) val.textContent = v + '%';
       const ap2 = window.pathbindingAppearance.load();
-      ap2.bgOpacity = v;
-      window.pathbindingAppearance.save(ap2);
       applyBackground(ap2.bgPath, v, ap2.bgPosX, ap2.bgPosY);
+      persistBgDebounced(x => { x.bgOpacity = v; });
     });
     // 批次：背景视角可调 —— 水平/垂直位置滑块，拖动即时生效并持久化（0-100 裁切窗口百分比）
     function bindBgPosSlider(sliderId, valId, storeKey) {
@@ -381,9 +401,13 @@
         const val = document.getElementById(valId);
         if (val) val.textContent = v + '%';
         const ap2 = window.pathbindingAppearance.load();
-        ap2[storeKey] = v;
-        window.pathbindingAppearance.save(ap2);
-        applyBackground(ap2.bgPath, ap2.bgOpacity, ap2.bgPosX, ap2.bgPosY);
+        applyBackground(
+          ap2.bgPath,
+          ap2.bgOpacity,
+          storeKey === 'bgPosX' ? v : ap2.bgPosX,
+          storeKey === 'bgPosY' ? v : ap2.bgPosY
+        );
+        persistBgDebounced(x => { x[storeKey] = v; });
       });
     }
     bindBgPosSlider('bgPosX', 'bgPosXVal', 'bgPosX');

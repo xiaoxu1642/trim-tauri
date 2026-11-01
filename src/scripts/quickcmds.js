@@ -80,7 +80,7 @@
     el.innerHTML = list.map(c => {
       const meta = CAT_META[c.cat] || CAT_META['系统工具'];
       return `
-        <div class="qc-card" data-id="${escapeHtml(c.id)}" data-tip="${escapeHtml(c.cmd)}">
+        <div class="qc-card" data-id="${escapeHtml(c.id)}" data-tip="${window.ds.escAttr(c.cmd)}">
           <div class="qc-icon">${catIcon(c.cat)}</div>
           <div class="qc-body">
             <div class="qc-name">${escapeHtml(c.name)}</div>

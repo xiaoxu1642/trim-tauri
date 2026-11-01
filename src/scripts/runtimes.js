@@ -30,6 +30,7 @@
 
   let items = [];          // 最近一次检测结果
   let scanned = false;     // F4c-M07：「已扫描但确无结果」与「尚未扫描」必须分开记账
+  let scanError = '';      // F4c-L01：第三种态——上次检测失败。空串表示没有待报告的失败
   let scanning = false;
   const repairedSet = new Set(); // v3.5.3：本会话修复成功的条目（行内「已修复」标记）
 
@@ -97,7 +98,11 @@
     if (!items.length) {
       // F4c-M07：成功回执但零条结果时，若仍显示「尚未扫描」会与摘要「共 0 项，全部正常」
       // 互相矛盾——两种空态按 scanned 分开写。
-      root.innerHTML = `<div class="empty-state"><p>${scanned ? '本机没有可检测的运行库条目。' : '尚未扫描。点击「开始扫描」检测本机运行库状态。'}</p></div>`;
+      // F4c-L01：失败是第三种态，不能与「尚未扫描」逐字相同，否则关掉 toast 就无从区分
+      const emptyText = scanError
+        ? `上次检测失败：${escapeHtml(scanError)}。可点击「开始扫描」重试。`
+        : (scanned ? '本机没有可检测的运行库条目。' : '尚未扫描。点击「开始扫描」检测本机运行库状态。');
+      root.innerHTML = `<div class="empty-state"><p>${emptyText}</p></div>`;
       return;
     }
     root.innerHTML = items.map(it => {
@@ -139,7 +144,12 @@
   function renderSummary(summary) {
     const el = document.getElementById('rtSummary');
     if (!el) return;
-    if (!summary) { el.textContent = '尚未扫描 · 点击「开始扫描」检测本机运行库'; return; }
+    if (!summary) {
+      el.textContent = scanError
+        ? `上次检测失败（${scanError}）· 点击「开始扫描」重试`
+        : '尚未扫描 · 点击「开始扫描」检测本机运行库';
+      return;
+    }
     if (summary.fail === 0 && summary.warn === 0) {
       el.textContent = `共 ${summary.total} 项，全部正常`;
       el.classList.add('all-ok');
@@ -174,12 +184,15 @@
       if (!resp || !resp.success) throw new Error((resp && resp.message) || '运行库检测失败');
       items = resp.data.items;
       scanned = true;
+      scanError = '';
       renderList();
       updateRadar();
       renderSummary(resp.data.summary);
       if (!silent) window.app?.toast('success', `运行库扫描完成，共 ${resp.data.summary.total} 项`);
     } catch (e) {
       items = [];
+      // F4c-L01：把失败原因留在页面上（error 值由渲染侧转义），不只靠 3 秒 toast
+      scanError = (e && e.message) || String(e);
       renderList();
       updateRadar();
       renderSummary(null);

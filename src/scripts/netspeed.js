@@ -233,6 +233,8 @@
     stopDetect();
     // 测速流量结束：自动关闭网页，切回实时图表并展示本次测速结果
     showChartView();
+    // F4b-L02：隐藏外嵌页不等于停止它，iframe 留在后台会继续跑页面脚本
+    unloadFrame();
     showReport(done);
   }
 
@@ -282,7 +284,9 @@
       if (note) note.textContent = '本次测速结果未能保存到历史记录。';
     });
     const latStat = `
-      <div class="rt-stat"><span class="rt-stat-label">平均延迟</span><span class="rt-stat-value" style="color:var(--warning,#E6A23C)">${avgLat != null ? avgLat + ' ms' : '—'}</span><span class="rt-stat-meta">${minLat != null ? '最低 ' + minLat + ' ms · 采样 ' + lats.length + ' 次' : '未获取到延迟采样'}</span></div>`;
+      <div class="rt-stat"><span class="rt-stat-label">平均延迟</span><span class="rt-stat-value" style="color:var(--warning,#875708)">${avgLat != null ? avgLat + ' ms' : '—'}</span><span class="rt-stat-meta">${minLat != null ? '最低 ' + minLat + ' ms · 采样 ' + lats.length + ' 次' : '未获取到延迟采样'}</span></div>`;
+    // F4b-L15：曲线只有像素，读屏与键盘拿不到任何数据，补一条等价的文字摘要
+    const chartAria = `实测带宽曲线：下载峰值 ${fmtSpeed(r.maxDown)}，上传峰值 ${fmtSpeed(r.maxUp)}，采样 ${r.samples.length} 个`;
     const body = `
       <div class="rt-report-head">
         <div class="rt-report-title">实测带宽（本机网卡流量采样）</div>
@@ -297,9 +301,9 @@
         <div class="rt-chart-legend">
           <span class="realtime-legend-item"><i class="rt-dot" style="background:var(--accent)"></i>下载</span>
           <span class="realtime-legend-item"><i class="rt-dot" style="background:var(--success)"></i>上传</span>
-          <span class="realtime-legend-item"><i class="rt-dot" style="background:var(--warning,#E6A23C)"></i>延迟(ms)</span>
+          <span class="realtime-legend-item"><i class="rt-dot" style="background:var(--warning,#875708)"></i>延迟(ms)</span>
         </div>
-        <canvas class="rt-report-canvas" id="nsReportCanvas"></canvas>
+        <canvas class="rt-report-canvas" id="nsReportCanvas" role="img" aria-label="${escapeHtml(chartAria)}"></canvas>
       </div>
       <p class="rt-report-note" id="nsReportSaveNote">${saved ? '本次测速结果已保存至历史记录（可在「查看报告」中查看，保留 7 天）。' : '正在保存本次测速结果到历史记录…'}</p>`;
 
@@ -367,9 +371,9 @@
       ctx.setLineDash([]);
     }
 
-    series(p => p.down, ySpd, getCssColor('--accent', '#7C86F2'), false);
-    series(p => p.up, ySpd, getCssColor('--success', '#34D399'), false);
-    if (maxLat > 0) series(p => p.latency, yLat, getCssColor('--warning', '#E6A23C'), true);
+    series(p => p.down, ySpd, getCssColor('--accent', '#6A59C9'), false);
+    series(p => p.up, ySpd, getCssColor('--success', '#156B42'), false);
+    if (maxLat > 0) series(p => p.latency, yLat, getCssColor('--warning', '#875708'), true);
   }
 
   // 读取 CSS 变量实际色值（canvas 不支持 var()，需解析 computed style）
@@ -404,12 +408,10 @@
     // 默认展示实时网络图表视图
     showChartView();
     const site = document.getElementById('externalTestSite');
-    // 切换站点：仅在已加载过测速页时刷新，未点击开始测速前不访问网页
+    // 切换站点：已加载过测速页时按「已开始测速」重载并重启流量检测，
+    // 否则换站后检测器已停、页内再点测速也不会有任何记录（F4b-L01）
     site?.addEventListener('change', () => {
-      if (loaded) {
-        stopDetect();
-        loadExternalTest(false);
-      }
+      if (loaded) loadExternalTest(true);
     });
     document.getElementById('btnExternalTest')?.addEventListener('click', () => loadExternalTest(true));
     document.getElementById('btnRefreshTest')?.addEventListener('click', () => {
@@ -418,11 +420,16 @@
     });
   }
 
-  // 离开本页时回收资源：停止流量采样并卸载 iframe，避免外部测速页在后台持续占用内存/CPU
-  function stop() {
-    stopDetect();
+  // 卸载外嵌页：测速结束与离开本页共用同一口径，避免外部测速页在后台持续占用内存/CPU
+  function unloadFrame() {
     const frame = document.getElementById('externalTestFrame');
     if (frame && frame.src && !frame.src.startsWith('about:')) frame.src = 'about:blank';
+  }
+
+  // 离开本页时回收资源：停止流量采样并卸载 iframe
+  function stop() {
+    stopDetect();
+    unloadFrame();
     showChartView();
   }
 

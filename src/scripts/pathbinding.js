@@ -221,10 +221,21 @@
   function bindBodyEvents() {
     if (!modal) return;
     modal.body.querySelectorAll('.pw-input').forEach(input => {
-      const commit = () => savePath(input.dataset.key, input.value.trim());
+      // F4a2-L06：change 与 blur 共用同一次提交，按「最近一次已提交值」去重——
+      // 同一值不再发两次 paths:save（保存失败时也就不会叠出两条错误提示）。
+      // 初值取已存配置：未改动的输入离开焦点不会产生空写回。
+      let lastSubmitted = pathConfig[input.dataset.key] || '';
+      const commit = () => {
+        const v = input.value.trim();
+        if (v === lastSubmitted) return;
+        lastSubmitted = v;
+        savePath(input.dataset.key, v).then(ok => { if (!ok) lastSubmitted = null; });
+      };
       input.addEventListener('change', commit);
-      input.addEventListener('blur', () => {
-        if (input.value.trim() !== (pathConfig[input.dataset.key] || '')) commit();
+      input.addEventListener('blur', commit);
+      // 回车提交：与 change/blur 走同一入口，不另写保存链。
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); commit(); }
       });
     });
     modal.body.querySelectorAll('.pw-browse').forEach(btn => {
@@ -242,7 +253,7 @@
 
   // ==================== 数据读写 ====================
   async function savePath(key, value) {
-    if (!window.api?.paths) return;
+    if (!window.api?.paths) return false;
     try {
       const resp = await window.api.paths.save(key, value);
       if (resp && resp.success) {
@@ -255,14 +266,16 @@
           icons[group.id] = null;
           await refreshGroupIcon(group.id);
         }
-      } else {
-        // 审查 SET-1（2026-09-15）：原实现无失败分支 → 主进程拒绝（白名单未收录 / 落盘失败）
-        // 时界面无任何反馈，用户误以为「已保存」。这里显式回滚提示，避免输入静默丢失。
-        setHint(key, '保存失败，请重试', 'warn');
-        window.app?.toast('error', `保存失败：${resp?.message || '路径配置无效'}`);
+        return true;
       }
+      // 审查 SET-1（2026-09-15）：原实现无失败分支 → 主进程拒绝（白名单未收录 / 落盘失败）
+      // 时界面无任何反馈，用户误以为「已保存」。这里显式回滚提示，避免输入静默丢失。
+      setHint(key, '保存失败，请重试', 'warn');
+      window.app?.toast('error', `保存失败：${resp?.message || '路径配置无效'}`);
+      return false;
     } catch (e) {
       window.app?.toast('error', '保存失败: ' + e.message);
+      return false;
     }
   }
 
@@ -478,7 +491,7 @@
     // 「这台机器上到底扫过没有」只有一个口径。原先另存一份 localStorage 标记是第二真源
     // ——清 WebView2 数据后标记丢了但 scannedAt 还在（对着已有绑定白扫一次），换机器则相反
     // （标记还在、扫描记录没了，从此再不补扫）。老配置里 scannedAt 若是升级前的 Debug 形态，
-    // 由下方 normalizeScannedAt 归一后仍算「扫过」，不会退化成重新扫描。
+    // 由下方 parsedScannedAt 归一后仍算「扫过」，不会退化成重新扫描。
     // 首启 Absent（degraded 未命中才会走到这里）仍照常自动扫描，本分支不得连带关闭。
     if (!parsedScannedAt(pathConfig.scannedAt)) {
       setTimeout(() => { autoScan(true); }, 1500);

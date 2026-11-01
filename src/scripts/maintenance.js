@@ -11,7 +11,6 @@
   let running = null;           // 正在执行的 taskId（同一时刻仅一个）
   // C3：永劫专项面板侧表（hiddenFromMaintenance 过滤用）
   let NARA_PANEL_MAINT = null;
-  let NARA_MAINT_FILTERED_IDS = null;  // 被 hiddenFromMaintenance 过滤的 id Set（null=未过滤，Set=过滤过）
   const status = new Map();     // taskId -> 'idle'|'running'|'ok'|'warn'|'error'
   const selected = new Set();   // 批量勾选的 taskId（跨分类保留）
   let batch = null;             // 批量状态 { total, done, ok, fail, cancelRequested } | null
@@ -227,7 +226,7 @@
     const list = visibleTasks();
     // 2026-10-22 用户裁定：撤下「网络类维护任务已收拢到永劫专项面板」迁移横幅。
     // 迁移已跨多个版本，新老用户都不需要这条指引（与优化中心 2026-09-27 撤「网络栈优化已移至
-    // 系统维护」横幅同一判断）；被收拢的 3 项仍由 NARA_MAINT_FILTERED_IDS 过滤，功能面不变。
+    // 系统维护」横幅同一判断）；被收拢的网络类维护任务仍由 hiddenFromMaintenance 过滤，功能面不变。
     if (!list.length) {
       el.innerHTML = (window.emptyState
         ? window.emptyState({ icon: 'search', title: '暂无维护任务', desc: '加载任务清单中，请稍后重试' })
@@ -353,8 +352,9 @@
       // 复核 N1（提权半闭环，2026-09-16）：admin 任务未提权时服务端回传 needAdmin，
       // 此前只输出一条错误文本、无提权入口；现在弹出提权确认（对齐 runtimes 范式）
       if (resp && resp.needAdmin) {
-        status.set(task.id, 'error');
         const elevated = await window.app?.requestElevation?.('该维护任务需要管理员权限才能执行系统级操作。');
+        // F4a2-L02：提权不是失败——未提权才落失败态；已同意时清掉红灯（应用即将重启）。
+        status.set(task.id, elevated ? 'idle' : 'error');
         if (elevated && batchRemainingIds && batchRemainingIds.length) {
           // 审查 2026-09-27 M8：同意提权 → 应用即将重启，先把剩余批次（含本项，
           // 本项未执行成功）写入 localStorage，重启进页时恢复预勾选
@@ -441,8 +441,18 @@
       // 不再自己弹确认，也就不会与批量链的确认等级再次分叉）。
       const st = await confirmAndRunOne(task);
       if (st === 'cancelled' || st === 'aborted') return;
+      if (st === 'elevating') {
+        // F4a2-L02：提权分支既不是失败也不是「完成」——单独一档，明确说应用将重启。
+        window.app?.toast?.('info', `${task.title} 已请求管理员权限，应用将重启`);
+        return;
+      }
       window.app?.toast?.(st === 'ok' ? 'success' : (st === 'warn' ? 'warning' : 'error'),
         `${task.title} ${STATUS_LABEL[st] || '完成'}`);
+    } catch (e) {
+      // F4a2-L09：单任务链此前只有 finally——确认件 reject 时用户只看到「点了没反应」。
+      const msg = (e && e.message) || String(e);
+      appendOutput(`—— 执行中断：${msg} ——`);
+      window.app?.toast?.('error', `执行中断：${msg}`);
     } finally {
       running = null;
       renderList();
@@ -572,16 +582,12 @@
       const resp = await window.api.maintenance.tasks();
       if (resp && resp.success && Array.isArray(resp.data)) {
         let data = resp.data;
-        // C3：hiddenFromMaintenance 过滤 — 网络类 3 项收拢到永劫专项面板
+        // C3：hiddenFromMaintenance 过滤 — 被收拢的网络类任务只在永劫专项面板出现。
+        // F4a2-L01/M01：只保留「有隐藏项就过滤」这一条腿——此前的过滤集只写不读，
+        // 空表分支还赋值了全仓未声明的标识符（严格模式下直接整页加载失败）。
         if (NARA_PANEL_MAINT) {
           const hiddenIds = new Set(NARA_PANEL_MAINT.hiddenFromMaintenance || []);
-          if (hiddenIds.size) {
-            NARA_MAINT_FILTERED_IDS = hiddenIds;
-            data = data.filter(t => !hiddenIds.has(t.id));
-          } else {
-            NARA_MAINT_FILTERED_IDS = null;
-            NARA_MAINT_FILTERED_TITLES = [];
-          }
+          if (hiddenIds.size) data = data.filter(t => !hiddenIds.has(t.id));
         }
         tasks = data;
         categories = Array.isArray(resp.categories) ? resp.categories : [];

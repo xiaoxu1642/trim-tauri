@@ -121,6 +121,10 @@
       saveHistoryRecord(result, options, engine);
     } catch (error) {
       if ($('diskBenchStatus')) $('diskBenchStatus').textContent = '测试失败';
+      // F4b-L10：数值区必须与状态区同源。失败后若留着上一轮六个数字，
+      // 读起来就是本轮成绩——先清成占位，再报失败。
+      ['diskSeqRead', 'diskSeqWrite', 'diskRandomRead', 'diskRandomWrite', 'diskIops', 'diskLatency']
+        .forEach(id => { if ($(id)) $(id).textContent = '—'; });
       window.app?.toast('error', `磁盘测速失败：${error.message}`);
     } finally {
       running = false;
@@ -257,6 +261,15 @@
     ctrl.body.querySelectorAll('[data-delete-id]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const id = btn.dataset.deleteId;
+        // F4b-L12：单条删除也走确认件——同弹窗「清空全部」有确认、逐条反而没有，
+        // 点错一下少一条历史且无法找回
+        const ok = await window.app?.confirm?.(
+          '删除测速记录',
+          '将删除这一条测速记录，删除后不可恢复。',
+          '删除',
+          '取消'
+        );
+        if (!ok) return;
         try {
           const receipt = await window.api.benchHistory.delete(id);
           // 先看回执再改 DOM：旧实现无条件摘行 + 无条件报「已删除」，重开弹窗记录全回来

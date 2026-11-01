@@ -387,7 +387,7 @@
       <div class="toast-icon">${iconFor('pending')}</div>
       <div class="toast-message">
         <div class="toast-title">优化电脑${progressToastSuffix ? '（' + progressToastSuffix + '）' : ''}</div>
-        <div class="toast-tune">正在执行「${title}」…</div>
+        <div class="toast-tune">正在执行「${escapeHtml(title)}」…</div>
         <div class="toast-progress"><div class="toast-progress-bar"><div class="toast-progress-fill"></div></div></div>
       </div>`;
     container.appendChild(el);
@@ -1700,6 +1700,9 @@
     // 最后落，否则会被预置里的猜测覆盖。
     const hasPresetNonRegStep = Array.isArray(opt.restore) && opt.restore.some(s => !s || !s.reg);
     let ok = true;
+    // F4b-L06：预置半成功、按备份回写失败 ⇒ 恢复的是出厂值而非改前值，
+    // 收尾不能照发绿色「已恢复」，否则用户以为回到了自己改之前的状态
+    let restoredByFallback = false;
 
     if (hasPresetNonRegStep) {
       ok = await runOptionActive({ restore: true }, opt);
@@ -1715,6 +1718,7 @@
         // 预置那半确实成了；但要说清"真原值没能回写"，否则用户以为恢复的是改前的状态。
         // 预置还原自己会销账，所以这里备份缺失（missing）是预期路径，不另判失败。
         if (r && !r.missing) {
+          restoredByFallback = true;
           window.app?.log('warn', `预置还原已执行，但按备份回写失败（恢复的是数据层出厂值，非改前值）: ${opt.title || opt.id}: ${r.message || ''}`);
         }
         ok = true;
@@ -1730,7 +1734,11 @@
     if (ok) {
       clearAllApplied(opt.id);
       renderGroups(OPTIONS);
-      window.app?.toast('success', '已恢复：' + (opt.title || opt.id));
+      if (restoredByFallback) {
+        window.app?.toast('warning', '已恢复为出厂值：' + (opt.title || opt.id) + ' 的改前值未能回写');
+      } else {
+        window.app?.toast('success', '已恢复：' + (opt.title || opt.id));
+      }
     }
     return ok;
   }
@@ -2438,7 +2446,8 @@
   }
 
   function getOptionTitle(id) {
-    const o = OPTIONS.find(x => x.id === id);
+    // F4b-L05：与横幅成员判据同源（ALL_OPTIONS）——只查展示列表会让侧表成员的名字回落成裸 id
+    const o = ALL_OPTIONS.find(x => x.id === id);
     return o ? o.title : id;
   }
 
@@ -2991,8 +3000,10 @@
         // 进度 Toast 由 runOptionActive 内部创建（同上，消除每项一次白建白毁）
         progressToastSuffix = `${i + 1}/${allowed.length}`;
         try {
+          // F4b-L13：includeStore 只是 subitems 参数的旁路开关，不能连它的默认勾选集一起绕开——
+          // 与详情弹窗、runSelected 用同一份 batchParams 组装
           const p = opt.id === 'tf_svc_bulk'
-            ? { includeStore: !!batchIncludeStore }
+            ? Object.assign({ includeStore: !!batchIncludeStore }, batchParams(opt, paramsByRun) || {})
             : batchParams(opt, paramsByRun);
           if (p === null) { failCount++; failedNames.push(opt.title + '（未选定参数）'); continue; }
           const succeeded = await runOptionActive(p, opt);

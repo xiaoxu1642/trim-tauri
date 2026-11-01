@@ -306,7 +306,7 @@
       }
       html += '</tbody></table>';
     }
-    if (pagesCount > 1) html += pagerHtml('dups', s.pageDup, pagesCount);
+    if (pagesCount > 1) html += pagerHtml('dups', s.pageDup, pagesCount, `每页按约 ${DUP_ROW_BUDGET} 行切分（组不拆，可能超出）`);
     el.innerHTML = html;
     refreshDupSummary();
     updateAllButtons();
@@ -325,10 +325,13 @@
   // 2026-09-28：分页渲染。扫描可返回数万条（10 万级也曾出现），一次挂全部 DOM 会
   // 把渲染层卡死；每页只渲染 EMPTY_PAGE_SIZE 条，勾选集合仍作用于全部结果。
   // 2026-09-28 二轮：左右双栏容器（.empty-grid），左空文件右空目录，各自独立翻页。
-  function pagerHtml(target, cur, pages) {
+  function pagerHtml(target, cur, pages, unitText) {
+    // F4b-L09：分页单位由调用方给——重复组按行预算切且组不拆，每页行数可超预算，
+    // 与空文件页的「每页 N 项」不是同一个口径
+    const perPageText = unitText || `每页约 ${EMPTY_PAGE_SIZE} 项`;
     return `<div class="finder-pager">
       <button type="button" class="btn btn-secondary btn-small" data-pg="${target}:prev" ${cur <= 1 ? 'disabled' : ''}>上一页</button>
-      <span class="finder-pager-info">第 ${cur} / ${pages} 页 · 每页约 ${EMPTY_PAGE_SIZE} 项</span>
+      <span class="finder-pager-info">第 ${cur} / ${pages} 页 · ${perPageText}</span>
       <button type="button" class="btn btn-secondary btn-small" data-pg="${target}:next" ${cur >= pages ? 'disabled' : ''}>下一页</button>
     </div>`;
   }
@@ -576,6 +579,17 @@
     anFetch(['%LOCALAPPDATA%'], 'AppData · Local');
   }
 
+  // F4b-L08：本层缓存里的总量与类型/时间构成都是「删除前」那次扫描的结果。
+  // 删完不从分母里扣，顶部总量与每行占比就继续吃旧分母；exts/times 已无法局部修正，
+  // 直接作废让它们不再显示（重新进层会重扫）。
+  function anInvalidateAfterDelete(layer, freed) {
+    if (!layer) return;
+    const sm = layer.summary;
+    if (sm && Number(sm.size) > 0) sm.size = Math.max(0, Number(sm.size) - (Number(freed) || 0));
+    layer.exts = [];
+    layer.times = [];
+  }
+
   async function anDelete(path) {
     if (an.scanning) return;
     const cur = anCurrent();
@@ -596,6 +610,7 @@
       const removed = new Set((resp.data.details || []).filter(d => d.status === 'ok').map(d => d.path));
       if (removed.has(path)) {
         if (layer) layer.dirs = layer.dirs.filter(r => r.path !== path);
+        anInvalidateAfterDelete(layer, total);
         renderAn();
         window.app?.toast?.('success', '已移入回收站（清空回收站后释放空间）');
       } else {
@@ -632,6 +647,7 @@
       const removed = new Set((resp.data.details || []).filter(d => d.status === 'ok').map(d => d.path));
       if (removed.has(path)) {
         if (layer) layer.oldfiles = layer.oldfiles.filter(r => r.path !== path);
+        anInvalidateAfterDelete(layer, total);
         renderAn();
         window.app?.toast?.('success', '已移入回收站（清空回收站后释放空间）');
       } else {
@@ -1161,7 +1177,14 @@
         `${skippedCount} 项已跳过（空目录复检未通过或目标已变化）`
         + (unhandledCount > 0 ? `，其中 ${unhandledCount} 项文件名无法无损处理` : ''));
     }
-    return busyCount + refusedCount + nameCount + skippedCount + unhandledCount;
+    // F4b-L03：后端回执里的「提交了多少、被队列上限丢掉多少」原先零消费，
+    // 于是「给了 N 条、只跑了 M 条」这条账永远对不上
+    const droppedCount = Number(d.droppedItems) || 0;
+    if (droppedCount > 0) {
+      window.app?.toast?.('warning',
+        `${droppedCount} 项未进入删除队列（单次提交上限 ${FINDER_DELETE_BATCH} 项），请重新发起`);
+    }
+    return busyCount + refusedCount + nameCount + skippedCount + unhandledCount + droppedCount;
   }
 
   async function onDelete(key) {
@@ -1192,7 +1215,8 @@
       // 各批回执计数聚合后统一汇报。
       const data = {
         details: [], recycled: 0, totalFreed: 0, success: 0,
-        failedBusy: 0, failedRefused: 0, failedName: 0, skipped: 0, unhandled: 0
+        failedBusy: 0, failedRefused: 0, failedName: 0, skipped: 0, unhandled: 0,
+        requestedTotal: 0, droppedItems: 0
       };
       for (let i = 0; i < items.length; i += FINDER_DELETE_BATCH) {
         if (i > 0) setProgress(cfg, Math.min(99, Math.round(i / items.length * 100)), `删除中... ${i}/${items.length} 项`);
@@ -1202,7 +1226,7 @@
         if (!resp || (!resp.success && !resp.data)) throw new Error((resp && resp.message) || '删除失败');
         const d = resp.data || {};
         (d.details || []).forEach(x => data.details.push(x));
-        for (const k of ['recycled', 'totalFreed', 'success', 'failedBusy', 'failedRefused', 'failedName', 'skipped', 'unhandled']) {
+        for (const k of ['recycled', 'totalFreed', 'success', 'failedBusy', 'failedRefused', 'failedName', 'skipped', 'unhandled', 'requestedTotal', 'droppedItems']) {
           data[k] += Number(d[k]) || 0;
         }
       }

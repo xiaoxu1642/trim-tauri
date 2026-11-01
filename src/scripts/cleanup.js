@@ -185,6 +185,9 @@
   let isCleaning = false;
   // P1-7：确认期间的重复点击标志（在任何 await 之前同步置起、在 finally 复位）。
   let confirmInFlight = false;
+  // F4a1-L11：init 自身幂等守卫。app.js 的 _initedModules 只保证今天这一条调用路径；
+  // 一旦出现第二个调用方，重复绑定 click/订阅会叠出双份执行。
+  let inited = false;
   // 2026-10-12：执行期逐项进度的接收器。订阅一次性注册在 init()（onEvent 会累积，
   // 不能放进 clean()）；每次执行时挂上真实处理器、结束置空，见 clean()。
   let execProgressSink = null;
@@ -722,8 +725,13 @@
     updateUI();
   }
 
+  // 可选集合：detect 未命中（已隐藏）的条目不参与全选/全不选。
+  // F4a1-L01：旧的全选直接遍历 ALL_IDS，把列表上根本看不到的条目也塞进 selectedIds，
+  // 总计数因此虚高、与分组计数（已按 hiddenIds 过滤）分裂；三处判据同源到本函数。
+  function selectableIds() { return ALL_IDS.filter(id => !hiddenIds.has(id)); }
+
   function selectAll() {
-    for (const id of ALL_IDS) selectedIds.add(id);
+    for (const id of selectableIds()) selectedIds.add(id);
     updateUI();
   }
 
@@ -734,7 +742,8 @@
 
   // 全选/全不选切换：已全选 → 全不选；否则 → 全选
   function toggleSelectAll() {
-    const allSelected = ALL_IDS.length > 0 && ALL_IDS.every(id => selectedIds.has(id));
+    const ids = selectableIds();
+    const allSelected = ids.length > 0 && ids.every(id => selectedIds.has(id));
     if (allSelected) deselectAll();
     else selectAll();
   }
@@ -743,7 +752,8 @@
   function updateSelectAllButton() {
     const text = document.getElementById('btnSelectAllText');
     if (!text) return;
-    const allSelected = ALL_IDS.length > 0 && ALL_IDS.every(id => selectedIds.has(id));
+    const ids = selectableIds();
+    const allSelected = ids.length > 0 && ids.every(id => selectedIds.has(id));
     text.textContent = allSelected ? '全不选' : '全选';
   }
 
@@ -1781,6 +1791,9 @@
         // F4a1-L05：原「审查 M-3」分支读 result.recycledBytes/recycledCount——两字段
         // 在本文件只有读点、后端回执链零写点（v3.3.0 已固定 toRecycle=false），属死分支。
         let toastMsg = `清理完成！释放 ${formatSize(freed)} 空间`;
+        // F4a1-L02：后端 skip 档（受保护 / 太新 / 已排除）此前读出后零消费，
+        // 清零时仍报「完成」。有跳过项就并入同一句，不另起一条 toast。
+        if (result.skipped > 0) toastMsg += `；另有 ${result.skipped} 项按策略跳过`;
         // P2-06/D-02：本批含 explorer 后置动作且该项确有成功——在完成提示里声明
         // 「重启资源管理器后才重建」（图标/缩略图缓存由资源管理器持有，不重启会看到空白图标）。
         const explorerDone = (result.details || []).some(d => d.status === 'ok' && explorerPickIds.has(d.id));
@@ -2281,31 +2294,37 @@
         window.app?.toast('error', '无法读取这些图片：' + ((e && e.message) || e));
         return;
       }
-      // ② 组 range 容器：src 直接走 asset 协议（convertFileSrc），浏览器自己管解码与缓存
-      const range = ensureLiteboxRange();
-      range.textContent = '';
-      for (const f of images) {
-        const img = document.createElement('img');
-        // v6-K16：pathToUrl 在 api **顶层**（paths 命名空间没有该成员——旧调用
-        // `window.api.paths.pathToUrl(...)` 必抛 TypeError，灯箱整块不亮）；
-        // typeof 守卫与 fontmanager/pathbinding 两个既有消费点同口径。
-        const url = (window.api && typeof window.api.pathToUrl === 'function')
-          ? window.api.pathToUrl(f.path)
-          : '';
-        img.setAttribute('data-src', url);
-        img.setAttribute('data-fullpath', f.path);
-        img.setAttribute('data-caption', `${f.name || ''} · ${formatSize(f.size)}`);
-        img.alt = f.name || '图片';
-        img.src = url;
-        range.appendChild(img);
+      // ② 组 range 容器：src 直接走 asset 协议（convertFileSrc），浏览器自己管解码与缓存。
+      // F4a1-L07：建容器 / 注入删除按钮 / 开灯箱三段此前在 try 之外，任一抛错都变成浮动
+      // reject（全局兜底只写日志）；整段收进 try，失败给用户可见回执。
+      try {
+        const range = ensureLiteboxRange();
+        range.textContent = '';
+        for (const f of images) {
+          const img = document.createElement('img');
+          // v6-K16：pathToUrl 在 api **顶层**（paths 命名空间没有该成员——旧调用
+          // `window.api.paths.pathToUrl(...)` 必抛 TypeError，灯箱整块不亮）；
+          // typeof 守卫与 fontmanager/pathbinding 两个既有消费点同口径。
+          const url = (window.api && typeof window.api.pathToUrl === 'function')
+            ? window.api.pathToUrl(f.path)
+            : '';
+          img.setAttribute('data-src', url);
+          img.setAttribute('data-fullpath', f.path);
+          img.setAttribute('data-caption', `${f.name || ''} · ${formatSize(f.size)}`);
+          img.alt = f.name || '图片';
+          img.src = url;
+          range.appendChild(img);
+        }
+        // ③ 注入删除按钮与缩略图抽屉钩子（抽屉默认收起），再打开第一张
+        liteboxDrawerBatchId = id;
+        liteboxInjectDeleteButton();
+        liteboxDrawerEnsure();
+        liteboxDrawerSetOpen(false);
+        const first = range.querySelector('img');
+        if (first) window.liteBox.click({ target: first });
+      } catch (e) {
+        window.app?.toast('error', '预览打开失败：' + ((e && e.message) || e));
       }
-      // ③ 注入删除按钮与缩略图抽屉钩子（抽屉默认收起），再打开第一张
-      liteboxDrawerBatchId = id;
-      liteboxInjectDeleteButton();
-      liteboxDrawerEnsure();
-      liteboxDrawerSetOpen(false);
-      const first = range.querySelector('img');
-      if (first) window.liteBox.click({ target: first });
     })();
   }
 
@@ -2472,10 +2491,16 @@
   // 条目在主窗没有任何入口（K13 缺口本体：看得见才算「可撤回」）。档位侧
   // uninstall:pending-list/revoke 已同 add 放到 PENDING_DELETE_WINDOWS（main+residue），
   // 这里补主窗侧的按钮 + 清单弹窗。
+  // R2a-L05：本表是后端待删状态的**唯一**中文消费点，未登记的英文值不许原样漏到界面。
+  // 后端已提出把「条目已被处理但文件仍在」从 consumed 拆出（拟名 present / consumed-present）——
+  // 它表示删除没有生效，不能念成「已消费」；后端改名前先把这几档文案钉在这里。
   const PENDING_STATUS_LABELS = {
     pending: '待重启删除',
     consumed: '已被重启消费',
-    missing: '文件已不在'
+    missing: '文件已不在',
+    present: '重启已处理，但文件仍在',
+    'consumed-present': '重启已处理，但文件仍在',
+    'consumed-gone': '已被重启消费，文件已不在'
   };
 
   /// 登记时间（X0-6 S1）：回执带秒级 addedAt；格式化失败不显示，不编造时间。
@@ -2559,7 +2584,7 @@
       const added = fmtPendingAddedAt(e.addedAt);
       const base = e.orphanSource
         ? '挂起删除（来源不明·不可撤回）'
-        : (PENDING_STATUS_LABELS[e.status] || e.status || '未知');
+        : (PENDING_STATUS_LABELS[e.status] || '状态未知');
       const label = base + (added ? ` · 登记于 ${added}` : '');
       const tip = e.orphanSource
         ? `${e.target || ''}\n系统重启队列仍挂着这条删除，但 Trim 没有它的登记凭据（可能来自更早批次或其它软件）；「撤回全部」只摘除 Trim 登记的条目。`
@@ -2569,6 +2594,12 @@
     // R2a-U01（B 方案）：「撤回全部」只摘台账登记项——计数必须排除 orphanSource
     // 对补行，否则按钮文案承诺的条数与实际摘除数不符。
     const pendingN = entries.filter(e => e.status === 'pending' && !e.orphanSource).length;
+    // F4a1-L06：弹窗工厂缺件时不能裸调 create——本函数是 async，抛出的 TypeError 会变成
+    // 无人接的 rejection（界面零提示）。与同文件另两处 create 调用同姿势，缺件即明示并早退。
+    if (!window.modal?.create) {
+      window.app?.toast?.('error', '弹窗组件未加载，无法打开待删清单');
+      return;
+    }
     const ctrl = window.modal.create({
       id: 'pendingListModal-' + Date.now(),
       title: `重启后删除（${entries.length} 项登记）`,
@@ -2847,6 +2878,11 @@
   }
 
   function openItemDetail(id) {
+    // F4a1-L06：同 openPendingListModal —— 缺件时明示后早退，不让同步 TypeError 只剩控制台。
+    if (!window.modal?.create) {
+      window.app?.toast?.('error', '弹窗组件未加载，无法查看明细');
+      return;
+    }
     const result = scanResults.get(id);
     const item = getItemById(id);
     closeItemDetail();
@@ -2905,6 +2941,8 @@
   // 导出「本次将清理」的 Markdown 计划清单（2026-10-06 任务四）：扫描勾选后、执行前
   // 一键另存（Rust 侧走保存对话框，口径同日志导出）。只读扫描结果与勾选状态，不触删除链。
   function init() {
+    if (inited) return;
+    inited = true;
     // F4a1-M03：灯箱的点击监听在 litebox.js 装载那一刻就挂在 document 上，原先只有第一次
     // 点「预览」才收窄到 #liteboxRange。窗口期内（已进清理页、尚未预览）主窗任何 <img>
     // 点击都会被劫持成全屏黑底灯箱（卸载列表图标、壁纸缩略图都算），还和该行自己的

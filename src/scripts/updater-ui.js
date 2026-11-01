@@ -28,7 +28,10 @@
     // ready 态由主进程带上：实际走的那条线路 + 包体 SHA-256 + 存到下载目录的安装包路径
     via: '',
     sha256: '',
-    savedTo: ''
+    savedTo: '',
+    // F4c-L05：签名被拒标记必须进状态表。回流载荷不带该键时 Object.assign 不会清它，
+    // 上一次的拒绝就会冒充这一次的失败原因（把网络错误渲染成「已阻止」）
+    sigFailed: false
   };
 
   let ctrl = null;          // window.modal.create 返回的控制器
@@ -695,7 +698,11 @@
 
     unbind = window.api.updater.onState(s => {
       if (!s || !s.phase) return;
-      if (s.phase === 'checking') activeManual = pendingManual;
+      if (s.phase === 'checking') {
+        activeManual = pendingManual;
+        // F4c-L05：每轮检查开始先清签名标记，避免上一轮的拒绝污染本轮的错误文案
+        state.sigFailed = false;
+      }
       Object.assign(state, s);
       render();
       // 终态后清掉本轮手动标记（available→下载→ready 期间弹窗保持，不受影响）

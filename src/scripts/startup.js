@@ -321,7 +321,12 @@
 
   // silent=true：后台静默重扫（无骨架屏、无"扫描完成"Toast），用于消除缓存误导而不打断用户
   async function scan(refresh = false, silent = false) {
-    if (loading) return;
+    if (loading) {
+      // F4a2-L11：静默重扫期间点「扫描启动项」此前被静默丢弃（按钮此时也 disabled，
+      // 属双保险）；用户主动触发的一律给一句在途提示，后台静默调用不打扰。
+      if (!silent) window.app?.toast?.('info', '正在扫描中，请稍候');
+      return;
+    }
     if (!window.api?.startup?.scan) {
       renderError('启动项扫描不可用：本地接口未就绪（window.api 缺失），请重启应用后再试'); // v2-M21
       return;
@@ -521,7 +526,7 @@
         })
         : '';
       const cmdHtml = cmd
-        ? `<div class="startup-item-cmd" data-tip="${escapeHtml(cmd)}">${escapeHtml(truncate(cmd, 120))}</div>`
+        ? `<div class="startup-item-cmd" data-tip="${window.ds.escAttr(cmd)}">${escapeHtml(truncate(cmd, 120))}</div>`
         : '';
       const missingHtml = missing
         ? `<div class="startup-item-cmd" data-tip="这个文件已经不存在（原样来自注册表/任务定义，Trim 未改动）">${escapeHtml(missing)}</div>`
@@ -611,10 +616,15 @@
   // 启动项图标异步应用：优先 fileIcon(项路径)，失败回退 Trim.ico（icon-fallback 共享缓存）；
   // 图标都不可用时保留源类型 SVG 色块作为降级展示。
   async function applyStartupIcons(container) {
-    if (!container || !window.iconFallback || !window.api?.paths?.fileIcon) return;
+    // F4a2-L07：每个早退出口都要解锁列表高度——旧实现只在末尾解锁，组件缺席或本屏
+    // 没有图标节点时 min-height 永久锁死，滚动与布局一起卡住。
+    if (!container || !window.iconFallback || !window.api?.paths?.fileIcon) { unlockListHeight(); return; }
     const imgs = container.querySelectorAll('.startup-item-icon-img');
-    if (!imgs.length) return;
-    const fallbackUrl = await window.iconFallback.getFallbackUrl();
+    if (!imgs.length) { unlockListHeight(); return; }
+    let fallbackUrl = '';
+    try {
+      fallbackUrl = await window.iconFallback.getFallbackUrl();
+    } catch (e) { /* 兜底图标取不到：下面 show() 分支按空值跳过，列表仍要解锁 */ }
     imgs.forEach(img => {
       if (img.dataset.iconDone) return;
       img.dataset.iconDone = '1';
@@ -1019,6 +1029,8 @@ ${enable ? '（启用后该项将随系统启动运行）' : '（禁用后可随
         if (row) {
           const item = items.find(i => i.id === row.dataset.id);
           if (item) showIntro(item);
+          // F4a2-L07：幽灵行不在 items 里，此前点了完全没反应——说清「为什么没有详情」。
+          else if (row.dataset.ghost) window.app?.toast?.('info', '该项已从系统消失，无可查看的详情');
         }
       }
     });

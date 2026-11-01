@@ -15,7 +15,17 @@
 
   function el(id) { return document.getElementById(id); }
   function esc(s) { return window.ds.esc(String(s == null ? '' : s)); }
-  function toast(type, message) { window.subToast?.hintLine('rsGlobalHint', type, message); }
+  function toast(type, message) {
+    // F4a1-L12：sub-toast.js 缺席时旧实现全窗零反馈（与本窗「确认件缺席即 fail-closed
+    // 且明示」的纪律不对称）。组件在就按组件播；不在就把该说的话写进页内提示行。
+    if (window.subToast?.hintLine) {
+      window.subToast.hintLine('rsGlobalHint', type, message);
+      return;
+    }
+    console.error('[residue-window] sub-toast 未加载，提示仅写入页内提示行：' + type + ' · ' + message);
+    const hint = el('rsGlobalHint');
+    if (hint) hint.textContent = String(message == null ? '' : message);
+  }
 
   // P2-13（2026-10-09）：真源迁后端 settings.json 的 `residueBackupPack` 键（AGENTS §0.2：
   // 配置真源在 %APPDATA%，localStorage 只是镜像）。本窗与主窗共享同一 localStorage，
@@ -102,6 +112,9 @@
     pendingFailed: [],
     running: false,
   };
+  // F4a1-L08：扫描世代号。连点「重新扫描」或主窗再推 residue:target 时，先发的旧回执
+  // 可能后到；回写前比对世代号，过期回执直接丢弃，避免 rows/appId 错配。
+  let scanGen = 0;
 
   function targetFromSearch() {
     try {
@@ -123,6 +136,7 @@
   // ==================== 四类候选 ====================
 
   async function scanResidue() {
+    const gen = ++scanGen;
     const box = el('rsChainBody');
     box.innerHTML = '<div class="finder-empty">正在扫描该应用的四类残留…</div>';
     const app = state.appId;
@@ -140,6 +154,7 @@
     } catch (e) {
       res = { success: false, message: String((e && e.message) || e) };
     }
+    if (gen !== scanGen) return; // 已有更新的扫描发起：旧回执作废
     if (!res || !res.success) {
       state.rows = [];
       state.notes = [];
@@ -324,10 +339,10 @@
       return;
     }
     const backup = readBackupPref();
-    // F4a1-M09：红色档确认按钮的文案一律「仍然X」（主窗四处同口径：仍然执行/仍然登记/
-    // 仍然清理/仍然结束）。modal.js 的护栏理由是「按钮本身是红色 + 文案是仍然执行，不是
-    // 无脑回车能滑过去的『确定』」——换成动作名就少掉这一条依据。档位本身不变：
-    // 残留删除是批量且注册表侧不可逐项撤销，仍走红色。
+    // F4a1-M09：红/黄色档的确认按钮取明确的动作动词，而不是无脑回车能滑过去的「确定」。
+    // 本窗三处按动作命名：清理与登记用「仍然清理 / 仍然登记」，撤回是安全方向、走「撤回全部」。
+    // 主窗同族确认里既有「仍然X」也有沿用动作名的档位（口径未完全统一，不在本窗单方改动）；
+    // 档位本身不变：残留删除是批量且注册表侧不可逐项撤销，仍走红色。
     const ok = await confirmViaModal({
       title: '确认清理残留',
       message: '将删除选中的 ' + picked.length + ' 项残留。文件与目录移入回收站（可还原）；注册表项删除前自动导出备份。',

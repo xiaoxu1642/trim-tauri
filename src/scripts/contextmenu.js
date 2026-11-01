@@ -13,7 +13,6 @@
   let demoMode = false;
   let demoToggleWarned = false;
   let iconMap = {};        // clsid 或 reg:regPath -> dataUrl（iconKey 规则见下）
-  let detailItem = null;   // 当前详情弹窗展示的条目
   let ctxModalCtrl = null; // v3.2.0：详情弹窗工厂 ctrl（焦点陷阱/Esc 由工厂统一管理）
   let kanbanMasonry = null; // 瀑布流布局引擎（resize 防抖 + FLIP）
   let kanbanEngineWarned = false; // 引擎缺失只报第一次（见 renderKanban 里的 window.kanbanMasonry 守卫）
@@ -471,7 +470,7 @@
     const value = note ? `${owner}（${note}）` : owner;
     const tip = item.ownerSource === 'system' ? '文件在 Windows 目录下且厂商指向微软，按系统组件归组'
       : (item.ownerSource ? '' : '没有可执行文件线索（命令为空或只写了一个 verb），因此不猜软件名');
-    return `<div class="ctx-detail-row"${tip ? ` data-tip="${escapeHtml(tip)}"` : ''}><span class="ctx-detail-label">软件归属</span><span class="ctx-detail-value">${escapeHtml(value)}</span></div>`;
+    return `<div class="ctx-detail-row"${tip ? ` data-tip="${window.ds.escAttr(tip)}"` : ''}><span class="ctx-detail-label">软件归属</span><span class="ctx-detail-value">${escapeHtml(value)}</span></div>`;
   }
 
   // CM-13 / 批次 B、C：详情里常驻「为什么是这个状态」——风险提示、失效原因、屏蔽来源、外部约定。
@@ -498,7 +497,6 @@
   // Esc/遮罩关闭、焦点陷阱、打开关闭日志均由工厂统一接管（ctrl 声明见文件顶部）
   function openDetail(item) {
     closeDetail();
-    detailItem = item;
 
     const badge = typeBadgeHtml(item);
     const regPath = item.regPath || item.location || '';
@@ -550,6 +548,8 @@
     const regJump = backdrop.querySelector('[data-role="regJump"]');
     if (regJump) {
       regJump.addEventListener('click', async e => {
+        // F4a2-L12：跳转在途时不再接第二次点击（连点会起两个 regedit 定位请求）。
+        if (regJump.classList.contains('jumping')) return;
         // 文字被选中时不触发跳转（支持复制路径）
         if (window.getSelection && window.getSelection().toString()) return;
         const path = item.regPath || item.location || '';
@@ -587,7 +587,6 @@
   function closeDetail() {
     // v3.2.0：骨架由工厂创建，close 即销毁（焦点陷阱/Esc 监听由工厂归还与移除）
     if (ctxModalCtrl) { ctxModalCtrl.close(); ctxModalCtrl = null; }
-    detailItem = null;
   }
 
   // 注：AI 简介的加载、缓存与重试统一由 intro.js 的简介面板处理（scope = contextmenu），
@@ -660,12 +659,14 @@
         updateUI();
         return;
       }
-      const results = (resp.data && resp.data.results) || [];
+      const results = (resp && resp.data && resp.data.results) || [];
       // 审计 P1-2：命令层判负时回的是 `{success:false, message}` 且没有 data。旧代码不看
       // success，results 为空 ⇒ 下面既不 changed 也不 failed ⇒ 弹绿色「XX 已禁用」，
       // 真正的拒绝原因被丢掉。先认 success。
-      if (resp && resp.success === false) {
-        window.app?.toast('error', resp.message || '切换未生效');
+      // F4a2-L03：与 startup.js 的回执判序统一为 `!== true`——`undefined` 同样不是成功，
+      // 不能被当成「有 data 就继续」。
+      if (!resp || resp.success !== true) {
+        window.app?.toast('error', (resp && resp.message) || '切换未生效');
         renderList();
         updateUI();
         return;
