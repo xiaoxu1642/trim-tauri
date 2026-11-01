@@ -109,7 +109,6 @@
     notes: [],
     scanned: false,
     filter: '',
-    pendingFailed: [],
     running: false,
   };
   // F4a1-L08：扫描世代号。连点「重新扫描」或主窗再推 residue:target 时，先发的旧回执
@@ -384,11 +383,8 @@
       const done = new Set((d.details || []).filter(function (x) { return x.status === 'ok'; }).map(function (x) { return x.kind + '|' + x.target; }));
       state.rows = state.rows.filter(function (f) { return !done.has(f.kind + '|' + f.target); });
       renderChains();
-      // 失败的文件项（被占用/无权限）才有「重启后删除」出口；目录后端会拒
-      const failedFiles = (d.details || [])
-        .filter(function (x) { return x.status !== 'ok' && x.kind === 'file'; })
-        .map(function (x) { return x.target; });
-      updatePendingButtons(failedFiles);
+      // 2026-11-02 用户裁定：登记重启后删除的入口退役，本窗只剩撤回按钮的显隐刷新
+      updatePendingButtons();
     } catch (e) {
       toast('error', '残留清理失败: ' + (e && e.message ? e.message : e));
     } finally {
@@ -404,18 +400,13 @@
   // 撤回按钮的基线 data-tip 快照（见 updatePendingButtons 的说明）；null = 尚未取过
   let revBtnBaselineTip = null;
 
-  function updatePendingButtons(failedFiles) {
-    const addBtn = el('rsBtnPending');
+  /// 按待删清单回执刷「撤回重启后删」按钮的显隐与计数（2026-11-02 起本域只保留
+  /// 查看/撤回；登记入口已退役，故本函数不再接手任何待登记集合）。
+  function updatePendingButtons() {
     const revBtn = el('rsBtnPendingRevoke');
     // 撤回按钮的基线提示以 HTML 为真源，只在首次（任何降级态覆盖之前）取一次：
     // 下面 degraded / 读取失败两支会改写 data-tip，恢复正常时必须还原，否则用户看到的是过期原因。
     if (revBtnBaselineTip === null && revBtn) revBtnBaselineTip = revBtn.getAttribute('data-tip') || '';
-    if (addBtn) {
-      if (Array.isArray(failedFiles)) state.pendingFailed = failedFiles;
-      addBtn.style.display = state.pendingFailed.length ? '' : 'none';
-      addBtn.textContent = `重启后删除失败的 ${state.pendingFailed.length} 项…`;
-      addBtn.disabled = !state.pendingFailed.length;
-    }
     if (revBtn && window.api?.uninstall?.pendingList) {
       window.api.uninstall.pendingList().then(function (r) {
         const entries = (r && r.success && r.data && r.data.entries) || [];
@@ -448,55 +439,10 @@
     }
   }
 
-  async function addPendingDeletes() {
-    if (!state.pendingFailed.length) return;
-    // F4a1-M04：与 cleanSelected 同姿势——确认件 await 纳入 try，异常按「未确认」fail-closed
-    let ok = false;
-    try {
-      ok = await confirmViaModal({
-        title: '登记重启后删除',
-        message: `把 ${state.pendingFailed.length} 个回收站删不掉的文件登记为「下次重启时删除」。这是永久删除：不进回收站、无法还原；重启前可撤回。目录不支持该机制，登记时会被跳过。`,
-        confirmText: '仍然登记',
-        cancelText: '取消',
-        danger: true,
-        dangerHint: '将写入系统 PendingFileRenameOperations，重启动作由系统在会话管理器阶段执行，Trim 不参与那一步。'
-      });
-    } catch (e) {
-      toast('error', '确认组件异常，本次不登记任何条目');
-      return;
-    }
-    if (!ok) return;
-    // K12（v6）：残留执行一批最多 200 个目标，失败文件可能超后端单批上限，旧流程一次性全送
-    // 必被整批拒「请分批登记」，故按上限切片顺序登记、聚合回执。上限不写在这里：真源在 Rust，
-    // 读 tauri-api.js 的导出（F4a1-L09 撤掉了此处的本地字面量副本）。
-    const PENDING_BATCH = window.ipcLimits.pendingAddMaxItems;
-    try {
-      let added = 0;
-      let skipped = 0;
-      let failedN = 0;
-      for (let i = 0; i < state.pendingFailed.length; i += PENDING_BATCH) {
-        const resp = await window.api.uninstall.pendingAdd(state.pendingFailed.slice(i, i + PENDING_BATCH));
-        if (!resp.success) throw new Error(resp.message || '登记失败');
-        const d = resp.data || {};
-        const rows = d.details || [];
-        added += Number(d.added) || 0;
-        skipped += rows.filter(r => r.status === 'skip').length;
-        failedN += rows.filter(r => r.status === 'fail').length;
-      }
-      toast(added ? 'success' : 'info', added
-        ? `已登记 ${added} 项，将在下次重启时永久删除（重启前可撤回）${skipped ? `；${skipped} 个跳过` : ''}${failedN ? `；${failedN} 个登记失败` : ''}`
-        : '没有新登记项（可能都已登记过或目标已不在）');
-      state.pendingFailed = [];
-      updatePendingButtons([]);
-    } catch (e) {
-      toast('error', '登记失败: ' + (e && e.message ? e.message : e));
-    }
-  }
-
   async function revokePendingDeletes() {
-    // F4a1-M09：撤回是**安全方向**（把登记摘掉、文件保持原样），主窗同一动作走黄档
-    // （cleanup.js 的 openPendingListModal）。红色留给「登记=永久删」那一发；两窗档位
-    // 相反会训练用户「红色也可以直接点」，稀释真正不可逆操作的警示强度。
+    // F4a1-M09：撤回是**安全方向**（把登记摘掉、文件保持原样），走黄档 warning；
+    // 与主窗同一动作同档（cleanup.js 的 openPendingListModal）——两窗档位相反会训练用户
+    // 「红色也可以直接点」，稀释真正不可逆操作的警示强度。
     // F4a1-M04：与另两处确认同姿势——撤回是本窗「重启前可撤回」的唯一前端出口，
     // 确认件异常时必须明示且不动作，不能静默成「点了没反应」。
     let ok = false;
@@ -517,7 +463,7 @@
       const resp = await window.api.uninstall.pendingRevoke();
       if (!resp.success) throw new Error(resp.message || '撤回失败');
       toast('success', `已撤回 ${(resp.data && resp.data.revoked) || 0} 项登记，相关文件不会被删除`);
-      updatePendingButtons([]);
+      updatePendingButtons();
     } catch (e) {
       toast('error', '撤回失败: ' + (e && e.message ? e.message : e));
     }
@@ -576,7 +522,6 @@
     window.ds?.bindCheckboxKeys?.(el('rsChainBody'), '[data-rcheck]');
     on('rsRescanBtn', 'click', scanAll);
     on('rsBtnClean', 'click', cleanSelected);
-    on('rsBtnPending', 'click', addPendingDeletes);
     on('rsBtnPendingRevoke', 'click', revokePendingDeletes);
     on('rsCloseBtn', 'click', function () {
       window.api.residueWindow.closeWindow().catch(function () { toast('warning', '关闭窗口失败，请手动关闭'); });
@@ -601,10 +546,9 @@
         scanAll();
       });
     }
-    // F4a1-M10：开窗即刷一次「重启后删除」入口——本窗正是卸载后被自动弹出的那扇窗，
-    // 上一轮（主窗清理失败面板 / 上一次会话）登记的永久删项若不在此现，界面上就没有
-    // 任何「还挂着待删项」的痕迹，等于违背「待删清单可见且重启前可撤回」这条受控例外约束。
-    // 不传参 = 保持 state.pendingFailed 现值，只按 pendingList 回执刷 revBtn 显隐。
+    // F4a1-M10：开窗即刷一次「撤回重启后删」入口——本窗正是卸载后被自动弹出的那扇窗，
+    // 遗留的永久删登记项若不在此现，界面上就没有任何「还挂着待删项」的痕迹，等于违背
+    // 「待删清单可见且重启前可撤回」这条受控例外约束。只按 pendingList 回执刷 revBtn 显隐。
     updatePendingButtons();
     scanAll();
   });

@@ -25,7 +25,6 @@
 //! commands::uninstall::uninstall_list,
 //! commands::uninstall::uninstall_run,
 //! commands::uninstall::uninstall_modify,
-//! commands::uninstall::uninstall_pending_add,
 //! commands::uninstall::uninstall_pending_list,
 //! commands::uninstall::uninstall_pending_revoke,
 //! commands::uninstall::uninstall_residue_scan,
@@ -74,7 +73,7 @@ pub use list_run::{uninstall_dir_size, __cmd__uninstall_dir_size, __tauri_comman
 mod minifilter_orphan;
 mod ownership;
 mod pending_delete;
-pub use pending_delete::{uninstall_pending_add, __cmd__uninstall_pending_add, __tauri_command_name_uninstall_pending_add, uninstall_pending_list, __cmd__uninstall_pending_list, __tauri_command_name_uninstall_pending_list, uninstall_pending_revoke, __cmd__uninstall_pending_revoke, __tauri_command_name_uninstall_pending_revoke};
+pub use pending_delete::{uninstall_pending_list, __cmd__uninstall_pending_list, __tauri_command_name_uninstall_pending_list, uninstall_pending_revoke, __cmd__uninstall_pending_revoke, __tauri_command_name_uninstall_pending_revoke};
 mod residue;
 pub use residue::{uninstall_residue_scan, __cmd__uninstall_residue_scan, __tauri_command_name_uninstall_residue_scan, uninstall_residue_execute, __cmd__uninstall_residue_execute, __tauri_command_name_uninstall_residue_execute};
 // v0.7.0：`commands::residue`（副窗建窗侧）要复用执行侧那对取值闸，AGENTS §5.16/N6 禁止

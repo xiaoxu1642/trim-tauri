@@ -99,6 +99,8 @@ const MUST_MAIN = [
   // 消费方只有主窗清理页——同 cleanup_recycle_stats 口径判 MAIN。
   'cleanup_open_recycle_bin',
   'cleanup_kill_locked_processes',
+  // 2026-11-02：「扫描大小」按钮的停止档 —— 只置取消位，消费方只有主窗清理页，判 MAIN。
+  'cleanup_scan_cancel',
   // C1-1（2026-10-16）：占用查询入口只在主窗磁盘清理页（内嵌卡片），按「谁真的需要
   // 调它」判 MAIN——比 readonly 紧；与 check-locked 的 readonly 不冲突（那条的候选
   // 来自扫描快照，子窗确认链也要用）。
@@ -632,15 +634,13 @@ const wantReadonly = [...MUST_READONLY].sort();
 //   E2 表里声明的成员标签 ⇄ engine/guard.rs 常量实体的成员**逐字相等**（顺序无关）；
 //   E3 常量成员必须 ⊆ APP_WINDOWS（往常量里塞一个没在 capabilities 登记过的 label 即红）。
 const MUST_WINDOWSET = {
-  // 2026-10-13：清理域失败引导给主窗开了「登记重启后删除」的入口（写 PFRO 是永久删
-  // 出口，窗口集从纯 residue 扩成 main+residue；models/processManager 无调用场景不放）。
   // 2026-10-18（v6-K13）：list/revoke 从 RESIDUE_WINDOWS 移入本集——待删清单对主窗
   // 清理域也要「可见可撤回」（主窗登记的条目在残留窗以外的路径上看不见 = 撤不回）。
-  // add/list/revoke 三条同集；residue 的 scan/execute 仍独占 RESIDUE_WINDOWS。
+  // 2026-11-02 用户裁定：登记入口全应用退役，本集只剩 list/revoke 两条；
+  // residue 的 scan/execute 仍独占 RESIDUE_WINDOWS。
   PENDING_DELETE_WINDOWS: {
     labels: ['main', 'residue'],
     cmds: [
-      'uninstall_pending_add',
       'uninstall_pending_list',
       'uninstall_pending_revoke',
     ],

@@ -182,6 +182,7 @@
   let scanResults = new Map();
   let selectedIds = new Set();
   let isScanning = false;
+  let scanCancelRequested = false;
   let isCleaning = false;
   // P1-7：确认期间的重复点击标志（在任何 await 之前同步置起、在 finally 复位）。
   let confirmInFlight = false;
@@ -980,6 +981,22 @@
   // 扫描
   // 2026-10-07 用户裁定：扫描范围 = 当前勾选项（一项未勾 = 全量）。「全选」与全量等价；
   // 「只勾一项」就只扫那项 —— 与「开始清理」只看勾选的执行范围口径对齐。
+  // 停止扫描：只置一次，按钮进入「正在停止…」；引擎在条目边界返回，回执由 scan() 统一收尾。
+  async function requestScanCancel() {
+    if (!isScanning || scanCancelRequested) return;
+    scanCancelRequested = true;
+    const btn = document.getElementById('btnScan');
+    const label = btn?.querySelector('span');
+    if (label) label.textContent = '正在停止…';
+    if (btn) btn.disabled = true;
+    if (!window.api?.cleanup?.scanCancel) return;
+    try {
+      await window.api.cleanup.scanCancel();
+    } catch (e) {
+      // 后端可能已自然结束：取消请求失败不改变本轮结果，最终以 cleanup:scan 的回执为准
+    }
+  }
+
   async function scan() {
     if (isScanning) return;
     isScanning = true;
@@ -998,8 +1015,12 @@
     updateUI();
 
     setProgress(0, '正在准备扫描...');
+    scanCancelRequested = false;
     const btnScan = document.getElementById('btnScan');
-    if (btnScan) btnScan.disabled = true;
+    const btnScanLabel = btnScan?.querySelector('span');
+    // 扫描中按钮保持可点：「停止扫描」走协作式取消（引擎在条目边界返回）
+    if (btnScan) btnScan.disabled = false;
+    if (btnScanLabel) btnScanLabel.textContent = '停止扫描';
 
     streamTotals.clear();
     // Electron 模式：进度由 cleanup:scan-progress 逐项真实推送（P1-12）。
@@ -1018,6 +1039,7 @@
 
     try {
       let results = [];
+      let cancelled = false;
       if (window.api?.cleanup) {
         // Electron 模式：调用 PowerShell（排除文件清理项）
         const regularIds = scopeIds.filter(id => !FILECLEAN_IDS.includes(id));
@@ -1027,11 +1049,13 @@
           throw new Error(resp.message || '扫描失败');
         }
         results = resp.data;
+        cancelled = resp.cancelled === true;
 
         // 文件清理项独立扫描（FC-4：传 total/doneBase 让主进程与常规条目共用同一进度条；
         // total = 常规则数 + fileclean 项数，与本次扫描范围口径一致）
+        // 用户已停止扫描 ⇒ 不再启动后续文件清理扫描，只保留已扫到的常规结果。
         const pathConfig = window.pathbinding?.getConfig?.() || {};
-        const fcScope = FILECLEAN_IDS.filter(id => scopeIds.includes(id));
+        const fcScope = cancelled ? [] : FILECLEAN_IDS.filter(id => scopeIds.includes(id));
         const scanTotal = regularIds.length + fcScope.length;
         let fcDoneBase = regularIds.length;
         for (const id of fcScope) {
@@ -1197,7 +1221,8 @@
       // 默认勾选所有安全项（**仅无勾选的全量扫描**——子集扫描不替用户改勾选）
       // v3.2.1 类目重构：维护与特殊操作域（special，DISM/回收站/Installer 缓存）为不可逆
       // 系统动作，永不默认勾选（文档 §2.2 域 5 / P4）
-      if (isFullScan) {
+      // 用户主动停止的扫描不做「默认勾选安全项」——那是完整扫描的便利，不是停止后的惊喜。
+      if (isFullScan && !cancelled) {
         for (const r of results) {
           const meta = getItemById(r.id);
           if (meta && meta.domain === 'special') continue;
@@ -1210,16 +1235,22 @@
       renderCategoryList();
       updateUI();
       const total = dedupSize(Array.from(scanResults.keys()));
-      window.app?.toast('success', isFullScan
-        ? `扫描完成，共发现 ${formatSize(total)} 可清理空间`
-        : `扫描完成，已刷新所选 ${scopeIds.length} 项`);
+      if (cancelled) {
+        window.app?.toast('info', '已停止扫描，保留已扫描到的结果');
+      } else {
+        window.app?.toast('success', isFullScan
+          ? `扫描完成，共发现 ${formatSize(total)} 可清理空间`
+          : `扫描完成，已刷新所选 ${scopeIds.length} 项`);
+      }
     } catch (e) {
       hideProgress();
       window.app?.toast('error', '扫描失败: ' + e.message);
       maybeOfferElevation('扫描失败，可能需要管理员权限才能访问部分系统目录。');
     } finally {
       isScanning = false;
+      scanCancelRequested = false;
       if (btnScan) btnScan.disabled = false;
+      if (btnScanLabel) btnScanLabel.textContent = '扫描大小';
       // 复位标志后必须再刷一次按钮态：try 尾部那次 updateUI 跑在 isScanning 仍为 true 时，
       // 而 #btnClean 的禁用判据里带着这个标志 ⇒ 扫描完成后「开始清理」一直停在禁用，
       // 用户要再动一次勾选才点得动（2026-10-22 真机 CDP 实测，扫完 8 分钟仍 disabled=true）。
@@ -1744,7 +1775,7 @@
               fcFreed += fcResp.data.totalFreed || 0;
               fcSuccess += fcResp.data.success || 0;
               fcFailed += fcResp.data.failed || 0;
-              // K12（v6）：path 必须保留——「登记到重启后删除」的登记面只认逐文件
+              // K12（v6）：path 必须保留——失败明细面板按逐文件
               // 失败明细（fileclean 回执的 details 逐文件带 path/status），旧映射把
               // path 丢掉，前端只能退回扫描数据全量顶替（= 把成功项也送去永久删）。
               fcDetails.push(...(fcResp.data.details || []).map(d => ({
@@ -1877,18 +1908,18 @@
         // P3 残留复查提示 + 2026-10-13 失败引导：explorer 等进程占着句柄的文件在
         // 内核层就删不掉，光提示「关闭相关程序」是把难题丢回给用户（真机裁定：
         // 「每次都提示我结束 explorer，真结束了资源管理器不就没了吗」）。现在给
-        // 两条可执行出路：① 重启资源管理器并重试（explorer 无损重启，几秒恢复）；
-        // ② 登记到重启后删除（PendingFileRenameOperations，复用卸载域现成链）。
+        // 一条可执行出路：重启资源管理器并重试（explorer 无损重启，几秒恢复）。
+        // 2026-11-02 用户裁定：登记到重启后删除的注册入口退役，引导只剩这一条。
         // R4（2026-10-15）：失败按因分档后，重试面板只收「重试有意义」的项——
         // 删除时已不存在的（gone）与纯 skip 档（太新/排除/未解析/lossy）不再冒充
-        // 「被占用」；权限不足（denied）保留（登记重启后删除对它仍有效）。
+        // 「被占用」；权限不足（denied）保留（重启后重试仍可能通过）。
         const failedItems = (result.details || []).filter(d => {
           if (d.status === 'ok' && (Number(d.residual) || 0) === 0) return false;
           if (d.status === 'skip') return (Number(d.denied) || 0) > 0;
           return true;
         });
         if (failedItems.length > 0) {
-          offerCleanupRetryPanel(failedItems, result.details || []);
+          offerCleanupRetryPanel(failedItems);
           maybeOfferElevation(`${failedItems.length} 项未完全清理，部分文件可能需要管理员权限。`);
         } else if (result.partial > 0) {
           // v3.3.4 文案纠偏：部分成功不是失败——多数文件已清理，仅少数未删（占用或权限）
@@ -2404,43 +2435,12 @@
   // ==================== 清理失败引导（2026-10-13 用户裁定） ====================
   // 背景：explorer 等进程占着句柄的文件在内核层删不掉，旧文案「可关闭相关程序或
   // 重启后再试」在占用者就是 explorer 时无解（真机裁定原话：「真结束了资源管理器
-  // 不就没了吗」）。两条出路都接现成原语：
-  //   ① 重启资源管理器（contextmenu:restart-explorer，无损重启，桌面/任务栏几秒
-  //      恢复）→ 自动对失败项重新执行（复用 clean() 的整条确认链）；
-  //   ② 登记重启后删除（uninstall:pending-add → PendingFileRenameOperations，
-  //      下次开机由系统删除；目录会被后端如实 skip，回执汇总展示）。
+  // 不就没了吗」）。出路接现成原语：重启资源管理器（contextmenu:restart-explorer，
+  // 无损重启，桌面/任务栏几秒恢复）→ 自动对失败项重新执行（复用 clean() 的整条确认链）。
+  // 2026-11-02 用户裁定：「登记到重启后删除」的注册入口全应用退役，面板只剩这一条出路；
+  // 已登记条目的**查看/撤回**保留（见下方 K13 清单，后端 list/revoke 未退役）。
 
-  // 收集待登记文件路径：**只认逐文件失败回执**（K12，2026-10-18）——
-  //   · 常规清理项：回执 details 的 failedFiles（{path, reason}；后端只外发可延期的
-  //     两档——被占用/权限不足，安全闸门拒绝的与已消失的不在其中）；
-  //   · 文件清理项：回执明细里 status==='error' 且带 path 的行。
-  // 拿不到逐文件明细的项（缺字段/旧回执）**不计入**：登记面不再拿条目目标路径或
-  // 扫描清单全量顶替——那会把成功项也送去「重启后永久删」（K12 病灶本体）。
-  function collectFailedPaths(items, details) {
-    const byId = new Map();
-    for (const d of details || []) {
-      if (!d || !d.id) continue;
-      if (!byId.has(d.id)) byId.set(d.id, []);
-      byId.get(d.id).push(d);
-    }
-    const paths = [];
-    for (const d of items) {
-      for (const r of byId.get(d.id) || []) {
-        if (Array.isArray(r.failedFiles)) {
-          for (const f of r.failedFiles) if (f && f.path) paths.push(f.path);
-        }
-        // 文件清理项：error 行自带 path（fcDetails 映射保留，见 clean()）
-        if (r.status === 'error' && r.path) paths.push(r.path);
-      }
-    }
-    return [...new Set(paths)].filter(Boolean);
-  }
-
-  // K12：失败文件动辄上百，一次性全送会被后端整批拒「请分批登记」，故按后端单批上限切片顺序登记。
-  // 上限不写在这里：真源在 Rust，读 tauri-api.js 的导出（F4a1-L09 撤掉了此处的本地字面量副本）。
-  const PENDING_ADD_BATCH = window.ipcLimits.pendingAddMaxItems;
-
-  function offerCleanupRetryPanel(items, execDetails) {
+  function offerCleanupRetryPanel(items) {
     if (!window.modal?.create) {
       // modal 缺席（理论不可达）：退回旧文案，至少不失声
       window.app?.toast('warning', `${items.length} 项未完全清理（部分文件可能被占用或需管理员权限，可重启后再试）`);
@@ -2460,17 +2460,15 @@
       id: 'cleanupRetryModal-' + Date.now(),
       title: `${items.length} 项未完全清理`,
       bodyHtml: `
-        <div class="confirm-message">以下项目未能完全删除（原因见各行标注；多为文件正被程序占用，部分是权限不足）。下面两个动作都不需要你手动结束任何程序：</div>
+        <div class="confirm-message">以下项目未能完全删除（原因见各行标注；多为文件正被程序占用，部分是权限不足）。下面这个动作不需要你手动结束任何程序：</div>
         <div class="lock-app-list">${rows}${overflow > 0 ? `<div class="lock-app-row"><span class="lock-app-name">…另有 ${overflow} 项</span></div>` : ''}</div>
         <div class="lock-critical-note">重启资源管理器是无损操作：桌面与任务栏会短暂消失后自动恢复，已打开的文件夹窗口会被关闭。</div>`,
       footerHtml: `
         <span class="model-picker-spacer"></span>
-        <button class="btn btn-secondary" data-retry="pending" type="button">登记到重启后删除</button>
         <button class="btn btn-primary" data-retry="explorer" type="button">重启资源管理器并重试</button>`,
       onClose() { /* 面板可随时关，不做强制 */ }
     });
     const explorerBtn = ctrl.footer.querySelector('[data-retry="explorer"]');
-    const pendingBtn = ctrl.footer.querySelector('[data-retry="pending"]');
     const failedIds = items.map(d => d.id);
 
     explorerBtn.addEventListener('click', async () => {
@@ -2498,72 +2496,13 @@
       updateUI();
       await clean();
     });
-
-    pendingBtn.addEventListener('click', async () => {
-      // K12：登记面只认逐文件失败回执（execDetails = 本次 clean() 的合并明细）
-      const paths = collectFailedPaths(items, execDetails);
-      if (!paths.length) {
-        window.app?.toast('warning', '没有可登记的文件：本批没有逐文件失败明细（目录、已删除与受保护项不支持重启后删）');
-        return;
-      }
-      // B3-2：确认件也必须进 try。旧写法 `await confirmDanger(...)` 在 try 之外 ——
-      // 确认件自己抛错时交给 async handler 变成**无人接的 rejection**：用户看不到提示，
-      // 而按钮已经处在「正在登记...」的中间态（disable 一旦挪到确认之前就是焊死）。
-      // 现在：确认 → 登记 → 终态全在一个 try 里，finally 兜住任何残留的中间态。
-      // 先判确认件可用性：`window.app?.confirmDanger(...)` 在缺该函数时只得到 undefined
-      // ⇒ 走「用户取消」分支 ⇒ 点了没反应。这种情况下要提示，不能静默。
-      if (typeof window.app?.confirmDanger !== 'function') {
-        window.app?.toast?.('warning', '当前环境不支持危险操作确认，已取消登记');
-        return;
-      }
-      try {
-        // K12：PFRO 是**永久删**出口，登记前必须独立高危险确认（旧流程点了就登记，
-        // 用户不知道是永久删）。文案三要素：重启后删除 / 不进回收站 / 重启前可撤回。
-        const ok = await window.app.confirmDanger(
-          '登记重启后删除',
-          `将把 ${paths.length} 个删除失败的文件登记为「下次重启时删除」。\n这是永久删除：不进回收站、无法还原；重启前可在本页「重启后删除」入口查看并撤回。`,
-          '仍然登记',
-          '取消',
-          '删除动作由系统在重启的会话管理器阶段执行，Trim 不参与那一步；目录不支持该机制，登记时会被跳过。'
-        );
-        if (!ok) return;
-        pendingBtn.disabled = true;
-        pendingBtn.textContent = '正在登记...';
-        // K12：按 PENDING_ADD_BATCH 切片顺序登记并聚合回执（单批超限会被后端整批拒）
-        let added = 0;
-        let skipped = 0;
-        const failedRows = [];
-        for (let i = 0; i < paths.length; i += PENDING_ADD_BATCH) {
-          const resp = await window.api.uninstall.pendingAdd(paths.slice(i, i + PENDING_ADD_BATCH));
-          if (!resp || !resp.success) throw new Error((resp && resp.message) || '登记失败');
-          const data = resp.data || {};
-          const rows = data.details || [];
-          added += Number(data.added) || 0;
-          skipped += rows.filter(r => r.status === 'skip').length;
-          failedRows.push(...rows.filter(r => r.status === 'fail'));
-        }
-        window.app?.toast('success', `已登记 ${added} 个文件到重启后删除${skipped ? `；${skipped} 个跳过（目录/重复登记）` : ''}${failedRows.length ? `；${failedRows.length} 个登记失败` : ''}`);
-        pendingBtn.textContent = added > 0 ? '已登记' : '无可登记项';
-        pendingBtn.setAttribute('data-tip', '已登记的文件将在下次重启时由系统删除（重启前可撤回）');
-        if (added === 0) pendingBtn.disabled = true;
-        refreshPendingBadge();
-      } catch (e) {
-        window.app?.toast('error', '登记失败：' + ((e && e.message) || e));
-      } finally {
-        // 只复位**中间态**：成功分支的「已登记 / 无可登记项」是终态，不许被 finally 抹平
-        if (pendingBtn.textContent === '正在登记...') {
-          pendingBtn.disabled = false;
-          pendingBtn.textContent = '登记到重启后删除';
-        }
-      }
-    });
   }
 
   // ==================== K13：重启后删除清单（主窗查看/撤回入口） ====================
-  // 背景：登记项（PFRO + 待删台账）此前只在残留副窗可见可撤回——主窗清理域登记的
-  // 条目在主窗没有任何入口（K13 缺口本体：看得见才算「可撤回」）。档位侧
-  // uninstall:pending-list/revoke 已同 add 放到 PENDING_DELETE_WINDOWS（main+residue），
-  // 这里补主窗侧的按钮 + 清单弹窗。
+  // 背景：已登记项（PFRO + 待删台账）此前只在残留副窗可见可撤回——没有清单入口就等于
+  // 撤不回（K13 缺口本体：看得见才算「可撤回」）。档位侧 uninstall:pending-list/revoke
+  // 在 PENDING_DELETE_WINDOWS（main+residue），这里补主窗侧的按钮 + 清单弹窗。
+  // 2026-11-02 用户裁定：登记入口退役，本段（查看/撤回）是唯一保留的消费面。
   // R2a-L05：本表是后端待删状态的**唯一**中文消费点，未登记的英文值不许原样漏到界面。
   // 后端已提出把「条目已被处理但文件仍在」从 consumed 拆出（拟名 present / consumed-present）——
   // 它表示删除没有生效，不能念成「已消费」；后端改名前先把这几档文案钉在这里。
@@ -2692,7 +2631,8 @@
       // 调用 undefined，抛 TypeError 变成 unhandled rejection；用户看到的是「点撤回没反应」，
       // 而这正是 AGENTS 例外 B「重启前可撤回」的唯一前端出口。整段收进一个 try 才有出口。
       try {
-        // 撤回是**安全方向**（阻止删除、文件保留），走黄色确认即可；红色留给登记（永久删）。
+        // 撤回是**安全方向**（阻止删除、文件保留），走黄色确认即可（2026-11-02 起
+        // 本域已无登记入口，红色档不再有对应动作）。
         const ok = await window.app?.confirmWarning(
           '撤回重启后删除',
           `将把 ${pendingN} 个仍挂起的登记从系统中摘除：这些文件不会被删除，保持原样。已被重启消费或文件已不在的条目会一并从清单清除。`,
@@ -3024,7 +2964,10 @@
     renderCategoryList();
     updateUI();
 
-    document.getElementById('btnScan')?.addEventListener('click', scan);
+    document.getElementById('btnScan')?.addEventListener('click', () => {
+      if (isScanning) requestScanCancel();
+      else scan();
+    });
     document.getElementById('btnClean')?.addEventListener('click', clean);
     document.getElementById('btnSelectAll')?.addEventListener('click', toggleSelectAll);
     // K13：重启后删除清单入口（有待删条目才显示；登记/撤回后刷新）

@@ -71,7 +71,7 @@ mod rules;
 // 根目录口径的真源是 `engine::paths`；「pub 且被 re-export」不等于「已接入」。
 pub use rules::{rules_watermark, rules_value, rules_value_arc, cleanup_rules, __cmd__cleanup_rules, __tauri_command_name_cleanup_rules};
 mod scan_execute;
-pub use scan_execute::{cleanup_scan, cleanup_scan_headless, __cmd__cleanup_scan, __tauri_command_name_cleanup_scan, cleanup_execute, __cmd__cleanup_execute, __tauri_command_name_cleanup_execute, cleanup_item_detail, __cmd__cleanup_item_detail, __tauri_command_name_cleanup_item_detail, cleanup_check_locked, __cmd__cleanup_check_locked, __tauri_command_name_cleanup_check_locked, cleanup_query_locked, __cmd__cleanup_query_locked, __tauri_command_name_cleanup_query_locked, cleanup_kill_locked_processes, __cmd__cleanup_kill_locked_processes, __tauri_command_name_cleanup_kill_locked_processes};
+pub use scan_execute::{cleanup_scan, cleanup_scan_headless, cleanup_scan_cancel, __cmd__cleanup_scan, __tauri_command_name_cleanup_scan, __cmd__cleanup_scan_cancel, __tauri_command_name_cleanup_scan_cancel, cleanup_execute, __cmd__cleanup_execute, __tauri_command_name_cleanup_execute, cleanup_item_detail, __cmd__cleanup_item_detail, __tauri_command_name_cleanup_item_detail, cleanup_check_locked, __cmd__cleanup_check_locked, __tauri_command_name_cleanup_check_locked, cleanup_query_locked, __cmd__cleanup_query_locked, __tauri_command_name_cleanup_query_locked, cleanup_kill_locked_processes, __cmd__cleanup_kill_locked_processes, __tauri_command_name_cleanup_kill_locked_processes};
 mod state;
 
 #[cfg(test)]

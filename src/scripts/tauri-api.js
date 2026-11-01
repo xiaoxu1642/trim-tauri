@@ -58,6 +58,7 @@
     'cleanup:file-backup-list': 'cleanup_file_backup_list',
     'cleanup:file-backup-restore': 'cleanup_file_backup_restore',
     'cleanup:scan': 'cleanup_scan',
+    'cleanup:scan-cancel': 'cleanup_scan_cancel',
     'cleanup:execute': 'cleanup_execute',
     'cleanup:check-locked': 'cleanup_check_locked',
     'cleanup:kill-locked-processes': 'cleanup_kill_locked_processes',
@@ -84,12 +85,11 @@
     // MAIN / MUST_READONLY 做双向棘轮，窄窗口集另登记在 MUST_WINDOWSET，改档必须两边同步）。
     // 2026-11-01 按后端逐条订正：此前注释把 report-*/appx-logo 说成只读、把 pending-*/residue-* 说成 MAIN。
     //   MAIN = list/run/modify/dir-size/reg-backup-*/batch-*/report-*/appx-logo
-    //   main+residue = pending-add|pending-list|pending-revoke（PENDING_DELETE_WINDOWS）
+    //   main+residue = pending-list|pending-revoke（PENDING_DELETE_WINDOWS；2026-11-02 登记入口退役）
     //   residue 副窗独占 = residue-scan|residue-execute（RESIDUE_WINDOWS）
     'uninstall:list': 'uninstall_list',
     'uninstall:run': 'uninstall_run',
     'uninstall:modify': 'uninstall_modify',
-    'uninstall:pending-add': 'uninstall_pending_add',
     'uninstall:pending-list': 'uninstall_pending_list',
     'uninstall:pending-revoke': 'uninstall_pending_revoke',
     'uninstall:residue-scan': 'uninstall_residue_scan',
@@ -425,6 +425,8 @@
       fileBackupRestore: function (file, index) { return invokeChannel('cleanup:file-backup-restore', { file: file, index: index }); },
       // partial：扫描范围是勾选项的子集（后端保快照桶并合并；全量扫描传 false）
       scan: function (categories, partial) { return invokeChannel('cleanup:scan', { categories: categories, partial: partial === true }); },
+      // 停止扫描：协作式取消，引擎在条目边界提前返回；回执带 cancelled:true
+      scanCancel: function () { return invokeChannel('cleanup:scan-cancel'); },
       // toRecycle 只为形状兼容而保留：后端 cleanup_execute 自 v3.3.0 用户裁定起固定永久删
       // （scan_execute.rs 里 to_recycle 恒 false），入参只回一份没人读的 toRecycleIgnored。
       // 新增调用点不得传 true；要摘形参得连带改 cleanup.js 的调用点并重新确认那条裁定。
@@ -491,7 +493,6 @@
       list: function (scope) { return invokeChannel('uninstall:list', { scope: scope }); },
       run: function (appId) { return invokeChannel('uninstall:run', { appId: appId }); },
       modify: function (appId, mode) { return invokeChannel('uninstall:modify', { appId: appId, mode: mode }); },
-      pendingAdd: function (targets) { return invokeChannel('uninstall:pending-add', { targets: targets }); },
       pendingList: function () { return invokeChannel('uninstall:pending-list'); },
       pendingRevoke: function () { return invokeChannel('uninstall:pending-revoke'); },
       residueScan: function (appId) { return invokeChannel('uninstall:residue-scan', { appId: appId }); },
@@ -997,11 +998,9 @@
     configurable: false
   });
 
-  // F4a1-L09：跨语言数值契约的唯一前端导出面。真源在 Rust 的 PENDING_ADD_MAX_ITEMS，两边由
-  // tools/check-pending-batch-limit.mjs 对拍：渲染层要按批切片就读这里，各页再抄一份字面量就是
-  // 「后端下调、前端整批被拒请分批登记」那条静默断裂（§5.16）。不塞进 var api = {}：那是
-  // check-channel-map D4 的形状解析面，非方法键会把相邻通道挂错路径。
-  Object.defineProperty(window, 'ipcLimits', { value: { pendingAddMaxItems: 32 } });
+  // F4a1-L09 的前端导出面 `window.ipcLimits.pendingAddMaxItems` 随「登记重启后删除」
+  // 注册入口于 2026-11-02 一并退役：本仓已无单批登记上限，故整个 defineProperty 撤除，
+  // 不留空对象。
 
   // Phase 0 的 window.__trimSpike 探针已随 commands/spike.rs 一并删除：更要紧的是它导出的 `raw: invokeCore` ——
   // 那等于把「直调任意 Rust 命令」的入口挂在 window 上，绕过上面手工挑选的 window.api 白名单，与本项目

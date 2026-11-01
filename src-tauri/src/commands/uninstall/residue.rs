@@ -1783,36 +1783,6 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             if learned_added > 0 {
                 log::write_log("info", &format!("本机学习库新增 {learned_added} 条落点（下轮同程序残留直接命中）"));
             }
-            // R2a-M03：本批「删除没有成功」的**文件**路径记进命令体侧的失败回执台账。
-            // 「登记重启后删除」的第一道约束（只收删除失败项）从此有命令体判据 ——
-            // 旧写法这道约束只在渲染层（residue-window.js 的失败文件筛选）维持，
-            // 命令体内没有任何判据，换一个消费方即整条绕过。
-            // 口径：`status == fail && kind == file`（目录后端本就拒登记）。
-            // B2-8：从 `!= "ok"` 收成 `== "fail"` —— skip 行（「目标位于系统目录」
-            // 「目标已不存在」）**从未被尝试删除**，把它记成「删除失败」语义不成立；
-            // 台账里多这一类条目，就等于把一个从没删过的路径喂进「重启后删除」的候选面。
-            // R2a-M01（2026-11-01 重审）：`fail` 里混着 finder 的**安全拒绝**
-            // （`rejected` / `reparse-ancestor` / `unrecoverable-name`，见
-            // `native-scanner/src/scan.rs` 的 `delete`）——那是「拒绝删」不是「删不掉」，
-            // 台账按 mode 只放行 `trash-failed`；mode 缺失/未知同样不放行（fail-closed）。
-            crate::engine::delete_failed::record_modes(
-                &label,
-                crate::engine::delete_failed::DOMAIN_RESIDUE,
-                details
-                    .iter()
-                    .filter(|d| d["status"] == "fail" && d["kind"] == "file")
-                    .filter_map(|d| {
-                        d["target"].as_str().map(|p| {
-                            (
-                                p.to_string(),
-                                crate::engine::delete_failed::DeleteFailMode::from_finder_mode(
-                                    d["mode"].as_str().unwrap_or(""),
-                                ),
-                            )
-                        })
-                    })
-                    .collect(),
-            );
             json!({ "success": true, "data": {
                 "details": details, "okCount": ok_count, "failCount": fail_count,
                 "reportPath": report_path.to_string_lossy(),

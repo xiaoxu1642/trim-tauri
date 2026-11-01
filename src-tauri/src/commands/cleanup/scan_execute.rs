@@ -402,12 +402,16 @@ fn run_cleanup_scan_core<E: FnMut(&Value, usize, usize) + 'static>(cats: Vec<Str
 /// 扫描主体（纯原生引擎；PS 回退已随 S3 删除，见 :11）——窗口版：核心 + 进度 emit + 快照登记。
 pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, cats: Vec<String>, partial: bool) -> Value {
     let win = window.clone();
-    let (mut data, _malformed) = match run_cleanup_scan_core(cats, move |item, done, total| {
+    let core = run_cleanup_scan_core(cats, move |item, done, total| {
         let _ = win.emit(
             "cleanup:scan-progress",
             json!({ "done": done, "total": total, "item": item }),
         );
-    }) {
+    });
+    // 先读取消位再复位：正常结束与 Err 早退都要把位清干净，下一轮不受影响。
+    let cancelled = trim_finder::cleanup_scan::scan_cancel_requested();
+    trim_finder::cleanup_scan::reset_scan_cancel();
+    let (mut data, _malformed) = match core {
         Ok(v) => v,
         Err(msg) => return json!({ "success": false, "message": msg, "data": [] }),
     };
@@ -430,7 +434,10 @@ pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, labe
         }
     }
     inject_post_actions(&mut data);
-    json!({ "success": true, "data": data })
+    if cancelled {
+        log::write_log("info", &format!("清理扫描已停止（保留已扫到 {} 项）", data.len()));
+    }
+    json!({ "success": true, "cancelled": cancelled, "data": data })
 }
 
 /// P2-06：给每个命中项注入后置动作（postAction: explorer|none），供前端在清理
@@ -601,12 +608,28 @@ pub async fn cleanup_scan<R: tauri::Runtime>(window: WebviewWindow<R>, categorie
             .insert(label.clone(), HashMap::new());
     }
     log::write_log("info", &format!("开始扫描{}: {}", if partial { "（仅勾选）" } else { "" }, cats.join(", ")));
+    // 新一轮扫描复位取消位（上一轮「停止扫描」可能留下的 true 不许影响本轮）。
+    trim_finder::cleanup_scan::reset_scan_cancel();
     let win = window.clone();
     let task = tauri::async_runtime::spawn_blocking(move || do_cleanup_scan(&win, &label, cats, partial));
     match task.await {
         Ok(v) => v,
         Err(e) => json!({ "success": false, "message": e.to_string(), "data": [] }),
     }
+}
+
+/// cleanup:scan-cancel — 请求停止正在进行的清理扫描（主窗档）。
+///
+/// 协作式取消：引擎在**条目边界**检查取消位，正在扫的那一条会跑完；
+/// 回执在 `cleanup_scan` 的响应里带 `cancelled: true`，已扫到的条目原样返回。
+#[tauri::command]
+pub async fn cleanup_scan_cancel<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    trim_finder::cleanup_scan::request_scan_cancel();
+    log::write_log("info", "cleanup:scan-cancel 已请求停止扫描（条目边界生效）");
+    json!({ "success": true })
 }
 
 // ==================== cleanup:execute ====================
@@ -852,25 +875,6 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
                 log::write_log("warn", &w);
             }
         }
-        // R2a-M03：本批「删除没有成功」的文件路径记进命令体侧的失败回执台账 ——
-        // 「登记重启后删除」的第一道约束（只收删除失败项）从此有命令体判据，
-        // 不再只由渲染层（cleanup.js 的 collectFailedPaths）维持。
-        crate::engine::delete_failed::record_modes(
-            &label,
-            crate::engine::delete_failed::DOMAIN_CLEANUP,
-            cleanup_failed_paths(
-                data.get("details")
-                    .and_then(|d| d.as_array())
-                    .map(|a| a.as_slice())
-                    .unwrap_or(&[]),
-            )
-            .into_iter()
-            // B2-8：常规清理是 v3.3.0 固定的**永久删**链 ⇒ 这条失败回执不得进
-            // 「重启后删除」登记面（登记同样是永久删，连回收站都不经过）。
-            // R2a-M01：这条链的失败也不是回收站调用失败，mode 维度同样不放行。
-            .map(|p| (p, crate::engine::delete_failed::DeleteFailMode::PermanentDeleteFailed))
-            .collect(),
-        );
         // 成功判据（v6-K10 收口）：硬失败（error ∪ fail，见上面 v5 C-3）为 0
         // **且确实删了东西**——failed==0 但 success/partial 全 0 = 全 skip（太新/
         // 排除/未解析/受保护）或空跑，按「未达成」处理而不是 success:true；
@@ -934,45 +938,6 @@ pub(super) fn summarize_details(data: &Value) -> (i64, usize, usize, usize) {
         }
     }
     (total, success, partial, skipped)
-}
-
-/// R2a-M03：本批「删除没有成功」的文件路径（纯函数，便于断言）。
-///
-/// 口径与渲染层 `cleanup.js` 的 `collectFailedPaths` 同源，但**更宽**：
-///   · `failedFiles[].path` —— 引擎侧逐文件失败明细（被占用 / 权限不足）；
-///   · `status` 为 `error` / `fail` 且自带 `path` 的行 —— 文件清理链那种「整项失败、
-///     路径在行上」的形状。
-/// 取「更宽」是刻意的：这道集合是**登记闸的白名单**（`pending_add` 凭它核对
-/// 「只收删除失败项」），白名单窄于渲染层要送的那批时，登记会被误拒 —— 闸越宽，
-/// 拦的只是「从没有失败过的文件」，而那正是闸要拦的东西。
-pub(super) fn cleanup_failed_paths(details: &[Value]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for d in details {
-        if let Some(ff) = d.get("failedFiles").and_then(|v| v.as_array()) {
-            for f in ff {
-                if let Some(p) = f.get("path").and_then(|v| v.as_str()) {
-                    if !p.is_empty() {
-                        out.push(p.to_string());
-                    }
-                }
-            }
-        }
-        let status = d.get("status").and_then(|v| v.as_str()).unwrap_or("");
-        if status == "error" || status == "fail" {
-            if let Some(p) = d.get("path").and_then(|v| v.as_str()) {
-                if !p.is_empty() {
-                    out.push(p.to_string());
-                }
-            }
-        }
-    }
-    let mut seen: Vec<String> = Vec::new();
-    for p in out {
-        if !seen.iter().any(|x| x.eq_ignore_ascii_case(&p)) {
-            seen.push(p);
-        }
-    }
-    seen
 }
 
 // ==================== cleanup:item-detail ====================

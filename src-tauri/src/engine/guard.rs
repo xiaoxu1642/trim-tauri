@@ -44,11 +44,9 @@ pub const MAIN: &[&str] = &["main"];
 /// `capabilities/subwindows.json`，否则窗口建得出来、IPC 判越权。
 pub const RESIDUE_WINDOWS: &[&str] = &["residue"];
 
-/// 「登记重启后删除」（PendingFileRenameOperations 写侧）的调用窗集。
-/// 两个消费方：残留副窗（原有入口）+ 主窗清理域的失败引导（2026-10-13 用户裁定：
-/// 清理失败不再只提示「关闭相关程序」，给一键重启 explorer 重试 + 兜底登记开机删）。
-/// 刻意不给 APP_WINDOWS 全集——写 PFRO 是**永久删**出口，models/processManager
-/// 没有调用场景。
+/// 「重启后删除」清单的查看 / 撤回调用窗集（2026-11-02 用户裁定：登记入口全应用退役，
+/// 只保留既有登记项的可见与撤回）。两个消费方：残留副窗 + 主窗清理页的待删清单入口。
+/// 刻意不给 APP_WINDOWS 全集——撤回会改写系统 PFRO，models/processManager 没有调用场景。
 pub const PENDING_DELETE_WINDOWS: &[&str] = &["main", "residue"];
 
 /// 校验调用来源窗口；返回 label 或错误消息（错误消息直接回给渲染层）。

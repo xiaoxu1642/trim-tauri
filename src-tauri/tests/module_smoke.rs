@@ -582,11 +582,11 @@ const GHOST_APP_ID: &str = r"HKLM|SOFTWARE\Microsoft\Windows\CurrentVersion\Unin
 // - 允许集外的窗口（含主窗）**全部**必须被拒杀。
 // - `reached` 集合显式断言「越过的窗口恰好等于允许集」，不是「至少一个」。
 //
-// 允许集是**参数**而不是写死的 `residue`：2026-10-13 裁定把 `uninstall_pending_add`
-// 的入口放宽到 `guard::PENDING_DELETE_WINDOWS`（= 主窗失败引导 + 残留副窗两个消费方），
-// 当时这条断言还按「residue 独占」写，于是提交里就留了一条恒红用例。2026-10-18（v6-K13）
-// list/revoke 同集放宽（待删清单对主窗可见可撤回）。档位以「谁真的需要调它」
-// 为准（AGENTS §3），测试必须跟着允许集走，而不是反过来。
+// 允许集是**参数**而不是写死的 `residue`：2026-10-18（v6-K13）把待删清单的
+// list/revoke 从「residue 独占」放宽到 `guard::PENDING_DELETE_WINDOWS`（= 主窗 + 残留
+// 副窗两个消费方），当时这条断言还按「residue 独占」写，于是提交里就留了一条恒红用例。
+// 2026-11-02 用户裁定登记入口退役后，本集只剩 list/revoke 两条（主窗查看/撤回）。
+// 档位以「谁真的需要调它」为准（AGENTS §3），测试必须跟着允许集走，而不是反过来。
 const RESIDUE_LABEL: &str = "residue";
 
 fn assert_window_tier(cmd: &str, args: serde_json::Value, needle: &str, allowed: &[&str]) {
@@ -719,23 +719,17 @@ fn uninstall_modify_is_main_only_and_passes_guard_from_main() {
     );
 }
 
-/// 重启后删三条命令的档位（2026-10-13 裁定 split；2026-10-18 v6-K13 起三條同集）：
-/// - `add` / `list` / `revoke` 都走 `PENDING_DELETE_WINDOWS`（= 主窗清理域失败引导
-///   + 残留副窗两个消费方），主窗必须**越过**档位；models/processManager 拒杀。
-///   add 用「空目标早退」做正向特征（零副作用，不写 PFRO）；list 用数据形状里的键名
-///   `entries`（档位拒杀只回 {success:false,message}）；revoke 会写 PFRO ⇒ 正例只用
-///   「不存在的 batchId」——命令体在写任何东西之前因 scoped 为空早退（零副作用），
-///   正向特征取回执里的 `revoked`；提权态下的真机正例留给发布前 #[ignore] 组（§4.2 ②）。
+/// 重启后删两条命令的档位（2026-10-13 裁定 split；2026-10-18 v6-K13 起同集；
+/// 2026-11-02 用户裁定登记入口 `add` 退役，本集只剩 list/revoke）：
+/// - `list` / `revoke` 都走 `PENDING_DELETE_WINDOWS`（= 主窗清理域 + 残留副窗两个
+///   消费方），主窗必须**越过**档位；models/processManager 拒杀。
+///   list 用数据形状里的键名 `entries` 做正向特征（档位拒杀只回 {success:false,message}）；
+///   revoke 会写 PFRO ⇒ 正例只用「不存在的 batchId」——命令体在写任何东西之前因
+///   scoped 为空早退（零副作用），正向特征取回执里的 `revoked`；提权态下的真机正例
+///   留给发布前 #[ignore] 组（§4.2 ②）。
 /// - residue 的 scan/execute 仍只给 `residue`（见上面的 assert_residue_window_only）。
 #[test]
 fn pending_delete_channels_window_tier() {
-    // add：主窗 + residue 两个都越过；models/processManager 拒杀
-    assert_window_tier(
-        "uninstall_pending_add",
-        json!({ "targets": [] }),
-        "没有要登记的目标",
-        &["main", RESIDUE_LABEL],
-    );
     // list：主窗 + residue 都越过（K13：待删清单对主窗可见）
     assert_window_tier("uninstall_pending_list", json!({}), "entries", &["main", RESIDUE_LABEL]);
     // revoke：主窗 + residue 都越过；不存在的 batchId ⇒ scoped 空 ⇒ 早退零写
@@ -747,98 +741,8 @@ fn pending_delete_channels_window_tier() {
     );
 }
 
-/// v2-B1/B2（2026-10-01 复核批次）：pending-add 的纵深防御正例。
-/// 两条路径都在**写入任何东西之前**短路：受保护/不可归一化目标在循环内第一道闸被
-/// skip（`added=0` → 不写 PFRO、不写待删文档），超限在 spawn_blocking 之前整批拒绝；
-/// 除只读 PFRO/文档读取外零副作用，可进快速组。v0.7.0 起调用方是 residue 副窗。
-/// 向量口径（对照 protect::build_default_roots）：空串=归一化失败、裸盘符与盘符根=
-/// drive_root、`System32\config` 子树与 `C:\Windows` exact=受保护清单本体。
-#[test]
-fn pending_add_rejects_protected_paths_and_over_limit() {
-    let w = window_with_label(RESIDUE_LABEL);
-    let res = invoke(
-        &w,
-        "uninstall_pending_add",
-        json!({ "targets": ["", "C:", "C:\\", "C:\\Windows", "C:\\Windows\\System32\\config\\SAM"] }),
-    );
-    assert_eq!(
-        res["success"], json!(true),
-        "受保护路径应逐项 skip 而非整批失败: {res}"
-    );
-    assert_eq!(res["data"]["added"], json!(0), "受保护路径一项都不许登记: {res}");
-    let rows = res["data"]["details"].as_array().expect("details 应为数组");
-    assert_eq!(rows.len(), 5, "五个目标都应有逐项回执: {res}");
-    for r in rows {
-        assert_eq!(r["status"], json!("skip"), "受保护目标必须 skip: {r}");
-        assert!(
-            r["message"].as_str().unwrap_or("").contains("受保护路径"),
-            "skip 原因必须写明受保护路径: {r}"
-        );
-    }
-    // 单批上限：33 项 > PENDING_ADD_MAX_ITEMS(32)，整批失败且信息写明口径
-    let over: Vec<String> = (0..33)
-        .map(|i| format!("C:\\nonexistent-trim-pending-{i}.bin"))
-        .collect();
-    let res = invoke(&w, "uninstall_pending_add", json!({ "targets": over }));
-    assert_eq!(res["success"], json!(false), "超上限必须整批失败: {res}");
-    assert!(
-        common::message_of(&res).contains("32"),
-        "失败信息应写明上限口径 32: {res}"
-    );
-}
-
-/// R2a-M03：登记「重启后删除」的第一道约束（只收删除失败项）必须有**命令体**判据。
-///
-/// 旧写法这道约束只由渲染层维持 —— `cleanup.js` 的 `collectFailedPaths` 与
-/// `residue-window.js` 的失败文件筛选各筛一遍，命令体里零判据 ⇒ 换一个消费方、
-/// 或渲染层被改一句，任意文件都能进 PFRO 这个**永久删**出口（不进回收站、不可还原）。
-///
-/// 判红自证：把 `uninstall_pending_add` 闸循环里
-/// `delete_failed::is_failed_in_session(t)` 那道闸删掉 ⇒ 首条断言红
-/// （未登记过的目标改由「不是存在的文件」拦下，回执文案不再写「删除失败回执」）。
-///
-/// 零副作用：两个目标都是**不存在的路径** ⇒ 未登记那个在闸上被拒、登记过的那个走到
-/// is_file 才被拒，全程不写 PFRO、不写待删台账。
-#[test]
-fn pending_add_only_accepts_delete_failed_receipt_targets() {
-    let w = window_with_label(RESIDUE_LABEL);
-    let failed = "C:\\trim-nonexistent-failed-receipt.bin";
-    let not_failed = "C:\\trim-nonexistent-no-receipt.bin";
-    trim_tauri_lib::engine::delete_failed::record(
-        RESIDUE_LABEL,
-        trim_tauri_lib::engine::delete_failed::DOMAIN_RESIDUE,
-        vec![failed.to_string()],
-        // B2-8：残留域是回收站链 ⇒ 可登记。本用例的判据正是「有回执才放行」，
-        // 所以这里必须给 true，否则它测的会变成「被 recyclable 闸拒掉」
-        true,
-    );
-    let res = invoke(
-        &w,
-        "uninstall_pending_add",
-        json!({ "targets": [failed, not_failed] }),
-    );
-    assert_eq!(res["success"], json!(true), "闸在命令体内逐项 skip，不整批失败: {res}");
-    assert_eq!(res["data"]["added"], json!(0), "两个目标都不得登记: {res}");
-    let rows = res["data"]["details"].as_array().expect("details 应为数组");
-    assert_eq!(rows.len(), 2, "两个目标都应有逐项回执: {res}");
-    let row_failed = rows
-        .iter()
-        .find(|r| r["target"] == json!(failed))
-        .unwrap_or_else(|| panic!("应有登记过那个目标的回执: {res}"));
-    assert!(
-        !row_failed["message"].as_str().unwrap_or("").contains("删除失败回执"),
-        "命中删除失败回执的目标不得被这道闸拒: {row_failed}"
-    );
-    let row_not = rows
-        .iter()
-        .find(|r| r["target"] == json!(not_failed))
-        .unwrap_or_else(|| panic!("应有未登记目标的回执: {res}"));
-    assert_eq!(row_not["status"], json!("skip"), "未命中必须 skip 而非 fail: {row_not}");
-    assert!(
-        row_not["message"].as_str().unwrap_or("").contains("删除失败回执"),
-        "未命中删除失败回执的目标必须被命令体闸拒: {row_not}"
-    );
-}
+// 2026-11-02 用户裁定：「登记到重启后删除」注册入口全应用退役（清单查看/撤回保留），
+// 原 pending-add 的两条快速组用例随命令与失败台账一并删除。
 
 /// v6-K11：外设备份还原必须带**显式高危确认字段** `confirmedHighRisk=true`。
 ///

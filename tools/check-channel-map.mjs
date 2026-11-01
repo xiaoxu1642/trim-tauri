@@ -136,6 +136,7 @@ const TAURI_ADDED = {
   'app:open-doc': '2026-10-22（目检会话）：模型子窗「API 文档」入口——渲染层只传白名单 key，URL 由 Rust 常量表给出（readonly 档：调用方就是子窗，主窗无入口）',
   // CDP 远程调试开关（2026-10-22 用户点名）：上游 Electron 轨的调试口是主进程自己的
   // `--inspect`/webPreferences，渲染层从来没有「查询/设置远程调试」这类通道，故在此登记。
+  'cleanup:scan-cancel': '2026-11-02（用户裁定）：清理页「扫描大小」在扫描中变为「停止扫描」——协作式取消位，引擎在条目边界返回；回执带 cancelled:true 并保留已扫结果（主窗档）',
   'settings:cdp-state': '2026-10-22（目检会话）：读 CDP 远程调试三态——本进程是否真暴露端口 / 下次启动的意图 / 是否需要重启。WebView2 的 --remote-debugging-port 只能在浏览器进程创建前定下，运行中改不了，所以不能只回一个布尔（主窗档）',
   'settings:cdp-set': '2026-10-22（目检会话）：写 CDP 手动档偏好（dev 默认开、正式默认关，用户可覆盖）。只改「下次启动的意图」，回执如实带 requiresRestart；偏好落独立明文小文件而非 settings.json，因为读取点在 Builder 之前、不能等解密链（主窗档）',
   // F4a2-M01（P1-W3 Phase2d）：外观域真源从 localStorage 迁到后端 appearance.json 的读回/写入通道。
@@ -145,7 +146,6 @@ const TAURI_ADDED = {
   'appearance:set-pref': 'F4a2-M01（2026-10-22，P1-W3）：同上写入通道；与 settings:set-pref 刻意分条——后者值闸只认布尔，本条按键各自声明形状与范围，非法值当场拒且拒因点名键（主窗档）',
   'startup:open-source': '2026-10-13：B-6 增强——点「位置」同时打开软件所在文件夹与登记来源（注册表项写 regedit LastKey 后拉起；计划任务项定位 System32\Tasks 落盘文件）',  'cleanup:allow-preview-assets': '2026-10-13：图片预览改主窗内嵌 LiteBox 后的 asset 按需放行命令（把本次预览的那组图加进 asset scope，替代退役的 fileclean:read-image dataURL 通道）',  'updater:completion': 'S3（2026-10-05）：新版本实例首领取一次「更新已完成」标记（读后即删，主窗档）。上游 Electron 的 ready-to-install 提示由主进程弹，没有渲染层查询接口',
   'uninstall:modify': 'P1-D6（2026-10-01）：修改/修复入口，执行 ModifyPath（主窗档）',
-  'uninstall:pending-add': 'P1-B3（2026-10-01）：回收站失败项登记重启后删（主窗档）',
   'uninstall:pending-list': 'P1-B3（2026-10-01）：重启后删待删清单（主窗档，只读）',
   'uninstall:pending-revoke': 'P1-B3（2026-10-01）：撤回重启后删登记（主窗档）',
   'uninstall:report-list': 'U-6（2026-09-28）：批次报告列表（上游只写报告无查看面）',

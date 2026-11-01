@@ -73,7 +73,6 @@ const PAGES = [
     api: () => ({
       'uninstall.residueScan': async (a) => ({ success: true, data: { appName: '示例程序', findings: [], notes: [] }, _echo: a }),
       'uninstall.residueExecute': async () => ({ success: true, data: { details: [], okCount: 0, failCount: 0 } }),
-      'uninstall.pendingAdd': async () => ({ success: true, data: {} }),
       'uninstall.pendingRevoke': async () => ({ success: true, data: { revoked: 0 } }),
       'uninstall.pendingList': async () => ({ success: true, data: { entries: [] } }),
       'residueWindow.closeWindow': async () => ({ success: true }),

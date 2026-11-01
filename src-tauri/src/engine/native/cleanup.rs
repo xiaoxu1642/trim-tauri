@@ -1435,10 +1435,10 @@ let mut freed = 0i64;
     // 在回执里长得一模一样，Kudu S2 的护栏一旦静默失效就再也无从察觉。
     let mut identity_unbaselined = 0i64;
     // K12（v6）：本规则逐文件失败明细（{path, reason}，reason = occupied/denied）——
-    // 「登记到重启后删除」的登记面只认这个清单，不再拿条目目标路径全量顶替
-    // （全量 = 把成功项也送去永久删）。只收可延期两档：被占用与权限不足；
-    // gone（删时已不存在）无可删，protected/reparse/identity 是安全闸门的拒绝，
-    // 都不进永久删出口。上限 FAILED_FILES_CAP，总数另计（failedFilesTotal）。
+    // 只收可重试两档：被占用与权限不足；gone（删时已不存在）无可删，
+    // protected/reparse/identity 是安全闸门的拒绝，都不进失败明细。
+    // 该清单供渲染层的「未完全清理」引导面板逐项展示（登记入口已于 2026-11-02 退役）。
+    // 上限 FAILED_FILES_CAP，总数另计（failedFilesTotal）。
     let mut failed_files: Vec<Value> = Vec::new();
     // Kudu S2（2026-10-16）：别名解析（父目录 canonicalize）按父目录 memo——同目录下成千上万个文件只解析一次
     // R5a-L01 取舍声明：两条 memo（final_memo / ancestor_memo）按**父目录**缓存某一时刻的

@@ -63,11 +63,6 @@ const REGISTRY = [
   // T1c-M02 / T1c-M05（v7.2 C09）两条新门禁：
   { file: 'check-data-signatures.mjs', reason: '数据产物逐件验签（D1-M03 扩到五件）：签名面现算 ⇄ 登记面双向对账（摘一件必红、塞一件无签名的必红，两向均在 2026-10-21 实跑判红并点名对象）+ 四件内联 _sig 产物逐件字节对照（正文追加空格 / 签名换尾八字节必须拒）；判定 import 自 sign-cleanup-rules 单一实现。段序=对账→对照→逐件验签，真样本验签不过归第 3 段以「改后必须重签」点名，不再冒充「判定器不可信」' },
   { file: 'check-fixture-freshness.mjs', reason: '夹具新鲜度：比对器 isFresh 正反合成样本钉方向（反相 = 全绿假象）；主断言「盘上 ⇄ 生成器导出逐字节」的手改破坏由真破坏验证兜底' },
-  {
-    file: 'check-pending-batch-limit.mjs',
-    selfTestArgs: ['--selftest'],
-    reason: 'IPC 载荷上限跨语言单源：8 组合成样本与现盘判定共用同一 judge（前端导出值改 33 必红 / 后端锚点消失必红 / 前端锚点重复必红 / 消费面字面量副本回归必红 / 漏读导出必红（reached 只 1 个）/ 非消费文件偷抄必红 / 注释里的举例不判红 / 干净样本不假红）；对照块每次运行都跑，不再只在 --selftest 才跑',
-  },
   // B0（2026-10-24 全仓重审方案 §4 A-6…A-9）：四道「先让后续修复能被判红」的施工前置门禁，
   // 各自内置合成对照块且每次运行都跑，落地即入本表受第 1/2 组实跑核验。
   { file: 'check-degraded-consumption.mjs', reason: 'A-6 degraded 消费契约：发射面现算 ⇄ 通道表三态（consumed/pending/exempt）双向咬合——consumed 的 anchor 必须在源文件命中、pending 兑现后不回收必红；对照块验证「status 白名单判定本身不失真」（非法值恰好 1 个）。B1 已把 paths_load 从 pending 转 consumed，转换当天门禁即要求锚点存在' },
