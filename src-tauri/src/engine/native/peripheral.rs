@@ -92,12 +92,14 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
                 Err("注册表备份失败".into())
             }
         })?;
-        // K11（v6）：**新生成的备份必须写边车封条**（同目录 `<file>.reg.meta.json`，
-        // SHA-256 + 目标键）。还原侧只接受封条 `ok` 的备份——同用户往备份目录投放
-        // 一份自制 .reg（哪怕不含删除段，也能覆盖任意键值）不再是可导入形态。
-        // 封条写失败不阻断本次 apply（备份本体已写成；还原侧会按 fail-closed 拒），
-        // 但要在日志里留下「这份备份将不可还原」的线索（write_reg_backup_seal 内部留痕）。
-        crate::engine::reg_backup::write_reg_backup_seal(&backup_file, &reg_path);
+        // K11（v6）/ R5b-K01：新生成的备份必须写**两份锚**（HKLM）：边车封条 +
+        // HKLM 管理员摘要（`write_reg_backup_seals` 按目标根分流，只有 HKLM 才写后者；
+        // 摘要存非提权进程写不了的键，是系统级备份的防伪根）。还原侧与 cleanup/uninstall
+        // 共用同一个强化闸（`reg_backup_restore_guards`）——同用户往备份目录投放自制
+        // `.reg` + 自算边车不再能通过：缺管理员摘要的 HKLM 备份一律拒。
+        // 写失败不阻断本次 apply（备份本体已写成；还原侧会按 fail-closed 拒），
+        // 日志留痕由 write_reg_backup_seals 内部完成。
+        crate::engine::reg_backup::write_reg_backup_seals("peripheral", &backup_file, &reg_path);
     }
 
     // 写入值
@@ -130,38 +132,35 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
 
 
 
-/// K11（v6）：单份外设备份的还原准入（两条判据，全过才交给执行臂）。
+/// 外设还原准入（R5b-K01）：与 cleanup/uninstall 共用同一个强化闸
+/// [`crate::engine::reg_backup::reg_backup_restore_guards`]（域 = `"peripheral"`）。
 ///
-/// ① **边车封条必须 `ok`**：`write_reg_backup_seal` 在备份生成时记 SHA-256；`missing`
-///    意味着文件不是 Trim 生成（旧版本备份或同用户投放），按 D4 拍板默认拒导——
-///    备份目录是用户可写的，没有封条时「还原」等价于「把任意 .reg 写进 HKLM」。
-/// ② **解析产物不得含 `[-HKEY…]` 删除段**：Trim 的导出从不含删除段；出现即外来/被改，
-///    整键删除的后果不可逆（这就是 K11 点名的「导入备份可能含删除段」）。
+/// 此前这里只有两条手写判据（边车封条 + 拒 `[-HKEY…]` 段），而同仓强化闸还有：
+/// 只允许 HKLM/HKCU 根、逐键目标判定（外设域是两条真实父键及其子键的精确白名单，
+/// 比通用受保护容器判据更窄）、`is_admin`、HKLM 管理员摘要核对。
+/// 外设备份目录是用户可写目录，同一用户可同时投放自制 `.reg` 并自算边车 ⇒ 缺了
+/// 管理员摘要这道信任根，提权实例会把任意 HKLM 值写进注册表（user→admin 提权）。
+/// 现在本地一条判据都不重写：闸的回执 `sections`
+/// （[`crate::engine::reg_backup::AdmittedSections`]）直接交给执行臂。
 ///
-/// 返回**同一份**解析产物给 `reg_import_apply_sections`——闸与执行臂吃一次解析，
-/// 不重演「校验一套、执行另一套」（v5-K06 A6-K01 的教训）。
+/// 本次改造前生成、没有管理员摘要的旧备份会按「没有管理员摘要」被拒——fail-closed 是
+/// 刻意的：请先应用一次优化生成新备份，或重装目标软件后重新应用。
 fn peripheral_restore_admit(
     f: &std::path::Path,
-) -> Result<Vec<crate::engine::reg_backup::RegSection>, String> {
-    // P1-02：一次读盘，文本与摘要同源 —— 封条比对用的必须是**被解析的那份字节**，
-    // 不能稍后再读一次盘拿另一份摘要（那样「校验的内容」与「导入的内容」可能不同）。
-    let content = crate::engine::reg_backup::read_reg_content(f)
-        .map_err(|_| "备份文件不是合法的 .reg（读不到或编码不可识别）".to_string())?;
-    let (seal, _) = crate::engine::reg_backup::reg_backup_seal_state_with_digest(f, &content.digest);
-    if seal != "ok" {
-        return Err(match seal {
-            "missing" => "该备份不是 Trim 可验证备份（无封条：可能来自旧版本或外部投放），已拒绝导入".to_string(),
-            "mismatch" => "备份内容与封条哈希不符（生成后被改动），已拒绝导入".to_string(),
-            "corrupt" | "unreadable" => "备份封条损坏或不可读，已拒绝导入".to_string(),
-            other => format!("备份封条状态异常（{other}），已拒绝导入"),
-        });
-    }
-    let sections = crate::engine::reg_backup::parse_reg_text(&content.text)
-        .map_err(|_| "备份文件不是合法的 .reg（缺版本头或没有任何键段）".to_string())?;
-    if let Some(sec) = sections.iter().find(|s| s.delete_key) {
-        return Err(format!("备份含删除键段（[-{}]），已拒绝导入", sec.full_key()));
-    }
-    Ok(sections)
+    name: &str,
+) -> Result<crate::engine::reg_backup::AdmittedSections, String> {
+    peripheral_restore_admit_with(f, name, crate::engine::sysinfo::is_admin())
+}
+
+/// 与 [`peripheral_restore_admit`] 同一判据；`is_admin` 由调用方给，
+/// 让闸能拿临时目录静默测（与 `reg_backup_restore_guards` 的同名参数同一理由）。
+fn peripheral_restore_admit_with(
+    f: &std::path::Path,
+    name: &str,
+    is_admin: bool,
+) -> Result<crate::engine::reg_backup::AdmittedSections, String> {
+    crate::engine::reg_backup::reg_backup_restore_guards(f, name, "peripheral", is_admin)
+        .map(|chk| chk.sections)
 }
 
 /// 从备份恢复外设设置（原 PS 时代脚本 peripheral_restore.ps1，已退役；S3）
@@ -199,12 +198,12 @@ pub fn peripheral_restore() -> Result<Value, String> {
 
     let mut imported = 0i64;
     let mut rejected: Vec<Value> = Vec::new();
-    for f in &group {
-        // K11：先过准入（封条 + 删除段），闸的解析产物直接交给执行臂
-        let sections = match peripheral_restore_admit(f) {
+    for &f in &group {
+        let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        // K11 / R5b-K01：先过与 cleanup/uninstall 同一套强化闸，闸的解析产物直接交给执行臂
+        let sections = match peripheral_restore_admit(f, name) {
             Ok(s) => s,
             Err(reason) => {
-                let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
                 crate::engine::log::write_log("warn", &format!("外设备份拒绝导入: {name} -> {reason}"));
                 rejected.push(json!({ "file": name, "reason": reason }));
                 continue;
@@ -303,46 +302,112 @@ mod k11_restore_admit_tests {
         let d = TempDir::new("noseal");
         let f = d.0.join("backup_20261018_203000_1.reg");
         std::fs::write(&f, format!("{HDR}{LEGIT}")).unwrap();
-        let err = peripheral_restore_admit(&f).unwrap_err();
-        assert!(err.contains("不是 Trim 可验证备份"), "拒因必须点明不可验证: {err}");
+        let err =
+            peripheral_restore_admit_with(&f, "backup_20261018_203000_1.reg", true).unwrap_err();
+        assert!(
+            err.contains("缺少边车封条"),
+            "HKLM 备份无封条必须拒（封条 missing 对 HKLM 不放行）: {err}"
+        );
     }
 
-    /// K11 判据本体：同用户投放的 .reg（`[-HKEY]` 整键删除段）在无封条时必拒。
+    /// R5b-K01 判据本体：同用户可同时改写「备份 + 边车」，**自算边车的自制 `.reg`
+    /// 在读入阶段就被 HKLM 管理员摘要闸拒**——边车自洽不再是通行证。
+    ///
+    /// 零写入：准入返回 Err 时执行臂 `reg_import_apply_sections` 从未被调用，
+    /// 不存在任何写注册表的动作（本用例不写真实 HKLM，管理员摘要只读）。
+    ///
+    /// 判红自证：把 admit 退回「只比边车 + 拒删除段」的手写实现 ⇒ 本用例两条断言全红
+    /// （自洽边车会被放行，只剩提权白名单一条路可拦）。
+    #[test]
+    fn 自算边车的伪造备份必拒_未提权或缺管理员摘要() {
+        let d = TempDir::new("forged");
+        let f = d.0.join("backup_20261018_203000_1.reg");
+        std::fs::write(&f, format!("{HDR}{LEGIT}")).unwrap();
+        // 攻击者自算边车：内容与封条完全自洽（seal = ok）
+        crate::engine::reg_backup::write_reg_backup_seal(
+            &f,
+            r"HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl",
+        );
+        let err = peripheral_restore_admit_with(&f, "backup_20261018_203000_1.reg", false)
+            .unwrap_err();
+        assert!(err.contains("管理员"), "非提权实例必须拒: {err}");
+        let err =
+            peripheral_restore_admit_with(&f, "backup_20261018_203000_1.reg", true).unwrap_err();
+        assert!(
+            err.contains("管理员摘要"),
+            "提权但缺管理员摘要必须拒（自算边车不算信任根）: {err}"
+        );
+    }
+
+    /// 外设域的合法目标（Trim 真实导出的两个父键）必须过目标白名单，只停在提权/摘要闸上；
+    /// 目标面之外的键（哪怕边车自洽）一律在准入阶段拒 —— 外设还原只能写回自己动过的两个键。
+    ///
+    /// 「合法（Trim 提权生成、有管理员摘要）⇒ 可还原」的放行判据需要真机 HKLM 管理员摘要
+    /// （单测写不出，如实标未验证）；同一判据由 `reg_backup` 的单测
+    /// `伪造自洽边车的hklm备份仍被管理员摘要拒` 第 ④ 段以注入摘要覆盖。
+    #[test]
+    fn 合法目标不被白名单误伤_面外目标一律拒() {
+        let d = TempDir::new("scope");
+        // ① 合法目标：非提权 ⇒ 停在提权闸（而不是「外设还原面之外」）
+        let legit = d.0.join("backup_20261018_203000_1.reg");
+        std::fs::write(&legit, format!("{HDR}{LEGIT}")).unwrap();
+        crate::engine::reg_backup::write_reg_backup_seal(
+            &legit,
+            r"HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl",
+        );
+        let err = peripheral_restore_admit_with(&legit, "backup_20261018_203000_1.reg", false)
+            .unwrap_err();
+        assert!(
+            err.contains("需要以管理员身份运行"),
+            "合法目标必须过目标白名单，停在提权闸: {err}"
+        );
+        assert!(!err.contains("外设还原面之外"), "合法目标不得被白名单误伤: {err}");
+        // ② 面外目标：HKLM 任意键 / 任意 HKCU 段，即使边车自洽也拒
+        for (tag, section, target) in [
+            (
+                "out-hklm.reg",
+                "[HKEY_LOCAL_MACHINE\\SOFTWARE\\TrimK01OutOfScope]\r\n\"X\"=dword:00000001\r\n",
+                r"HKLM\SOFTWARE\TrimK01OutOfScope",
+            ),
+            (
+                "out-hkcu.reg",
+                "[HKEY_CURRENT_USER\\Software\\TrimK01OutOfScope]\r\n\"X\"=dword:00000001\r\n",
+                r"HKCU\Software\TrimK01OutOfScope",
+            ),
+        ] {
+            let f = d.0.join(tag);
+            std::fs::write(&f, format!("{HDR}{section}")).unwrap();
+            crate::engine::reg_backup::write_reg_backup_seal(&f, target);
+            let err = peripheral_restore_admit_with(&f, tag, true).unwrap_err();
+            assert!(err.contains("外设还原面之外"), "{tag} 必须被目标白名单拒: {err}");
+        }
+    }
+
+    /// 删除段先于封条判定：`[-HKEY…]` 段即使边车自洽也整份拒（Trim 的导出从不含
+    /// 删除段；整键删除不可逆）。
+    #[test]
+    fn 含删除段的备份仍被拒() {
+        let d = TempDir::new("sealeddel");
+        let f = d.0.join("backup_20261018_203000_1.reg");
+        std::fs::write(&f, format!("{HDR}{EVIL_DELETE}")).unwrap();
+        crate::engine::reg_backup::write_reg_backup_seal(&f, r"HKLM\SOFTWARE\TrimFakeTarget");
+        let err =
+            peripheral_restore_admit_with(&f, "backup_20261018_203000_1.reg", true).unwrap_err();
+        assert!(err.contains("删除键段"), "删除段必须拒: {err}");
+    }
+
+    /// 无封条 + 删除段：删除段判据在封条之前，拒因仍点名删除段（不是笼统「不可验证」）。
     #[test]
     fn 无封条含删除段的假备份必拒() {
         let d = TempDir::new("fakedel");
         let f = d.0.join("backup_20261018_203000_1.reg");
         std::fs::write(&f, format!("{HDR}{EVIL_DELETE}")).unwrap();
-        let err = peripheral_restore_admit(&f).unwrap_err();
-        assert!(err.contains("不是 Trim 可验证备份"), "无封条先于内容判: {err}");
-    }
-
-    /// K11 判据：有封条且完整匹配的合法备份**放行到解析层**（返回同一份 sections）。
-    #[test]
-    fn 封条匹配的合法备份放行到解析层() {
-        let d = TempDir::new("legit");
-        let f = d.0.join("backup_20261018_203000_1.reg");
-        std::fs::write(&f, format!("{HDR}{LEGIT}")).unwrap();
-        crate::engine::reg_backup::write_reg_backup_seal(&f, r"HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl");
-        let sections = peripheral_restore_admit(&f).expect("封条匹配必须放行");
-        assert_eq!(sections.len(), 1);
-        assert!(!sections[0].delete_key, "合法备份无删除段");
-        assert!(sections[0].full_key().contains("PriorityControl"));
-    }
-
-    /// 封条匹配但内容含 `[-HKEY…]` 删除段 ⇒ 仍拒（Trim 的导出从不含删除段，
-    /// 这种形态只能是外来/被改；整键删除不可逆）。
-    #[test]
-    fn 封条匹配但含删除段仍拒() {
-        let d = TempDir::new("sealeddel");
-        let f = d.0.join("backup_20261018_203000_1.reg");
-        std::fs::write(&f, format!("{HDR}{EVIL_DELETE}")).unwrap();
-        crate::engine::reg_backup::write_reg_backup_seal(&f, r"HKLM\SOFTWARE\TrimFakeTarget");
-        let err = peripheral_restore_admit(&f).unwrap_err();
+        let err =
+            peripheral_restore_admit_with(&f, "backup_20261018_203000_1.reg", true).unwrap_err();
         assert!(err.contains("删除键段"), "删除段必须拒: {err}");
     }
 
-    /// 封条不符（生成后被改动）⇒ 拒，且拒因说「已被改动」而不是笼统失败。
+    /// 封条不符（生成后被改动）⇒ 拒，且拒因点名封条（不是笼统失败）。
     #[test]
     fn 封条不符内容被改后必须拒() {
         let d = TempDir::new("mismatch");
@@ -351,8 +416,23 @@ mod k11_restore_admit_tests {
         crate::engine::reg_backup::write_reg_backup_seal(&f, r"HKLM\x");
         // 封条写入后追加内容（模拟同用户改写备份）
         std::fs::write(&f, format!("{HDR}{LEGIT}\"Extra\"=dword:00000001\r\n")).unwrap();
-        let err = peripheral_restore_admit(&f).unwrap_err();
-        assert!(err.contains("与封条哈希不符"), "改后必须点明哈希不符: {err}");
+        let err =
+            peripheral_restore_admit_with(&f, "backup_20261018_203000_1.reg", true).unwrap_err();
+        assert!(err.contains("封条"), "改后必须点明封条不符: {err}");
+    }
+
+    /// R5b-K01 静态钉：生成侧必须写两份锚（HKLM 还要写管理员摘要），不能退回单锚
+    /// `write_reg_backup_seal` —— 单锚备份在还原闸里会按「缺管理员摘要」被拒，
+    /// 表现成「Trim 自己生成的备份也还原不了」。
+    /// 判红自证：把调用改回单锚 ⇒ 本断言红。
+    #[test]
+    fn 生成侧必须写管理员摘要() {
+        let src = include_str!("peripheral.rs");
+        let needle = concat!("write_reg_backup_", "seals(\"peripheral\"");
+        assert!(
+            src.contains(needle),
+            "外设备份生成侧必须走 write_reg_backup_seals（HKLM 目标要写管理员摘要）"
+        );
     }
 
     /// R5b-M26 回归钉：`ok` 为真但另有备份根读不动 ⇒ reason 必须是 partial-unknown，

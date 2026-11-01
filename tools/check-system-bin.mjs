@@ -133,6 +133,11 @@ const RAW_EXEMPT = [
     reason: 'v6-K05（P0-3）别名复检用例：mklink /J 造指向受保护子树（System32\\config）的 junction，验证 PFRO 登记闸的 final_path_protected 分支（cfg(test) 专用、非生产执行面；junction 无稳定 Rust API，symlink_dir 需特权）',
   },
   {
+    file: 'src-tauri/src/commands/uninstall/pending_delete.rs',
+    anchor: 'let junction = std::process::Command::new("cmd.exe")',
+    reason: 'R2a-M01（P0-7）PFRO 登记闸用例：mklink /J 造指向普通目录的 junction 当祖先，验证 pending 入口与删除链同源复查后拒绝（cfg(test) 专用、非生产执行面；锚点带 junction 前缀与上一条区分）',
+  },
+  {
     file: 'src-tauri/src/engine/restore_pack.rs',
     anchor: 'let made = std::process::Command::new("cmd")',
     reason: 'P0-4（R4-M09）真机 #[ignore] 探针（B1）：mklink /J 在 lib 单测隔离数据根内造 junction，验证还原写回拒绝「父链带链接」的新建目标（cfg(test) 专用、非生产执行面；与 cleanup.rs / fileclean.rs / protect.rs 夹具同口径）',

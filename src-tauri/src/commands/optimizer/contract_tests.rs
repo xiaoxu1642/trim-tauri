@@ -1002,26 +1002,29 @@ fn strip_js_comments(src: &str) -> String {
     #[test]
     fn restore_ops_keep_untrusted_values_verbatim() {
         let payload = "A$(whoami)`id`\"B'c";
-        let ops = build_restore_ops(&[json!({
-            "hive": "CurrentUser", "sub": "Software\\X", "key": "Y",
+        // R3-K01：生产构造必须落在声明面内 —— 这里用 `svc_mem_gb` 的硬编码单目标。
+        let ops = build_restore_ops("svc_mem_gb", &[json!({
+            "hive": "LocalMachine", "sub": "SYSTEM\\ControlSet001\\Control",
+            "key": "SvcHostSplitThresholdInKB",
             "exists": true, "type": "REG_SZ", "data": payload
         })])
         .expect("合法条目不应报畸形");
-        let [RestoreOp::Write { ref key, ref bytes, .. }] = ops[..] else {
+        let [RestoreOp::Write { key, bytes, .. }] = ops.as_slice() else {
             panic!("应为一条 Write: {ops:?}");
         };
-        assert_eq!(key, "Y");
+        assert_eq!(key, "SvcHostSplitThresholdInKB");
         // 期望字节 = UTF-16LE(含 NUL)；关键字段是「没有任何字符被吃掉或改写」
         let mut want: Vec<u8> = payload.encode_utf16().flat_map(|w| w.to_le_bytes()).collect();
         want.extend_from_slice(&[0, 0]);
         assert_eq!(bytes, &want, "REG_SZ 数据被改写 ⇒ 注入防护已退化为碰运气");
 
-        // hive/sub/key 同样只是数据，不是代码
+        // hive/sub/key 同样只是数据，不是代码。
         // P0-3：删除项现在必须显式带 `presence=absent`。旧记录（无 presence 且
         // exists=false）属 legacyUnknown —— 当年分不清「不存在」还是「读不出来」，
         // 一律拒删（见 backup_restore::p0_3_presence_tests）。本断言仍钉 Delete 路径
-        // 逐字节原样带值。
-        let ops = build_restore_ops(&[json!({
+        // 逐字节原样带值；任意键名走**仅测试存在**的准入旁路 —— 生产路径会在准入处
+        // 直接拒掉声明面外的键（R3-K01 门禁用例）。
+        let ops = build_restore_ops_unadmitted(&[json!({
             "hive": "LocalMachine", "sub": "S", "key": "K'$(p)", "presence": "absent", "exists": false
         })])
         .unwrap();
@@ -1035,10 +1038,11 @@ fn strip_js_comments(src: &str) -> String {
     /// 非 hex 字符剥掉再写 —— 还原路径上「写错数据还报成功」比「报失败」更糟。
     #[test]
     fn restore_rejects_malformed_backup_data() {
+        // 编码层本体（目标准入另有 R3-K01 门禁用例；这里只锁「畸形值一律拒」）
         // BINARY：旧测试喂 `41;42`$(x)43\n` 并断言剥成 `414243`；现在必须整体拒绝
         for bad in ["41;42`$(x)43\n", "4", "zz", "4142g"] {
             assert!(
-                build_restore_ops(&[json!({
+                build_restore_ops_unadmitted(&[json!({
                     "hive": "LocalMachine", "sub": "S", "key": "K",
                     "exists": true, "type": "REG_BINARY", "data": bad
                 })])
@@ -1049,7 +1053,7 @@ fn strip_js_comments(src: &str) -> String {
         // DWORD / QWORD：非十进制整数同样拒绝
         for bad in ["abc", "", "1.5"] {
             assert!(
-                build_restore_ops(&[json!({
+                build_restore_ops_unadmitted(&[json!({
                     "hive": "LocalMachine", "sub": "S", "key": "K",
                     "exists": true, "type": "REG_DWORD", "data": bad
                 })])
@@ -1059,7 +1063,7 @@ fn strip_js_comments(src: &str) -> String {
         }
         // 未知 hive 也不放行
         assert!(
-            build_restore_ops(&[json!({
+            build_restore_ops_unadmitted(&[json!({
                 "hive": "NoSuchHive", "sub": "S", "key": "K", "exists": false
             })])
             .is_err()
@@ -1070,20 +1074,22 @@ fn strip_js_comments(src: &str) -> String {
     /// 这样 `0xFFFFFFFF` 才能以 `-1` 的形式原样往返（reg.exe 同口径）。
     #[test]
     fn restore_dword_roundtrip_is_signed32() {
-        let ops = build_restore_ops(&[json!({
-            "hive": "LocalMachine", "sub": "S", "key": "K",
+        let ops = build_restore_ops("svc_mem_gb", &[json!({
+            "hive": "LocalMachine", "sub": "SYSTEM\\ControlSet001\\Control",
+            "key": "SvcHostSplitThresholdInKB",
             "exists": true, "type": "REG_DWORD", "data": "-1"
         })])
         .unwrap();
-        let Some(RestoreOp::Write { bytes, .. }) = ops.first() else { panic!("{ops:?}") };
+        let Some(RestoreOp::Write { bytes, .. }) = ops.as_slice().first() else { panic!("{ops:?}") };
         assert_eq!(bytes.as_slice(), &[0xFFu8, 0xFF, 0xFF, 0xFF]);
         // 正常值
-        let ops = build_restore_ops(&[json!({
-            "hive": "LocalMachine", "sub": "S", "key": "K",
+        let ops = build_restore_ops("svc_mem_gb", &[json!({
+            "hive": "LocalMachine", "sub": "SYSTEM\\ControlSet001\\Control",
+            "key": "SvcHostSplitThresholdInKB",
             "exists": true, "type": "REG_DWORD", "data": "4096"
         })])
         .unwrap();
-        let Some(RestoreOp::Write { bytes, .. }) = ops.first() else { panic!("{ops:?}") };
+        let Some(RestoreOp::Write { bytes, .. }) = ops.as_slice().first() else { panic!("{ops:?}") };
         assert_eq!(bytes.as_slice(), 4096i32.to_le_bytes().as_slice());
     }
 
@@ -1186,12 +1192,13 @@ fn strip_js_comments(src: &str) -> String {
             ("REG_MULTI_SZ", REG_MULTI_SZ),
             ("REG_SZ", REG_SZ),
         ] {
-            let ops = build_restore_ops(&[json!({
-                "hive": "CurrentUser", "sub": "S", "key": "K",
+            let ops = build_restore_ops("svc_mem_gb", &[json!({
+                "hive": "LocalMachine", "sub": "SYSTEM\\ControlSet001\\Control",
+                "key": "SvcHostSplitThresholdInKB",
                 "exists": true, "type": label, "data": "x"
             })])
             .unwrap();
-            let Some(RestoreOp::Write { typ, .. }) = ops.first() else {
+            let Some(RestoreOp::Write { typ, .. }) = ops.as_slice().first() else {
                 panic!("{label} 应当产生写操作，实际 {ops:?}")
             };
             assert_eq!(typ, label, "备份里的 {label} 在还原操作里被降级");
@@ -1272,7 +1279,10 @@ fn strip_js_comments(src: &str) -> String {
         assert!(native::reg_restore_write(HKEY_CURRENT_USER, SUB, "dw", REG_DWORD, &0u32.to_le_bytes()));
 
         // ③ 还原（M-11：构造 ops 一次，写回与回读共用）
-        let ops = build_restore_ops(&backup).expect("备份应能构造还原操作");
+        // R3-K01：探针键不在任何优化项的声明面内，测试构建走准入旁路（`for_test`）。
+        let ops = AdmittedRestoreOps::for_test(
+            build_restore_ops_unadmitted(&backup).expect("备份应能构造还原操作"),
+        );
         assert!(restore_backup_values(&ops), "值级还原必须整体成功");
 
         // ④ 绝对期望：还原后注册表里就是这个类型与这串内容
@@ -1407,12 +1417,13 @@ fn strip_js_comments(src: &str) -> String {
     #[test]
     fn restore_binary_hex_is_strict() {
         // 合法 hex 连写（读值侧 `-join ''` 的产物）必须按字节对解码
-        let ops = build_restore_ops(&[json!({
-            "hive": "LocalMachine", "sub": "S", "key": "K",
+        let ops = build_restore_ops("svc_mem_gb", &[json!({
+            "hive": "LocalMachine", "sub": "SYSTEM\\ControlSet001\\Control",
+            "key": "SvcHostSplitThresholdInKB",
             "exists": true, "type": "REG_BINARY", "data": "414243"
         })])
         .unwrap();
-        let Some(RestoreOp::Write { bytes, .. }) = ops.first() else { panic!("{ops:?}") };
+        let Some(RestoreOp::Write { bytes, .. }) = ops.as_slice().first() else { panic!("{ops:?}") };
         assert_eq!(bytes.as_slice(), &[0x41u8, 0x42, 0x43]);
     }
 

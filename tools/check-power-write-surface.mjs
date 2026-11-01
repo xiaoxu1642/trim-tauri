@@ -163,6 +163,11 @@ const ALLOW = [
     match: (h) => h.rule === 'powercfg-write' && h.detail === 'powercfg h',
     why: '退役台账 note 原文引用 powercfg /h——描述已退役项的史实叙述，非可执行写面',
   },
+  {
+    file: 'src-tauri/src/commands/optimizer/backup_restore.rs',
+    match: (h) => h.rule === 'power-ns',
+    why: '退役项历史声明面表 RETIRED_RESTORE_STEPS_JSON（tf_hibern_off 等）—— R3-K01 目标收窄的对拍白名单，不是新增写面；实际写入仍走 native reg_restore_write/delete 且必须先过管理员摘要 + 声明面两道闸',
+  },
 ];
 
 // ===========================================================================

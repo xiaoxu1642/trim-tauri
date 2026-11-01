@@ -855,7 +855,7 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
         // R2a-M03：本批「删除没有成功」的文件路径记进命令体侧的失败回执台账 ——
         // 「登记重启后删除」的第一道约束（只收删除失败项）从此有命令体判据，
         // 不再只由渲染层（cleanup.js 的 collectFailedPaths）维持。
-        crate::engine::delete_failed::record(
+        crate::engine::delete_failed::record_modes(
             &label,
             crate::engine::delete_failed::DOMAIN_CLEANUP,
             cleanup_failed_paths(
@@ -863,10 +863,13 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
                     .and_then(|d| d.as_array())
                     .map(|a| a.as_slice())
                     .unwrap_or(&[]),
-            ),
+            )
+            .into_iter()
             // B2-8：常规清理是 v3.3.0 固定的**永久删**链 ⇒ 这条失败回执不得进
-            // 「重启后删除」登记面（登记同样是永久删，连回收站都不经过）
-            false,
+            // 「重启后删除」登记面（登记同样是永久删，连回收站都不经过）。
+            // R2a-M01：这条链的失败也不是回收站调用失败，mode 维度同样不放行。
+            .map(|p| (p, crate::engine::delete_failed::DeleteFailMode::PermanentDeleteFailed))
+            .collect(),
         );
         // 成功判据（v6-K10 收口）：硬失败（error ∪ fail，见上面 v5 C-3）为 0
         // **且确实删了东西**——failed==0 但 success/partial 全 0 = 全 skip（太新/

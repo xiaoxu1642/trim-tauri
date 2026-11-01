@@ -853,17 +853,25 @@ pub async fn fileclean_execute<R: Runtime>(
     // 「登记重启后删除」的第一道约束（只收删除失败项）从此有命令体判据，不再只由
     // 渲染层（cleanup.js 的 collectFailedPaths）维持。与常规清理链同域（DOMAIN_CLEANUP）：
     // 两者是 cleanup.js 那条链的两段，回执并进同一槽。
-    crate::engine::delete_failed::record(
+    crate::engine::delete_failed::record_modes(
         window.label(),
         crate::engine::delete_failed::DOMAIN_CLEANUP,
         details
             .iter()
             .filter(|d| d.get("status").and_then(|v| v.as_str()) != Some("ok"))
-            .filter_map(|d| d.get("path").and_then(|v| v.as_str()).map(str::to_string))
+            .filter_map(|d| {
+                d.get("path").and_then(|v| v.as_str()).map(|p| {
+                    // B2-8：本链走回收站 ⇒ 失败项可以在「重启后删除」里重试（那一步也是
+                    // 永久删，但用户已经在回收站界面上确认过一次，语义是「已同意删掉这个
+                    // 文件」）。R2a-M01：`recycle_one` 的失败只可能来自
+                    // `send_to_trash_os`（回收站调用本身），所以这里全部是 `TrashFailed`。
+                    (
+                        p.to_string(),
+                        crate::engine::delete_failed::DeleteFailMode::TrashFailed,
+                    )
+                })
+            })
             .collect(),
-        // B2-8：本链走回收站 ⇒ 失败项可以在「重启后删除」里重试（那一步也是永久删，
-        // 但用户已经在回收站界面上确认过一次，语义是「已同意删掉这个文件」）
-        true,
     );
 
     if !manifest_entries.is_empty() {

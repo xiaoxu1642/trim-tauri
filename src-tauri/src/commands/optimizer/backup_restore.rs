@@ -7,6 +7,7 @@
 
 use crate::engine::{guard, log, optimization_state as opt_state, sysinfo};
 use serde_json::{Value, json};
+use std::sync::OnceLock;
 use tauri::{Runtime, WebviewWindow};
 use super::apply::ledger_note;
 use super::catalog::*;
@@ -15,6 +16,12 @@ use super::overview::*;
 
 pub(super) fn opt_backup_file() -> std::path::PathBuf {
     crate::engine::paths::app_data_dir().join("optimizer-backups.json")
+}
+
+/// 台账文件**确定不存在**（R3-K01：只有 `NotFound` 才算；权限/IO 异常必须落到摘要闸
+/// 的 `unreadable`，不能被折叠成「没有备份」—— 那会让用户以为从来没备份过）。
+pub(super) fn opt_backup_absent(path: &std::path::Path) -> bool {
+    matches!(std::fs::metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// 备份台账只读消费（列表 / 详情 / 迁移提示）。
@@ -50,11 +57,52 @@ pub(super) fn load_opt_backups_state() -> Result<Value, String> {
 /// 空表）→ 改 → save（`atomic_write_json` 直调）会在读失败瞬间把整本台账覆写成
 /// 只剩本次改动，回执仍是 success。走 `security::update_json`：Corrupt 拒写、
 /// `UPDATE_JSON_LOCK` 全局串行（此前三条写链各自 load/save 手工配对、无域锁）。
+///
+/// R3-K01（2026-11-01）：落盘后立刻为该文件补管理员摘要。台账在用户可写目录、明文、
+/// 无签名时，「同用户改台账 → 用户点一次还原」就是一条提权任意写；摘要键在 HKLM
+/// （非提权进程写不了），还原前由提权实例重算比对（见 [`restore_preflight`]）。
+/// 本函数是全仓唯一写入口，所以所有写路径都带摘要，不存在「漏签」的分叉。
 pub(super) fn update_opt_backups<F>(f: F) -> Result<Value, String>
 where
     F: FnOnce(&mut Value) -> Result<(), String>,
 {
-    crate::security::update_json(&opt_backup_file(), f)
+    let path = opt_backup_file();
+    let out = crate::security::update_json(&path, f)?;
+    // 摘要失败不阻断本次落盘（备份/清理本身已成功），但该台账此后过不了还原闸 ——
+    // fail-closed 是刻意的，`write_admin_seal_with_digest` 已留 warn。
+    seal_opt_backup_ledger(&path);
+    Ok(out)
+}
+
+/// 落盘后补写管理员摘要（R3-K01）。摘要来源可注入：单测据此钉住「签的是刚写下去
+/// 的那份字节」，而不是另一条路径重新拼出来的内容。
+///
+/// 并发/竞态口径：`update_json` 的读-改-写有全局锁，但补摘要发生在锁外。同一用户的
+/// 中完整性进程若恰在「落盘 → 重算」这毫秒级窗口内改写台账，摘要会覆盖其内容 ——
+/// 这是本闸承认的窄窗口，也正是**第二道闸**（目标准入）必须同时存在的原因：即便摘要
+/// 覆盖了对手内容，越界坐标仍然写不进去，能做的只有该项声明面内的写/删。
+fn seal_opt_backup_ledger_with<H, S>(path: &std::path::Path, hash_of: H, mut seal_of: S) -> bool
+where
+    H: FnOnce(&std::path::Path) -> Result<String, String>,
+    S: FnMut(&str) -> bool,
+{
+    let sum = match hash_of(path) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::engine::log::write_log(
+                "warn",
+                &format!("优化项备份台账摘要计算失败（本次未写管理员摘要，该台账将不能用于还原）: {e}"),
+            );
+            return false;
+        }
+    };
+    seal_of(&sum)
+}
+
+fn seal_opt_backup_ledger(path: &std::path::Path) -> bool {
+    seal_opt_backup_ledger_with(path, crate::engine::hash::sha256_file, |sum| {
+        crate::engine::reg_backup::write_admin_seal_with_digest("optimizer", path, sum)
+    })
 }
 
 /// .reg 根键 → [Microsoft.Win32.Registry] 静态属性名（Read-One 用）
@@ -178,15 +226,8 @@ pub(super) fn option_targets(option_id: &str) -> Option<Vec<RegTarget>> {
         }]);
     }
     let opt = find_option(option_id)?;
-    let mut targets = Vec::new();
-    if let Some(steps) = opt.get("steps").and_then(|v| v.as_array()) {
-        for s in steps {
-            if let Some(block) = s.get("reg").and_then(|v| v.as_str()) {
-                targets.extend(parse_reg_targets(block));
-            }
-        }
-        collect_service_start_targets(steps, &mut targets);
-    }
+    let empty: &[Value] = &[];
+    let mut targets = targets_from_steps(opt.get("steps").and_then(|v| v.as_array()).map(|a| a.as_slice()).unwrap_or(empty));
     // R3-M03（v4，与 R3-M02 同批）：`tf_svc_bulk` 勾了 includeStore 时
     // `svc_bulk_append_store` 会在**执行期**追加 5 个商店服务的 Start=4 写入 ——
     // 那一步不在数据层 steps 里，基线必须把它们的 Start 一并纳入；否则还原按旧基线
@@ -198,10 +239,152 @@ pub(super) fn option_targets(option_id: &str) -> Option<Vec<RegTarget>> {
             targets.push(svc_start_target(name));
         }
     }
-    // 去重（root\sub::key）
+    dedupe_targets(&mut targets);
+    Some(targets)
+}
+
+/// 从数据层 steps 抽值级备份目标：`reg` 块 + pwsh/cmd/service 步骤里的「Start 写点」。
+///
+/// 在册项（[`option_targets`]）与退役项（[`retired_restore_surface`]）共用这一份解析 ——
+/// 还原侧的「声明面」与当年备份侧的「目标集」必须是同一套口径，否则要么误拒合法备份、
+/// 要么放行台账里凭空多出来的坐标。
+fn targets_from_steps(steps: &[Value]) -> Vec<RegTarget> {
+    let mut targets = Vec::new();
+    for s in steps {
+        if let Some(block) = s.get("reg").and_then(|v| v.as_str()) {
+            targets.extend(parse_reg_targets(block));
+        }
+    }
+    collect_service_start_targets(steps, &mut targets);
+    dedupe_targets(&mut targets);
+    targets
+}
+
+/// 去重（`root\sub::key`，按字面量；大小写归一发生在对拍那一侧）
+fn dedupe_targets(targets: &mut Vec<RegTarget>) {
     let mut seen = std::collections::HashSet::new();
     targets.retain(|t| seen.insert(format!("{}\\{}::{}", t.root, t.sub, t.key)));
-    Some(targets)
+}
+
+/// 退役优化项的**历史声明面**（R3-K01，2026-11-01）。
+///
+/// 为什么必须有这张表：退役 id 已不在目录里，`option_targets` 返回 `None`。还原入口
+/// 若因此跳过目标核对，「台账里写什么就还原什么」等于把任意 HKLM 写权限交还给一个
+/// 用户可写文件。表里每一行都是**当年数据层 steps 的逐字快照**，运行时用与在册项
+/// 完全相同的解析函数现算坐标（不另写「当年写过哪些键」的第二套口径）。
+///
+/// 数据来源（可复核）：`git log --all -S '<id>' -- src-tauri/data` 找到移除提交，
+/// 再 `git show <提交>^:src-tauri/data/optimizer-options.json`（更名后的
+/// `optimizer-runtime.json` 同理）取当年 steps。当前两处提交：`a329a8a`（整批迁移）、
+/// `2fd9490`（电源写面收敛的 nara 两项）。
+///
+/// 收录口径：只保留**可能进值级基线**的步骤（`reg`、`service`、含 `Start` 写点的
+/// `pwsh`/`cmd`）；空数组 = 当年没有注册表写点（纯 pwsh 设备枚举 / powercfg /
+/// AppX 等），因此不可能留下值级备份，任何值级记录都不予还原。
+///
+/// **不在这张表里的退役 id = 历史定义早于 git 基线，无法恢复**（`maps_off`、
+/// `clear_recent_docs_on_exit` 等，清单见 [`RETIRED_SURFACE_UNRECOVERABLE`]）
+/// ⇒ [`build_restore_ops`] fail-closed 拒绝并
+/// 点名「退役项无可核对目标」，提示按退役说明手动回退。绝不因为「查不到」就放行任意目标。
+const RETIRED_RESTORE_STEPS_JSON: &str = r##"{
+  "mmcss_optimize": [{"label":"MMCSS Games 任务优先级 + 低延迟标记","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile\\Tasks\\Games]\r\n\"Affinity\"=dword:00000000\r\n\"Background Only\"=\"False\"\r\n\"Clock Rate\"=dword:00002710\r\n\"Scheduling Category\"=\"High\"\r\n\"SFIO Priority\"=\"High\"\r\n\"GPU Priority\"=dword:00000008\r\n\"Priority\"=dword:00000006\r\n\"Latency Sensitive\"=\"True\"\r\n"},{"label":"MMCSS 系统级增强（NoLazyMode/AlwaysOn/Reliability）","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile]\r\n\"NoLazyMode\"=dword:00000001\r\n\"AlwaysOn\"=dword:00000001\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Reliability]\r\n\"TimeStampInterval\"=dword:00000001\r\n\"IoPriority\"=dword:00000003\r\n"}],
+  "explorer_foreground_speed": [{"label":"ForegroundLockTimeout=0","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\Control Panel\\Desktop]\r\n\"ForegroundLockTimeout\"=dword:00000000\r\n"}],
+  "perf_shutdown_fast": [{"label":"WaitToKillAppTimeout=2000","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\Control Panel\\Desktop]\r\n\"WaitToKillAppTimeout\"=\"2000\"\r\n"}],
+  "perf_service_shutdown_fast": [{"label":"WaitToKillServiceTimeout=2000","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control]\r\n\"WaitToKillServiceTimeout\"=\"2000\"\r\n"}],
+  "tf_fso": [{"label":"FSO GameConfigStore","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\System\\GameConfigStore]\r\n\"GameDVR_DSEBehavior\"=dword:00000000\r\n\"GameDVR_FSEBehaviorMode\"=dword:00000000\r\n\"GameDVR_EFSEFeatureFlags\"=dword:00000000\r\n\"GameDVR_DXGIHonorFSEWindowsCompatible\"=dword:00000000\r\n\"GameDVR_HonorUserFSEBehaviorMode\"=dword:00000001\r\n"}],
+  "svc_fax_disable": [{"label":"Fax Start=4","pwsh":"$p = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Fax\"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 4 -PropertyType DWord -Force | Out-Null; Stop-Service -Name Fax -Force -ErrorAction SilentlyContinue }"}],
+  "tf_ifeo_perf": [{"label":"IFEO PerfOptions（双蜂巢）","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dwm.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000004\r\n\"IoPriority\"=dword:00000003\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\ntoskrnl.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000004\r\n\"IoPriority\"=dword:00000003\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\csrss.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000004\r\n\"IoPriority\"=dword:00000003\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\lsass.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000001\r\n\"IoPriority\"=dword:00000000\r\n\"PagePriority\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\SearchIndexer.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000001\r\n\"IoPriority\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\svchost.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000001\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\TrustedInstaller.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000001\r\n\"IoPriority\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\wuauclt.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000001\r\n\"IoPriority\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\MsMpEng.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000001\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\MsMpEngCP.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000001\r\n\r\n[HKEY_LOCAL_MACHINE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dwm.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000004\r\n\"IoPriority\"=dword:00000003\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\ntoskrnl.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000004\r\n\"IoPriority\"=dword:00000003\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\csrss.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000004\r\n\"IoPriority\"=dword:00000003\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\lsass.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000001\r\n\"IoPriority\"=dword:00000000\r\n\"PagePriority\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\SearchIndexer.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000001\r\n\"IoPriority\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\svchost.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000001\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\TrustedInstaller.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000001\r\n\"IoPriority\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\wuauclt.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000001\r\n\"IoPriority\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\audiodg.exe\\PerfOptions]\r\n\"CpuPriorityClass\"=dword:00000002\r\n"}],
+  "tf_onedrive": [{"label":"OneDrive 入口 / 策略","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CLASSES_ROOT\\CLSID\\{018D5C66-4533-4307-9B53-224DE2ED1FE6}\\ShellFolder]\r\n\"Attributes\"=dword:00000000\r\n\r\n[HKEY_CLASSES_ROOT\\Wow6432Node\\CLSID\\{018D5C66-4533-4307-9B53-224DE2ED1FE6}\\ShellFolder]\r\n\"Attributes\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\OneDrive]\r\n\"DisableFileSync\"=dword:00000001\r\n\"DisableFileSyncNGSC\"=dword:00000001\r\n\"DisableMeteredNetworkFileSync\"=dword:00000000\r\n\"DisableLibrariesDefaultSaveToOneDrive\"=dword:00000000\r\n"}],
+  "tf_hibern_off": [{"label":"快速启动 / 休眠 / 睡眠诊断注册表","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power]\r\n\"HiberbootEnabled\"=dword:00000000\r\n\"HibernateEnabled\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SleepReliability]\r\n\"SleepReliabilityDetailedDiagnostics\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SleepStudy]\r\n\"SleepStudyDisabled\"=dword:00000001\r\n"}],
+  "power_off": [{"label":"关闭节能与休眠默认值","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Power]\r\n\"HibernateEnabledDefault\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Power\\PowerThrottling]\r\n\"PowerThrottlingOff\"=dword:00000001\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\DriverSearching]\r\n\"SearchOrderConfig\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Power\\PowerSettings\\54533251-82be-4824-96c1-47b60b740d00\\943c8cb6-6f93-4227-ad87-e9a3feec08d1]\r\n\"Attributes\"=dword:00000002\r\n"}],
+  "tf_oosu": [],
+  "tf_gpu_msi": [],
+  "tf_usb_msi": [],
+  "audio_disable_voice_activation": [],
+  "audio_disable_voice_activation_last_used": [],
+  "tf_ifeo_wipe": [],
+  "tf_dev_audio": [],
+  "tf_dev_printer": [],
+  "perf_exploit_protection_off": [],
+  "tf_mmagent": [],
+  "power_aspm_off": [],
+  "nara_throttle_off": [],
+  "nara_usb3_lpm_off": []
+}"##;
+
+/// 历史定义**不可恢复**的退役 id（早于 git 基线，仓内已无当年 steps）。
+///
+/// 显式列出而不是「表里没有就算了」：一是拒因要能区分「确知不可恢复」与「新退役项
+/// 忘了补表」，二是让「退役账本每个 id 都有结论」可机检（见 `r3_k01_gate_tests`）。
+pub(super) const RETIRED_SURFACE_UNRECOVERABLE: &[&str] = &[
+    "tf_pccleaner",
+    "clear_recent_docs_on_exit",
+    "always_unload_dll",
+    "ssd_opt",
+    "services_off",
+    "maps_off",
+    "mem_compress",
+    "tasks_disable_ceip",
+    "tasks_disable_usb_ceip",
+    "tasks_disable_disk_diag",
+    "tasks_disable_office_telemetry",
+    "edge_game_assistant_overlay_off",
+    "tasks_stubborn_strategy",
+];
+
+/// 退役 id 的当年 steps；`None` = 历史定义不可恢复（不是「没有写点」）。
+fn retired_restore_steps(option_id: &str) -> Option<&'static [Value]> {
+    static CACHE: OnceLock<Option<std::collections::HashMap<String, Vec<Value>>>> = OnceLock::new();
+    let map = CACHE.get_or_init(|| {
+        // 内嵌 JSON 损坏时 fail-closed：返回 None，所有退役项按「声明面不可恢复」拒绝，
+        // 不在还原链上 panic（那会把「拒绝」变成整进程崩溃）。
+        let parsed: Value = match serde_json::from_str(RETIRED_RESTORE_STEPS_JSON) {
+            Ok(v) => v,
+            Err(e) => {
+                crate::engine::log::write_log(
+                    "error",
+                    &format!("退役项历史步骤表损坏，退役项还原一律拒绝: {e}"),
+                );
+                return None;
+            }
+        };
+        Some(
+            parsed
+                .as_object()
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_array()?.clone())))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        )
+    });
+    map.as_ref()?.get(option_id).map(|v| v.as_slice())
+}
+
+/// 退役项的历史声明面。只有仍登记在退役账本里的 id 才认（表与账本双保险）。
+fn retired_restore_surface(option_id: &str) -> Option<Vec<RegTarget>> {
+    if !is_retired_id(option_id) {
+        return None;
+    }
+    let steps = retired_restore_steps(option_id)?;
+    Some(targets_from_steps(steps))
+}
+
+/// 某项还原时的**声明面**（R3-K01 第二道闸的唯一判据来源）。
+///
+/// - 在册项：`option_targets`（与备份侧同源）；
+/// - `tf_restore_point`：历史备份 id 的窄口子，坐标硬编码在
+///   `super::restore_point::restore_freq_target`（写入侧与还原侧共用同一函数）；
+/// - 退役项：[`retired_restore_surface`] 的静态历史表；不可恢复 ⇒ `None`（拒绝）。
+fn declared_restore_surface(option_id: &str) -> Option<Vec<RegTarget>> {
+    if let Some(t) = option_targets(option_id) {
+        return Some(t);
+    }
+    if option_id == "tf_restore_point" {
+        return Some(vec![super::restore_point::restore_freq_target()]);
+    }
+    retired_restore_surface(option_id)
 }
 
 /// 服务启动类型注册表位置（`sc config X start= N` 与 `New-ItemProperty … -Name Start` 的落点）
@@ -441,6 +624,61 @@ pub async fn optimizer_backup_reg<R: Runtime>(
     json!({ "success": true, "count": count, "baselineKept": kept })
 }
 
+/// 台账管理员摘要的拒因码（R3-K01）：`None` = `ok` 放行。
+///
+/// 不可识别的状态同样拒（fail-closed）：`reg_backup_admin_seal_state` 以后若新增
+/// 状态，必须先在这里表态，不能因为「没写分支」就落到放行。
+pub(super) fn seal_refusal_reason(state: &str) -> Option<&'static str> {
+    match state {
+        "ok" => None,
+        "missing" => Some("sealMissing"),
+        "mismatch" => Some("sealMismatch"),
+        "unreadable" => Some("sealUnreadable"),
+        "corrupt" => Some("sealCorrupt"),
+        _ => Some("sealUnknown"),
+    }
+}
+
+/// 摘要非 `ok` 时的用户可见理由（与拒因码一一对应，不复用「无备份记录」那套文案）。
+pub(super) fn seal_refusal_message(state: &str) -> &'static str {
+    match state {
+        "missing" => {
+            "优化项备份台账没有管理员摘要（旧版本生成的台账，或摘要已被清除），无法确认内容未被改动，已拒绝还原；请先重新执行一次该项优化（执行前的自动备份会重新为台账加摘要），再点还原"
+        }
+        "mismatch" => {
+            "优化项备份台账的摘要与管理员记录不一致（台账内容被改动过），已拒绝还原；请检查该台账是否被其它程序修改"
+        }
+        "unreadable" => "优化项备份台账或其摘要不可读，无法核对完整性，已拒绝还原",
+        "corrupt" => "优化项备份台账的摘要记录损坏，无法核对完整性，已拒绝还原",
+        _ => "优化项备份台账的摘要状态异常，无法核对完整性，已拒绝还原",
+    }
+}
+
+/// 「需要管理员」回执（非提权实例的**唯一**出口文案，R3-K01 前后不变）。
+fn need_admin_receipt() -> Value {
+    json!({ "success": false, "needAdmin": true, "message": "还原优化需要管理员权限，请先提权" })
+}
+
+/// 还原入口的前置闸（R3-K01）：**guard 之后、读台账之前**，先过管理员门槛再过台账摘要。
+///
+/// 纯判据、不读写任何状态 —— 返回 `Err(回执)` 的调用点结构上没有任何注册表写入，
+/// 所以「非管理员 / 摘要非 ok」两类拒绝都是零写入。
+fn restore_preflight(is_admin: bool, seal_state: &str) -> Result<(), Value> {
+    if !is_admin {
+        return Err(need_admin_receipt());
+    }
+    if let Some(reason) = seal_refusal_reason(seal_state) {
+        return Err(json!({
+            "success": false,
+            "restoreRefused": true,
+            "ledgerSeal": seal_state,
+            "reason": reason,
+            "message": seal_refusal_message(seal_state),
+        }));
+    }
+    Ok(())
+}
+
 /// optimizer:restore-reg —— 按备份回写原值（不存在的键删除）
 #[tauri::command]
 pub async fn optimizer_restore_reg<R: Runtime>(
@@ -456,9 +694,25 @@ pub async fn optimizer_restore_reg<R: Runtime>(
         return json!({ "success": false, "message": "未知的优化选项" });
     }
     // 审查 2026-09-27 M3：值级还原要写回 HKLM/HKCU 备份值，非管理员必然写失败且
-    // 此前无任何提示（与 optimizer_run 的提权门槛对齐，needAdmin 走前端提权链）
+    // 此前无任何提示（与 optimizer_run 的提权门槛对齐，needAdmin 走前端提权链）。
+    // R3-K01（2026-11-01）：台账是用户可写明文，必须在**读它之前**先核对管理员摘要
+    // —— 「同用户改台账 → 用户点一次还原」否则就是一条提权任意写。摘要只对提权实例
+    // 可读（HKLM），非提权一律先拒，不读摘要也不读台账内容。
     if !sysinfo::is_admin() {
-        return json!({ "success": false, "needAdmin": true, "message": "还原优化需要管理员权限，请先提权" });
+        return need_admin_receipt();
+    }
+    let ledger_path = opt_backup_file();
+    // 台账不存在 = 确无备份记录：保持既有回执形状（missing/absent），
+    // 不冒充「摘要不可读」（后者会把用户指向「台账被改过」的结论）。
+    if opt_backup_absent(&ledger_path) {
+        return json!({ "success": false, "missing": true, "reason": "absent", "message": "无备份记录" });
+    }
+    let digest = crate::engine::hash::sha256_file(&ledger_path).ok();
+    let seal_state =
+        crate::engine::reg_backup::reg_backup_admin_seal_state("optimizer", &ledger_path, digest.as_deref());
+    if let Err(resp) = restore_preflight(true, seal_state) {
+        log::write_log("warn", &format!("优化项还原被拒（台账摘要 {seal_state}）: {option_id}"));
+        return resp;
     }
     // v5-K01 批次 4：只读查 entry。A1-M04：台账读不动必须与「无备份记录」分开。
     let map = match load_opt_backups_state() {
@@ -491,7 +745,7 @@ pub async fn optimizer_restore_reg<R: Runtime>(
     // 先看能不能构造出还原操作（构造失败即无可核对项，直接拒）。
     // P0-3：拒因逐项如实上屏（只含序号与错误码名）并落日志；备份记录保留，
     // 用户可查日志后重试 —— 这条链永远不靠猜着删。
-    let ops = match build_restore_ops(&values) {
+    let ops = match build_restore_ops(&option_id, &values) {
         Ok(o) => o,
         Err(e) => {
             log::write_log("warn", &format!("优化项还原被拒: {option_id}（{e}）"));
@@ -514,7 +768,7 @@ pub async fn optimizer_restore_reg<R: Runtime>(
     //
     // fail-closed：回读不一致时**保留备份记录**并报失败，让用户能再试一次 ——
     // 清掉记录就等于删掉了唯一的还原依据。
-    let (checked, mismatched) = verify_restore_ops(&ops);
+    let (checked, mismatched) = verify_restore_ops(ops.as_slice());
     if mismatched > 0 {
         log::write_log(
             "error",
@@ -625,7 +879,68 @@ pub(super) fn restore_write_bytes(typ: &str, data: &str) -> Result<Vec<u8>, Stri
     }
 }
 
-/// 把备份条目转成结构化还原操作；任一条畸形即整体 `Err`（不产生半套操作）。
+/// 已按**声明面**（在册项 `option_targets` / 退役项历史表 / 频率覆写硬编码坐标）
+/// 对拍过的还原操作集合（R3-K01，2026-11-01）。
+///
+/// 为什么需要 newtype：旧实现的 `build_restore_ops` 只校验 hive 名，`RestoreOp` 可以
+/// 自由构造 —— 任何调用点（或改错顺序的旧调用点）都能绕开目标核对直接写 HKLM。
+/// 字段私有 + [`restore_backup_values`] 只收本类型之后，「没经过目标准入的还原操作」
+/// 在类型上就不存在写出口。
+#[derive(Debug, PartialEq)]
+pub(super) struct AdmittedRestoreOps(Vec<RestoreOp>);
+
+impl AdmittedRestoreOps {
+    pub(super) fn as_slice(&self) -> &[RestoreOp] {
+        &self.0
+    }
+
+    /// 真机探针专用（`HKCU` 临时探针键不在任何优化项的声明面内）。只在测试构建里
+    /// 存在，生产二进制没有这条路径 —— 「唯一构造点」不靠自觉。
+    #[cfg(test)]
+    pub(super) fn for_test(ops: Vec<RestoreOp>) -> Self {
+        Self(ops)
+    }
+}
+
+/// 把备份条目转成**已准入**的还原操作（R3-K01 第二道闸）。
+///
+/// 两道校验都在这里落：
+/// 1. 条目自身形态（[`encode_restore_ops`]：presence 三态、hive 合法、值编码可逆）；
+/// 2. 每个 `(hive, sub, key)` 必须落在该 id 的**声明面**内（大小写 / 分隔符归一后全等）。
+///
+/// 任一条不满足即整批 `Err`（不产生半套操作）。声明面来源见
+/// [`declared_restore_surface`]；退役项无历史表时 fail-closed —— 绝不因为「查不到当年
+/// 写过什么」就放行任意目标。
+pub(super) fn build_restore_ops(option_id: &str, values: &[Value]) -> Result<AdmittedRestoreOps, String> {
+    let declared = declared_restore_surface(option_id).ok_or_else(|| {
+        if is_retired_id(option_id) {
+            if RETIRED_SURFACE_UNRECOVERABLE.contains(&option_id) {
+                format!(
+                    "退役项「{option_id}」没有可核对的还原目标（历史定义早于 git 基线，无法恢复），已拒绝还原；请按该项退役说明手动回退"
+                )
+            } else {
+                format!(
+                    "退役项「{option_id}」没有登记历史还原目标表（需补录后才能按备份还原），已拒绝还原"
+                )
+            }
+        } else {
+            format!("「{option_id}」没有可核对的还原目标声明面，已拒绝还原")
+        }
+    })?;
+    Ok(AdmittedRestoreOps(encode_restore_ops(values, Some(declared.as_slice()))?))
+}
+
+/// 测试构建专用：跳过目标准入的编码入口（真机探针键 / 纯编码单测）。
+///
+/// `#[cfg(test)]` —— 生产构建里不存在，所以「写入必须已经目标准入」有类型兜底，
+/// 不是靠调用方自觉。
+#[cfg(test)]
+pub(super) fn build_restore_ops_unadmitted(values: &[Value]) -> Result<Vec<RestoreOp>, String> {
+    encode_restore_ops(values, None)
+}
+
+/// 还原操作的编码本体；`declared = None` 只给测试构建用（见
+/// [`build_restore_ops_unadmitted`]），生产路径一律经 [`build_restore_ops`] 传入声明面。
 ///
 /// 旧实现（`backup_restore_lines`）在这里生成 PS 命令行，靠单引号串 + `''` 转义把
 /// 不可信值锁住（v2-K2，有 3 条回归测试钉着）。改原生后那个攻击面整个消失 ——
@@ -637,7 +952,10 @@ pub(super) fn restore_write_bytes(typ: &str, data: &str) -> Result<Vec<u8>, Stri
 ///   绝不产出半套操作 —— 写一半删一半比全不还原更难对账，且拒因里只允许出现
 ///   逐项序号与错误码名（`unknownReason` 由读侧生成，不含路径/键名/值）。
 /// - 旧记录无 presence 但 exists=true：读成功过才会带 type/data，可信，照常写回。
-pub(super) fn build_restore_ops(values: &[Value]) -> Result<Vec<RestoreOp>, String> {
+///
+/// R3-K01：目标核对放在 presence 判定之后、值编码之前 —— 状态存疑的条目先按 P0-3
+/// 口径拒，不为越界目标做无谓解码；越界条目按序号点名后整批拒。
+fn encode_restore_ops(values: &[Value], declared: Option<&[RegTarget]>) -> Result<Vec<RestoreOp>, String> {
     let mut ops = Vec::with_capacity(values.len());
     let mut refusals: Vec<String> = Vec::new();
     for (idx, v) in values.iter().enumerate() {
@@ -655,12 +973,22 @@ pub(super) fn build_restore_ops(values: &[Value]) -> Result<Vec<RestoreOp>, Stri
                 continue;
             }
         };
+        if presence == "unknown" {
+            let reason = v.get("unknownReason").and_then(|x| x.as_str()).unwrap_or("未记录");
+            refusals.push(format!("第 {idx} 项：presence=unknown（拒因: {reason}）"));
+            continue;
+        }
+        // R3-K01 第二道闸：目标必须在本项声明的还原面内。
+        if let Some(declared) = declared {
+            if !coord_in_surface(declared, &hive, &sub, &key) {
+                refusals.push(format!(
+                    "第 {idx} 项：还原目标 {hive}\\{sub}::{key} 不在本项声明的还原面内（拒绝写入/删除）"
+                ));
+                continue;
+            }
+        }
         match presence {
             "absent" => ops.push(RestoreOp::Delete { hive, sub, key }),
-            "unknown" => {
-                let reason = v.get("unknownReason").and_then(|x| x.as_str()).unwrap_or("未记录");
-                refusals.push(format!("第 {idx} 项：presence=unknown（拒因: {reason}）"));
-            }
             _ => {
                 let typ = v.get("type").and_then(|x| x.as_str()).unwrap_or("REG_SZ").to_string();
                 let data = v.get("data").and_then(|x| x.as_str()).unwrap_or("");
@@ -670,9 +998,54 @@ pub(super) fn build_restore_ops(values: &[Value]) -> Result<Vec<RestoreOp>, Stri
         }
     }
     if !refusals.is_empty() {
-        return Err(format!("注册表备份存在无法确认状态的条目，拒绝还原（不产生删除）：{}", refusals.join("；")));
+        return Err(format!("注册表备份存在无法确认状态或越界的条目，拒绝还原（不产生删除）：{}", refusals.join("；")));
     }
     Ok(ops)
+}
+
+/// 目标是否落在声明面内（大小写 / `\`↔`/` / 首尾分隔符归一后全等）。
+///
+/// 只服务**对拍**：真正写入用的 `hive`/`sub`/`key` 仍是台账原值（`restore_hive`
+/// 按别名表解析），归一不改变任何被写下的字节。
+fn coord_in_surface(declared: &[RegTarget], hive: &str, sub: &str, key: &str) -> bool {
+    let Some(h) = norm_hive(hive) else {
+        return false;
+    };
+    let s = norm_sub(sub);
+    let k = norm_key(key);
+    declared
+        .iter()
+        .any(|t| norm_hive(&t.root) == Some(h) && norm_sub(&t.sub) == s && norm_key(&t.key) == k)
+}
+
+/// hive 别名归一（`LocalMachine` / `HKEY_LOCAL_MACHINE` 等价）；不认识的一律 `None`。
+fn norm_hive(name: &str) -> Option<&'static str> {
+    let n = name.trim();
+    let eq = |a: &str| n.eq_ignore_ascii_case(a);
+    Some(if eq("LocalMachine") || eq("HKEY_LOCAL_MACHINE") {
+        "HKEY_LOCAL_MACHINE"
+    } else if eq("CurrentUser") || eq("HKEY_CURRENT_USER") {
+        "HKEY_CURRENT_USER"
+    } else if eq("ClassesRoot") || eq("HKEY_CLASSES_ROOT") {
+        "HKEY_CLASSES_ROOT"
+    } else if eq("Users") || eq("HKEY_USERS") {
+        "HKEY_USERS"
+    } else if eq("CurrentConfig") || eq("HKEY_CURRENT_CONFIG") {
+        "HKEY_CURRENT_CONFIG"
+    } else {
+        return None;
+    })
+}
+
+/// 子键归一：`\` 与 `/` 等价、大小写不敏感、首尾分隔符忽略（注册表路径本身大小写不敏感）。
+fn norm_sub(sub: &str) -> String {
+    let t = sub.trim().replace('/', "\\");
+    t.trim_matches('\\').to_ascii_lowercase()
+}
+
+/// 值名归一（大小写不敏感）
+fn norm_key(key: &str) -> String {
+    key.trim().to_ascii_lowercase()
 }
 
 /// 备份里的类型标签 → 写注册表用的 `REG_VALUE_TYPE`。
@@ -797,16 +1170,18 @@ fn canonical_type_label(kind: windows::Win32::System::Registry::REG_VALUE_TYPE) 
     }
 }
 
-/// 按已构造的还原操作回写（任一失败即返回 false；调用方据此报「还原不完整」）。
+/// 按**已准入**的还原操作回写（任一失败即返回 false；调用方据此报「还原不完整」）。
 ///
 /// M-11（审查 2026-10-07）：原签名收 `&[Value]`，内部再 `build_restore_ops` 一次 ——
 /// 调用方（`optimizer_restore_reg` / `recycle_freq_override`）为了先判可构造性已经建过
 /// 一遍 ops，等于同一份备份解析两次，且写失败时无法定位到具体条目。改成收 ops，
 /// 构造只发生一次，回读校验（`verify_restore_ops`）也复用同一份 ops。
-pub(super) fn restore_backup_values(ops: &[RestoreOp]) -> bool {
+///
+/// R3-K01：只收 [`AdmittedRestoreOps`] —— 这是「写入必须已经过目标准入」的类型级闸门。
+pub(super) fn restore_backup_values(ops: &AdmittedRestoreOps) -> bool {
     use crate::engine::native;
     let mut failed = 0usize;
-    for op in ops {
+    for op in ops.as_slice() {
         let ok = match op {
             RestoreOp::Write { hive, sub, key, typ, bytes } => {
                 let Some(h) = restore_hive(&hive) else {
@@ -931,8 +1306,10 @@ mod m01_type_label_tests {
         }];
         // 起手先清一次（上轮残留会让首写撞非预期旧值）
         let _ = native::reg_key_remove(native::hive_hkcu(), SUB, true);
-        assert!(restore_backup_values(&ops), "EXPAND_SZ 值写回必须成功");
-        let (checked, mismatched) = verify_restore_ops(&ops);
+        // R3-K01：探针键不在任何优化项的声明面内，测试构建走准入旁路（`for_test`）。
+        let admitted = AdmittedRestoreOps::for_test(ops);
+        assert!(restore_backup_values(&admitted), "EXPAND_SZ 值写回必须成功");
+        let (checked, mismatched) = verify_restore_ops(admitted.as_slice());
         let _ = native::reg_key_remove(native::hive_hkcu(), SUB, true);
         assert_eq!(
             (checked, mismatched),
@@ -946,10 +1323,11 @@ mod m01_type_label_tests {
 mod p0_3_presence_tests {
     use super::*;
 
-    /// 单测 1（P0-3 主病灶）：`presence=unknown` 的条目 ⇒ `build_restore_ops` 整批拒绝、
+    /// 单测 1（P0-3 主病灶）：`presence=unknown` 的条目 ⇒ 编码层整批拒绝、
     /// 回执逐项点名拒因；同批里的合法 absent 条目也不得被带着产出半套操作 ——
     /// 写一半删一半比全不还原更难对账。
-    /// （五种合法类型的往返行为由 contract_tests 既有用例钉住，本模块不重复造。）
+    /// （目标准入另由 `r3_k01_gate_tests` 覆盖；本模块只锁 presence 语义，
+    /// 所以走 `build_restore_ops_unadmitted` 这条测试构建专用入口。）
     #[test]
     fn unknown_只回拒因不产删除() {
         let batch = vec![
@@ -960,7 +1338,7 @@ mod p0_3_presence_tests {
             json!({ "hive": "LocalMachine", "sub": "S", "key": "K3",
                 "presence": "absent", "exists": false }),
         ];
-        let Err(msg) = build_restore_ops(&batch) else {
+        let Err(msg) = build_restore_ops_unadmitted(&batch) else {
             panic!("unknown 条目必须整批拒绝（旧实现在这里生成 Delete，一次访问拒绝就删掉本来存在的值）");
         };
         assert!(msg.contains("拒绝还原"), "回执必须点名这是拒删: {msg}");
@@ -970,7 +1348,7 @@ mod p0_3_presence_tests {
     /// 单测 2：确认不存在的 `presence=absent` 仍照常生成 Delete（合法还原能力不削弱）。
     #[test]
     fn absent_仍产删除() {
-        let ops = build_restore_ops(&[
+        let ops = build_restore_ops_unadmitted(&[
             json!({ "hive": "LocalMachine", "sub": "S", "key": "K", "presence": "absent", "exists": false }),
         ])
         .expect("absent 应可构造");
@@ -984,12 +1362,12 @@ mod p0_3_presence_tests {
     /// 旧记录仍可信（读成功过才会带 type/data）。
     #[test]
     fn 旧记录无presence且existsfalse_按存疑拒删() {
-        let Err(msg) = build_restore_ops(&[
+        let Err(msg) = build_restore_ops_unadmitted(&[
             json!({ "hive": "LocalMachine", "sub": "S", "key": "K", "exists": false }),
         ]) else { panic!("legacyUnknown 必须拒绝（旧实现把它当确认不存在直接生成 Delete）") };
         assert!(msg.contains("legacyUnknown"), "回执必须点名 legacyUnknown: {msg}");
 
-        let ops = build_restore_ops(&[
+        let ops = build_restore_ops_unadmitted(&[
             json!({ "hive": "LocalMachine", "sub": "S", "key": "K", "exists": true, "type": "REG_DWORD", "data": "4" }),
         ])
         .expect("旧记录 exists=true 仍按值写回");
@@ -1026,9 +1404,336 @@ mod p0_3_presence_tests {
     /// 而不是猜一个新语义。
     #[test]
     fn 非法presence取值_按旧记录保守处理() {
-        let Err(msg) = build_restore_ops(&[
+        let Err(msg) = build_restore_ops_unadmitted(&[
             json!({ "hive": "LocalMachine", "sub": "S", "key": "K", "presence": "yes", "exists": false }),
         ]) else { panic!("不可识别 presence + exists=false 必须拒删") };
         assert!(msg.contains("legacyUnknown"), "{msg}");
+    }
+}
+
+/// R3-K01（P0-2，2026-11-01）：优化还原的两道闸 —— 台账管理员摘要 + 目标收窄。
+///
+/// 判红对照（每条都能被以下改动打红）：
+/// - 让 `seal_refusal_reason("missing")` 返回 `None` ⇒ `台账摘要状态_只有ok放行…` 红；
+/// - 把 `restore_preflight` 的 is_admin 分支删掉 ⇒ `前置闸_未提权…` 红；
+/// - 把补签从 `update_opt_backups` 摘掉 ⇒ `台账写入口必须补管理员摘要` 红；
+/// - 把摘要闸挪到读台账之后 ⇒ `还原命令_摘要闸在读台账之前` 红；
+/// - 把 `encode_restore_ops` 里的 `coord_in_surface` 判断删掉 ⇒
+///   `在册项_声明面内放行_面外拒绝…` 与 `退役项_…` 红。
+#[cfg(test)]
+mod r3_k01_gate_tests {
+    use super::*;
+
+    /// 摘要闸的纯判据：只有 `ok` 放行，其余（含不可识别状态）一律拒且拒因可辨。
+    #[test]
+    fn 台账摘要状态_只有ok放行且拒因可辨() {
+        assert!(seal_refusal_reason("ok").is_none(), "ok 必须放行");
+        for state in ["missing", "mismatch", "unreadable", "corrupt"] {
+            let reason = seal_refusal_reason(state).unwrap_or_else(|| panic!("{state} 必须拒"));
+            assert!(reason.starts_with("seal"), "{state} 的拒因码不可辨: {reason}");
+            assert!(!seal_refusal_message(state).is_empty(), "{state} 没有用户可见理由");
+        }
+        // 拒因码必须两两不同 —— 折叠成同一个码，用户与日志就分不清「缺摘要」与「摘要不符」
+        let codes: std::collections::HashSet<_> =
+            ["missing", "mismatch", "unreadable", "corrupt", "未来新状态"]
+                .iter()
+                .map(|s| seal_refusal_reason(s).unwrap())
+                .collect();
+        assert_eq!(codes.len(), 5, "非 ok 状态的拒因码出现重复: {codes:?}");
+        // 不可识别状态必须 fail-closed（新增状态不许因为「没写分支」而落到放行）
+        assert!(seal_refusal_reason("some_future_state").is_some());
+    }
+
+    /// 「未提权」与「摘要异常」两类前置拒绝：回执可辨，且判据本身不读写任何状态
+    /// （能在这条路径上跑到 `Ok`/`Err` 即证明它没有注册表写入）。
+    #[test]
+    fn 前置闸_未提权与摘要异常都必须拒() {
+        let Err(resp) = restore_preflight(false, "ok") else { panic!("非管理员必须拒") };
+        assert_eq!(resp["needAdmin"], true, "{resp}");
+
+        let Err(resp) = restore_preflight(true, "mismatch") else { panic!("摘要不符必须拒") };
+        assert_eq!(resp["restoreRefused"], true, "{resp}");
+        assert_eq!(resp["reason"], "sealMismatch", "{resp}");
+        assert_eq!(resp["ledgerSeal"], "mismatch", "{resp}");
+
+        assert!(restore_preflight(true, "ok").is_ok(), "管理员 + 摘要 ok 必须放行");
+        // 非管理员优先于摘要状态（用户先看到「请提权」，而不是一条他无力处理的摘要错）
+        let Err(resp) = restore_preflight(false, "missing") else { panic!("非管理员必须拒") };
+        assert_eq!(resp["needAdmin"], true, "{resp}");
+    }
+
+    /// 篡改台账 / 旧台账无摘要：摘要状态不可能为 `ok`，闸必须拒（零写入由结构保证）。
+    #[test]
+    fn 篡改或缺失摘要的台账_摘要状态不可能为ok() {
+        struct SampleDir(std::path::PathBuf);
+        impl Drop for SampleDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = SampleDir(
+            crate::engine::paths::lib_test_data_root()
+                .join(format!("opt-seal-{}", std::process::id())),
+        );
+        let _ = std::fs::remove_dir_all(&dir.0);
+        std::fs::create_dir_all(&dir.0).expect("建样本目录");
+        let path = dir.0.join("optimizer-backups.json");
+        std::fs::write(&path, br#"{"tf_fso":{"values":[]}}"#).unwrap();
+        let before = crate::engine::hash::sha256_file(&path).expect("哈希失败");
+        // 篡改（同用户可写目录里的另一份内容）
+        std::fs::write(
+            &path,
+            br#"{"tf_fso":{"values":[{"hive":"LocalMachine","sub":"S","key":"K","presence":"value","exists":true,"type":"REG_SZ","data":"x"}]}}"#,
+        )
+        .unwrap();
+        let after = crate::engine::hash::sha256_file(&path).expect("哈希失败");
+        assert_ne!(before, after, "内容变了摘要必须变（否则摘要闸形同虚设）");
+        // 该文件从未写过管理员摘要 ⇒ 任何摘要都比对不出 ok（旧无摘要文件必须拒）
+        for digest in [&before, &after] {
+            let state = crate::engine::reg_backup::reg_backup_admin_seal_state(
+                "optimizer-p02-test",
+                &path,
+                Some(digest),
+            );
+            assert_ne!(state, "ok", "无摘要的台账不可能通过摘要闸（state={state}）");
+            assert!(seal_refusal_reason(state).is_some(), "状态 {state} 必须被拒");
+        }
+        // 文件读不到（= 摘要无从比对）同样按 unreadable 拒，不许落到放行
+        assert_eq!(
+            crate::engine::reg_backup::reg_backup_admin_seal_state("optimizer-p02-test", &path, None),
+            "unreadable"
+        );
+    }
+
+    /// 落盘后补摘要：签的必须是**刚写下去的那份字节**；哈希失败时不盲签。
+    #[test]
+    fn 补摘要_签的是落盘字节_哈希失败不签() {
+        struct SampleDir(std::path::PathBuf);
+        impl Drop for SampleDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = SampleDir(
+            crate::engine::paths::lib_test_data_root()
+                .join(format!("opt-seal-write-{}", std::process::id())),
+        );
+        let _ = std::fs::remove_dir_all(&dir.0);
+        std::fs::create_dir_all(&dir.0).expect("建样本目录");
+        let path = dir.0.join("optimizer-backups.json");
+        let body = br#"{"tf_fso":{"values":[]}}"#;
+        std::fs::write(&path, body).unwrap();
+
+        let mut sealed: Vec<String> = Vec::new();
+        assert!(
+            seal_opt_backup_ledger_with(&path, crate::engine::hash::sha256_file, |sum| {
+                sealed.push(sum.to_string());
+                true
+            }),
+            "正常路径应报成功"
+        );
+        assert_eq!(
+            sealed,
+            vec![crate::engine::hash::sha256_bytes(body)],
+            "签的不是落盘字节 ⇒ 还原闸会把合法台账判成 mismatch"
+        );
+
+        // 哈希失败 ⇒ 一次都不许调摘要写入（宁可让还原 fail-closed，也不签不知道内容的摘要）
+        sealed.clear();
+        assert!(!seal_opt_backup_ledger_with(
+            &path,
+            |_| Err("读不到".to_string()),
+            |sum| {
+                sealed.push(sum.to_string());
+                true
+            }
+        ));
+        assert!(sealed.is_empty(), "哈希失败时不得调用摘要写入");
+    }
+
+    /// 在册项：声明面内放行（hive 别名 / 分隔符 / 大小写归一后全等），面外整批拒并点名序号。
+    #[test]
+    fn 在册项_声明面内放行_面外拒绝并点名序号() {
+        // `svc_mem_gb` 的声明面是硬编码单目标（不经目录数据）：HKLM\SYSTEM\ControlSet001\Control::SvcHostSplitThresholdInKB
+        let ok = build_restore_ops(
+            "svc_mem_gb",
+            &[json!({
+                "hive": "HKEY_LOCAL_MACHINE",
+                "sub": "system/controlset001/control/",
+                "key": "svchostsplitthresholdinkb",
+                "presence": "value", "exists": true, "type": "REG_QWORD", "data": "8388608"
+            })],
+        )
+        .expect("声明面内的目标必须放行（别名 / 分隔符 / 大小写归一后等价）");
+        assert_eq!(ok.as_slice().len(), 1);
+        assert_eq!(
+            ok.as_slice()[0],
+            RestoreOp::Write {
+                hive: "HKEY_LOCAL_MACHINE".into(),
+                sub: "system/controlset001/control/".into(),
+                key: "svchostsplitthresholdinkb".into(),
+                typ: "REG_QWORD".into(),
+                bytes: 8388608i64.to_le_bytes().to_vec(),
+            },
+            "准入只做对拍，不得改写写入用的原值"
+        );
+
+        // 第二条越界（Run 键）⇒ 整批拒，回执点名越界项序号（0 基）
+        let Err(msg) = build_restore_ops(
+            "svc_mem_gb",
+            &[
+                json!({ "hive": "LocalMachine", "sub": "SYSTEM\\ControlSet001\\Control", "key": "SvcHostSplitThresholdInKB", "presence": "absent", "exists": false }),
+                json!({ "hive": "LocalMachine", "sub": "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", "key": "TrimUpdate", "presence": "value", "exists": true, "type": "REG_SZ", "data": "C:\\x.exe" }),
+            ],
+        ) else { panic!("未声明目标必须整批拒绝（这正是 R3-K01 的反例形状）") };
+        assert!(msg.contains("第 1 项"), "越界项必须点名序号: {msg}");
+        assert!(msg.contains("不在本项声明的还原面内"), "{msg}");
+    }
+
+    /// 退役项：历史表内放行、越界拒绝；不可恢复的退役 id 与空声明面都 fail-closed。
+    #[test]
+    fn 退役项_历史目标放行_越界拒绝_不可恢复拒绝() {
+        // tf_fso：当年 reg 块写 HKCU\System\GameConfigStore 的一组值（git 历史恢复）
+        let ok = build_restore_ops(
+            "tf_fso",
+            &[json!({
+                "hive": "CurrentUser", "sub": "System\\GameConfigStore", "key": "GameDVR_DSEBehavior",
+                "presence": "absent", "exists": false
+            })],
+        )
+        .expect("退役项的当年目标必须放行");
+        assert_eq!(ok.as_slice().len(), 1);
+
+        let Err(msg) = build_restore_ops(
+            "tf_fso",
+            &[
+                json!({ "hive": "CurrentUser", "sub": "System\\GameConfigStore", "key": "GameDVR_DSEBehavior", "presence": "absent", "exists": false }),
+                json!({ "hive": "LocalMachine", "sub": "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", "key": "TrimUpdate", "presence": "value", "exists": true, "type": "REG_SZ", "data": "C:\\x.exe" }),
+            ],
+        ) else { panic!("退役项越界目标必须拒绝（退役 id 是攻击面最大的入口）") };
+        assert!(msg.contains("第 1 项"), "{msg}");
+
+        // 历史定义早于 git 基线（maps_off）：无表 ⇒ 拒绝且理由可读，绝不放行任意目标
+        let Err(msg) = build_restore_ops(
+            "maps_off",
+            &[json!({
+                "hive": "LocalMachine", "sub": "SYSTEM\\CurrentControlSet\\Services\\MapsBroker", "key": "Start",
+                "presence": "value", "exists": true, "type": "REG_DWORD", "data": "3"
+            })],
+        ) else { panic!("不可恢复的退役项必须 fail-closed") };
+        assert!(msg.contains("退役项") && msg.contains("无法恢复"), "{msg}");
+
+        // 当年只有 pwsh 设备写入（无注册表写点）的项：声明面为空 ⇒ 任何值级记录都不予还原
+        let Err(msg) = build_restore_ops(
+            "tf_gpu_msi",
+            &[json!({
+                "hive": "LocalMachine", "sub": "SYSTEM\\CurrentControlSet\\Enum\\PCI\\X", "key": "MSISupported",
+                "presence": "value", "exists": true, "type": "REG_DWORD", "data": "1"
+            })],
+        ) else { panic!("空声明面的退役项必须拒绝") };
+        assert!(msg.contains("不在本项声明的还原面内"), "{msg}");
+    }
+
+    /// 退役历史表与退役账本不许漂移：表里的 id 必须都还在账本里登记。
+    #[test]
+    fn 退役历史表_只含退役账本里的id() {
+        let parsed: Value =
+            serde_json::from_str(RETIRED_RESTORE_STEPS_JSON).expect("历史步骤表必须是合法 JSON");
+        let map = parsed.as_object().expect("历史步骤表必须是对象");
+        assert!(!map.is_empty(), "历史步骤表为空 ⇒ 退役项的合法还原全部被误拒");
+        for id in map.keys() {
+            assert!(is_retired_id(id), "历史步骤表里的 {id} 不在退役账本里 —— 表与账本漂移");
+        }
+        // 正向对照：能恢复的、不能恢复的都在预期状态（防整表被误删/误清空）
+        for id in ["tf_fso", "power_off", "tf_hibern_off", "svc_fax_disable"] {
+            assert!(retired_restore_steps(id).is_some(), "{id} 的历史定义必须可恢复");
+            assert!(retired_restore_surface(id).is_some(), "{id} 必须产出声明面函数");
+        }
+        for id in ["maps_off", "clear_recent_docs_on_exit"] {
+            assert!(retired_restore_steps(id).is_none(), "{id} 不该有历史定义（当年早于 git 基线）");
+        }
+    }
+
+    /// 退役账本里的**每个** id 都必须有结论：要么有历史表，要么在不可恢复清单里。
+    /// 新退役一条项却两处都不登记时本条红 —— 否则它会静默落进「需补录」拒因，
+    /// 用户拿不到可操作的解释，审阅者也看不见这个缺口。
+    #[test]
+    fn 退役账本每个id都要有结论() {
+        let parsed: Value =
+            serde_json::from_str(RETIRED_RESTORE_STEPS_JSON).expect("历史步骤表必须是合法 JSON");
+        let table = parsed.as_object().expect("历史步骤表必须是对象");
+        for item in retired_items() {
+            let id = item["id"].as_str().unwrap_or("");
+            let has_table = table.contains_key(id);
+            let known_unrecoverable = RETIRED_SURFACE_UNRECOVERABLE.contains(&id);
+            assert!(
+                has_table != known_unrecoverable,
+                "{id}: 历史表与不可恢复清单必须恰好命中一个（hasTable={has_table}, unrecoverable={known_unrecoverable}）—— 新退役项必须先在这里表态"
+            );
+        }
+        for id in RETIRED_SURFACE_UNRECOVERABLE {
+            assert!(!table.contains_key(*id), "{id} 同时出现在历史表与不可恢复清单里");
+            assert!(is_retired_id(id), "{id} 已不在退役账本里（清单该删行）");
+        }
+        // 反向对照：白名单没被顺手清空（清空后所有退役项都会落进「需补录」）
+        assert!(!RETIRED_SURFACE_UNRECOVERABLE.is_empty());
+    }
+
+    /// 还原点频率覆写窄口子：只认硬编码坐标（`restore_freq_target`），其它 HKLM 目标一律拒。
+    #[test]
+    fn 还原点频率窄口子_只认硬编码坐标() {
+        let target = super::super::restore_point::restore_freq_target();
+        let ok = build_restore_ops(
+            "tf_restore_point",
+            &[json!({
+                "hive": target.root, "sub": target.sub, "key": target.key,
+                "presence": "absent", "exists": false
+            })],
+        )
+        .expect("频率覆写的硬编码坐标必须放行");
+        assert_eq!(ok.as_slice().len(), 1);
+
+        let Err(msg) = build_restore_ops(
+            "tf_restore_point",
+            &[json!({
+                "hive": "LocalMachine", "sub": "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", "key": "TrimUpdate",
+                "presence": "absent", "exists": false
+            })],
+        ) else { panic!("窄口子之外的任何目标必须拒绝") };
+        assert!(msg.contains("不在本项声明的还原面内"), "{msg}");
+    }
+
+    /// 结构护栏：写入口必须补管理员摘要（判红实验：摘掉补签调用，本条必须红）。
+    #[test]
+    fn 台账写入口必须补管理员摘要() {
+        let src = include_str!("backup_restore.rs");
+        let at = src
+            .find("pub(super) fn update_opt_backups")
+            .expect("找不到台账写入口");
+        let rest = &src[at..];
+        let end = rest.find("\n}\n").expect("update_opt_backups 函数体没闭合");
+        let body = &rest[..end];
+        assert!(body.contains("update_json"), "写入口没有走 security::update_json");
+        assert!(
+            body.contains("seal_opt_backup_ledger"),
+            "update_opt_backups 没有补写管理员摘要 —— 台账无封条，还原闸会拒掉全部合法备份"
+        );
+    }
+
+    /// 结构护栏：摘要闸必须在读台账之前（判红实验：把闸挪到 load 之后，本条必须红）。
+    #[test]
+    fn 还原命令_摘要闸在读台账之前() {
+        let src = include_str!("backup_restore.rs");
+        let at = src
+            .find("pub async fn optimizer_restore_reg")
+            .expect("找不到 optimizer_restore_reg");
+        let rest = &src[at..];
+        let seal = rest
+            .find("reg_backup_admin_seal_state")
+            .expect("optimizer_restore_reg 没有调 reg_backup_admin_seal_state —— 摘要闸缺失");
+        let pre = rest.find("restore_preflight").expect("没有经过前置闸");
+        let load = rest.find("load_opt_backups_state").expect("找不到读台账调用");
+        assert!(seal < load, "摘要闸被挪到了读台账之后（{seal} vs {load}）—— 先信内容再验签等于没验");
+        assert!(pre < load, "前置闸必须在读台账之前（{pre} vs {load}）");
     }
 }

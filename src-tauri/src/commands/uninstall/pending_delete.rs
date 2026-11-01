@@ -511,7 +511,8 @@ pub(super) fn reconcile_pfro_orphans(mut rows: Vec<Value>, pfro: &[String]) -> V
     rows
 }
 
-/// v6-K05：PFRO 登记前的**新增两道**只读闸（纯函数，可测）——系统命名空间 + 别名复检。
+/// v6-K05 / R2a-M01：PFRO 登记前的**只读闸**（纯函数，可测）——系统命名空间 + 别名复检
+/// + reparse 复检。
 ///
 /// PFRO 是**永久删**出口（不进回收站、重启后由会话管理器执行），登记面此前只有
 /// `is_path_protected` 一道（v2-B1，`check-delete-exits` 的 MUST_PROTECT 正向棘轮钉在
@@ -520,7 +521,13 @@ pub(super) fn reconcile_pfro_orphans(mut rows: Vec<Value>, pfro: &[String]) -> V
 ///    子孙，residue 执行侧（`classify_residue_op` 的 file 分支）同位置已有这道；
 /// ② `final_path_protected`（别名复检）——字面判定拦不住「父目录被换成 junction /
 ///    短名指向受保护根」（同一实体两条路径，literal 比对只认其中一条），
-///    canonicalize 父目录后重跑同一套判据（Kudu S2，清理删除链与 finder 同函数）。
+///    canonicalize 父目录后重跑同一套判据（Kudu S2，清理删除链与 finder 同函数）；
+/// ③ reparse 复检（R2a-M01）——删除链（`native-scanner/src/scan.rs` 的 `delete`）把
+///    **活链目标**与**祖先重解析点**记成 `status:"fail"` 的**安全拒绝**
+///    （`mode=rejected/reparse-ancestor`），不是「被占用」。PFRO 是更强的删除
+///    （重启后、绕过回收站），同一路径不许在这里放行——判据与删除链同源：
+///    自身用 `broken_reparse_link`（只有断链放行；而断链连 `is_file` 都过不了），
+///    祖先用 `trim_finder::scan::reparse_ancestor`，不另造第二份。
 ///
 /// 返回 `Some(原因)` = 拒绝登记。存在性不在这里判（调用方按 is_file 判，PFRO 只收文件）。
 pub(super) fn pending_delete_sysns_alias_reason(target: &str) -> Option<&'static str> {
@@ -529,6 +536,18 @@ pub(super) fn pending_delete_sysns_alias_reason(target: &str) -> Option<&'static
     }
     if protect::final_path_protected(target) {
         return Some("目标经别名解析后位于受保护路径，拒绝登记重启后删除");
+    }
+    // ③ R2a-M01：目标自身不是活链（与 finder 删除链 `is_reparse_target && !broken_reparse_link`
+    // 同一口径 —— 属性位判据走主侧唯一真源 `protect::is_reparse`）。断链不在 `is_file`
+    // 之列，本闸放行后仍会被存在性闸拒。
+    let p = Path::new(target);
+    if let Ok(md) = std::fs::symlink_metadata(p) {
+        if protect::is_reparse(&md) && !trim_finder::scan::broken_reparse_link(p) {
+            return Some("目标是链接/junction（reparse point），拒绝登记重启后删除");
+        }
+    }
+    if trim_finder::scan::reparse_ancestor(p).is_some() {
+        return Some("目标祖先目录是链接/junction（reparse point），拒绝登记重启后删除");
     }
     None
 }
@@ -612,7 +631,9 @@ pub async fn uninstall_pending_add<R: tauri::Runtime>(
                 rows.push(json!({ "target": t, "status": "skip", "message": "不是本次删除失败回执里的文件，拒绝登记重启后删除" }));
                 continue;
             }
-            // v6-K05：系统命名空间 + 别名复检（与 residue 执行侧同口径）
+            // v6-K05 / R2a-M01：系统命名空间 + 别名复检 + reparse 复检（与 residue 执行侧
+            // 及 finder 删除链同口径）——删除链对活链/祖先 junction 的安全拒绝，
+            // 不许在「重启后永久删」这个更强出口上被放行。
             if let Some(reason) = pending_delete_sysns_alias_reason(t) {
                 rows.push(json!({ "target": t, "status": "skip", "message": reason }));
                 continue;
@@ -1283,6 +1304,61 @@ mod tests {
             pending_delete_sysns_alias_reason(&probe.to_string_lossy()).is_some(),
             "链接别名穿透登记闸: {}",
             probe.display()
+        );
+    }
+
+    /// R2a-M01：活链目标与 junction 祖先在 PFRO 登记闸**再次**被拒 —— 删除链
+    /// （`native-scanner/src/scan.rs` 的 `delete`）把这两类记为 `status:"fail"` 的
+    /// 安全拒绝；旧登记闸只复查受保护面/系统面/别名面，于是「安全拒绝」被降级成
+    /// 「重启后永久删」。判红自证：把 `pending_delete_sysns_alias_reason` 的两条
+    /// reparse 分支删掉 ⇒ 前两条断言红（正控那条仍绿，证明红的是新闸不是环境）。
+    #[test]
+    fn pfro登记闸_活链与junction祖先必须拒() {
+        let sandbox = crate::testutil::Sandbox::new(&format!("r2am01-{}", std::process::id()));
+        let dir = sandbox.to_path_buf();
+        let real = dir.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let file = real.join("probe.txt");
+        std::fs::write(&file, b"x").unwrap();
+        // 样本双通道：符号链接优先，junction（mklink /J 免管理员）回退；都建不出来显式 SKIP。
+        let link = dir.join("anc");
+        let junction = std::process::Command::new("cmd.exe")
+            .args(["/C", &format!(r#"mklink /J "{}" "{}""#, link.display(), real.display())])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        let made = std::os::windows::fs::symlink_dir(&real, &link).is_ok() || junction;
+        if !made {
+            eprintln!("SKIP：符号链接与 junction 都建不出来（受限环境），reparse 样本未校验");
+            return;
+        }
+        // ① 祖先 junction + 普通文件（R2a-M01 的攻击面）：字面路径与别名解析后都不在保护面，
+        //    只有 reparse 复检拦得住。
+        let under = link.join("probe.txt");
+        assert!(under.is_file(), "前置：junction 下的文件必须可读: {}", under.display());
+        assert!(
+            !protect::is_path_protected(&under.to_string_lossy()),
+            "前置：样本不在 protect 判据内（否则测的不是新闸）"
+        );
+        assert_eq!(
+            pending_delete_sysns_alias_reason(&under.to_string_lossy()),
+            Some("目标祖先目录是链接/junction（reparse point），拒绝登记重启后删除"),
+            "祖先 junction 下的文件必须被登记闸拒绝: {}",
+            under.display()
+        );
+        // ② 目标自身是活链：与 finder 删除链 `is_reparse_target && !broken_reparse_link`
+        //    同口径拒（活链不是「删不掉」，是「拒绝删」）。
+        assert_eq!(
+            pending_delete_sysns_alias_reason(&link.to_string_lossy()),
+            Some("目标是链接/junction（reparse point），拒绝登记重启后删除"),
+            "活链目标必须被登记闸拒绝: {}",
+            link.display()
+        );
+        // ③ 正控：同一目录树里的普通文件必须放行（闸不是恒拒）。
+        assert!(
+            pending_delete_sysns_alias_reason(&file.to_string_lossy()).is_none(),
+            "普通文件必须放行: {}",
+            file.display()
         );
     }
 }

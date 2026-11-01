@@ -263,9 +263,11 @@ pub(super) fn restore_freq_target() -> RegTarget {
 pub(super) enum FreqRestoreError {
     /// 台账损坏 / IO 失败：现状未知
     LedgerUnreadable(String),
+    /// 台账管理员摘要缺失 / 不符 / 不可读（R3-K01）：不能确认台账未被改动
+    LedgerUnsealed { state: &'static str, reason: &'static str },
     /// 确无备份记录（含记录为空）
     NoBackup,
-    /// 备份在，但构造不出还原操作
+    /// 备份在，但构造不出还原操作（含目标越界 / 退役历史面缺失）
     BadBackup,
     /// 写回或回读校验失败
     WriteFailed(String),
@@ -275,6 +277,7 @@ impl FreqRestoreError {
     pub(super) fn message(&self) -> String {
         match self {
             Self::LedgerUnreadable(e) => e.clone(),
+            Self::LedgerUnsealed { state, .. } => seal_refusal_message(state).to_string(),
             Self::NoBackup => "没有可用于恢复的备份记录".to_string(),
             Self::BadBackup => "备份数据无法解析成还原操作".to_string(),
             Self::WriteFailed(e) => e.clone(),
@@ -294,6 +297,23 @@ impl std::fmt::Display for FreqRestoreError {
 /// 创建流程（无论成败）与弹窗「恢复默认创建频率」命令**共用这一处实现**（§5.16：
 /// 同一判定只许一处定义）——两个调用方各写一份「写回/删值」逻辑，漂移时谁也发现不了。
 pub(super) fn recycle_freq_override() -> Result<String, FreqRestoreError> {
+    // R3-K01（2026-11-01）：同一本台账的第二条还原读路径，封条闸与
+    // `optimizer_restore_reg` 同口径 —— 台账是用户可写明文，没有它就不能确认内容可信。
+    let ledger_path = opt_backup_file();
+    // 台账不存在 = 确无备份记录（与「摘要不可读」分开：交给下面的 NoBackup 口径）。
+    if opt_backup_absent(&ledger_path) {
+        return Err(FreqRestoreError::NoBackup);
+    }
+    let digest = crate::engine::hash::sha256_file(&ledger_path).ok();
+    let seal_state = crate::engine::reg_backup::reg_backup_admin_seal_state(
+        "optimizer",
+        &ledger_path,
+        digest.as_deref(),
+    );
+    if let Some(reason) = seal_refusal_reason(seal_state) {
+        log::write_log("warn", &format!("还原点频率覆写回收被拒（台账摘要 {seal_state}）"));
+        return Err(FreqRestoreError::LedgerUnsealed { state: seal_state, reason });
+    }
     // R3-L03：三态读器 —— 台账读不动时不能回「没有可用于恢复的备份记录」。
     let map = load_opt_backups_state().map_err(FreqRestoreError::LedgerUnreadable)?;
     let some_values = map
@@ -305,7 +325,9 @@ pub(super) fn recycle_freq_override() -> Result<String, FreqRestoreError> {
         return Err(FreqRestoreError::NoBackup);
     };
     // M-11：构造还原操作只做一次，写回与回读核对共用同一份 ops。
-    let ops = build_restore_ops(&values).map_err(|_| FreqRestoreError::BadBackup)?;
+    // R3-K01：窄口子的声明面是硬编码的 `restore_freq_target`（见 backup_restore 的
+    // `declared_restore_surface`）—— 台账里除了这个坐标之外的任何目标一律拒。
+    let ops = build_restore_ops("tf_restore_point", &values).map_err(|_| FreqRestoreError::BadBackup)?;
     // R3-M02（v7.2 C04，AGENTS §3）：马上要写 HKLM 注册表，日志先强制落盘。
     log::flush_sync();
     if !restore_backup_values(&ops) {
@@ -313,7 +335,7 @@ pub(super) fn recycle_freq_override() -> Result<String, FreqRestoreError> {
     }
     // R3-L03：写完独立回读 —— `RegSetValueExW` 返回成功不等于值写对了（与
     // `optimizer_restore_reg` 同口径）；不一致时如实报失败，备份记录保留可重试。
-    let (checked, mismatched) = verify_restore_ops(&ops);
+    let (checked, mismatched) = verify_restore_ops(ops.as_slice());
     if mismatched > 0 {
         log::write_log(
             "warn",
@@ -675,6 +697,11 @@ pub async fn optimizer_restore_frequency<R: Runtime>(window: WebviewWindow<R>) -
             // 点一个必然失败的按钮。
             let (reason, missing) = match &e {
                 FreqRestoreError::LedgerUnreadable(_) => ("unreadable", false),
+                // R3-K01：摘要缺失/不符/不可读时 `reason` 保留独立码（sealMissing 等）；
+                // `missing` 位沿用「没有可用于恢复的备份记录」的既有口径 —— 一份过不了
+                // 摘要闸的台账对还原而言就是不可用依据（module_smoke 的失败出口断言
+                // 要求失败必须是 needAdmin 或 missing 之一，不许出现无标记的失败）。
+                FreqRestoreError::LedgerUnsealed { reason, .. } => (*reason, true),
                 FreqRestoreError::NoBackup => ("absent", true),
                 FreqRestoreError::BadBackup => ("corrupt", false),
                 FreqRestoreError::WriteFailed(_) => ("writeFailed", false),

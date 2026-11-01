@@ -6,6 +6,8 @@
 //! # 要点
 //!
 //! - 配置真源仍是 `settings.json`（密钥掩码 + 掩码穿透：回传掩码 = 未修改 → 保留已存真值）；
+//! - **端点-密钥配对**（R1b-K01）：已存密钥只许发往它保存时的 `apiUrl`；改地址必须显式
+//!   重输密钥，否则拒绝（不联网、不落盘）——堵住「一次 IPC 把已存明文密钥发到任意主机」；
 //! - **保存即校验**：向该模型发一条确认消息，只有返回内容才置 `verified`；
 //!   密钥为空时不校验、强制 `verified=false`/`enabled=false`（与 Electron 同语义）；
 //! - 作用域权威校验在 Rust 侧：`key` 必须属于 `AI_MODEL_KEYS`，
@@ -131,6 +133,74 @@ fn require_settings_object(next: &Value) -> Result<(), String> {
     }
 }
 
+/// 本次请求里 `apiKey` 字段的来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApiKeySource {
+    /// 显式新值（含显式空串 = 清除）：渲染层重新输入过密钥
+    Explicit,
+    /// 回传 `SECRET_MASK`：用户未修改密钥
+    Masked,
+    /// 未传该字段（含 `null`）：未修改密钥
+    Missing,
+}
+
+/// 解析本次请求实际生效的密钥与来源（掩码穿透的唯一实现，`models_test`/`models_save` 共用）：
+/// 掩码 / 缺失 ⇒ 回落到已存明文真值；显式新值（含空串=清除）⇒ 用新值。
+fn resolve_request_api_key(cfg: &Value, stored_key: &str) -> (String, ApiKeySource) {
+    match cfg_str(cfg, "apiKey") {
+        Some(v) if v != SECRET_MASK => (v, ApiKeySource::Explicit),
+        Some(_) => (stored_key.to_string(), ApiKeySource::Masked),
+        None => (stored_key.to_string(), ApiKeySource::Missing),
+    }
+}
+
+/// 判据两侧的地址归一：非 baidu_pro 一律按 chat/completions 归一（历史存档可能是 `/v1`
+/// 旧形态，直接字符串比会把「没改地址」误判成换端点）；baidu_pro 走专用 web_summary 接口，
+/// 不归一（与两命令原有的 api_url 组法同口径）。
+fn endpoint_for_compare(key: &str, raw: &str) -> String {
+    if key == "baidu_pro" {
+        raw.trim().to_string()
+    } else {
+        normalize_chat_completions_url(raw)
+    }
+}
+
+/// 两个已归一的地址是否指向同一端点（只抹尾斜杠与 ASCII 大小写差异）。
+fn same_api_endpoint(a: &str, b: &str) -> bool {
+    fn norm(s: &str) -> String {
+        s.trim().trim_end_matches('/').to_ascii_lowercase()
+    }
+    norm(a) == norm(b)
+}
+
+/// R1b-K01 的拒绝文案（拒绝回执只此一份）
+const ENDPOINT_REKEY_MESSAGE: &str = "更换接口地址时必须重新输入密钥";
+
+/// 端点-密钥配对判据 + 拒绝回执（`models_test`/`models_save` 共用的唯一实现）。
+///
+/// 威胁模型（`engine/guard.rs` 文件头）：子窗口被注入脚本即可发任意 IPC。两条命令的
+/// `apiUrl` 完全来自载荷，`apiKey` 掩码/缺失时又回落到 `models_config()` 解密后的
+/// **明文**密钥 ⇒ 任意副窗一次 IPC 就能把已存密钥发到攻击者主机，DPAPI 与 `SECRET_MASK`
+/// 同时失效（R1b-K01）。
+///
+/// 规则：密钥来自已存值（掩码 / 缺失）时，只许发往它保存时的那一个地址；换地址必须
+/// 显式重输密钥（正常换源流程保留）。同地址 + 掩码沿用原功能；已存密钥为空时无事可泄，
+/// 不拦。两侧地址由调用方先用 `endpoint_for_compare` 归一后再传入。
+fn endpoint_rekey_rejection(
+    stored_url: &str,
+    stored_key: &str,
+    requested_url: &str,
+    key_source: ApiKeySource,
+) -> Option<Value> {
+    if stored_key.trim().is_empty() || key_source == ApiKeySource::Explicit {
+        return None;
+    }
+    if same_api_endpoint(stored_url, requested_url) {
+        return None;
+    }
+    Some(json!({ "success": false, "message": ENDPOINT_REKEY_MESSAGE }))
+}
+
 /// models:save — 保存单个模型项（含连通性校验，落盘携带密钥的配置）
 #[tauri::command]
 pub async fn models_save<R: tauri::Runtime>(
@@ -163,11 +233,7 @@ pub async fn models_save<R: tauri::Runtime>(
     let timeout = clamp_timeout(cfg.get("timeout"), 30);
     let mut models = models_config();
     // 百度千帆走专用 web_summary 接口（不归一化）；其余统一归一为 OpenAI 兼容 chat/completions
-    let api_url = if key == "baidu_pro" {
-        raw_url
-    } else {
-        normalize_chat_completions_url(&raw_url)
-    };
+    let api_url = endpoint_for_compare(&key, &raw_url);
     if is_private_api_url(&api_url) {
         return Ok(json!({ "success": false, "message": "API 接口地址不允许指向本机或内网网段" }));
     }
@@ -179,10 +245,16 @@ pub async fn models_save<R: tauri::Runtime>(
 
     let cur = models.get(&key).cloned().unwrap_or_else(|| json!({}));
     // 掩码穿透（审查 1-5）：渲染层回传掩码 = 用户未修改密钥，保留已存真值；空串仍表示清除
-    let api_key = match cfg_str(&cfg, "apiKey") {
-        Some(v) if v != SECRET_MASK => v,
-        _ => truthy_string(cur.get("apiKey")).unwrap_or_default(),
-    };
+    let stored_key = truthy_string(cur.get("apiKey")).unwrap_or_default();
+    let (api_key, key_source) = resolve_request_api_key(&cfg, &stored_key);
+    // R1b-K01：判据放在组确认请求与落盘之前 —— 命中时既不发起网络调用，
+    // 也不会把调用方给的新地址写进 settings.json（复用密钥换端点即通道关闭）。
+    let stored_endpoint =
+        endpoint_for_compare(&key, &truthy_string(cur.get("apiUrl")).unwrap_or_default());
+    let reject = endpoint_rekey_rejection(&stored_endpoint, &stored_key, &api_url, key_source);
+    if let Some(receipt) = reject {
+        return Ok(receipt);
+    }
     let patch = json!({
         "apiUrl": api_url,
         "apiKey": api_key,
@@ -368,6 +440,8 @@ pub async fn models_test<R: tauri::Runtime>(
     key: Option<String>,
     config: Option<Value>,
 ) -> Result<Value, String> {
+    // R1b-K01：端点-密钥配对判据在下面统一拦截（地址变了且密钥来自已存值 ⇒ 拒），
+    // 档位维持只读 —— 唯一调用点是大模型管理副窗的「测试连接」。
     guard::guard_readonly(&window)?;
     let key = key.unwrap_or_default();
     if !AI_MODEL_KEYS.contains(&key.as_str()) {
@@ -382,15 +456,11 @@ pub async fn models_test<R: tauri::Runtime>(
         .unwrap_or_default()
         .trim()
         .to_string();
-    let api_url = if key == "baidu_pro" {
-        raw_url
-    } else {
-        normalize_chat_completions_url(&raw_url)
-    };
-    let api_key = match cfg_str(&cfg, "apiKey") {
-        Some(v) if v != SECRET_MASK => v,
-        _ => truthy_string(base.get("apiKey")).unwrap_or_default(),
-    };
+    let api_url = endpoint_for_compare(&key, &raw_url);
+    let stored_endpoint =
+        endpoint_for_compare(&key, &truthy_string(base.get("apiUrl")).unwrap_or_default());
+    let stored_key = truthy_string(base.get("apiKey")).unwrap_or_default();
+    let (api_key, key_source) = resolve_request_api_key(&cfg, &stored_key);
     let model = match cfg.get("model") {
         Some(_) => cfg_str(&cfg, "model").unwrap_or_default(),
         None => truthy_string(base.get("model")).unwrap_or_default(),
@@ -411,6 +481,12 @@ pub async fn models_test<R: tauri::Runtime>(
     // 审查 v2-U2（v3 拍板收紧）：与 save 同一口径，测试连接同样只认 https。
     if let Some(reason) = settings::is_insecure_api_scheme(&api_url) {
         return Ok(json!({ "success": false, "message": reason }));
+    }
+    // R1b-K01：判据必须在组 test_cfg 与 call_model_text 之前 —— 命中即返回，
+    // 保证「改地址 + 掩码/缺失密钥」的网络调用次数为 0。
+    let reject = endpoint_rekey_rejection(&stored_endpoint, &stored_key, &api_url, key_source);
+    if let Some(receipt) = reject {
+        return Ok(receipt);
     }
 
     let test_cfg = json!({
@@ -612,5 +688,156 @@ mod p1_5_concurrency_tests {
         assert!(require_settings_object(&json!({})).is_ok());
         assert!(require_settings_object(&json!([])).is_err(), "根是数组必须拒绝");
         assert!(require_settings_object(&json!("x")).is_err(), "根是字符串必须拒绝");
+    }
+}
+
+#[cfg(test)]
+mod r1b_k01_endpoint_key_tests {
+    use super::*;
+
+    /// 验收样本 1：改地址 + 复用已存密钥（掩码或缺失）⇒ `success:false`。
+    /// 判红自证：把 `endpoint_rekey_rejection` 末尾的拒绝回执改回 `None` ⇒ 本条红。
+    #[test]
+    fn 改地址复用已存密钥必须拒绝() {
+        let 已存 = "https://api.metaso.cn/v1/chat/completions";
+        let 攻击者 = "https://attacker.example/v1/chat/completions";
+        for source in [ApiKeySource::Masked, ApiKeySource::Missing] {
+            let receipt = endpoint_rekey_rejection(已存, "sk-已存", 攻击者, source)
+                .unwrap_or_else(|| panic!("{source:?} 必须拒绝"));
+            assert_eq!(receipt["success"], json!(false), "拒绝回执必须是 success:false");
+            assert_eq!(receipt["message"], json!("更换接口地址时必须重新输入密钥"));
+        }
+    }
+
+    /// 验收样本 2：同 URL + 掩码 ⇒ 原功能可用（尾斜杠 / 大小写差异仍算同一端点；
+    /// 密钥字段缺失与掩码同义）。
+    /// 判红自证：把 `same_api_endpoint` 改成恒 false ⇒ 本条前三条红。
+    #[test]
+    fn 同地址掩码沿用原功能() {
+        let 已存 = "https://api.metaso.cn/v1/chat/completions";
+        for (requested, source) in [
+            (已存, ApiKeySource::Masked),
+            ("HTTPS://API.METASO.CN/v1/chat/completions/", ApiKeySource::Masked),
+            (已存, ApiKeySource::Missing),
+            (已存, ApiKeySource::Explicit),
+        ] {
+            assert!(
+                endpoint_rekey_rejection(已存, "sk-已存", requested, source).is_none(),
+                "{source:?} {requested} 必须放行"
+            );
+        }
+    }
+
+    /// 验收样本 3：改地址 + 显式新密钥 ⇒ 放行（正常换端点流程）。
+    /// 判红自证：把 Explicit 分支删掉 ⇒ 本条红。
+    #[test]
+    fn 换地址显式新密钥放行() {
+        assert!(endpoint_rekey_rejection(
+            "https://api.metaso.cn/v1/chat/completions",
+            "sk-已存",
+            "https://new.example/v1/chat/completions",
+            ApiKeySource::Explicit,
+        )
+        .is_none());
+    }
+
+    /// 边界：已存密钥为空（无事可泄）不拦；显式空串是「清除密钥」，也不拦，
+    /// 随后由 save 的无密钥分支强制 verified=false。
+    /// 判红自证：删掉 `stored_key.trim().is_empty()` 短路 ⇒ 第一条红。
+    #[test]
+    fn 无已存密钥与显式空密钥不拦() {
+        assert!(
+            endpoint_rekey_rejection("https://a.example/x", "", "https://b.example/x", ApiKeySource::Masked)
+                .is_none()
+        );
+        let (key, source) = resolve_request_api_key(&json!({ "apiKey": "" }), "sk-已存");
+        assert_eq!(source, ApiKeySource::Explicit, "显式空串是清除，不是掩码");
+        assert_eq!(key, "");
+        assert!(
+            endpoint_rekey_rejection("https://a.example/x", "sk-已存", "https://b.example/x", source)
+                .is_none()
+        );
+    }
+
+    /// 掩码 / 缺失 / 显式三种来源的取值口径：掩码与缺失都必须回落到已存真值，
+    /// 否则「未修改密钥」的保存会静默清空密钥。
+    /// 判红自证：把 Masked/Missing 两臂改成返回空串 ⇒ 本条红。
+    #[test]
+    fn 密钥来源判定() {
+        let stored = "sk-已存";
+        assert_eq!(
+            resolve_request_api_key(&json!({}), stored),
+            (stored.to_string(), ApiKeySource::Missing)
+        );
+        assert_eq!(
+            resolve_request_api_key(&json!({ "apiKey": Value::Null }), stored),
+            (stored.to_string(), ApiKeySource::Missing)
+        );
+        assert_eq!(
+            resolve_request_api_key(&json!({ "apiKey": SECRET_MASK }), stored),
+            (stored.to_string(), ApiKeySource::Masked)
+        );
+        assert_eq!(
+            resolve_request_api_key(&json!({ "apiKey": "sk-新" }), stored),
+            ("sk-新".to_string(), ApiKeySource::Explicit)
+        );
+    }
+
+    /// 地址归一：历史 `/v1` 旧存档与新形态归一后必须相等（否则「没改地址」会被
+    /// 误判成换端点而拒绝保存）；baidu_pro 走专用接口不归一。
+    /// 判红自证：把 endpoint_for_compare 改成恒原样返回 ⇒ 第一条红。
+    #[test]
+    fn 两侧地址归一后同口径() {
+        assert_eq!(
+            endpoint_for_compare("metaso", "https://api.metaso.cn/v1"),
+            "https://api.metaso.cn/v1/chat/completions"
+        );
+        assert_eq!(
+            endpoint_for_compare("metaso", " https://api.metaso.cn/v1/ "),
+            "https://api.metaso.cn/v1/chat/completions"
+        );
+        assert_eq!(
+            endpoint_for_compare("baidu_pro", "https://q.example/v2/ai_search/web_summary"),
+            "https://q.example/v2/ai_search/web_summary"
+        );
+    }
+
+    /// 顺序契约（= 验收「网络调用次数 0 / 不落盘」的机械保证）：判据必须在
+    /// `call_model_text`（联网）与 `update_settings`（落盘）之前，且判据/文案各只有一份。
+    /// 判红自证：把 models_test 的判据挪到 spawn_blocking 之后、或往 models_save 再加
+    /// 一份判据副本 ⇒ 本条红。
+    #[test]
+    fn 判据必须先于联网与落盘() {
+        let src = include_str!("models.rs");
+        let cut = src.find("#[cfg(test)]").expect("截断锚点 #[cfg(test)] 不见了");
+        let prod = &src[..cut];
+        assert_eq!(
+            prod.matches("endpoint_rekey_rejection(").count(),
+            3,
+            "判据必须只有一处实现 + 两处调用（models_save / models_test）"
+        );
+        assert_eq!(
+            prod.matches("更换接口地址时必须重新输入密钥").count(),
+            1,
+            "拒绝文案只许有一份"
+        );
+        let save_start = prod.find("pub async fn models_save").expect("models_save 消失");
+        let scope_start = prod.find("pub fn models_set_scope").expect("models_set_scope 消失");
+        let test_start = prod.find("pub async fn models_test").expect("models_test 消失");
+        let save = &prod[save_start..scope_start];
+        let test = &prod[test_start..];
+        for (name, body) in [("models_save", save), ("models_test", test)] {
+            let gate = body
+                .find("endpoint_rekey_rejection(")
+                .unwrap_or_else(|| panic!("{name} 没接端点-密钥配对判据"));
+            let net = body.find("call_model_text(").unwrap_or(usize::MAX);
+            assert!(gate < net, "{name}: 判据必须在 call_model_text 之前");
+        }
+        let gate = save.find("endpoint_rekey_rejection(").unwrap();
+        let sinks: Vec<usize> = save.match_indices("update_settings(").map(|(at, _)| at).collect();
+        assert!(!sinks.is_empty(), "models_save 的 update_settings 落盘点消失，顺序断言失效");
+        for at in sinks {
+            assert!(gate < at, "models_save: 判据必须在落盘（update_settings）之前");
+        }
     }
 }

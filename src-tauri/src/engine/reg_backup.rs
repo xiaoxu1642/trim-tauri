@@ -3,7 +3,7 @@
 //! 为什么要抽：清理域与卸载域各有一条「把备份 `.reg` import 回系统」的链，威胁模型逐字相同
 //! ——都是"用户可写目录里的一份文件，被拿去写注册表"。此前只有卸载域收了口（严格解析 +
 //! 逐键过禁删面 + 封条核对 + HKLM 要求已提权），清理域四道一道没有。同一模型两套口径，
-//! 弱的那套就是入口。
+//! 弱的那套就是入口。外设域（peripheral）走的是同一威胁模型、同一份强化闸（R5b-K01）。
 //!
 //! 更要紧的是 N1 之后清理域列表会**跨根**列出 Electron 轨写的 `.reg`（无封条、形状更不可信），
 //! 弱链的输入面因此同步扩大 ⇒ 闸必须先补齐。
@@ -48,7 +48,11 @@ fn write_reg_backup_seal_with_digest(file: &Path, target: &str, sum: &str) {
     }
 }
 
-/// 写边车封条（自己算摘要）：**单锚**场景用（外设备份域没有管理员摘要）。
+/// 写边车封条（自己算摘要）：**单锚**场景用（测试夹具，或确定不需要管理员摘要的域）。
+///
+/// 还原链（cleanup / uninstall / peripheral）的生成侧必须用 [`write_reg_backup_seals`]：
+/// HKLM 目标还要写管理员摘要，只写边车的 HKLM 备份在还原闸里会按「缺管理员摘要」拒绝
+/// （R5b-K01：边车与备份同在用户可写目录，自洽不等于可信）。
 pub fn write_reg_backup_seal(file: &Path, target: &str) {
     let sum = match crate::engine::hash::sha256_file(file) {
         Ok(s) => s,
@@ -473,14 +477,78 @@ pub fn read_reg_text_file(file: &Path) -> Result<String, String> {
 /// `sections` 要带出去，是因为 v5-K06 批次 3（A6-K01）：执行臂 `reg_import_apply_sections`
 /// 与四道闸必须吃**同一份**解析产物——此前闸侧按物理行枚举键、执行侧另读另解析，
 /// 续行折行的删除臂对闸不可见、对执行器可见，禁删面/提权/摘要全部建在键子集上。
+/// R5b-K01：`sections` 的类型是 [`AdmittedSections`]（newtype），执行臂只收这个类型
+/// ⇒ 还原链拿到的 sections 只能来自本回执，不再是一条谁都能走的 `&[RegSection]`。
 #[derive(Debug)]
 pub struct RegBackupCheck {
     pub keys: Vec<String>,
     pub seal: &'static str,
-    pub sections: Vec<RegSection>,
+    pub sections: AdmittedSections,
 }
 
-/// 还原前的**公共闸**，两域共用同一顺序与同一回执口径：
+/// 过了还原闸的键段集合（R5b-K01）。
+///
+/// 为什么要这层 newtype：执行臂 [`reg_import_apply_sections`] 的入参此前是
+/// `&[RegSection]` —— 任何能解析 `.reg` 的调用方（包括将来忘了走闸的新调用点）都能
+/// 把 `[-HKEY…]` 删除段或 HKLM 值直接写进注册表。外设还原链正是这样绕开了同仓的
+/// HKLM 管理员摘要闸（自制 `.reg` + 自算边车 ⇒ 提权实例写任意 HKLM 值）。
+/// 现在还原链的唯一构造来源是 [`reg_backup_restore_guards`] 的回执。
+///
+/// 旁路只有一个，且名字写明它不属于还原路径：
+/// [`AdmittedSections::for_non_restore_path`]。
+#[derive(Debug)]
+pub struct AdmittedSections(Vec<RegSection>);
+
+impl AdmittedSections {
+    /// **非还原路径**的构造入口（刻意可见的旁路）。
+    ///
+    /// 只给「按 R5-W-1/W-2 白名单不套公共四道闸、也没有第二份判据可对拍」的域用：
+    /// 优化器步骤体（`commands/optimizer/apply.rs` → [`reg_import_apply`]）。
+    /// 三个还原域（cleanup / uninstall / peripheral）**禁止**调用本构造 —— 它们的
+    /// sections 必须来自 [`reg_backup_restore_guards`] 回执，否则「自制 `.reg` +
+    /// 自算边车」又能绕开 HKLM 管理员摘要闸（R5b-K01 的根因形态）。
+    pub(crate) fn for_non_restore_path(sections: Vec<RegSection>) -> Self {
+        Self(sections)
+    }
+}
+
+impl std::ops::Deref for AdmittedSections {
+    type Target = [RegSection];
+    fn deref(&self) -> &[RegSection] {
+        &self.0
+    }
+}
+
+/// 外设域（`"peripheral"`）的还原目标白名单 —— 用来替换通用受保护容器判据。
+///
+/// 为什么不能直接套通用判据（R5b-K01 落地时现算出的冲突）：外设备份的两个父键都在
+/// `HKLM\SYSTEM` 下，而 `reg_target_block_reason` 按「递归删树」语义把整棵
+/// `HKLM\SYSTEM` 都拦下（`REG_SUBTREE_DENY`），原样套用会把 Trim 自己生成的合法
+/// 外设备份一并打死（修法作用域里的合法目标被误伤）。外设域的产品写面只有下面两个
+/// 父键，所以这里换成**比通用判据更窄**的精确白名单：每段必须是这两个父键本身或其
+/// 子树（`reg.exe export` 会连子键一起导出）；其余目标（含任意 HKCU 段）一律拒。
+///
+/// 与 `engine/native/peripheral.rs` 的 `targets` 表同源：那里新增写面时本表必须同步，
+/// 否则新内核的备份还原不了（还原侧会点名「外设还原面之外」）。
+const PERIPHERAL_RESTORE_ROOTS: &[&str] = &[
+    r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\PriorityControl",
+    r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\mouclass\Parameters",
+];
+
+/// 外设域逐段目标判定（纯函数）：只放行两个父键及其子树，大小写不敏感。
+///
+/// 前缀匹配必须落在 `\` 边界上：`…\PriorityControlX` 不是 `…\PriorityControl` 的子键。
+fn peripheral_restore_target_allowed(full_key: &str) -> bool {
+    let k = full_key.trim();
+    PERIPHERAL_RESTORE_ROOTS.iter().any(|root| {
+        k.get(..root.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(root))
+            && k.as_bytes().get(root.len()).map_or(true, |b| *b == b'\\')
+    })
+}
+
+/// 还原前的**公共闸**，三个还原域（cleanup / uninstall / peripheral）共用同一顺序与
+/// 同一回执口径：
 /// ① 严格 `.reg` 解析（形状不对直接拒）② 解析出的每个键都要仍在允许删除的面上
 /// ③ 边车封条核对（`mismatch`/`corrupt`/`unreadable` 拒；`missing` 放行 —— 封条是 v0.2.6
 /// 才加的，早期备份与 Electron 轨老备份都没有，拒 HKCU 老备份等于把还原依据扔掉）
@@ -495,9 +563,13 @@ pub struct RegBackupCheck {
 /// 对它不可见 ⇒ 四道闸建在键子集上，执行臂却按合并后的完整键集直删（探针三样本实测）。
 /// 回执 `sections` 即执行臂要写的那一份，调用方直接传给 `reg_import_apply_sections`。
 ///
-/// `domain`（"cleanup"/"uninstall"）决定管理员摘要值名的域前缀；`is_admin` 由调用方
-/// 传入而不是在这里查系统，是为了让这几道闸能拿临时目录静默测；真机端到端归
-/// `#[ignore]` 的发布前用例。
+/// `domain`（"cleanup"/"uninstall"/"peripheral"）决定管理员摘要值名的域前缀；`is_admin`
+/// 由调用方传入而不是在这里查系统，是为了让这几道闸能拿临时目录静默测；真机端到端归
+/// `#[ignore]` 的发布前用例。R5b-K01：三个还原域（cleanup/uninstall/peripheral）都走
+/// 本函数，执行臂只收回执里的 [`AdmittedSections`]。
+///
+/// ② 的目标判定按域分流：peripheral 走 [`peripheral_restore_target_allowed`]（两个真实
+/// 父键的精确白名单，见上方注释）；其余域继续走 `reg_target_block_reason`。
 pub fn reg_backup_restore_guards(
     file: &Path,
     name: &str,
@@ -514,6 +586,7 @@ pub fn reg_backup_restore_guards(
         file,
         &content,
         name,
+        domain,
         is_admin,
         || read_admin_seal(domain, file),
     )
@@ -527,10 +600,12 @@ pub fn reg_backup_restore_guards(
 ///
 /// `admin_seal` 是闭包而不是值：只有目标含 HKLM 时才需要读管理员摘要，
 /// 保持「HKCU 备份不碰 HKLM」的原口径；单测则用它注入固定值。
+/// `domain` 只参与目标判定分流（peripheral 白名单 / 其余受保护容器）。
 fn reg_backup_restore_guards_with<F>(
     file: &Path,
     content: &RegBackupContent,
     name: &str,
+    domain: &str,
     is_admin: bool,
     admin_seal: F,
 ) -> Result<RegBackupCheck, String>
@@ -577,7 +652,20 @@ where
             );
             return Err("备份内含删除键段（[-HKEY…]），本工具不支持导入该形态，已拒绝还原".to_string());
         }
-        if let Some(reason) = crate::engine::protect::reg_target_block_reason(&sec.full_key()) {
+        if domain == "peripheral" {
+            // R5b-K01：外设域的父键整棵在 `HKLM\SYSTEM` 下，通用受保护容器判据会把
+            // 合法备份一并拒死；这里换成两个真实父键的精确白名单（比通用判据更窄）。
+            if !peripheral_restore_target_allowed(&sec.full_key()) {
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("备份 {name} 含外设还原面之外的目标，已拒绝还原: {}", sec.full_key()),
+                );
+                return Err(
+                    "备份含外设还原面之外的目标（只允许外设优化写过的两个系统键及其子键），已拒绝还原"
+                        .to_string(),
+                );
+            }
+        } else if let Some(reason) = crate::engine::protect::reg_target_block_reason(&sec.full_key()) {
             crate::engine::log::write_log(
                 "warn",
                 &format!("备份 {name} 含受保护目标，已拒绝还原: {reason}"),
@@ -637,7 +725,7 @@ where
             );
         }
     }
-    Ok(RegBackupCheck { keys, seal, sections })
+    Ok(RegBackupCheck { keys, seal, sections: AdmittedSections(sections) })
 }
 
 /// 删掉本进程写进 HKCU 的 scratch 键（真机探针的 Drop 守卫用；文件级，两个测试模块共用）。
@@ -860,6 +948,115 @@ mod reg_backup_common_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// R5b-K01 判红：同用户可同时改写「备份 + 自算边车」，边车自洽（seal = ok）**不构成**
+    /// 放行依据 —— 目标含 HKLM 时信任根是存在 HKLM（非提权进程写不了）的管理员摘要。
+    ///
+    /// 样本取外设域的真实父键（`…\PriorityControl`）：它在外设白名单内，所以要拒它只能
+    /// 靠提权闸与管理员摘要。五段：① 非提权 ⇒ 拒；② 提权但该文件名无管理员摘要 ⇒ 拒；
+    /// ③ 注入不符摘要 ⇒ 拒；④ 注入与当前字节同源的摘要 ⇒ 放行（等价于 Trim 提权生成那份，
+    /// 即「合法 ⇒ 可还原」的判据）；⑤ 同一份字节换到 cleanup 域 ⇒ 通用受保护容器判据
+    /// 照旧拒（证明外设白名单只对外设域生效，其它域的闸没有被松动）。
+    ///
+    /// 判红自证：删掉 `needs_admin && !is_admin` 分支 ⇒ ① 红；删掉管理员摘要读取/比对
+    /// ⇒ ②③ 红；把摘要比对改成恒通过 ⇒ ③ 红；把外设分支删掉（改回通用受保护容器判据）
+    /// ⇒ ④ 红（合法目标被 HKLM\SYSTEM 禁令误伤）。
+    #[test]
+    fn 伪造自洽边车的hklm备份仍被管理员摘要拒() {
+        let root = sandbox("k01-forged");
+        // 独特文件名：真实 HKLM 摘要键下不可能有历史值，② 才不依赖本机状态
+        let name = format!("forged-{}-{}.reg", std::process::id(), crate::engine::now_ms());
+        let file = root.join(&name);
+        let body = "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\PriorityControl]\r\n\"Win32PrioritySeparation\"=dword:00000002\r\n";
+        std::fs::write(&file, body).unwrap();
+        // 攻击者自算的边车：内容与封条完全自洽（seal = ok）
+        write_reg_backup_seal(&file, r"HKLM\SYSTEM\CurrentControlSet\Control\PriorityControl");
+        let content = read_reg_content(&file).expect("攻击者自己写的内容必须可读");
+        assert_eq!(
+            reg_backup_seal_state_with_digest(&file, &content.digest).0,
+            "ok",
+            "夹具前提：自算边车必须自洽（否则测的就不是这条闸）"
+        );
+        // ① 非提权实例 ⇒ 拒（不读真实 HKLM 摘要）
+        let err = reg_backup_restore_guards(&file, &name, "peripheral", false).unwrap_err();
+        assert!(err.contains("管理员"), "非提权实例必须拒: {err}");
+        // ② 提权但无管理员摘要 ⇒ 拒
+        let err = reg_backup_restore_guards(&file, &name, "peripheral", true).unwrap_err();
+        assert!(err.contains("管理员摘要"), "缺管理员摘要必须拒: {err}");
+        // ③ 注入不符的管理员摘要（模拟另一份备份的摘要）⇒ 拒
+        let err =
+            reg_backup_restore_guards_with(&file, &content, &name, "peripheral", true, || {
+                Some("b".repeat(64))
+            })
+            .unwrap_err();
+        assert!(err.contains("管理员摘要"), "摘要不符必须拒: {err}");
+        // ④ 唯一放行：管理员摘要与当前字节同源；回执 sections 即可执行的那一份
+        let chk =
+            reg_backup_restore_guards_with(&file, &content, &name, "peripheral", true, || {
+                Some(content.digest.clone())
+            })
+            .expect("管理员摘要与内容同源时必须放行（合法备份的判据）");
+        assert_eq!(chk.sections.len(), 1);
+        assert_eq!(
+            chk.sections[0].full_key(),
+            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\PriorityControl"
+        );
+        // ⑤ 同一份字节在 cleanup 域仍受通用保护面约束（外设白名单不是全局开口子）
+        let err =
+            reg_backup_restore_guards_with(&file, &content, &name, "cleanup", true, || {
+                Some(content.digest.clone())
+            })
+            .unwrap_err();
+        assert!(err.contains("受保护"), "cleanup 域的通用禁删面必须保持: {err}");
+        rm_sandbox(&root);
+    }
+
+    /// R5b-K01 纯判据：外设域目标白名单只放两个父键及其子树（`\` 边界），其余一律拒。
+    /// 判红自证：把前缀匹配从「`\` 边界」改成裸 `starts_with` ⇒ `PriorityControlX` 那条红；
+    /// 把 HKCU 加进白名单 ⇒ 最后两条红。
+    #[test]
+    fn 外设域目标白名单边界() {
+        assert!(peripheral_restore_target_allowed(
+            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\PriorityControl"
+        ));
+        assert!(peripheral_restore_target_allowed(
+            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\mouclass\Parameters"
+        ));
+        // 大小写与别名归一后的形态（parse_reg_text 的 hive 固定成全名）
+        assert!(peripheral_restore_target_allowed(
+            r"hkey_local_machine\system\currentcontrolset\control\prioritycontrol"
+        ));
+        // 子树（reg.exe export 会连子键一起导出）
+        assert!(peripheral_restore_target_allowed(
+            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\PriorityControl\Sub"
+        ));
+        // 边界：名字相近但不是子键
+        assert!(!peripheral_restore_target_allowed(
+            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\PriorityControlX"
+        ));
+        // 其它 HKLM / 任意 HKCU：外设域一律不放行
+        assert!(!peripheral_restore_target_allowed(
+            r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+        ));
+        assert!(!peripheral_restore_target_allowed(
+            r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run"
+        ));
+        assert!(!peripheral_restore_target_allowed(""));
+    }
+
+    /// R5b-K01 静态钉：执行臂只收 `&AdmittedSections`；宽松入口必须显式构造
+    /// `for_non_restore_path`（旁路在代码里可见，不再是一条隐式的 `&[RegSection]` 通道）。
+    ///
+    /// 判红自证：把执行臂参数改回 `&[RegSection]` ⇒ 第一条红；把 `reg_import_apply`
+    /// 直接传裸 Vec ⇒ 第二条红；期望串用 concat! 拼，避免断言扫到自己那行（恒真假绿）。
+    #[test]
+    fn 执行臂只收闸回执且旁路显式命名() {
+        let src = include_str!("reg_backup.rs");
+        let sig = concat!("pub fn reg_import_apply_sections(sections: &", "AdmittedSections)");
+        assert!(src.contains(sig), "执行臂入参必须是 &AdmittedSections");
+        let ctor = concat!("AdmittedSections::", "for_non_restore_path(");
+        assert!(src.contains(ctor), "宽松入口必须走命名明确的非还原构造");
+    }
+
     /// P0-01 对账纯判据：只清本域、且只清备份已不存在的值名
     #[test]
     fn 孤立管理员摘要值名识别() {
@@ -1041,7 +1238,7 @@ mod reg_backup_common_tests {
             "createdAt": 0,
         });
         std::fs::write(reg_seal_path_for(&file), payload.to_string()).unwrap();
-        let chk = reg_backup_restore_guards_with(&file, &content, "a.reg", false, || None)
+        let chk = reg_backup_restore_guards_with(&file, &content, "a.reg", "cleanup", false, || None)
             .expect("传入内容与封条同源时必须放行");
         assert_eq!(
             chk.seal, "ok",
@@ -1208,7 +1405,9 @@ mod reg_backup_common_tests {
              [HKEY_CURRENT_USER\\{long_key}]\r\n\"b\"=dword:00000002\r\n"
         );
         let secs = parse_reg_text(&text).expect("样本应可解析");
-        let failure = reg_import_apply_sections(&secs).expect_err("超长键名建键必失败");
+        // 本探针验的是写入臂的失败回执，不经还原闸 ⇒ 显式走非还原构造（R5b-K01 旁路）
+        let failure = reg_import_apply_sections(&AdmittedSections::for_non_restore_path(secs))
+            .expect_err("超长键名建键必失败");
         assert_eq!(
             failure.stat.values_written, 1,
             "失败回执必须带上已写入的值数: {failure:?}"
@@ -1768,10 +1967,14 @@ fn delete_value_failed_verdict(state: &crate::engine::native::RegReadState) -> O
 /// 失败即停并带着「第几段/哪个值」的原因返回 —— 不做"跳过坏行继续写"，
 /// 那会把一次还原变成半截状态而回执仍然像成功。
 ///
+/// R5b-K01：入参收窄成 [`AdmittedSections`]。还原链（cleanup / uninstall / peripheral）
+/// 能拿到的唯一构造来源是 `reg_backup_restore_guards` 的回执；非还原路径（优化器步骤体）
+/// 必须显式走 [`AdmittedSections::for_non_restore_path`]，旁路在代码里可见、可审。
+///
 /// P2-05：失败回执**带统计**（[`RegImportFailure`]），所有早退都带当前统计。
-pub fn reg_import_apply_sections(sections: &[RegSection]) -> Result<RegImportStat, RegImportFailure> {
+pub fn reg_import_apply_sections(sections: &AdmittedSections) -> Result<RegImportStat, RegImportFailure> {
     let mut stat = RegImportStat::default();
-    for sec in sections {
+    for sec in sections.iter() {
         let hive = match hive_of(&sec.hive) {
             Ok(h) => h,
             Err(reason) => {
@@ -1866,12 +2069,17 @@ pub fn reg_import_apply_sections(sections: &[RegSection]) -> Result<RegImportSta
     Ok(stat)
 }
 
-/// 非闸链域的 `.reg` 导入便捷件：自己读盘 + 自己解析 + 执行。
+/// **非还原路径**的 `.reg` 导入便捷件：自己读盘 + 自己解析 + 执行。
 ///
-/// **只有不经四道闸的域用它**（外设备份还原、优化器步骤体还原——两者按 R5-W-1/W-2
-/// 白名单不套公共四道闸，也没有第二份判据可对拍）。还原闸链（cleanup/uninstall 的
-/// 备份还原）**不要**走本函数：那会退回「闸侧一套键枚举、执行侧另一套」的旧形态，
-/// 应改用 `reg_backup_restore_guards` 回执的 `sections` + [`reg_import_apply_sections`]。
+/// 本函数刻意绕开 [`reg_backup_restore_guards`] 的四道闸，只给按 R5-W-1/W-2 白名单
+/// 不套公共闸的优化器步骤体用（`commands/optimizer/apply.rs`）。R5b-K01 起外设还原
+/// 也走公共强化闸，**不再是**本函数的调用方。
+///
+/// 旁路在这里显式可见：执行臂要求的 [`AdmittedSections`] 由
+/// [`AdmittedSections::for_non_restore_path`] 构造，名字点明它不属于还原链。
+/// 三个还原域（cleanup / uninstall / peripheral）的备份还原**不要**走本函数：
+/// 那会退回「闸侧一套键枚举、执行侧另一套」的旧形态，应改用 `reg_backup_restore_guards`
+/// 回执的 `sections` + [`reg_import_apply_sections`]。
 pub fn reg_import_apply(path: &std::path::Path) -> Result<RegImportStat, RegImportFailure> {
     let text = match read_reg_text_file(path) {
         Ok(t) => t,
@@ -1891,7 +2099,7 @@ pub fn reg_import_apply(path: &std::path::Path) -> Result<RegImportStat, RegImpo
             })
         }
     };
-    reg_import_apply_sections(&sections)
+    reg_import_apply_sections(&AdmittedSections::for_non_restore_path(sections))
 }
 
 fn hive_of(name: &str) -> Result<windows::Win32::System::Registry::HKEY, String> {
@@ -2222,7 +2430,8 @@ mod p3b_tests {
             delete_key: false,
             writes: Vec::new(),
         };
-        let err = reg_import_apply_sections(&[sec]).expect_err("NUL 子键建键必须失败");
+        let err = reg_import_apply_sections(&AdmittedSections::for_non_restore_path(vec![sec]))
+            .expect_err("NUL 子键建键必须失败");
         assert!(err.reason.contains("打开/创建键失败"), "{err:?}");
     }
 

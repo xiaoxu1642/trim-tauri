@@ -30,7 +30,7 @@
 use serde_json::{json, Value};
 use tauri::WebviewWindow;
 
-use crate::engine::{civil_from_days, guard, paths};
+use crate::engine::{civil_from_days, guard, paths, sysinfo};
 use crate::security::{self, SECRET_MASK};
 
 // ==================== 常量（与 main.js 逐条同值） ====================
@@ -1151,6 +1151,14 @@ pub fn settings_load<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Valu
 // 的读取挂在解密链之后（`protect::configure_from_app` 在 setup 里）。在 Builder 之前去读它，
 // 等于把「数据根 OnceLock 何时定死」提前到旧目录迁移之前。这个文件只有一个布尔，
 // 明文、可直接删，删掉就回默认档。
+//
+// # 提权态为什么一律不认这个偏好（P0-6 / R1a-M01）
+//
+// 该文件是用户可写目录里的明文布尔。管理员实例若按它带 9222 起来，同用户（中完整性）
+// 进程连上 CDP 就能在页面上下文调 `window.api.*`，以管理员令牌驱动 MAIN 档命令 ——
+// 即「写一个配置换管理员」。所以提权进程**连读都不读**它，只有启动者显式注入
+// `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 才算数（临时、由启动者承担后果）；
+// 提权进程里的 `settings:cdp-set` 也直接拒绝，文案指向未提权会话。
 
 /// WebView2 远程调试端口。**固定端口**是刻意的：验证侧要能不问自答地连上；
 /// 端口随机就得先从日志里捞端口，而正式环境的用户没有看日志的习惯。
@@ -1170,15 +1178,52 @@ fn cdp_pref_path() -> std::path::PathBuf {
 /// 读手动档偏好：`None` = 从没设过（走默认档），`Some(b)` = 用户显式选过。
 /// 读不到 / 不是对象 / 字段不是布尔一律当「没设过」——这是**降级**不是损坏，
 /// 因为默认档本身就是安全答案（正式环境关）。
-fn read_cdp_pref() -> Option<bool> {
+///
+/// `is_admin` 为真时**不读文件**：这条判据必须让「提权态下的可写文件」彻底退出决策，
+/// 只把它当「没设过」，而不是读完再忽略（读完再忽略会在别处被再次引用）。
+fn read_cdp_pref(is_admin: bool) -> Option<bool> {
+    if is_admin {
+        return None;
+    }
     let raw = std::fs::read_to_string(cdp_pref_path()).ok()?;
     let v: Value = serde_json::from_str(&raw).ok()?;
     v.get("enabled")?.as_bool()
 }
 
-/// 生效意图：dev 构建默认开、正式构建默认关；用户显式设过则以用户为准。
-fn cdp_effective_want() -> bool {
-    read_cdp_pref().unwrap_or(cfg!(debug_assertions))
+/// 下次启动的意图（纯函数）：dev 构建默认开、正式构建默认关，用户显式设过以用户为准；
+/// 但提权进程恒关 —— `cdp-preference.json` 是用户可写文件，不得决定管理员进程的调试面。
+fn cdp_want_on_next_start(is_admin: bool, pref_enabled: Option<bool>, debug_build: bool) -> bool {
+    if is_admin {
+        return false;
+    }
+    pref_enabled.unwrap_or(debug_build)
+}
+
+/// 启动期动作（纯函数）：外部已注入就不覆盖，否则按意图决定是否由本进程注入 9222。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CdpStartupDecision {
+    /// 外部已注入 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`：保持原值，只据其内容记录生效态。
+    External,
+    /// 由本进程注入 `--remote-debugging-port`。
+    Enable,
+    /// 不注入，端口关闭。
+    Disable,
+}
+
+fn cdp_startup_decision(
+    is_admin: bool,
+    external_injected: bool,
+    pref_enabled: Option<bool>,
+    debug_build: bool,
+) -> CdpStartupDecision {
+    if external_injected {
+        return CdpStartupDecision::External;
+    }
+    if cdp_want_on_next_start(is_admin, pref_enabled, debug_build) {
+        CdpStartupDecision::Enable
+    } else {
+        CdpStartupDecision::Disable
+    }
 }
 
 /// 启动期应用一次，**必须在 `tauri::Builder` 之前调用**（见模块注释）。
@@ -1187,17 +1232,28 @@ fn cdp_effective_want() -> bool {
 /// 是既有工作流，覆盖会把别人的调试现场弄没；此时只据其内容记录生效态。
 pub fn apply_cdp_debug_env_at_startup() {
     use std::sync::atomic::Ordering;
-    if let Ok(existing) = std::env::var(CDP_ENV_KEY) {
-        if !existing.trim().is_empty() {
-            CDP_ACTIVE_NOW.store(existing.contains("remote-debugging-port"), Ordering::SeqCst);
-            return;
+    let is_admin = sysinfo::is_admin();
+    let existing = std::env::var(CDP_ENV_KEY)
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let decision = cdp_startup_decision(
+        is_admin,
+        existing.is_some(),
+        read_cdp_pref(is_admin),
+        cfg!(debug_assertions),
+    );
+    match decision {
+        CdpStartupDecision::External => {
+            let args = existing.as_deref().unwrap_or_default();
+            CDP_ACTIVE_NOW.store(args.contains("remote-debugging-port"), Ordering::SeqCst);
         }
-    }
-    if cdp_effective_want() {
-        std::env::set_var(CDP_ENV_KEY, format!("--remote-debugging-port={CDP_PORT}"));
-        CDP_ACTIVE_NOW.store(true, Ordering::SeqCst);
-    } else {
-        CDP_ACTIVE_NOW.store(false, Ordering::SeqCst);
+        CdpStartupDecision::Enable => {
+            std::env::set_var(CDP_ENV_KEY, format!("--remote-debugging-port={CDP_PORT}"));
+            CDP_ACTIVE_NOW.store(true, Ordering::SeqCst);
+        }
+        CdpStartupDecision::Disable => {
+            CDP_ACTIVE_NOW.store(false, Ordering::SeqCst);
+        }
     }
 }
 
@@ -1209,8 +1265,10 @@ pub fn settings_cdp_state<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value 
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
+    let is_admin = sysinfo::is_admin();
+    let pref = read_cdp_pref(is_admin);
     let active = CDP_ACTIVE_NOW.load(Ordering::SeqCst);
-    let want = cdp_effective_want();
+    let want = cdp_want_on_next_start(is_admin, pref, cfg!(debug_assertions));
     json!({
         "success": true,
         "activeNow": active,
@@ -1218,16 +1276,29 @@ pub fn settings_cdp_state<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value 
         "requiresRestart": active != want,
         "port": CDP_PORT,
         "devBuild": cfg!(debug_assertions),
-        "manuallySet": read_cdp_pref().is_some(),
+        "manuallySet": pref.is_some(),
     })
 }
 
 /// settings:cdp-set —— 写手动档偏好。**只改下次启动的意图**，回执里如实带上当前态与重启要求。
+///
+/// 提权进程直接拒绝（P0-6）：偏好文件是用户可写面，管理员实例不得由它决定是否开 9222，
+/// 所以这一档连写都不写，免得界面看起来「已记录」而下次启动照样不生效。
 #[tauri::command]
 pub async fn settings_cdp_set<R: tauri::Runtime>(window: WebviewWindow<R>, enabled: bool) -> Value {
     use std::sync::atomic::Ordering;
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
+    }
+    if sysinfo::is_admin() {
+        crate::engine::log::write_log(
+            "warn",
+            &format!("提权进程拒绝写 CDP 偏好（请求值 {enabled}）：管理员态不通过偏好开启调试端口"),
+        );
+        return json!({
+            "success": false,
+            "message": "管理员进程下不支持通过偏好开启调试端口，需要调试请在未提权的会话里开",
+        });
     }
     let active = CDP_ACTIVE_NOW.load(Ordering::SeqCst);
     let payload = json!({
@@ -1253,6 +1324,73 @@ pub async fn settings_cdp_set<R: tauri::Runtime>(window: WebviewWindow<R>, enabl
             "已记录，但本进程的调试端口无法在运行中改变——重启 Trim 后生效"
         },
     })
+}
+
+#[cfg(test)]
+mod tests_cdp_admin_gate {
+    //! P0-6（R1a-M01）：用户可写的 `cdp-preference.json` 不得决定**提权**进程是否暴露 9222。
+    //! 断言钉在决策枚举上：破坏 `cdp_want_on_next_start` 里的 `is_admin` 分支后，
+    //! `elevated_ignores_pref_that_enables_debug_port` 立刻由 Disable 变 Enable 而判红。
+    use super::cdp_startup_decision;
+    use super::cdp_want_on_next_start;
+    use super::CdpStartupDecision;
+
+    #[test]
+    fn elevated_ignores_pref_that_enables_debug_port() {
+        // 提权 + 偏好 enabled:true：dev / 正式两种构建都不许注入 9222。
+        for debug_build in [true, false] {
+            assert_eq!(
+                cdp_startup_decision(true, false, Some(true), debug_build),
+                CdpStartupDecision::Disable,
+                "提权进程读到用户可写的 enabled:true 也不得开 9222（debug_build={debug_build}）"
+            );
+            assert!(
+                !cdp_want_on_next_start(true, Some(true), debug_build),
+                "提权进程的 next-start 意图必须恒为关（debug_build={debug_build}）"
+            );
+        }
+    }
+
+    #[test]
+    fn elevated_still_honors_external_injection() {
+        // 外部注入是启动者的显式行为：不覆盖、不剥离，提权态同样只按内容记录。
+        assert_eq!(
+            cdp_startup_decision(true, true, Some(false), false),
+            CdpStartupDecision::External,
+            "提权 + 外部环境变量必须放行（保持原值）"
+        );
+        assert_eq!(
+            cdp_startup_decision(true, true, Some(true), true),
+            CdpStartupDecision::External
+        );
+    }
+
+    #[test]
+    fn non_elevated_defaults_follow_build_kind() {
+        assert_eq!(
+            cdp_startup_decision(false, false, None, false),
+            CdpStartupDecision::Disable,
+            "普通正式构建 + 无偏好 ⇒ 关"
+        );
+        assert_eq!(
+            cdp_startup_decision(false, false, None, true),
+            CdpStartupDecision::Enable,
+            "普通 dev 构建 + 无偏好 ⇒ 开"
+        );
+    }
+
+    #[test]
+    fn non_elevated_pref_still_overrides_default() {
+        // 非提权时手动档保持原功能：正式构建可开、dev 可关。
+        assert_eq!(
+            cdp_startup_decision(false, false, Some(true), false),
+            CdpStartupDecision::Enable
+        );
+        assert_eq!(
+            cdp_startup_decision(false, false, Some(false), true),
+            CdpStartupDecision::Disable
+        );
+    }
 }
 
 #[cfg(test)]

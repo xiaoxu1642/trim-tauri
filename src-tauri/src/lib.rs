@@ -662,8 +662,10 @@ fn grant_asset_scope_on_data_dirs<R: Runtime>(app: &AppHandle<R>) {
 pub fn run() {
     // ---------- CDP 远程调试参数：必须早于 Builder ----------
     // WebView2 的 `--remote-debugging-port` 是浏览器进程创建参数，Builder 一旦走起来就再也改不了
-    // （dev 默认开、正式默认关但用户可手动开，见 commands::settings 的 CDP 段注释）。
-    // 放在提权握手之前是有意的：那一串逻辑可能直接 exit(0)，届时端口参数已经定下、不影响任何判定。
+    // （dev 默认开、正式默认关、非提权时可手动开；提权进程不认偏好、只认外部注入的
+    // `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`，见 commands::settings 的 CDP 段注释）。
+    // 放在提权握手之前是有意的：那一串逻辑可能直接 exit(0)，届时端口参数已经定下、不影响任何判定；
+    // 提权与否由进程令牌判定（`sysinfo::is_admin`），不依赖后面的握手结果。
     commands::settings::apply_cdp_debug_env_at_startup();
 
     // ---------- 提权接管握手：必须早于任何建窗 ----------

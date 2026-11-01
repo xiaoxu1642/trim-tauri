@@ -348,7 +348,41 @@ fn report_name() -> String {
     format!("realtime-{}-{:04}.json", crate::engine::now_ms(), seq % 10000)
 }
 
+/// 保存链的受判入口（R1d-K01）：根判定 + TTL 裁剪 + 写出收在同一函数体内。
+///
+/// 病根：旧保存链在阻塞闭包里 `ensure_report_dir()` → `prune_reports_in` →
+/// `atomic_write_json`，而执行体不看根 —— `cache/realtime-reports` 被换成 junction 时，
+/// 裁剪会**永久删除**链接另一头 mtime 超 TTL 的 `.json`（不经回收站、不过
+/// `is_path_protected`），新报告也会被写进链接另一头。
+///
+/// 判据本体与 `prune_reports` 同一段，且留在本函数体内**可见**（`check-delete-root-guard`
+/// 判的是根入口函数体内看得见判定，套一层间接会让它失明 —— 同 `prune_reports` 的注释）。
+/// 根不可信 ⇒ 裁剪与写出**都不执行**（不得先裁后写），拒因随 `Err` 进回执，不静默继续。
+/// 判红自证：摘掉下面这段判定 ⇒ 单测「报告根是链接时保存链零删除零新写」当场红。
+fn save_report_guarded(
+    dir: &std::path::Path,
+    report_name: &str,
+    payload: &Value,
+    now_ms: i64,
+) -> Result<usize, String> {
+    let verdict = crate::engine::protect::inspect_root(dir, crate::engine::paths::data_root_base(dir).as_deref());
+    if !verdict.is_trusted() {
+        crate::engine::protect::note_root_skipped("保存网速报告", dir, &verdict);
+        return Err(format!(
+            "报告目录未通过安全判定，本次未保存也未裁剪：{}",
+            verdict.reason()
+        ));
+    }
+    let path = dir.join(report_name);
+    let pruned = prune_reports_in(dir, now_ms, REPORT_TTL_MS);
+    security::atomic_write_json(&path, payload)?;
+    Ok(pruned)
+}
+
 /// realtime:report-save
+///
+/// R1d-K01：保存走 `save_report_guarded`（根判定 / TTL 裁剪 / 写出同一入口），
+/// 根不可信时三件事都不执行，回 `success:false` 并带拒因。
 #[tauri::command]
 pub async fn realtime_report_save<R: tauri::Runtime>(window: WebviewWindow<R>, data: Value) -> Result<Value, String> {
     guard::guard_readonly(&window)?;
@@ -371,10 +405,8 @@ pub async fn realtime_report_save<R: tauri::Runtime>(window: WebviewWindow<R>, d
     let res = tauri::async_runtime::spawn_blocking(move || {
         report_bytes_check(&payload)?;
         let dir = ensure_report_dir()?;
-        let path = dir.join(&report_name);
-        let pruned = prune_reports_in(&dir, crate::engine::now_ms(), REPORT_TTL_MS);
-        security::atomic_write_json(&path, &payload)?;
-        Ok::<usize, String>(pruned)
+        // R1d-K01：裁剪与写出必须在**同一个受判入口**里，根不可信时两件事都不做。
+        save_report_guarded(&dir, &report_name, &payload, crate::engine::now_ms())
     })
     .await;
     match res {
@@ -831,12 +863,92 @@ mod tests {
         );
     }
 
+    /// R1d-K01：保存链根不可信时必须「零裁剪、零写出」—— 链接另一头的过期报告
+    /// 一份都不许永久删，新报告也不许写到链接外。
+    ///
+    /// 夹具走目录符号链接（造不出来显式 SKIP，与删除侧用例同口径）。
+    /// 判红自证：摘掉 `save_report_guarded` 的根判定块 ⇒ 过期报告被剪、新报告写到
+    /// 链接外，本用例当场红。
+    #[test]
+    fn 报告根是链接时保存链零删除零新写() {
+        let sb = crate::testutil::Sandbox::new(&format!("realtime-save-junction-{}", std::process::id()));
+        let root = sb.path();
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let old = put(&real, "realtime-old.json");
+        let f = std::fs::OpenOptions::new().write(true).open(&old).unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_577_836_800))
+            .unwrap();
+        drop(f);
+        let link = root.join("link");
+        if std::os::windows::fs::symlink_dir(&real, &link).is_err() {
+            println!("SKIP：本机 symlink_dir 失败（需开发者模式/提权），保存链根 reparse 一面未校验");
+            return;
+        }
+        let payload = serde_json::json!({ "samples": [] });
+        let err = save_report_guarded(&link, "realtime-new.json", &payload, crate::engine::now_ms())
+            .unwrap_err();
+        assert!(err.contains("安全判定"), "回执必须说明根不可信: {err}");
+        assert!(err.contains("reparse"), "拒因要能指向真实原因: {err}");
+        assert!(old.exists(), "根不可信时链接另一头的过期报告一份都不许删");
+        assert!(!real.join("realtime-new.json").exists(), "根不可信时新报告不许写到链接外");
+        let leftovers: Vec<String> = std::fs::read_dir(&real)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "realtime-old.json")
+            .collect();
+        assert!(leftovers.is_empty(), "裁剪与写出都不得启动，链接外不许出现临时件: {leftovers:?}");
+    }
+
+    /// R1d-K01 正向对照：普通报告目录必须保存成功，且 TTL 裁剪照旧执行 ——
+    /// 「恒判不可信」也能让上面的拒收用例全绿，这条把它钉回来。
+    #[test]
+    fn 普通报告目录保存成功且过期件被裁剪() {
+        let sb = crate::testutil::Sandbox::new(&format!("realtime-save-plain-{}", std::process::id()));
+        let dir = sb.path();
+        let old = put(dir, "realtime-old.json");
+        let f = std::fs::OpenOptions::new().write(true).open(&old).unwrap();
+        f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_577_836_800))
+            .unwrap();
+        drop(f);
+        let payload = serde_json::json!({ "createdAt": "2026-11-01T00:00:00Z", "samples": [] });
+        let pruned = save_report_guarded(dir, "realtime-new.json", &payload, crate::engine::now_ms())
+            .expect("普通目录必须判可信并保存成功");
+        assert_eq!(pruned, 1, "过期报告必须被 TTL 裁剪回收");
+        assert!(!old.exists(), "TTL 裁剪在可信根上必须照常生效");
+        let written = dir.join("realtime-new.json");
+        assert!(written.exists(), "新报告必须落盘");
+        let back: Value = serde_json::from_str(&std::fs::read_to_string(&written).unwrap()).unwrap();
+        assert_eq!(back["createdAt"], serde_json::json!("2026-11-01T00:00:00Z"));
+    }
+
+    /// R1d-K01：根不是目录（不可信的另一种形态）⇒ 保存链拒收并说明原因，
+    /// 根与目录内都不许出现改动。用普通文件当根，不依赖开发者模式 ⇒ 本机恒真跑，不 SKIP。
+    #[test]
+    fn 报告根不是目录时保存链拒收并说明原因() {
+        let sb = crate::testutil::Sandbox::new(&format!("realtime-save-file-root-{}", std::process::id()));
+        let root = put(sb.path(), "not-a-dir");
+        let payload = serde_json::json!({ "samples": [] });
+        let err = save_report_guarded(&root, "realtime-new.json", &payload, crate::engine::now_ms())
+            .unwrap_err();
+        assert!(err.contains("不是目录"), "回执要点名拒因: {err}");
+        assert!(root.is_file(), "判定只读不改：根文件本身不许被动");
+        let extra: Vec<String> = std::fs::read_dir(sb.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "not-a-dir")
+            .collect();
+        assert!(extra.is_empty(), "根不可信时目录里不许出现新文件（含临时件）: {extra:?}");
+    }
+
     /// B2-4：两个删除入口必须共用**同一道**根判定与同一句回执措辞 ——
     /// 「一个入口拒收、另一个入口穿透」正是这条病的形态，各写一份就会复发。
-    /// 判红自证：把删除侧的 `inspect_root` 判定块删掉 ⇒ `inspect_root(` 从 3 掉到 2，当场红。
+    /// 判红自证：把删除侧的 `inspect_root` 判定块删掉 ⇒ `inspect_root(` 从 4 掉到 3，当场红。
     ///
     /// 期望每个根入口体内各自看得见 `inspect_root(`（`prune_reports` / `report-delete` /
-    /// `report-clear`），而不是抽成一个公共函数：
+    /// `report-clear` / `save_report_guarded`），而不是抽成一个公共函数：
     /// `check-delete-root-guard` 的判据是「根入口**函数体内**看得见 `inspect_root(`」，
     /// 套一层间接会让它对这些根入口全部失明 —— 不许为了少写两行去关掉那道机检。
     /// 判据本体仍是同一个 `protect::inspect_root`，措辞由 `report_root_receipt` 单点给。
@@ -857,8 +969,8 @@ mod tests {
         );
         assert_eq!(
             prod.matches("protect::inspect_root(").count(),
-            3,
-            "三处根入口（TTL 裁剪 / 删除 / 清空）各自体内都要看得见判据，不许被间接层藏起来"
+            4,
+            "四处根入口（TTL 裁剪 / 删除 / 清空 / 保存）各自体内都要看得见判据，不许被间接层藏起来"
         );
     }
 

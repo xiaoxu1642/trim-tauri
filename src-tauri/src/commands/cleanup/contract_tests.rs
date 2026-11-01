@@ -1141,22 +1141,37 @@ fn 清理失败路径集合_取逐文件明细与整项失败行() {
 /// 纯函数测试只证明 `cleanup_failed_paths` 取法对，证明不了「回执真的被记进台账」
 /// —— 把 record 调用删掉，上面那条照样全绿，而登记闸会拒掉全部合法登记
 /// （症状：清理/残留明明失败了，登记面却说「不是删除失败回执里的文件」）。
+///
+/// R2a-M01：台账准入还带**失败原因**维度 —— 接线钉必须同时钉住「每条链标的原因」，
+/// 否则实参退化成 `TrashFailed` 时台账照样收，安全拒绝项又会被放出去。
 #[test]
 fn 清理失败回执_三个执行命令都落台账() {
     let scan_src = include_str!("scan_execute.rs");
     assert!(
-        scan_src.contains("delete_failed::record"),
-        "cleanup:execute 必须把删除失败路径记进失败回执台账（登记闸只认台账里的路径）"
+        scan_src.contains("delete_failed::record_modes"),
+        "cleanup:execute 必须把删除失败路径（带失败原因）记进失败回执台账（登记闸只认台账里的路径）"
+    );
+    assert!(
+        scan_src.contains("DeleteFailMode::PermanentDeleteFailed"),
+        "cleanup:execute 是永久删链 ⇒ 失败回执必须标 PermanentDeleteFailed（标成 TrashFailed 就进了重启后删）"
     );
     let fc_src = include_str!("../fileclean.rs");
     assert!(
-        fc_src.contains("delete_failed::record"),
+        fc_src.contains("delete_failed::record_modes"),
         "fileclean:execute 必须把回收站失败的文件记进失败回执台账"
+    );
+    assert!(
+        fc_src.contains("DeleteFailMode::TrashFailed"),
+        "fileclean 走回收站 ⇒ 失败回执必须标 TrashFailed（否则真·回收站失败没有出口）"
     );
     let residue_src = include_str!("../uninstall/residue.rs");
     assert!(
-        residue_src.contains("delete_failed::record"),
-        "uninstall:residue-execute 必须把删除失败的文件记进失败回执台账"
+        residue_src.contains("delete_failed::record_modes"),
+        "uninstall:residue-execute 必须把删除失败的文件（带失败原因）记进失败回执台账"
+    );
+    assert!(
+        residue_src.contains("DeleteFailMode::from_finder_mode"),
+        "残留链必须带 finder 的 mode 进台账（rejected/reparse-ancestor/unrecoverable-name 是安全拒绝，不得登记）"
     );
 }
 

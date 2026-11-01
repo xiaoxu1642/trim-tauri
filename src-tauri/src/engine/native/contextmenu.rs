@@ -1497,15 +1497,79 @@ unsafe fn is_system_com_server(guid: &str) -> bool {
 
 /// 词法归一：小写、`/`→`\`、折回 verbatim `\\?\` 前缀。路径键比对只走这里，
 /// 不再造第二份（R5a-L02 同因）。
+///
+/// R5a-K03：本函数同时服务**文件路径**（WinX/SendTo 臂）与**注册表路径**
+/// （`HKEY_*\…` 容器臂），所以不能改调 `protect::normalize_lexical`——那把相对
+/// 路径拼到当前工作目录，注册表容器判定会被打碎。这里只做「先认命名空间、再按
+/// 各自分量表拒危险组件」：`.` / `..` / 内部空段 / 控制字符任一命中即返回空串
+/// （fail-closed：`cm_under` 对空键恒 false）。不这么做的话 `cm_*_root_ok` 只是
+/// 字符串前缀判，而 `std::fs::rename` / `SetFileAttributesW` 由 Win32 折叠 `..`，
+/// `<根>\Group1\..\..\…\Windows\System32\x.dll` 就能纯词法跨出根外。
 fn cm_path_key(p: &str) -> String {
     let n = p.trim().replace('/', "\\");
     let n = n.strip_prefix(r"\\?\").unwrap_or(&n);
-    n.trim_end_matches('\\').to_ascii_lowercase()
+    let n = n.trim_end_matches('\\');
+    if n.is_empty() {
+        return String::new();
+    }
+    // UNC（`\\server\share\…`）的前导双分隔符是命名空间标记、不是一个空分量：
+    // 先剥这两个字符再按 `\` 切分量，之后的空段才判危险（R5a-K03 口径）。
+    let body = if n.starts_with(r"\\") { &n[2..] } else { n };
+    let ok = if cm_registry_namespace(body) {
+        cm_registry_components_ok(body)
+    } else {
+        cm_file_components_ok(body)
+    };
+    if !ok {
+        return String::new();
+    }
+    n.to_ascii_lowercase()
+}
+
+/// 命名空间识别：首分量是注册表 hive 根名即按键形走注册表分量表。本域现只产
+/// `HKEY_CURRENT_USER\…` / `HKEY_LOCAL_MACHINE\…`，其余 hive 一并认——将来新增
+/// 来源时不会静默落进文件分量表。
+fn cm_registry_namespace(body: &str) -> bool {
+    let first = body.split('\\').next().unwrap_or("");
+    [
+        "hkey_current_user",
+        "hkey_local_machine",
+        "hkey_users",
+        "hkey_current_config",
+        "hkey_classes_root",
+        "hkey_performance_data",
+        "hkey_dyn_data",
+    ]
+    .iter()
+    .any(|h| first.eq_ignore_ascii_case(h))
+}
+
+/// 文件路径分量表：`.` / `..` / 空段 / 控制字符即拒。Win32 在 DOS→NT 折回时
+/// 逐段剥尾随空格，所以按「去尾随空格后」的形态判 `.` / `..`（`.. ` 与 `..`
+/// 同等危险）；纯句点段（`...`）折回后等价于当前目录、不改变层级，无需拒。
+fn cm_file_components_ok(body: &str) -> bool {
+    body.split('\\').all(|c| {
+        if c.is_empty() || c.chars().any(char::is_control) {
+            return false;
+        }
+        let folded = c.trim_end_matches(' ');
+        folded != "." && folded != ".."
+    })
+}
+
+/// 注册表键形分量表：键名逐段**字面**（不做尾随空格/句点折叠，`Foo ` 与 `Foo`
+/// 是两个键），只拒 `.` / `..` / 空段 / 控制字符。注册表 API 本身不折叠 `..`，
+/// 这里仍拒——容器判定是字符串前缀判，留着 `..` 段等于给下一个把调用面改成
+/// `normalize_lexical` 的人埋雷。
+fn cm_registry_components_ok(body: &str) -> bool {
+    body.split('\\')
+        .all(|c| !c.is_empty() && !c.chars().any(char::is_control) && c != "." && c != "..")
 }
 
 /// 组件边界前缀判：`a\b` 是 `a\bc` 的前缀不算命中。
 fn cm_under(path_key: &str, root_key: &str) -> bool {
-    if root_key.is_empty() {
+    // 空键是 `cm_path_key` 的 fail-closed 出口，这里显式判死，不靠前缀判巧合。
+    if path_key.is_empty() || root_key.is_empty() {
         return false;
     }
     path_key == root_key || path_key.starts_with(&format!("{root_key}\\"))
@@ -2403,7 +2467,8 @@ mod c02_write_gate_tests {
     /// C02（R5a-K02）写侧准入三判。判红自证：把 `cm_under` 的组件边界判改成裸
     /// `starts_with` ⇒ ② 类相邻前缀样本红；把 `cm_registry_container_ok` 的
     /// Classes 前缀判删掉 ⇒ ⑤ 类越界容器样本红；把 `cm_path_key` 的 verbatim
-    /// 折回删掉 ⇒ ③ 类 verbatim 样本红。
+    /// 折回删掉 ⇒ ③ 类 verbatim 样本红。`..` 穿越面见
+    /// `cm写侧准入_危险分量拒_文件与注册表两路`（R5a-K03）。
     #[test]
     fn cm写侧准入_容器合法放行_越界拒() {
         // ---- 键归一（③）：verbatim 折回 / 正斜杠 / 大小写 / 尾反斜杠 ----
@@ -2432,5 +2497,72 @@ mod c02_write_gate_tests {
         assert!(!cm_registry_container_ok(r"HKEY_CURRENT_USER\Software\ClassesX\*\shell\Evil"), "Classes 相邻前缀必须拒");
         assert!(!cm_registry_container_ok(r"HKEY_USERS\.DEFAULT\Software\Classes\*\shell\Evil"), "hive 越界必须拒");
         assert!(!cm_registry_container_ok(""), "空串必须拒");
+    }
+
+    /// R5a-K03：`..` / `.` / 内部空段 / 控制字符分量必须让键 fail-closed。不做这层，
+    /// `cm_*_root_ok` 只是字符串前缀判，而 Win32 会把 `..` 折叠后交给
+    /// `std::fs::rename` / `SetFileAttributesW`，目标就落到根外。
+    ///
+    /// 判红自证：删掉 `cm_file_components_ok` 的 `..` 拒绝分支 ⇒ ①② 两组红；
+    /// 删掉 `cm_registry_components_ok` 的 `..` 拒绝分支 ⇒ ③ 组红（前置的「同形状
+    /// 正常键放行」保证红来自分量判，不是形状误杀）。样本取自审查探针
+    /// `_探针/R5a/cm-containment-bypass.mjs`（正控入库）。
+    #[test]
+    fn cm写侧准入_危险分量拒_文件与注册表两路() {
+        let la = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let ad = std::env::var("APPDATA").unwrap_or_default();
+
+        // ---- ① 文件路径（WinX）：探针原样本，6 级 `..` 落到 C:\Windows\System32 ----
+        let winx_escape = format!(r"{la}\Microsoft\Windows\WinX\Group1\..\..\..\..\..\..\Windows\System32\x.dll");
+        assert!(cm_path_key(&winx_escape).is_empty(), "含 `..` 的文件键必须 fail-closed 成空键");
+        assert!(!cm_winx_root_ok(&winx_escape), "WinX `..` 穿越必须拒");
+        // 审查验收口径的短样本：`Group1\..\..\Windows\System32\x`（几级 `..` 都必须拒）
+        assert!(
+            !cm_winx_root_ok(&format!(r"{la}\Microsoft\Windows\WinX\Group1\..\..\Windows\System32\x")),
+            "WinX 短 `..` 样本必须拒"
+        );
+        // 同形状把 `..` 去掉仍放行（局部正控）
+        assert!(cm_winx_root_ok(&format!(r"{la}\Microsoft\Windows\WinX\Group1\工具.lnk")), "WinX 正常目标必须放行");
+
+        // ---- ② 文件路径（SendTo）：探针原样本 ----
+        let sendto_escape = format!(r"{ad}\Microsoft\Windows\SendTo\..\..\..\..\..\..\Windows\System32\x.dll");
+        assert!(cm_path_key(&sendto_escape).is_empty());
+        assert!(!cm_sendto_root_ok(&sendto_escape), "SendTo `..` 穿越必须拒");
+        assert!(cm_sendto_root_ok(&format!(r"{ad}\Microsoft\Windows\SendTo\x.desklink")), "SendTo 正常目标必须放行");
+
+        // ---- ③ 注册表路径：同一 `..` 形态也必须拒 ----
+        // 前置：同形状的正常键今天就是放行的（证明下面的红只来自 `..` 分量）。
+        assert!(cm_registry_container_ok(r"HKEY_CURRENT_USER\Software\Classes\*\shell\Foo\command"));
+        let reg_escape = r"HKEY_CURRENT_USER\Software\Classes\*\shell\..\..\..\Run";
+        assert!(cm_path_key(reg_escape).is_empty(), "注册表 `..` 段必须 fail-closed 成空键");
+        assert!(!cm_registry_container_ok(reg_escape), "注册表 `..` 段必须拒");
+        assert!(
+            !cm_registry_container_ok(r"HKEY_LOCAL_MACHINE\SOFTWARE\Classes\Directory\shellex\ContextMenuHandlers\..\..\..\..\..\Run"),
+            "shellex 容器里的 `..` 段必须拒"
+        );
+        // 与文件路径同形的短样本：`Group1\..\..\Windows\System32\x`
+        assert!(
+            !cm_registry_container_ok(r"HKEY_CURRENT_USER\Software\Classes\*\shell\Group1\..\..\Windows\System32\x"),
+            "注册表短 `..` 样本必须拒"
+        );
+
+        // ---- ④ 其余危险分量：单点段 / 内部空段 / 控制字符 / 折回即 `..` 的变体 ----
+        assert!(cm_path_key(r"C:\X\.\Y\x.dll").is_empty(), "`.` 段必须拒");
+        assert!(cm_path_key(r"C:\X\\Y\x.dll").is_empty(), "内部空段必须拒");
+        assert!(cm_path_key("C:\\X\\\u{1}\\x.dll").is_empty(), "控制字符必须拒");
+        assert!(cm_path_key(r"C:\X\.. \x.dll").is_empty(), "`.. ` 折回即 `..`，必须拒");
+        assert!(cm_path_key(r"HKEY_CURRENT_USER\Software\Classes\*\shell\.\..\Run").is_empty(), "注册表 `.` 段必须拒");
+        assert!(cm_path_key("HKEY_CURRENT_USER\\Software\\Classes\\\u{7}\\Evil").is_empty(), "注册表控制字符必须拒");
+
+        // ---- ⑤ 正常场景仍放行 ----
+        assert_eq!(cm_path_key(r"\\server\share\dir"), r"\\server\share\dir", "UNC 前导双分隔符不算空段");
+        assert_eq!(cm_path_key("//server/share/dir/"), r"\\server\share\dir", "正斜杠 UNC 归一后保留双分隔符");
+        assert!(cm_path_key(r"\\server\share\dir\..\x").is_empty(), "UNC 后的 `..` 仍要拒");
+        assert_eq!(
+            cm_path_key(r"HKEY_USERS\.DEFAULT\Software\Classes\-A"),
+            r"hkey_users\.default\software\classes\-a",
+            "点开头的键名不是 `.` 段，不能误杀"
+        );
+        assert_eq!(cm_path_key(r"\\?\C:\X\Y\"), r"c:\x\y", "verbatim 折回保持不变");
     }
 }

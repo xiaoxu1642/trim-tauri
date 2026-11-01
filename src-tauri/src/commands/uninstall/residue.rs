@@ -1791,16 +1791,27 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             // B2-8：从 `!= "ok"` 收成 `== "fail"` —— skip 行（「目标位于系统目录」
             // 「目标已不存在」）**从未被尝试删除**，把它记成「删除失败」语义不成立；
             // 台账里多这一类条目，就等于把一个从没删过的路径喂进「重启后删除」的候选面。
-            crate::engine::delete_failed::record(
+            // R2a-M01（2026-11-01 重审）：`fail` 里混着 finder 的**安全拒绝**
+            // （`rejected` / `reparse-ancestor` / `unrecoverable-name`，见
+            // `native-scanner/src/scan.rs` 的 `delete`）——那是「拒绝删」不是「删不掉」，
+            // 台账按 mode 只放行 `trash-failed`；mode 缺失/未知同样不放行（fail-closed）。
+            crate::engine::delete_failed::record_modes(
                 &label,
                 crate::engine::delete_failed::DOMAIN_RESIDUE,
                 details
                     .iter()
                     .filter(|d| d["status"] == "fail" && d["kind"] == "file")
-                    .filter_map(|d| d["target"].as_str().map(str::to_string))
+                    .filter_map(|d| {
+                        d["target"].as_str().map(|p| {
+                            (
+                                p.to_string(),
+                                crate::engine::delete_failed::DeleteFailMode::from_finder_mode(
+                                    d["mode"].as_str().unwrap_or(""),
+                                ),
+                            )
+                        })
+                    })
                     .collect(),
-                // B2-8：残留链走回收站优先 ⇒ 失败项可登记
-                true,
             );
             json!({ "success": true, "data": {
                 "details": details, "okCount": ok_count, "failCount": fail_count,
