@@ -644,7 +644,9 @@
         const glyph = img.parentElement && img.parentElement.querySelector('.startup-item-glyph');
         if (glyph) glyph.style.display = 'none';
       };
-      if (p) {
+      // 相对来源（注册表里只写裸文件名）按 CWD 解析没有意义，后端必拒且会记 WARN；
+      // 直接走兜底图标。
+      if (p && /^[A-Za-z]:\\/.test(p)) {
         window.api.paths.fileIcon(p)
           .then(r => show(r && r.success && r.dataUrl ? r.dataUrl : fallbackUrl))
           .catch(() => show(fallbackUrl));

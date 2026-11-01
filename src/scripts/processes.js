@@ -228,7 +228,8 @@
         if (img.dataset.loaded) return;
         img.dataset.loaded = '1';
         const p = img.getAttribute('data-icon-path');
-        if (!p) { getFallback().then(url => apply(img, url)); return; }
+        // 相对来源按 CWD 解析没有意义，后端必拒并记 WARN；直接走兜底图标。
+        if (!p || !/^[A-Za-z]:\\/.test(p)) { getFallback().then(url => apply(img, url)); return; }
         window.api.paths.fileIcon(p)
           .then(resp => {
             if (resp && resp.success && resp.dataUrl) img.src = resp.dataUrl;

@@ -213,6 +213,16 @@ pub async fn paths_browse<R: tauri::Runtime>(
 /// 设备路径 / `::` 外壳命名空间 / 相对路径由 `shellicon::guard_icon_source` 先拒；本函数
 /// 复用 `protect::normalize_for_compare` 的同一份归一，**不另立路径分类**（§5.16），
 /// 归一判不出形态（`\\?\Volume{…}` / `\\?\GLOBALROOT\…` / 展不掉的短名）按 fail-closed 拒。
+/// 相对来源是厂商数据形态（`DisplayIcon` 只写了裸 exe 名），不是攻击面：
+/// 记 info，避免卸载/启动项列表每项刷一条 WARN；UNC / 设备 / 命名空间形态仍记 WARN。
+fn icon_source_log_level(reason: &str) -> &'static str {
+    if reason.starts_with("图标来源必须是绝对路径") {
+        "info"
+    } else {
+        "warn"
+    }
+}
+
 pub(crate) fn icon_source_reject_reason(path: &std::path::Path) -> Option<&'static str> {
     if let Some(reason) = crate::engine::shellicon::guard_icon_source(path) {
         return Some(reason);
@@ -247,7 +257,7 @@ pub async fn paths_app_icon<R: tauri::Runtime>(
     // 命名空间闸必须排在 exists() 之前：UNC 形态的 `Path::exists()` 自身就会发起远程名
     // 解析，先判存在性等于把本闸要防的那个副作用做掉了。
     if let Some(reason) = icon_source_reject_reason(std::path::Path::new(&install)) {
-        log::write_log("warn", &format!("拒绝提取应用图标（安装目录来源不受信）: {reason}"));
+        log::write_log(icon_source_log_level(reason), &format!("拒绝提取应用图标（安装目录来源不受信）: {reason}"));
         return Ok(serde_json::json!({ "success": false, "dataUrl": null, "message": reason }));
     }
     if install.is_empty() || !std::path::Path::new(&install).exists() {
@@ -261,7 +271,7 @@ pub async fn paths_app_icon<R: tauri::Runtime>(
     let target = picked.unwrap_or_else(|| std::path::PathBuf::from(&install));
     // 交给外壳之前再过一次域内白名单（候选是渲染层给的相对串，拼接后可以带 `..` 逃逸）
     if let Some(reason) = icon_source_reject_reason(&target) {
-        log::write_log("warn", &format!("拒绝提取应用图标（拼出的目标来源不受信）: {reason}"));
+        log::write_log(icon_source_log_level(reason), &format!("拒绝提取应用图标（拼出的目标来源不受信）: {reason}"));
         return Ok(serde_json::json!({ "success": false, "dataUrl": null, "message": reason }));
     }
     Ok(match crate::engine::shellicon::file_icon_data_url(&target) {
@@ -385,7 +395,7 @@ pub async fn paths_file_icon<R: tauri::Runtime>(window: WebviewWindow<R>, file_p
     // 先过域内命名空间白名单再交给外壳 —— shellicon 只判「能不能当文件系统路径」，
     // 「该不该由图标链去驱动外壳解析它」归这里。
     if let Some(reason) = icon_source_reject_reason(std::path::Path::new(&path)) {
-        log::write_log("warn", &format!("拒绝提取文件图标（来源不受信）: {reason}"));
+        log::write_log(icon_source_log_level(reason), &format!("拒绝提取文件图标（来源不受信）: {reason}"));
         return Ok(serde_json::json!({ "success": false, "dataUrl": null, "message": reason }));
     }
     Ok(match crate::engine::shellicon::file_icon_data_url(std::path::Path::new(&path)) {

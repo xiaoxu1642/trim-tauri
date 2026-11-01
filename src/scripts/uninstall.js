@@ -178,6 +178,9 @@
     }
     let url = '';
     for (const src of iconSourcePaths(app)) {
+      // 厂商数据常把 DisplayIcon / InstallLocation 写成裸文件名或相对串（如 `app.exe`）；
+      // 相对来源按 CWD 解析没有意义，后端必拒。这里先跳过，避免每个列表项刷一条 WARN。
+      if (src.kind !== 'png' && !/^[A-Za-z]:\\/.test(String(src.path || ''))) continue;
       try {
         const resp = src.kind === 'png'
           ? await window.api.uninstall.appxLogo(src.path)
