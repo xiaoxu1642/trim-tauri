@@ -286,7 +286,7 @@
     const body = `
       <div class="rt-report-head">
         <div class="rt-report-title">实测带宽（本机网卡流量采样）</div>
-        <div class="rt-report-meta">测速站点：${escapeHtml(r.label)} · 测速耗时：${durationSec} 秒 · 采样 ${r.samples.length} 个 · 上传阶段结束</div>
+        <div class="rt-report-meta">测速站点：${escapeHtml(r.label)} · 测速耗时：${durationSec} 秒 · 采样 ${r.samples.length} 个 · 记录已结束</div>
       </div>
       <div class="rt-stats-grid">
         <div class="rt-stat"><span class="rt-stat-label">最大下载速率</span><span class="rt-stat-value" style="color:var(--accent)">${fmtSpeed(r.maxDown)}</span><span class="rt-stat-meta">约 ${toMbps(r.maxDown)} Mbps</span></div>

@@ -404,7 +404,7 @@
       // 复核 N1：提权半闭环收口（同 memory:clean）
       if (resp && resp.needAdmin) {
         const elevated = await window.app?.requestElevation?.('顽固软件专杀需要管理员权限才能结束受保护的后台进程。');
-        if (elevated) window.app?.toast('info', '已获得管理员权限，请重新点击「一键专杀」');
+        if (elevated) window.app?.toast('info', '已获得管理员权限，请重新点击「立即结束进程」');
         return;
       }
       // 回执对账（本轮附带修正）：后端 `stubborn_kill` 返回的是

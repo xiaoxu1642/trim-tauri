@@ -104,7 +104,7 @@
 
         const bodyHtml = `
             <p class="model-picker-tip">
-              这里只选择「${escapeHtml(meta.label)}」使用的模型，不会影响另外两个模块。
+              这里只选择「${escapeHtml(meta.label)}」使用的模型，不会影响其它模块。
               模型是否启用、接口地址与密钥请在「设置 - 大模型管理」中维护。
             </p>
             <div class="model-picker-list">

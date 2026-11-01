@@ -53,7 +53,7 @@
       name: '主 NVMe 空闲超时',
       desc: '硬盘空闲多久后允许进入省电模式（毫秒）。值越大越不容易进省电、响应越快；设 0 = 一直保持全速。',
       rec: {
-        desktopAmd: { v: '0 或 2000', why: '0 = 一直全速、延迟最优；2000 是「保留少量省电」的折中（视频作者口径）。锐龙平台上深层链路低功耗态的兼容性偶有报告，禁用可顺带规避。' },
+        desktopAmd: { v: '0 或 2000', why: '0 = 一直全速、延迟最优；2000 是「保留少量省电」的折中。锐龙平台上深层链路低功耗态的兼容性偶有报告，禁用可顺带规避。' },
         desktopIntel: { v: '0 或 2000', why: '同左；想兼顾一点点省电就选 2000。' },
         laptopAmd: { v: '保持默认', why: '续航优先；若出现与盘唤醒相关的卡顿，可试 0 对比。' },
         laptopIntel: { v: '保持默认', why: '续航优先，同左。' },
@@ -63,7 +63,7 @@
       name: '次 NVMe 空闲超时',
       desc: '硬盘在主省电状态里再待多久后，允许继续进入更深的省电状态（毫秒）。',
       rec: {
-        desktopAmd: { v: '0 或 200', why: '不让硬盘进入更深的省电态（视频口径给 200）；理由同上一条。' },
+        desktopAmd: { v: '0 或 200', why: '不让硬盘进入更深的省电态；理由同上一条。' },
         desktopIntel: { v: '0 或 200', why: '同左。' },
         laptopAmd: { v: '保持默认', why: '保持默认即可。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
@@ -93,7 +93,7 @@
       name: 'AHCI 链路电源管理 — HIPM/DIPM',
       desc: 'SATA 硬盘链路的省电档位：Active = 不省电（最稳）；HIPM / DIPM / HIPM+DIPM = 逐级允许链路省电。',
       rec: {
-        desktopAmd: { v: 'Active', why: '禁用 SATA 链路省电：消除链路唤醒延迟与偶发掉盘（视频口径：选择 active）。较老的 AMD 芯片组上 SATA 链路低功耗的兼容性问题更常被报告。' },
+        desktopAmd: { v: 'Active', why: '禁用 SATA 链路省电：消除链路唤醒延迟与偶发掉盘。较老的 AMD 芯片组上 SATA 链路低功耗的兼容性问题更常被报告。' },
         desktopIntel: { v: 'Active', why: '同左；Intel 平台问题相对少见，遇到 SATA 链路类卡顿再改也可以。' },
         laptopAmd: { v: '保持默认', why: '续航优先；出现掉盘/卡顿再改 Active。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
@@ -154,7 +154,7 @@
       name: 'USB 3 链路电源管理',
       desc: 'USB 3 接口空闲时的省电策略。',
       rec: {
-        desktopAmd: { v: '关闭', why: 'USB 3 链路低功耗态（U1/U2 等）是外设偶发断连、无线接收器失联、外置硬盘掉盘的常见根因（视频口径：选择 Off）；台式没有续航压力，直接关最稳。' },
+        desktopAmd: { v: '关闭', why: 'USB 3 链路低功耗态（U1/U2 等）是外设偶发断连、无线接收器失联、外置硬盘掉盘的常见根因；台式没有续航压力，直接关最稳。' },
         desktopIntel: { v: '关闭', why: '同左；外设一切正常且在意省电的话，保留默认也可以。' },
         laptopAmd: { v: '保持默认', why: '续航优先；出现外设掉线再关。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
@@ -164,7 +164,7 @@
       name: 'USB 集线器选择性挂起超时',
       desc: 'USB 集线器空闲多久后被允许挂起（毫秒）。',
       rec: {
-        desktopAmd: { v: '100000', why: '把挂起超时拉到约 100 秒、几乎不触发（视频口径「10 万」），避免键鼠/接收器被挂起后唤醒迟滞或失联。' },
+        desktopAmd: { v: '100000', why: '把挂起超时拉到约 100 秒、几乎不触发，避免键鼠/接收器被挂起后唤醒迟滞或失联。' },
         desktopIntel: { v: '100000', why: '同左。' },
         laptopAmd: { v: '保持默认', why: '续航优先；键鼠迟滞再调。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
@@ -178,7 +178,7 @@
     // ---- 只带调优参考、不需要翻译的设置（名称与描述系统已出中文）----
     'ee12f906-d277-404b-b6da-e5fa1a576df5': { // PCI Express 链接状态电源管理（ASPM）
       rec: {
-        desktopAmd: { v: '关闭', why: 'PCIe 链路省电（ASPM）是延迟与兼容性问题的常见来源（掉盘、USB 断连、卡顿）；台式没有续航压力，直接关最稳（视频口径：选择关闭）。' },
+        desktopAmd: { v: '关闭', why: 'PCIe 链路省电（ASPM）是延迟与兼容性问题的常见来源（掉盘、USB 断连、卡顿）；台式没有续航压力，直接关最稳。' },
         desktopIntel: { v: '关闭', why: '同左；Intel 平台的 ASPM 实现较稳，外设一切正常也可保留默认。' },
         laptopAmd: { v: '保持默认', why: '续航优先；出现 PCIe/USB 类异常再关。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
@@ -186,7 +186,7 @@
     },
     'be337238-0d82-4146-a960-4f3749d470c7': { // 处理器性能提升模式（Boost mode）
       rec: {
-        desktopAmd: { v: '高效积极且有保障', why: '保留加速但不长时间超功耗跑，护硬件寿命；不要选「激进/高性能」（视频口径：AMD、Intel 都选它）。' },
+        desktopAmd: { v: '高效积极且有保障', why: '保留加速但不长时间超功耗跑，护硬件寿命；不要选「激进/高性能」。' },
         desktopIntel: { v: '高效积极且有保障', why: '同左。' },
         laptopAmd: { v: '保持默认（通常为「启用」）', why: '笔记本散热余量小，激进档容易拉高温度与风扇噪音。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
@@ -194,24 +194,24 @@
     },
     '3b04d4fd-1cc7-4f23-ab1c-d1337819c4bb': { // 允许节流状态
       rec: {
-        desktopAmd: { v: '禁用', why: '不让 CPU 用节流降频兜底，减少游戏里的频率抖动（视频口径：AMD 关闭）。' },
-        desktopIntel: { v: '启用', why: 'Intel 平台保留节流更稳（视频口径：Intel 启用）。' },
+        desktopAmd: { v: '禁用', why: '不让 CPU 用节流降频兜底，减少游戏里的频率抖动。' },
+        desktopIntel: { v: '启用', why: 'Intel 平台保留节流更稳。' },
         laptopAmd: { v: '保持默认（启用）', why: '笔记本靠它压温度与功耗，不建议关。' },
         laptopIntel: { v: '保持默认（启用）', why: '同左。' },
       },
     },
     '36687f9e-e3a5-4dbf-b1dc-15eb381c6863': { // 处理器能源性能首选策略（EPP）
       rec: {
-        desktopAmd: { v: '5', why: '偏性能侧的小幅让步（视频口径：AMD 给 5）。数值越接近 0 越偏性能、越接近 100 越偏省电。' },
-        desktopIntel: { v: '0', why: '纯性能优先（视频口径：Intel 给 0）。' },
+        desktopAmd: { v: '5', why: '偏性能侧的小幅让步。数值越接近 0 越偏性能、越接近 100 越偏省电。' },
+        desktopIntel: { v: '0', why: '纯性能优先。' },
         laptopAmd: { v: '保持默认', why: '默认值随电源模式自动协商，续航优先不动。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
       },
     },
     '12a0ab44-fe28-4fa9-b3bd-4b64f44960a6': { // 处理器性能降低阈值
       rec: {
-        desktopAmd: { v: '10', why: '降频更迟钝、频率保持更久（视频口径：AMD 10）。' },
-        desktopIntel: { v: '5', why: '同左（视频口径：Intel 5）。' },
+        desktopAmd: { v: '10', why: '降频更迟钝、频率保持更久。' },
+        desktopIntel: { v: '5', why: '同左。' },
         laptopAmd: { v: '保持默认', why: '续航优先不动。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
       },
@@ -226,8 +226,8 @@
     },
     '7d24baa7-0b84-480f-840c-1b0743c00f5f': { // 处理器性能历史计数
       rec: {
-        desktopAmd: { v: '1', why: '采样窗口更短、对负载变化反应更快（视频口径：AMD 1）。' },
-        desktopIntel: { v: '3', why: '同左（视频口径：Intel 3）。' },
+        desktopAmd: { v: '1', why: '采样窗口更短、对负载变化反应更快。' },
+        desktopIntel: { v: '3', why: '同左。' },
         laptopAmd: { v: '保持默认', why: '续航优先不动。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
       },
@@ -242,15 +242,15 @@
     },
     '4b70f900-cdd9-4e66-aa26-ae8417f98173': { // 延迟敏感度提示处理器能源性能首选项
       rec: {
-        desktopAmd: { v: '50', why: '延迟敏感负载下给性能留一半余量（视频口径：AMD 50）。' },
-        desktopIntel: { v: '100', why: '完全按性能响应（视频口径：Intel 100）。' },
+        desktopAmd: { v: '50', why: '延迟敏感负载下给性能留一半余量。' },
+        desktopIntel: { v: '100', why: '完全按性能响应。' },
         laptopAmd: { v: '保持默认', why: '续航优先不动。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
       },
     },
     '94d3a615-a899-4ac5-ae2b-e4d8f634367f': { // 系统散热方式
       rec: {
-        desktopAmd: { v: '主动', why: '优先用风扇散热、少用降频（视频口径：主动）；台式散热余量足，性能更稳。' },
+        desktopAmd: { v: '主动', why: '优先用风扇散热、少用降频；台式散热余量足，性能更稳。' },
         desktopIntel: { v: '主动', why: '同左。' },
         laptopAmd: { v: '保持默认', why: '笔记本默认往往是「被动」优先，静音；想更凉快再改主动。' },
         laptopIntel: { v: '保持默认', why: '同左。' },
@@ -258,7 +258,7 @@
     },
     '2430ab6f-a520-44a2-9601-f7f23b5134b1': { // 处理器性能内核休止并发阈值
       rec: {
-        desktopAmd: { v: '95–98', why: '别给 100：给满会让核心停放进退来回震荡；95–98 区间任选、可自行对比（视频口径）。' },
+        desktopAmd: { v: '95–98', why: '别给 100：给满会让核心停放进退来回震荡；95–98 区间任选、可自行对比。' },
         desktopIntel: { v: '95–98', why: '同左。' },
         laptopAmd: { v: '保持默认', why: '笔记本核心停放省电更重要，不建议收紧。' },
         laptopIntel: { v: '保持默认', why: '同左。' },

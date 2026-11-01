@@ -38,7 +38,7 @@
   async function load() {
     if (loading || !backdrop) return;
     if (!window.api?.optimizer?.listRestore) {
-      setListError('系统还原点不可用：本地接口未就绪（window.api 缺失），请重启应用后再试'); // v2-M21
+      setListError('系统还原点不可用：本地接口未就绪，请重启应用后再试'); // v2-M21
       return;
     }
     loading = true;
@@ -124,7 +124,7 @@
 
   async function create() {
     if (!window.api?.optimizer?.createRestore) {
-      window.app?.toast('error', '创建还原点不可用：本地接口未就绪（window.api 缺失），请重启应用后再试'); // v2-M21
+      window.app?.toast('error', '创建还原点不可用：本地接口未就绪，请重启应用后再试'); // v2-M21
       return;
     }
     // 复核 💭3（2026-09-16）：confirmDanger 链路判空，预览模式（无 app.js 提供方）不抛错
@@ -171,7 +171,7 @@
   // 覆写值）用户在这里一键恢复，不必去注册表编辑器。
   async function restoreFrequency() {
     if (!window.api?.optimizer?.restoreFrequency) {
-      window.app?.toast('error', '恢复创建频率不可用：本地接口未就绪（window.api 缺失），请重启应用后再试');
+      window.app?.toast('error', '恢复创建频率不可用：本地接口未就绪，请重启应用后再试');
       return;
     }
     const ok = await window.app?.confirmDanger?.(

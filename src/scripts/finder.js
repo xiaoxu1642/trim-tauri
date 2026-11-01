@@ -328,7 +328,7 @@
   function pagerHtml(target, cur, pages) {
     return `<div class="finder-pager">
       <button type="button" class="btn btn-secondary btn-small" data-pg="${target}:prev" ${cur <= 1 ? 'disabled' : ''}>上一页</button>
-      <span class="finder-pager-info">第 ${cur} / ${pages} 页 · 每页 ${EMPTY_PAGE_SIZE} 条</span>
+      <span class="finder-pager-info">第 ${cur} / ${pages} 页 · 每页约 ${EMPTY_PAGE_SIZE} 项</span>
       <button type="button" class="btn btn-secondary btn-small" data-pg="${target}:next" ${cur >= pages ? 'disabled' : ''}>下一页</button>
     </div>`;
   }
