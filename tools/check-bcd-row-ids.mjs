@@ -33,10 +33,26 @@ const check = (ok, label, detail = '') => {
 function bcdSetProblems({ panel, js, all, arms }) {
   const out = [];
   const sets = { panel, js, all, arms };
-  for (const [k, v] of Object.entries(sets)) {
-    if (!Array.isArray(v) || v.length === 0) out.push(`${k} 端解析为空（fail-closed，不算相等）`);
-  }
   const labels = { panel: '面板 JSON', js: 'NARA_ROW_LABEL', all: 'ALL_ROW_IDS', arms: 'row_targets' };
+  for (const [k, v] of Object.entries(sets)) {
+    if (!Array.isArray(v) || v.length === 0) {
+      out.push(`${k} 端解析为空（fail-closed，不算相等）`);
+      continue;
+    }
+    // T1f-L08：旧实现先把面板项 `.filter(typeof === 'string')` 再比较 —— 面板形状漂成
+    // 对象数组时，新增的那一行被静默丢弃，四端仍旧「相等」。非字符串/空 id 一律红。
+    const badType = v.filter((x) => typeof x !== 'string' || !x.trim());
+    if (badType.length) out.push(`${k} 端含非字符串/空 id 项 ${badType.length} 处（旧实现在比较前 filter 掉了）`);
+    // 重复 id：四端一律用 Set 比较，重复会被吃成一次 —— 任一端重复同样要红。
+    const dup = [];
+    const seen = new Set();
+    for (const x of v) {
+      if (typeof x !== 'string') continue;
+      if (seen.has(x) && !dup.includes(x)) dup.push(x);
+      seen.add(x);
+    }
+    if (dup.length) out.push(`${k} 端重复 id：${dup.join('、')}`);
+  }
   const keys = Object.keys(sets);
   for (let i = 0; i < keys.length; i++) {
     for (let j = i + 1; j < keys.length; j++) {
@@ -58,6 +74,10 @@ function bcdSetProblems({ panel, js, all, arms }) {
   check(bcdSetProblems({ ...clean, js: ['a'] }).length > 0, '对照：单端缺一项必须判红');
   check(bcdSetProblems({ ...clean, arms: ['a', 'b', 'c'] }).length > 0, '对照：单端多一项必须判红');
   check(bcdSetProblems({ ...clean, panel: [] }).length > 0, '对照：解析为空必须判红（不许空集放行）');
+  check(bcdSetProblems({ ...clean, panel: ['a', 'b', { id: 'c' }] }).length > 0, '对照：面板含非字符串项必须判红（旧实现静默丢弃）');
+  check(bcdSetProblems({ panel: ['a', 'b', ''], js: ['a', 'b', ''], all: ['a', 'b', ''], arms: ['a', 'b', ''] }).length > 0,
+    '对照：四端同含空 id 也要判红（Set 相等挡不住，只能靠元素类型判据）');
+  check(bcdSetProblems({ ...clean, js: ['a', 'a', 'b'] }).length > 0, '对照：任一端重复 id 必须判红（Set 比较会吃掉重复）');
 }
 
 // ---------- 真仓 ----------
@@ -70,7 +90,8 @@ for (const f of [PANEL, JS, BCD]) {
 }
 const panelJson = JSON.parse(readFileSync(PANEL, 'utf8'));
 const bcdSection = (panelJson.sections || []).find((s) => s.id === 'bcd');
-const panelIds = Array.isArray(bcdSection?.items) ? bcdSection.items.filter((x) => typeof x === 'string') : [];
+// T1f-L08：这里不再 filter —— 面板项的形态由判定器检查，非字符串项必须判红而不是被丢掉。
+const panelIds = Array.isArray(bcdSection?.items) ? bcdSection.items : [];
 
 const jsText = readFileSync(JS, 'utf8');
 const jsBlock = (jsText.match(/NARA_ROW_LABEL\s*=\s*\{([\s\S]*?)\n\s*\};/) || [])[1] || '';

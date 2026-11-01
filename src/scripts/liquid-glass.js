@@ -733,6 +733,9 @@
 
       const compile = (type, src) => {
         const sh = gl.createShader(type);
+        // F5-L16：上下文丢失时 createShader 返回 null，而 shaderSource/shaderParameter 的入参同样是
+        // 非空 IDL 类型——不在这里挡住，异常就发生在「编译判空」之前，判空形同虚设。
+        if (!sh) return null;
         gl.shaderSource(sh, src);
         gl.compileShader(sh);
         return gl.getShaderParameter(sh, gl.COMPILE_STATUS) ? sh : null;
@@ -744,6 +747,7 @@
       // 这里与后面的 LINK_STATUS 判据配成一对：装配失败只放弃本元素，不外溢。
       if (!vs || !fs) return;
       const prog = gl.createProgram();
+      if (!prog) return; // 同上：上下文丢失时 createProgram 也返回 null
       gl.attachShader(prog, vs);
       gl.attachShader(prog, fs);
       gl.linkProgram(prog);
@@ -766,8 +770,10 @@
       this.items.set(el, item);
       el.insertBefore(canvas, el.firstChild);
       // F5-L18：上下文丢失后 draw 的退出条件（dead / isConnected / mode）都不成立，rAF 会继续对着
-      // 失效的上下文 clear/drawArrays，画布停在空白或上一帧残影。丢失即销毁自身；上下文恢复后
-      // 由 scheduleScan 走正常挂载路径重建，不在本处原地复活。
+      // 失效的上下文 clear/drawArrays，画布停在空白或上一帧残影。丢失即销毁自身，destroy 置 dead 并
+      // cancelAnimationFrame，rAF 链就此断开。此后本元素不再自动重挂：measureGlass 对已在册元素直接
+      // 返回 null（见其首行早退），scheduleScan 只升折射、不碰焦散——要等切档（attachedMode 变化触发
+      // detachAllGlass 清册后重新挂载）或元素重建，才能再次进入 commitGlass。
       canvas.addEventListener('webglcontextlost', (ev) => {
         ev.preventDefault();
         this.destroy(el);

@@ -69,6 +69,14 @@ if (!byId || typeof byId !== 'object') {
   process.exit(1);
 }
 
+// ⓪ 数据文件自身的版本字段（T1f-L07）：`rule-schema.json` 没有与它对应的键，也没有
+// 任何消费方读它（`intro.js` 只按 scope 取简介），所以这里按现值钉住 —— 删掉或静默
+// 改版都会红；真升版时改这里也等于强制有人看一眼「为什么升」。
+const ITEM_INTRO_VERSION = 3;
+check(intro.version === ITEM_INTRO_VERSION,
+  `⓪ item-intro.version = ${ITEM_INTRO_VERSION}（无 schema 对应键，按现值钉住）`,
+  `实际 ${JSON.stringify(intro.version)}`);
+
 // ①② 的唯一实现（真仓与 ⑥ 合成样本共用 —— T1f-L01：自检不许再复刻一份判据）。
 function validateEntries(map) {
   const legacyStrings = [];
@@ -104,6 +112,15 @@ function coverageProblems(catIds, retIds, ids) {
     orphans: ids.filter((id) => !catIds.has(id) && !retIds.has(id)),
   };
 }
+// ④ 的唯一实现：tips 计数 + 棘轮缺口（真仓与 ⑥ 合成样本共用）。
+// T1f-L01：旧 ⑥ 只给 ①② 做了样本，③④ 的判据被改坏也不会有任何对照；
+// 把计数与「比基线少多少」抽出来，⑥ 才能对 ④ 造一个真的下降样本。
+function tipsCountOf(map) {
+  return Object.values(map).filter((v) => v && typeof v === 'object' && v.tips).length;
+}
+function ratchetDeficit(count, baseline) {
+  return count < baseline ? baseline - count : 0;
+}
 
 const { legacyStrings, objNoDesc, tipsPartial } = validateEntries(byId);
 check(objNoDesc.length === 0,
@@ -131,10 +148,11 @@ check(orphans.length === 0,
   orphans.length ? `孤儿：${orphans.slice(0, 5).join(',')}` : '');
 
 // ④ tips 覆盖率棘轮
-const tipsCount = Object.values(byId).filter((v) => v && typeof v === 'object' && v.tips).length;
-check(tipsCount >= TIPS_BASELINE,
+const tipsCount = tipsCountOf(byId);
+const tipsDeficit = ratchetDeficit(tipsCount, TIPS_BASELINE);
+check(tipsDeficit === 0,
   `④ tips 覆盖率棘轮（当前 ${tipsCount} / 基线 ${TIPS_BASELINE}，只增不减）`,
-  tipsCount < TIPS_BASELINE ? `比基线少 ${TIPS_BASELINE - tipsCount} —— 补回来或明确 --bump-baseline 降基线（须书面理由）` : '');
+  tipsDeficit ? `比基线少 ${tipsDeficit} —— 补回来或明确 --bump-baseline 降基线（须书面理由）` : '');
 
 // ⑤ 其他 scope 保持"键 → string"，别乱改形状（这几块本轮 §3.4 不动）
 for (const scope of ['startup', 'contextmenu', 'memoryclean', 'residue']) {
@@ -151,7 +169,7 @@ for (const scope of ['startup', 'contextmenu', 'memoryclean', 'residue']) {
     badShape.length ? `漂了 ${badShape.length} 条：${badShape.slice(0, 3).join(',')}` : '');
 }
 
-// ⑥ 判据正向自检：伪造一份违规数据，**调用真实判据**（①②③ 与真仓共用同一函数对象）。
+// ⑥ 判据正向自检：伪造一份违规数据，**调用真实判据**（①②③④ 与真仓共用同一函数对象）。
 // T1f-L01：旧自检把 ①② 的判据复刻了一遍、③④ 没有任何样本，注释却写「复刻 ①②③④」——
 // 真实判据被改坏时自检照样绿，给出的是「判据活着」的假保证。
 {
@@ -167,11 +185,16 @@ for (const scope of ['startup', 'contextmenu', 'memoryclean', 'residue']) {
   // ③ 对照：catalog {x,y} / retired {r} / intro [x,z,r] ⇒ 缺 y、孤儿 z
   const cov = coverageProblems(new Set(['x', 'y']), new Set(['r']), ['x', 'z', 'r']);
   const c3 = cov.missing.length === 1 && cov.missing[0] === 'y' && cov.orphans.length === 1 && cov.orphans[0] === 'z';
-  check(c1 && c3,
-    `⑥ 判据正向自检（①②：伪造 5 条抓到 3 条 → 实际 ${v.objNoDesc.length + v.tipsPartial.length + v.legacyStrings.length}；③：缺 ${cov.missing.length}/孤儿 ${cov.orphans.length}）`,
-    c1 && c3 ? ''
+  // ④ 对照：合成样本的 tips 数远低于基线 ⇒ 缺口必须等于差值；基线降到其下 ⇒ 不许报缺口
+  const fakeTips = tipsCountOf(fake);
+  const fakeGap = ratchetDeficit(fakeTips, TIPS_BASELINE);
+  const c4 = fakeGap === TIPS_BASELINE - fakeTips && ratchetDeficit(fakeTips, fakeTips - 1) === 0;
+  check(c1 && c3 && c4,
+    `⑥ 判据正向自检（①②：伪造 5 条抓到 ${v.objNoDesc.length + v.tipsPartial.length + v.legacyStrings.length} 条；③：缺 ${cov.missing.length}/孤儿 ${cov.orphans.length}；④：合成基线缺口 ${fakeGap}）`,
+    c1 && c3 && c4 ? ''
       : !c1 ? '①②（validateEntries）行为漂移'
-        : '③（coverageProblems）行为漂移');
+        : !c3 ? '③（coverageProblems）行为漂移'
+          : '④（tipsCountOf / ratchetDeficit）行为漂移');
 }
 
 // ---- ⑦ scope 三表对拍（v0.7.0）----

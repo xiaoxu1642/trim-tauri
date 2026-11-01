@@ -37,7 +37,8 @@ use crate::engine::{appearance, log, paths, sysinfo};
 const APP_NAME: &str = "Trim";
 
 /// 主窗口 label（R8-L03）：建窗、单实例唤回、首帧显示、事件判定共用这一个常量。
-/// 四处字面量各自漂移时没有任何机械核对，症状是窗口建得出来但 IPC/唤回找错对象。
+/// 其余文件里的裸字面量由 `l03` 的基线扫描机械核对（新增即红，R8-L09）；
+/// 把它们全部收敛到 `crate::MAIN_LABEL`（含 `guard::MAIN` 由本常量派生）仍是待办。
 pub const MAIN_LABEL: &str = "main";
 
 /// appearance.json 里窗口状态的键（R8-M01 读写唯一真源）。
@@ -93,7 +94,10 @@ pub fn apply_material_outcome<R: Runtime>(
         _ => clear_mica(window).and(clear_acrylic(window)),
     };
     if let Err(e) = &result {
-        eprintln!("[trim] 材质 {normalized} 应用失败（忽略，CSS 不透明兜底）: {e}");
+        // R8-L05：发布构建 `windows_subsystem = "windows"` 没有 stderr，这里若只打 eprintln，
+        // 材质失败在日志里就是零留痕（用户只看到不透明底色，查不到原因）。走统一日志通道，
+        // 顺带覆盖所有「不消费回执」的调用方。
+        log::write_log("warn", &format!("材质 {normalized} 应用失败（CSS 不透明兜底）: {e}"));
     }
     (normalized, result.is_ok())
 }
@@ -227,14 +231,16 @@ pub fn dev_noactivate() -> bool {
     std::env::var("TRIM_DEV_NOACTIVATE").as_deref() == Ok("1")
 }
 
-/// wry 0.55.1 WebView2 的默认浏览器参数（R8-L02）。
+/// wry 0.55.1 WebView2 的默认浏览器参数（R8-L02 / R8-L06）。
 ///
 /// 上游 `webview2/mod.rs` 是 `additional_browser_args(...).unwrap_or_else(|| 默认串)`——
-/// **传参即整串替换**。只传自己的调试参数会把三个关闭项丢掉（msWebOOUI / msPdfOOUI /
-/// msSmartScreenProtection），所以这里显式拼回默认值。升级 wry 时必须重核这条字面量：
-/// 它没有编译期校验，漂移了只会表现为行为差异。
+/// **传参即整串替换**。只传自己的调试参数会把默认项全丢掉，所以这里显式拼回默认值：
+/// 三个 disable-features 关闭项（msWebOOUI / msPdfOOUI / msSmartScreenProtection）
+/// 加 `autoplay` 那一项（`WebViewAttributes::default()` 里 `autoplay: true`，wry 据此补
+/// `--autoplay-policy=no-user-gesture-required`；tauri-runtime-wry 不覆盖该字段，默认恒真）。
+/// 升级 wry 时必须重核这条字面量：它没有编译期校验，漂移了只会表现为行为差异。
 const WRY_DEFAULT_BROWSER_ARGS: &str =
-    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required";
 
 /// 把 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 环境变量透传给 builder（审查 K4 复盘）。
 ///
@@ -891,7 +897,19 @@ pub fn run() {
 
             // ---------- 材质与圆角（show 之前就绪） ----------
             force_round_corners(&window);
-            apply_material(&window, &appearance::effective_material());
+            // R8-L05：启动调用点必须消费材质回执。旧实现 `apply_material(...)` 把结果整个丢掉，
+            // 发布构建又没有 stderr ⇒ mica 建不出来这类失败在日志里查不到任何线索。
+            // 拒因由 `apply_material_outcome` 自己的 warn 给出；这里固定记一条启动基线，
+            // 成败都记，便于对照「启动时到底请求/生效了哪个材质」。
+            let (startup_material, startup_native) =
+                apply_material_outcome(&window, &appearance::effective_material());
+            log::write_log(
+                "info",
+                &format!(
+                    "启动材质 {startup_material}（原生应用: {}）",
+                    if startup_native { "成功" } else { "失败，拒因见上一条材质 warn" }
+                ),
+            );
 
             app.manage(ShowState {
                 shown: AtomicBool::new(false),
@@ -956,6 +974,10 @@ pub fn on_app_exit() {
     // 有上界（最多 3s），不会把退出卡成无限等待。
     commands::updater::join_silent_check_thread();
     pwsh::cleanup_temp_scripts();
+    // R8-L04：上面三步自己会写日志（停采样器的「已停止」、临时脚本清扫计数），它们都排在
+    // 首次 flush 之后，只剩一个很短的异步合并窗口；`RunEvent::Exit` 一返回进程就结束，
+    // 最后几条可能落不了盘。flush_sync 幂等（队列空即返回、无副作用），收尾后再刷一次。
+    log::flush_sync();
 }
 
 #[cfg(test)]
@@ -982,10 +1004,38 @@ mod tests {
         }
     }
 
+    /// 去掉整行注释后的源码（`//` / `///` / `//!` 开头）。
+    ///
+    /// 为什么要剔：L08 / L09 数的是「可执行调用点 / 字面量」，注释里出现的同名 token 会让
+    /// 计数虚高（L08 里一处漏包裹 + 一句注释 = 照样绿，正是 R8-L08 的另一半缺陷）。
+    /// 只剔整行注释、不切行尾注释：按 `//` 硬切会把 `"https://…"` 这类字符串腰斩，
+    /// 反而制造假红——宁可少剔一点，也不让判据朝「误判成有包裹」的反方向失明。
+    fn code_lines(text: &str) -> String {
+        text.lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 一个文件的生产段：截到首个 `#[cfg(test)]` 之前（没有测试模块就是全文）。
+    fn file_prod(text: &str) -> &str {
+        match text.find("#[cfg(test)]") {
+            Some(cut) => &text[..cut],
+            None => text,
+        }
+    }
+
     /// 审查 v2-L4 的常驻断言：**每个建窗点都必须过一次 `with_browser_args`**。
     /// R8-M03：旧实现全局数两个 token 再比相等——一处漏透传 + 一处重复包裹 = 5/5 恒绿，
     /// 且 `read_to_string` 失败静默跳过。现改为**逐文件点名**：凡文件内出现建窗 token，
     /// 就必须同文件出现透传 token，并把命中的文件清单打进 `reached`。
+    /// R8-L08：判据此前是 `t.contains(wrap_token)`（存在性）——同一文件里加第二扇窗、
+    /// 只包第一扇时仍然全绿。现改为**逐文件比次数**（`包裹数 < 建窗数` 即红），
+    /// 失败信息同时打印两个数字。
+    /// 计数域 = 生产段（`file_prod`）+ 剔整行注释：测试模块里会用字符串字面量引用建窗
+    /// token 当锚点（本文件 `asset_scope_grant_tests` 就用
+    /// `WebviewWindowBuilder::new(app, MAIN_LABEL` 在源码里定位建窗行），整文件计数会把
+    /// 那句字面量当成第二个建窗点、把一处漏包裹变成假红；而建窗只发生在生产段。
     /// token 用 concat! 拼，避免测试源码里的字面量被自己数进去。
     #[test]
     fn every_window_builder_goes_through_browser_args() {
@@ -995,28 +1045,35 @@ mod tests {
         let mut files = Vec::new();
         rs_files(&root, &mut files);
         let mut builders = 0usize;
+        let mut wraps = 0usize;
         let mut reached: Vec<String> = Vec::new();
         let mut failures: Vec<String> = Vec::new();
         for f in &files {
             let t = std::fs::read_to_string(f).unwrap_or_else(|e| {
                 panic!("读不了源文件 {}：{e}（仓内源码不该读不到，静默跳过会让本断言瞎）", f.display())
             });
-            let n = t.matches(builder_token).count();
+            let code = code_lines(file_prod(&t));
+            let n = code.matches(builder_token).count();
             if n == 0 {
                 continue;
             }
+            let w = code.matches(wrap_token).count();
             builders += n;
-            if !t.contains(wrap_token) {
-                failures.push(format!("{}：{n} 个建窗点但 0 处 with_browser_args", f.display()));
+            wraps += w;
+            if w < n {
+                failures.push(format!(
+                    "{}：{n} 个建窗点但只有 {w} 处 with_browser_args",
+                    f.display()
+                ));
             }
             reached.push(f.strip_prefix(&root).unwrap_or(f).display().to_string());
         }
         assert!(builders > 0, "一个建窗点都没扫到——扫描根目录是否变了");
         assert!(
             failures.is_empty(),
-            "以下文件有建窗点但没透传浏览器参数（K4 的静默 hwnd=0x0）：{failures:#?}；本次命中的建窗文件：{reached:?}"
+            "以下文件的建窗点没有逐一透传浏览器参数（K4 的静默 hwnd=0x0）：{failures:#?}；本次命中的建窗文件：{reached:?}"
         );
-        println!("reached 建窗文件（{}）：{reached:?}", reached.len());
+        println!("reached 建窗文件（{}），建窗点 {builders} / 包裹点 {wraps}：{reached:?}", reached.len());
     }
 
     /// R8-L01：`TRIM_DEV_NOACTIVATE` 的判定只许有一处定义；dev 档两条路径都不能落回
@@ -1044,12 +1101,14 @@ mod tests {
     }
 
     /// R8-L02：`additional_browser_args` 传参即替换，必须把 wry 默认串拼回来。
+    /// R8-L06：默认串还含 autoplay 那一项（`autoplay: true` 是 wry 的默认属性），
+    /// 期望串跟着常量一起改——两边本就该同源，旧串在这里恰好是正向对照。
     #[test]
     fn l02_browser_args_append_wry_defaults() {
         assert_eq!(
             super::WRY_DEFAULT_BROWSER_ARGS,
-            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection",
-            "默认串必须与 wry 0.55.1 的 WebView2 默认值一致（升级 wry 时重核）"
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required",
+            "默认串必须与 wry 0.55.1 的 WebView2 默认值逐项一致（含 autoplay；升级 wry 时重核）"
         );
         let src = prod();
         assert!(
@@ -1059,16 +1118,64 @@ mod tests {
         assert!(!src.contains("additional_browser_args(extra)"), "裸传 extra 的旧形态不得回来");
     }
 
+    /// R8-L04：退出收尾必须在三步收尾动作**之后**再刷一次盘。
+    ///
+    /// 旧实现只在最前面 flush 一次，而 `shutdown_sampler` / `cleanup_temp_scripts` 自己会写
+    /// 日志（「已停止」、清扫计数），只剩一个很短的异步合并窗口；`RunEvent::Exit` 一返回
+    /// 进程就结束，最后几条可能落不了盘。`flush_sync` 幂等（队列空即返回），补刷无副作用。
+    #[test]
+    fn l04_exit_flushes_after_cleanup() {
+        let body = fn_body("fn on_app_exit");
+        assert_eq!(
+            body.matches("log::flush_sync();").count(),
+            2,
+            "退出收尾必须两次 flush：动作前一次、三步动作之后再补一次（删掉末尾那次 = 清扫计数可能丢）"
+        );
+        let cleanup = body
+            .find("pwsh::cleanup_temp_scripts();")
+            .expect("on_app_exit 里的临时脚本清扫不见了");
+        let last_flush = body.rfind("log::flush_sync();").expect("flush_sync 不见了");
+        assert!(
+            last_flush > cleanup,
+            "第二次 flush 必须排在三步收尾之后：排在前面等于没补——后三步写的日志又悬在异步刷盘上"
+        );
+    }
+
+    /// R8-L05：材质失败的唯一出口必须进日志文件（发布构建 `windows_subsystem = "windows"`
+    /// 没有 stderr），启动调用点必须消费回执并留一条启动基线。
+    #[test]
+    fn l05_material_failure_is_logged() {
+        let src = prod();
+        assert!(
+            !src.contains("eprintln!"),
+            "材质失败不得只走 eprintln：发布构建没有 stderr，等于零留痕（须走 log::write_log）"
+        );
+        let outcome = fn_body("fn apply_material_outcome");
+        assert!(
+            outcome.contains("log::write_log(\"warn\""),
+            "apply_material_outcome 的失败分支必须写 warn（调用方不消费回执时也要能查到拒因）"
+        );
+        assert!(
+            src.contains("let (startup_material, startup_native) ="),
+            "启动调用点必须收下材质回执（旧实现把 apply_material 的返回值整个丢掉）"
+        );
+        assert!(
+            src.contains("启动材质 {startup_material}"),
+            "启动期材质必须留痕：否则「启动时到底请求了哪个材质、原生是否生效」在日志里无从核对"
+        );
+    }
+
     /// R8-L03：主窗 label 单一真源，且与 guard::MAIN 同源。
+    ///
+    /// R8-L09：射程从「只有 lib.rs 的 prod()」扩到 `src/**/*.rs`。旧版只扫 lib.rs，
+    /// 其余裸字面量把 "main" 写成 "Main" / "main " 时照样绿，症状是首帧握手按
+    /// 「非主窗来源」忽略、elevate:notice / 材质广播打到不存在的窗口——全是静默失效。
+    /// 现存裸字面量**逐文件登记基线**（双向棘轮：多一处即红，清理后不删条目也红）。
+    /// 彻底方案（guard::MAIN 由 MAIN_LABEL 派生、其余三处改引用常量）跨多个文件，
+    /// 不在本单元授权范围内，故本轮只把射程补齐、把现状钉成显式基线。
     #[test]
     fn l03_main_label_has_single_source() {
         assert_eq!(super::MAIN_LABEL, "main");
-        let src = prod();
-        assert_eq!(
-            src.matches("\"main\"").count(),
-            1,
-            "主窗 label 只许在 MAIN_LABEL 定义处出现字面量（建窗/查窗/唤回点必须引用常量）"
-        );
         assert_eq!(
             crate::engine::guard::MAIN,
             [super::MAIN_LABEL].as_slice(),
@@ -1077,6 +1184,66 @@ mod tests {
         assert!(
             crate::engine::guard::APP_WINDOWS.contains(&super::MAIN_LABEL),
             "APP_WINDOWS 必须包含主窗 label"
+        );
+
+        // （相对 src/ 的路径, 允许条数, 为什么还在）
+        let baseline: [(&str, usize, &str); 6] = [
+            ("lib.rs", 1, "MAIN_LABEL 定义处——全仓唯一合法字面量"),
+            ("engine/guard.rs", 3, "档位表（APP_WINDOWS / MAIN / PENDING_DELETE_WINDOWS）；彻底方案：由 MAIN_LABEL 派生"),
+            ("commands/processmanager.rs", 1, "自建的同名私有常量；彻底方案：改为引用 crate::MAIN_LABEL"),
+            ("commands/app.rs", 1, "首帧来源过滤直接比字面量（本单元未授权改该文件）"),
+            ("commands/appearance.rs", 1, "电池降级取主窗判最大化（同上）"),
+            ("commands/elevate.rs", 1, "提权通知取主窗（同上）"),
+        ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let self_path = root.join("lib.rs");
+        let needle = concat!("\"", "main", "\"");
+        let mut files = Vec::new();
+        rs_files(&root, &mut files);
+        let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for f in &files {
+            let raw = std::fs::read_to_string(f).unwrap_or_else(|e| {
+                panic!("读不了源文件 {}：{e}（仓内源码不该读不到，静默跳过会让本断言瞎）", f.display())
+            });
+            // lib.rs 只取生产段：本断言自己的期望值就写在测试模块里
+            let code = if f.as_path() == self_path.as_path() {
+                let cut = raw
+                    .find("#[cfg(test)]")
+                    .expect("lib.rs 里找不到 #[cfg(test)]——截断锚点变了");
+                code_lines(&raw[..cut])
+            } else {
+                code_lines(&raw)
+            };
+            let n = code.matches(needle).count();
+            if n > 0 {
+                let rel = f
+                    .strip_prefix(&root)
+                    .unwrap_or(f)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                counts.insert(rel, n);
+            }
+        }
+        let mut failures: Vec<String> = Vec::new();
+        for (rel, allowed, why) in baseline {
+            match counts.get(rel) {
+                None => failures.push(format!(
+                    "{rel}：基线登记了 {allowed} 处裸 \"main\"，这轮一处都没扫到（已清理就删条目，文件改名就同步路径）"
+                )),
+                Some(got) if *got != allowed => failures.push(format!(
+                    "{rel}：裸 \"main\" {got} 处，基线 {allowed} 处（{why}）"
+                )),
+                _ => {}
+            }
+        }
+        for rel in counts.keys() {
+            if !baseline.iter().any(|(b, _, _)| *b == rel.as_str()) {
+                failures.push(format!("{rel}：新增裸 \"main\"（必须引用 crate::MAIN_LABEL）"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "主窗 label 漂出了单一真源（症状：首帧握手忽略主窗 / 提权通知打到不存在的窗口）：{failures:#?}；本轮扫到 {counts:?}"
         );
     }
 
@@ -2043,7 +2210,7 @@ mod startup_housekeeping_tests {
                 "受保护路径清单必须在任何 show 路径之前配好，否则兜底显示出来的窗口跑在没有保护清单的状态里",
             ),
             (
-                "apply_material(&window, &appearance::effective_material());",
+                "apply_material_outcome(&window, &appearance::effective_material());",
                 "commands::appearance::init_env(app.handle());",
                 "环境自适应（电池降级 / 系统透明开关）必须晚于初始材质落地，否则降级结果被随后的 apply_material 覆盖（v3 B1 原根因）",
             ),

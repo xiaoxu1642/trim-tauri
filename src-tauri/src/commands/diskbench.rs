@@ -114,6 +114,31 @@ fn free_bytes(path: &Path) -> Option<u64> {
     }
 }
 
+/// 逐个世代号尝试占位（R1d-L05），返回本场**亲手建成**的那个目录。
+///
+/// 判据为什么是「`create_dir` 成功」而不是「目录存在」：清理侧只凭名字就 `remove_dir_all`，
+/// 同名目录若是上轮遗留或用户自建，先删后跑等于删别人的目录。占不到就换下一个世代号，
+/// 用尽仍占不到则拒绝运行。`claim` 只承载「占位这一次动作」（生产传 `std::fs::create_dir`），
+/// 测试不必碰盘。
+fn claim_residue_dir<F>(base: &Path, mut claim: F) -> Result<PathBuf, String>
+where
+    F: FnMut(&Path) -> std::io::Result<()>,
+{
+    let mut last_err = String::from("同名目录已存在");
+    for _ in 0..DISKBENCH_DIR_CLAIM_TRIES {
+        let generation = DISKBENCH_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+        let candidate = base.join(format!("Trim-DiskBench-{generation}"));
+        match claim(&candidate) {
+            Ok(()) => return Ok(candidate),
+            // 同名目录已存在：不是本场建的，换号重试
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last_err = e.to_string(),
+            // 其它失败（路径不可写等）换号也没用
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err(last_err)
+}
+
 /// 残留测试目录递归清理（应用自产临时数据；失败只记日志，不影响结果）
 ///
 /// R1d-L05：调用方在调原生**之前**已 `create_dir` 占位成功，所以这里的 `dir` 只可能是
@@ -365,34 +390,19 @@ pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options:
     //    另需一条证据。旧清理判据只有「名字像本场产物」⇒ 上轮进程遗留或用户自建的同名
     //    目录会被整棵 `remove_dir_all`。现在先自己 `create_dir` 占位：占不到（已存在）
     //    就换下一个世代号，仍占不到才拒绝运行——清理因此只可能删本场亲手建的那个空目录。
-    let mut residue_dir = PathBuf::new();
-    let mut claim_err: Option<std::io::Error> = None;
-    for _ in 0..DISKBENCH_DIR_CLAIM_TRIES {
-        let generation = DISKBENCH_GEN.fetch_add(1, Ordering::Relaxed) + 1;
-        let candidate = resolved.join(format!("Trim-DiskBench-{generation}"));
-        match std::fs::create_dir(&candidate) {
-            Ok(()) => {
-                residue_dir = candidate;
-                claim_err = None;
-                break;
-            }
-            // 同名目录已存在：不是本场建的，换号重试
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => claim_err = Some(e),
-            // 其它失败（路径不可写等）换号也没用
-            Err(e) => {
-                claim_err = Some(e);
-                break;
-            }
+    let residue_dir = match claim_residue_dir(&resolved, |p: &Path| std::fs::create_dir(p)) {
+        Ok(dir) => dir,
+        Err(why) => {
+            log::write_log(
+                "warn",
+                &format!("磁盘测速临时目录占位失败: {} -> {why}", resolved.display()),
+            );
+            return Ok(json!({
+                "success": false,
+                "message": "测速临时目录不可用（同名目录已存在或路径不可写），请换一个测速目录再试",
+            }));
         }
-    }
-    if residue_dir.as_os_str().is_empty() {
-        let why = claim_err.map(|e| e.to_string()).unwrap_or_else(|| "同名目录已存在".to_string());
-        log::write_log("warn", &format!("磁盘测速临时目录占位失败: {} -> {why}", resolved.display()));
-        return Ok(json!({
-            "success": false,
-            "message": "测速临时目录不可用（同名目录已存在或路径不可写），请换一个测速目录再试",
-        }));
-    }
+    };
 
     let args: Vec<String> = vec![
         "diskbench".to_string(),
@@ -477,8 +487,9 @@ pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options:
 
 #[cfg(test)]
 mod p1_6e_diskbench_param_tests {
-    use super::{bench_response, pick};
+    use super::{bench_response, claim_residue_dir, pick, DISKBENCH_DIR_CLAIM_TRIES};
     use serde_json::json;
+    use std::path::{Path, PathBuf};
 
     const QD: &[i64] = &[1, 8, 32];
 
@@ -569,4 +580,46 @@ mod p1_6e_diskbench_param_tests {
         assert_eq!((t_level, d_level), ("warn", "error"), "线程异常要按 error 记账");
     }
 
+    /// R1d-L05：清理只许删「本场 `create_dir` 占位成功」的那个目录，
+    /// 不许按「名字像本场产物」删——同名目录可能是上轮遗留或用户自建。
+    /// 判红自证：把换号重试去掉（或改成「已存在就采用」）⇒ 前三条断言红。
+    #[test]
+    fn 残留目录只认本场占位成功的那个() {
+        let base = Path::new(r"C:\bench");
+        let mut tried: Vec<PathBuf> = Vec::new();
+        let refused = claim_residue_dir(base, |p: &Path| -> std::io::Result<()> {
+            tried.push(p.to_path_buf());
+            Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+        });
+        assert!(refused.is_err(), "一直占不到必须拒绝运行，不许采用同名目录: {refused:?}");
+        assert_eq!(tried.len(), DISKBENCH_DIR_CLAIM_TRIES, "换号次数用尽才放弃");
+        let uniq: std::collections::HashSet<&PathBuf> = tried.iter().collect();
+        assert_eq!(uniq.len(), tried.len(), "每次重试必须换新世代号：{tried:?}");
+        assert!(
+            tried.iter().all(|p| p.parent() == Some(base)),
+            "候选必须落在用户所选目录下：{tried:?}"
+        );
+
+        // 占位失败几次后成功：返回的必须是本次占到的路径，且仍在用户所选目录下
+        let mut n = 0usize;
+        let claimed = claim_residue_dir(base, |_: &Path| {
+            n += 1;
+            if n < 3 {
+                Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+            } else {
+                Ok(())
+            }
+        })
+        .expect("第三次占位应成功");
+        assert_eq!(claimed.parent(), Some(base), "返回路径必须仍在用户所选目录下");
+        assert!(
+            claimed
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("Trim-DiskBench-"))
+                .unwrap_or(false),
+            "目录名必须带世代号: {}",
+            claimed.display()
+        );
+    }
 }

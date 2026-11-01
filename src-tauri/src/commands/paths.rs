@@ -57,6 +57,33 @@ fn path_value_problem(value: &str) -> Option<&'static str> {
     None
 }
 
+/// 把一次自动扫描的结果分成「可落盘」与「被闸拒掉」两堆（R1a-L05）。
+///
+/// 判据是 [`path_value_problem`] —— 与 `paths:save` 同一份实现，不另立第二份（AGENTS §2）。
+/// 空串 = 本次没扫到该键，保持既有绑定不动（与旧落盘口径相同）；数组（软件清单类）
+/// 原样放行 —— 它们不是路径键。拒因由调用方记日志，本函数保持零副作用，单测可直接喂形态。
+fn split_scan_results(
+    dmap: &serde_json::Map<String, serde_json::Value>,
+) -> (
+    Vec<(String, serde_json::Value)>,
+    Vec<(String, &'static str)>,
+) {
+    let mut keepers = Vec::new();
+    let mut rejected = Vec::new();
+    for (key, value) in dmap {
+        match value {
+            serde_json::Value::String(s) if s.is_empty() => {}
+            serde_json::Value::String(s) => match path_value_problem(s) {
+                Some(why) => rejected.push((key.clone(), why)),
+                None => keepers.push((key.clone(), value.clone())),
+            },
+            serde_json::Value::Array(_) => keepers.push((key.clone(), value.clone())),
+            _ => {}
+        }
+    }
+    (keepers, rejected)
+}
+
 /// 可写 key 白名单（与渲染层 GROUPS 同源）
 const ALLOWED_KEYS: &[&str] = &[
     // QQ
@@ -317,23 +344,12 @@ fn scan_install_paths() -> serde_json::Value {
     // R1a-L05：落盘值与 `paths_save` 过**同一道**形态闸（判据唯一真源 `path_value_problem`）。
     // 扫描值的来源是 HKCU 可写的 InstallLocation / DisplayIcon，缺这层就只剩 protect 的
     // fail-closed 兜底；同一份配置的两条写路径安全边际必须一致，不能一条有闸、一条没闸。
-    let mut keepers: Vec<(String, serde_json::Value)> = Vec::new();
-    for (key, value) in &dmap_snapshot {
-        match value {
-            // 空串 = 本次没扫到，保持既有绑定不动（与旧落盘口径相同）
-            serde_json::Value::String(s) if s.is_empty() => {}
-            serde_json::Value::String(s) => match path_value_problem(s) {
-                Some(why) => {
-                    log::write_log(
-                        "warn",
-                        &format!("路径扫描：{key} 的形态不安全，本次未落盘（{why}）"),
-                    );
-                }
-                None => keepers.push((key.clone(), value.clone())),
-            },
-            serde_json::Value::Array(_) => keepers.push((key.clone(), value.clone())),
-            _ => {}
-        }
+    let (keepers, rejected) = split_scan_results(&dmap_snapshot);
+    for (key, why) in &rejected {
+        log::write_log(
+            "warn",
+            &format!("路径扫描：{key} 的形态不安全，本次未落盘（{why}）"),
+        );
     }
     let persisted = security::update_json(&paths::paths_config_file(), |persisted| {
         let Some(pmap) = persisted.as_object_mut() else {
@@ -380,7 +396,7 @@ pub async fn paths_file_icon<R: tauri::Runtime>(window: WebviewWindow<R>, file_p
 
 #[cfg(test)]
 mod tests {
-    use super::{icon_source_reject_reason, path_value_problem};
+    use super::{icon_source_reject_reason, path_value_problem, split_scan_results};
     use std::path::Path;
 
     /// R6b-M11：图标来源的域内白名单**只按来源命名空间收放**，不按扩展名收放。
@@ -506,6 +522,74 @@ mod tests {
             path_value_problem(r"\\?\C:\Users\Administrator\AppData\Local\Temp").is_none(),
             "paths_save 拒了 \\\\?\\ 长路径前缀 —— 规则侧拒它的理由是执行侧不还原长路径，\
              与本处（值直接进 protect 判定，那条链能处理）不同，不该照抄"
+        );
+    }
+
+    /// R1a-L05：自动扫描的落盘面必须与 `paths:save` 过**同一道**值形态闸。
+    ///
+    /// 扫描值的来源是 HKCU 可写的 `InstallLocation` / `DisplayIcon` —— 一个设备路径前缀
+    /// 就能让下游 `is_path_protected` 的判定反号。两侧都断：被闸拒的键必须不进落盘集，
+    /// 合法键与数组必须照常保留（收紧过头会把「扫描一次」变成「什么都不更新」）。
+    #[test]
+    fn 扫描结果与保存走同一道值形态闸() {
+        let mut dmap = serde_json::Map::new();
+        dmap.insert("qqInstallPath".into(), serde_json::json!(r"\\.\C:\Users\Administrator"));
+        dmap.insert("wechatInstallPath".into(), serde_json::json!("D:"));
+        dmap.insert("qqFileDir".into(), serde_json::json!(r"C:\QQ\FileRecv"));
+        dmap.insert("wechatCacheDir".into(), serde_json::json!(""));
+        dmap.insert("neteaseCacheDir".into(), serde_json::json!(r"\\server\share\cache"));
+        dmap.insert("softwareInventory".into(), serde_json::json!(["a", "b"]));
+        dmap.insert("scannedAt".into(), serde_json::json!(12));
+
+        let (keepers, rejected) = split_scan_results(&dmap);
+        let kept: Vec<&str> = keepers.iter().map(|(k, _)| k.as_str()).collect();
+        let reasons: std::collections::HashMap<&str, &str> = rejected
+            .iter()
+            .map(|(k, why)| (k.as_str(), *why))
+            .collect();
+
+        // ① 拒侧：设备路径与驱动器相对必须挡在落盘之前，且理由原样可回报
+        assert!(!kept.contains(&"qqInstallPath"), "设备路径前缀竟进了落盘集");
+        assert!(!kept.contains(&"wechatInstallPath"), "驱动器相对路径竟进了落盘集");
+        assert_eq!(
+            reasons.get("qqInstallPath").copied(),
+            Some("路径是设备路径形式，无法判定保护归属"),
+            "设备路径的拒因口径变了（渲染层与日志都按它说人话）"
+        );
+        assert!(reasons.get("wechatInstallPath").is_some(), "驱动器相对的拒因缺失");
+
+        // ② 放侧：合法绝对路径、UNC（企业环境合法）与数组必须照常落盘
+        assert!(kept.contains(&"qqFileDir"), "合法路径被扫描闸误拒");
+        assert!(kept.contains(&"neteaseCacheDir"), "UNC 被扫描闸误拒（protect 另有 share-root 判定）");
+        assert!(kept.contains(&"softwareInventory"), "数组键不是路径键，不该被闸拦");
+
+        // ③ 空串 = 本次没扫到，既不落盘也不算「被拒」（保持既有绑定）
+        assert!(!kept.contains(&"wechatCacheDir"), "空串不该覆盖既有绑定");
+        assert!(!reasons.contains_key("wechatCacheDir"), "空串不该被记成「形态不安全」");
+        // ④ 非字符串非数组（时间戳一类）一并不进落盘集
+        assert!(!kept.contains(&"scannedAt"));
+        // ⑤ 正向对照：空结果不得 panic、也不得凭空产出
+        let (k0, r0) = split_scan_results(&serde_json::Map::new());
+        assert!(k0.is_empty() && r0.is_empty(), "空扫描结果竟产出了落盘项");
+    }
+
+    /// 判据必须真的被扫描命令用到：只测纯函数会漏掉「闸留着、落盘改回旧写法」这种回退。
+    #[test]
+    fn 扫描落盘必须真的过形态闸() {
+        let src = include_str!("paths.rs");
+        let start = src
+            .find("fn scan_install_paths")
+            .expect("找不到 scan_install_paths，判据坐标已漂");
+        let rest = &src[start..];
+        let end = rest.find("\n#[tauri::command]").unwrap_or(rest.len());
+        let body = &rest[..end];
+        assert!(
+            body.contains(&["split_scan_results(", "&dmap_snapshot)"].concat()),
+            "扫描落盘没有走形态闸 ⇒ 注册表里写进来的设备路径会原样进配置"
+        );
+        assert!(
+            body.contains(&["for (key, why) in ", "&rejected"].concat()),
+            "被闸拒掉的键没有被逐个记日志 ⇒ 扫描结果静默少几项而用户与事后追溯都看不见"
         );
     }
 }

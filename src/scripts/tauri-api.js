@@ -80,7 +80,12 @@
     'finder:ignore-folder': 'finder_ignore_folder',
     'finder:ignore-list': 'finder_ignore_list',
     'finder:ignore-remove': 'finder_ignore_remove',
-    // uninstall：卸载域（report/appx-logo 为只读档，其余 MAIN）
+    // uninstall：卸载域。档位以命令体的 guard 第二实参为准（tools/check-guard-tiers.mjs 对
+    // MAIN / MUST_READONLY 做双向棘轮，窄窗口集另登记在 MUST_WINDOWSET，改档必须两边同步）。
+    // 2026-11-01 按后端逐条订正：此前注释把 report-*/appx-logo 说成只读、把 pending-*/residue-* 说成 MAIN。
+    //   MAIN = list/run/modify/dir-size/reg-backup-*/batch-*/report-*/appx-logo
+    //   main+residue = pending-add|pending-list|pending-revoke（PENDING_DELETE_WINDOWS）
+    //   residue 副窗独占 = residue-scan|residue-execute（RESIDUE_WINDOWS）
     'uninstall:list': 'uninstall_list',
     'uninstall:run': 'uninstall_run',
     'uninstall:modify': 'uninstall_modify',
@@ -162,7 +167,7 @@
     'paths:browse': 'paths_browse',
     'paths:app-icon': 'paths_app_icon',
     'paths:file-icon': 'paths_file_icon',
-    // fileclean（3）
+    // fileclean（条数不写死在这里：以 node tools/check-channel-map.mjs 现算为准，退役一条就漂一次）
     'fileclean:scan': 'fileclean_scan',
     'fileclean:execute': 'fileclean_execute',
     'fileclean:delete-file': 'fileclean_delete_file',
@@ -208,7 +213,7 @@
     'optimizer:nara-panel': 'optimizer_nara_panel',
     'optimizer:privacy-panel': 'optimizer_privacy_panel',
     'optimizer:external-scan': 'optimizer_external_scan',
-    // system / startup（8）
+    // system / startup（条数不写死在这里：同 fileclean 段，以 check-channel-map 现算为准）
     'system:disk-type': 'system_disk_type',
     'system:disk-list': 'system_disk_list',
     'startup:scan': 'startup_scan',
@@ -272,6 +277,10 @@
     'processManager:report': 'process_manager_report'
   };
 
+  /**
+   * send 通道：语义是「不等回执」，但必须把回执 promise 交出去 —— resolve(true)=已投递，
+   * resolve(false)=失败且已落日志。api 方法一律 `return sendChannel(...)`，不要吞掉回执。
+   */
   function sendChannel(channel, args) {
     var cmd = SEND_MAP[channel];
     if (!cmd) {
@@ -339,15 +348,21 @@
      * 绝对路径 → 页面可加载 URL。页源是 http://tauri.localhost，Chromium 拦掉跨源的 file: 子资源
      * （CSP 里留着 `file:` 也放行不了 —— 表现为「路径正确但图/字体就是不出来」），必须走 asset 协议
      * （conf 的 assetProtocol.scope 只放行了 backgrounds 与 fonts）。URL 形态按平台不同，不在前端复刻
-     * 规则，直接用注入脚本提供的 convertFileSrc；取不到时退回 file:///，保证非 Tauri 环境不白屏。
+     * 规则，直接用注入脚本提供的 convertFileSrc。
+     * 这里**不是双轨**：非 Tauri 环境根本加载不到本文件（文件开头 early return），`internals` 也不可能是空。
+     * 末尾的 file:/// 只在 convertFileSrc 缺失或抛错时走到，且它本身多半会被 CSP / asset scope 再拦一次
+     * —— 所以那一支必须落 warn，让「图不出来」在日志里留痕，而不是静默给个坏 URL。
      */
     pathToUrl: function (filePath) {
       if (!filePath) return '';
       try {
-        if (internals && typeof internals.convertFileSrc === 'function') {
+        if (typeof internals.convertFileSrc === 'function') {
           return internals.convertFileSrc(String(filePath));
         }
-      } catch (e) { /* 落兜底 */ }
+        bridgeLog('warn', 'tauri-api：注入脚本未提供 convertFileSrc，路径只能退回 file:');
+      } catch (e) {
+        bridgeLog('warn', 'tauri-api：convertFileSrc 异常，路径只能退回 file: ' + ((e && e.message) || e));
+      }
       return 'file:///' + String(filePath).replace(/\\/g, '/').replace(/^\//, '');
     },
 
@@ -410,6 +425,9 @@
       fileBackupRestore: function (file, index) { return invokeChannel('cleanup:file-backup-restore', { file: file, index: index }); },
       // partial：扫描范围是勾选项的子集（后端保快照桶并合并；全量扫描传 false）
       scan: function (categories, partial) { return invokeChannel('cleanup:scan', { categories: categories, partial: partial === true }); },
+      // toRecycle 只为形状兼容而保留：后端 cleanup_execute 自 v3.3.0 用户裁定起固定永久删
+      // （scan_execute.rs 里 to_recycle 恒 false），入参只回一份没人读的 toRecycleIgnored。
+      // 新增调用点不得传 true；要摘形参得连带改 cleanup.js 的调用点并重新确认那条裁定。
       execute: function (items, force, toRecycle, autoRebuild) {
         return invokeChannel('cleanup:execute', {
           items: items,
@@ -450,9 +468,13 @@
     // R1（2026-10-01）：`pwsh` 命名空间随 pwsh:status 通道整链摘除——右键图标改原生取图后本应用不再有 PS7 使用者，探测失去对象。
 
     finder: {
+      // 具名键白名单（2026-11-01）：原先 Object.assign 整体透传，载荷键永远进不了 check-channel-map 的
+      // D6 参数名对拍；键集合必须与 Rust 形参一一对应，多传 / 少传都由 D6 判红。
       scan: function (scanType, opts) {
-        if (opts === void 0) opts = {};
-        return invokeChannel('finder:scan', Object.assign({ scanType: scanType }, opts));
+        if (opts == null) opts = {};
+        return invokeChannel('finder:scan', {
+          scanType: scanType, paths: opts.paths, minSize: opts.minSize, minSizeMb: opts.minSizeMb
+        });
       },
       delete: function (items) {
         return invokeChannel('finder:delete', { items: items });
@@ -635,7 +657,12 @@
     processManager: {
       openWindow: function () { return invokeChannel('processManager:open-window'); },
       closeWindow: function () { return invokeChannel('processManager:close-window'); },
-      report: function (payload) { sendChannel('processManager:report', Object.assign({}, payload)); },
+      // 回执透传（2026-11-01）：sendChannel 返回 Promise<boolean>，此前这里把它丢掉，与「要回执的调用方
+      // 可以 await」的契约相反；载荷同时收窄为具名键（updatedAt 由后端 now_ms 生成，前端那份从未被读）。
+      report: function (payload) {
+        var input = payload || {};
+        return sendChannel('processManager:report', { totalCount: input.totalCount });
+      },
       onUpdate: function (callback) { return onEvent('processManager:update', callback); }
     },
 

@@ -367,6 +367,42 @@ fn is_signature_failure(err: &str) -> bool {
     .any(|k| e.contains(k))
 }
 
+/// 下载前复验失败的对外口径。
+struct ReverifyFailure {
+    /// 前端据此决定要不要挂「前往 Releases 手动下载」
+    sig_failed: bool,
+    /// 日志分类词
+    kind: &'static str,
+    /// 推给渲染层的文案
+    message: &'static str,
+    /// 回执错误码（渲染层按它区分可重试/需重新检查）
+    code: &'static str,
+}
+
+/// 把复验失败分流成「签名类 / 网络类」两类口径。
+///
+/// 判据仍是 [`is_signature_failure`]，不另立第二份（AGENTS §2「同一判据不留两份」）；
+/// 单独成函数是为了让「网络失败不得回成签名已变化」这条承诺有**不触网**的机检点 ——
+/// 它此前只写在注释里，而注释不会红。保守方向不变：认不出类别的错误仍按网络处理，
+/// 但下载一律被阻止（本函数只在拒绝路径上被调用）。
+fn reverify_failure_view(err: &str) -> ReverifyFailure {
+    if is_signature_failure(err) {
+        ReverifyFailure {
+            sig_failed: true,
+            kind: "签名类",
+            message: "发布签名在本次会话内发生变化或复验失败，已阻止下载。请重新检查更新。",
+            code: "anchor-changed",
+        }
+    } else {
+        ReverifyFailure {
+            sig_failed: false,
+            kind: "网络类",
+            message: "复验线路暂时不可达（网络问题），本次下载未开始。请稍后重试。",
+            code: "anchor-unreachable",
+        }
+    }
+}
+
 // ==================== IPC 命令 ====================
 
 /// updater:check —— 手动检查（渲染层「检查更新」按钮）
@@ -414,27 +450,16 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
             // 复验失败同样按 `safe_check` 的口径分流：网络类不得标成签名失败 ——
             // 那会把断网/线路抖动推成「前往 Releases 手动下载」，正是 `check_once`
             // 超时文案刻意绕开的出口。下载本身照旧被阻止，安全口径不变。
-            let sig_failed = is_signature_failure(&e);
+            let view = reverify_failure_view(&e);
             log::write_log(
                 "warn",
-                &format!(
-                    "[updater] 下载前复验失败（{}）: {e}，已拒绝下载",
-                    if sig_failed { "签名类" } else { "网络类" }
-                ),
+                &format!("[updater] 下载前复验失败（{}）: {e}，已拒绝下载", view.kind),
             );
-            let message = if sig_failed {
-                "发布签名在本次会话内发生变化或复验失败，已阻止下载。请重新检查更新。"
-            } else {
-                "复验线路暂时不可达（网络问题），本次下载未开始。请稍后重试。"
-            };
             push(
                 &app,
-                json!({ "phase": "error", "sigFailed": sig_failed, "message": message }),
+                json!({ "phase": "error", "sigFailed": view.sig_failed, "message": view.message }),
             );
-            return Ok(json!({
-                "ok": false,
-                "error": if sig_failed { "anchor-changed" } else { "anchor-unreachable" }
-            }));
+            return Ok(json!({ "ok": false, "error": view.code }));
         }
     };
     if !reverified {
@@ -1116,5 +1141,85 @@ mod tests {
         );
         let _ = std::fs::remove_dir(&link);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// R1a-L03：下载前复验阶段的**网络失败**不得回成「签名已变化」。
+    ///
+    /// 两侧都断，少了任一侧这条用例就只剩半边：① 网络类必须 sigFailed=false 且文案
+    /// 不提签名、不引向手动下载（否则断网用户被推去绕验签的出口，正是 `check_once`
+    /// 超时文案刻意避开的）；② 签名类必须仍走拦截口径（保守方向不能被这次放宽带走）。
+    #[test]
+    fn 下载前复验的网络失败不得冒充签名失败() {
+        for net in [
+            "request error sending https://api.atomgit.com/x: timed out",
+            "HTTP status code: 404 Not Found",
+            "error decoding response body",
+        ] {
+            let v = reverify_failure_view(net);
+            assert!(!v.sig_failed, "网络类失败被标成签名失败: {net}");
+            assert_eq!(v.code, "anchor-unreachable", "网络类回执必须是可重试码: {net}");
+            assert_eq!(v.kind, "网络类", "网络类日志分类词错: {net}");
+            assert!(!v.message.contains("签名"), "网络类文案不得提签名: {}", v.message);
+            assert!(
+                !v.message.contains("手动下载"),
+                "网络类文案不得把用户引向手动下载（那是绕验签出口）: {}",
+                v.message
+            );
+        }
+        // 对照腿：签名类仍是拦截口径，且回执码与网络类必须不同
+        let sig = reverify_failure_view("failed to verify minisign signature");
+        assert!(sig.sig_failed, "签名类失败必须标 sigFailed");
+        assert_eq!(sig.code, "anchor-changed", "签名类回执码被改成了可重试形态");
+        assert_eq!(sig.kind, "签名类");
+        assert_ne!(sig.code, reverify_failure_view("timed out").code, "两类失败的回执码不得同形");
+    }
+
+    /// L03 的判据必须真的被下载命令用到：只测纯函数抓不到「口径函数留着、分支改回旧写法」
+    /// 这种回退（旧写法把 `Err(线路超时)` 一律标成 `sigFailed:true`）。
+    #[test]
+    fn 下载前复验必须真的走分流口径() {
+        let src = include_str!("updater.rs");
+        let start = src
+            .find("pub async fn updater_download")
+            .expect("找不到 updater_download，判据坐标已漂");
+        let rest = &src[start..];
+        let end = rest.find("\n#[tauri::command]").unwrap_or(rest.len());
+        let body = &rest[..end];
+        assert!(
+            body.contains(&["let view = reverify_failure_view", "(&e);"].concat()),
+            "复验失败分支没有走分流口径 ⇒ 断网又会被报成「签名已变化」"
+        );
+    }
+
+    /// R1a-L04：安装失败不得把**已验签的包**丢掉。
+    ///
+    /// 这条只能做源码形态断言：失败分支要改的是 `updater_install` 里的槽位回填，
+    /// 而该命令必须拿到 `WebviewWindow` 才能进（单测拿不到）。断言取该命令的函数体切片，
+    /// 判据串按段拼接 —— 完整判据串不在本文件出现，断言不会吃到自己。
+    #[test]
+    fn 安装失败不得丢弃已验签的包() {
+        let src = include_str!("updater.rs");
+        let start = src.find("fn updater_install").expect("找不到 updater_install，判据坐标已漂");
+        let rest = &src[start..];
+        let end = rest.find("\n#[tauri::command]").unwrap_or(rest.len());
+        let body = &rest[..end];
+        assert!(
+            body.contains("install(&d.bytes)"),
+            "updater_install 不再调用 install，本条判据的前提已不成立"
+        );
+        assert!(
+            body.contains(&["*lock(&DOWNLOADED) = ", "Some(d);"].concat()),
+            "安装失败分支没有把已验签的包放回槽里 ⇒ 用户必须重新下载整包"
+        );
+        assert!(
+            body.contains(&["\"retryable\"", ": true"].concat()),
+            "安装失败回执没带 retryable ⇒ 渲染层无从给出「重新安装」出口"
+        );
+        // 回填必须发生在 install 之后：装之前就把包塞回槽里等于给同一次失败留个假副本
+        let put_back = body
+            .find(&["*lock(&DOWNLOADED) = ", "Some(d);"].concat())
+            .expect("回填语句缺失");
+        let installed = body.find("install(&d.bytes)").expect("install 调用缺失");
+        assert!(put_back > installed, "包的回填位置在 install 之前，顺序反了");
     }
 }

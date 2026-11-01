@@ -13,13 +13,16 @@
 //   D4. 反向的第二层：映射到的命令还得**真有渲染层调用点**（审查 v2-M15）。
 //       D1~D3 只保证「三张表互相对得上」，对「表里有、没人调」是瞎的 ——
 //       settings:save 就是这么带着整段密钥/内网 URL 校验逻辑零调用方存活至今。
+//   G. 应用自建 ACL 清单（src-tauri/permissions/）存在时：注册集必须 ⊆ capabilities
+//      引用到的应用权限允许集 —— 否则 generate_handler! 会在构建期静默裁掉命令（R8-L07）。
+//      该目录不存在时打 ⊘ SKIP 并声明本节未校验（不打 ✓ 冒充通过）。
 //
 // 未迁移通道（Rust 尚未注册）只做**统计报告**不判失败，以支持 Phase 1 增量迁移。
 //
 // 用法：node tools/check-channel-map.mjs [--strict]
 //   --strict：要求全部通道均已迁移（Phase 5 收尾门禁用）
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 import { ORIGIN, REPO_ROOT } from './ps-origin.mjs';
@@ -834,6 +837,142 @@ check(
       : '',
 );
 
+
+// ---- G. 应用自建 ACL 清单：注册集 ⊆ ACL 允许集（R8-L07，2026-11-01）----
+//
+// 为什么需要这一组：`generate_handler!` 在**应用自建权限清单**存在时会按 capabilities
+// 静默裁剪命令（tauri-macros 2.7.1 `command/handler.rs` 展开前跑 `filter_unused_commands`，
+// 判据是 `tauri_utils::acl::read_allowed_commands()` 的 `has_app_acl`——为真时只保留
+// capabilities 引用到的权限里 `commands.allow` 列出的命令，特征仅是构建期一条 println）。
+// 被裁掉的命令**编译通过、运行期 not found**，`cargo check` 的 warning 计数里看不到，
+// 而 D1~D6 数的全是源码文本 ⇒ 那种形态下全部照样绿。所以单独一条把「注册面 ⊆ 权限面」钉死。
+//
+// 口径（不是通用 ACL 解析器，只覆盖 Tauri 权限文件的既有形态）：
+//   permissions/**/*.{toml,json} → 权限 / 权限集 / default 定义
+//   capabilities/**/*.json       → 引用面（没被 capabilities 引用的应用权限不产生放行）
+//   ACL 允许集 = 被引用到的应用权限（set / default 递归展开）里 commands.allow 的并集。
+// 解析不了的形态**判红**（fail-closed）：静默跳过等于把这条闸门重新变成瞎的。
+const PERM_DIR = join(TAURI_ROOT, 'src-tauri', 'permissions');
+if (!existsSync(PERM_DIR)) {
+  console.log(
+    '⊘ G. 应用自建 ACL 清单检查未校验（src-tauri/permissions/ 不存在 ⇒ has_app_acl=false，SKIP：不是通过）',
+  );
+} else {
+  /** 取 `[` … `]` 之间的单层字符串数组（权限文件里的数组只装字符串） */
+  const quotedArrayAfter = (text, at) => {
+    const open = text.indexOf('[', at);
+    const close = open < 0 ? -1 : text.indexOf(']', open);
+    if (close < 0) return null;
+    return [...text.slice(open + 1, close).matchAll(/"([^"]*)"|'([^']*)'/g)].map((m) => m[1] ?? m[2]);
+  };
+  /** TOML 权限文件 → [{ id, allow, members }]；只认 `[[permission]]` / `[[set]]` / `[default]` */
+  const parseTomlPermissionFile = (text) => {
+    const parts = text.split(/^[ \t]*\[\[?(permission|set|default)\]\]?[ \t]*$/m);
+    const out = [];
+    for (let i = 1; i < parts.length; i += 2) {
+      const kind = parts[i];
+      const body = parts[i + 1] ?? '';
+      const idm = body.match(/^[ \t]*identifier[ \t]*=[ \t]*"([^"]+)"/m);
+      const id = idm ? idm[1] : kind === 'default' ? 'default' : null;
+      const am = body.match(/^[ \t]*commands(?:[ \t]*\.[ \t]*allow)?[ \t]*=/m);
+      const pm = body.match(/^[ \t]*permissions[ \t]*=/m);
+      out.push({
+        id,
+        allow: am ? quotedArrayAfter(body, am.index) ?? [] : [],
+        members: pm ? quotedArrayAfter(body, pm.index) ?? [] : [],
+      });
+    }
+    return out;
+  };
+  /** JSON 权限文件（PermissionFile 形状）→ 同上 */
+  const parseJsonPermissionFile = (obj) => {
+    const out = [];
+    for (const p of Array.isArray(obj) ? obj : [obj]) {
+      if (!p || typeof p !== 'object') continue;
+      if (p.default) out.push({ id: 'default', allow: [], members: p.default.permissions ?? [] });
+      for (const s of p.set ?? []) out.push({ id: s.identifier, allow: [], members: s.permissions ?? [] });
+      for (const q of p.permission ?? []) {
+        out.push({ id: q.identifier, allow: q.commands?.allow ?? [], members: [] });
+      }
+    }
+    return out;
+  };
+
+  const aclBad = [];
+  const aclDefs = new Map(); // identifier → { allow, members }
+  const permFiles = walkFiles(PERM_DIR);
+  for (const f of permFiles) {
+    const rel = relative(TAURI_ROOT, f);
+    let defs;
+    try {
+      if (f.endsWith('.toml')) defs = parseTomlPermissionFile(readFileSync(f, 'utf8'));
+      else if (f.endsWith('.json')) defs = parseJsonPermissionFile(JSON.parse(readFileSync(f, 'utf8')));
+      else {
+        aclBad.push(`${rel}：不认识的权限文件扩展名（G 组解析器未覆盖，先扩展再放行）`);
+        continue;
+      }
+    } catch (e) {
+      aclBad.push(`${rel}：解析失败 ${e.message}`);
+      continue;
+    }
+    if (!defs.length) {
+      aclBad.push(`${rel}：没解析出任何权限/权限集定义（文件形态变了，G 组解析器要同步）`);
+      continue;
+    }
+    for (const d of defs) {
+      if (!d.id) {
+        aclBad.push(`${rel}：有权限/权限集块缺 identifier`);
+        continue;
+      }
+      aclDefs.set(d.id, { allow: d.allow, members: d.members });
+    }
+  }
+
+  // capabilities 的引用面：带 `:` 前缀的是插件权限（core: / dialog: …），不产生应用命令放行
+  const aclRefs = new Set();
+  const capFiles = walkFiles(join(TAURI_ROOT, 'src-tauri', 'capabilities'), (n) => n.endsWith('.json'));
+  for (const f of capFiles) {
+    let cap;
+    try {
+      cap = JSON.parse(readFileSync(f, 'utf8'));
+    } catch (e) {
+      aclBad.push(`${relative(TAURI_ROOT, f)}：解析失败 ${e.message}`);
+      continue;
+    }
+    for (const p of cap.permissions ?? []) {
+      const id = typeof p === 'string' ? p : p?.identifier;
+      if (typeof id === 'string' && !id.includes(':')) aclRefs.add(id);
+    }
+  }
+
+  const aclAllowed = new Set();
+  const expandAcl = (id, depth) => {
+    if (depth > 8) {
+      aclBad.push(`权限集展开超过 8 层（疑似自引用）：${id}`);
+      return;
+    }
+    const d = aclDefs.get(id);
+    if (!d) {
+      aclBad.push(`capabilities 引用了不存在的应用权限/权限集 ${id}`);
+      return;
+    }
+    for (const c of d.allow) aclAllowed.add(c);
+    for (const m of d.members) expandAcl(m, depth + 1);
+  };
+  for (const id of aclRefs) expandAcl(id, 0);
+
+  const aclRemoved = [...registered].filter((c) => !aclAllowed.has(c)).sort();
+  check(
+    aclBad.length === 0 && aclAllowed.size > 0 && aclRemoved.length === 0,
+    `G. 注册命令 ⊆ 应用 ACL 允许集（注册 ${registered.size} / 允许 ${aclAllowed.size} / 引用 ${aclRefs.size}）`,
+    aclBad.length
+      ? aclBad.join('；')
+      : aclAllowed.size === 0
+        ? 'ACL 允许集为空：capabilities 没引用任何应用权限，generate_handler! 会把全部命令裁掉'
+        : `这些注册命令不在任何被引用的应用权限里，构建期会被静默裁掉（运行期 not found）${JSON.stringify(aclRemoved)}`,
+  );
+  console.log(`  · G 组覆盖：权限文件 ${permFiles.length} 个 / capability 文件 ${capFiles.length} 个`);
+}
 
 // ---- F. 高危优化清单双源对拍（审查 L6） ----
 // 后端 `HAZARD_IDS` 是「必须拿到 confirmedHighRisk 才放行」的闸门集合，前端

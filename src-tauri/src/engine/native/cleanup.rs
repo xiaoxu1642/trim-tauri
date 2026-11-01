@@ -10,8 +10,9 @@
 //! 逐文件执行链**不接** `is_system_namespace`（系统命名空间）这一道闸，理由与复核条件如下——
 //! ① 本链的目标不来自外部：全部来自扫描结果，且删除前已过 `is_path_protected` 的受保护面 /
 //!    别名 / 父链 / 身份证四道闸（见下面「安全口径」）；
-//! ② 盲接会**误拒正常功能**：现算规则库里有 29 条合法规则要写/清 `%WINDIR%` 下的内容
-//!    （系统组件更新缓存一类），系统面闸一接上它们会被整批拒掉；
+//! ② 盲接会**误拒正常功能**：现算有 29 条合法规则要写/清 `%WINDIR%` 下的内容（取数命令：
+//!    测试 `豁免条数与规则库现算一致` 按 fileKeys/pathPs 遍历规则库）——系统组件更新缓存
+//!    一类，系统面闸一接上它们会被整批拒掉；
 //! ③ 复核条件（满足任一条就必须重新裁决、不许沿用本豁免）：规则库新增「写系统目录」的条目、
 //!    或本链的来源从扫描结果变成接受外部路径、或 §2 基线把系统面列为必接闸。
 //! 登记位置：审查台账的 N1a-U02 条目（定性=需修未修，本轮按用户裁定以书面豁免结案）。
@@ -3680,5 +3681,86 @@ mod phase_probe_tests {
         assert_eq!(temps, 0, "临时备份目录必须被清掉");
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&backup);
+    }
+}
+
+#[cfg(test)]
+mod review_shape_tests {
+    use super::*;
+
+    /// R5a-L12：永久删热循环不得逐文件走全局保护入口（每文件一次全局锁 + `ProtectRoots`
+    /// 整表 clone）。判红自证：把循环里的 `is_path_protected(path)` 换成带路径的全局调用
+    /// （`protect::is_path_protected(path)`）⇒ 第一条红；把入口那次 `roots()` 挪回循环内
+    /// ⇒ 最后一条红。
+    #[test]
+    fn 永久删循环复用入口取一次的保护快照() {
+        let src = include_str!("cleanup.rs");
+        let prod = &src[..src.find("#[cfg(test)]").expect("本文件带测试段")];
+        assert_eq!(
+            prod.matches("protect::is_path_protected(").count(),
+            0,
+            "生产段不得调全局入口（逐文件加锁 + 整表 clone）；只许用入口取一次的快照"
+        );
+        assert_eq!(
+            prod.matches("is_path_protected(").count(),
+            1,
+            "生产段只许一处保护判定调用（循环内的闭包）；多出来的就是全局入口那条"
+        );
+        assert!(
+            prod.contains("let protect_roots = crate::engine::protect::roots();"),
+            "保护清单必须在入口取一次"
+        );
+        assert!(
+            prod.contains("is_path_protected_with(p, &protect_roots)"),
+            "判定必须复用同一份快照"
+        );
+        assert_eq!(
+            prod.matches("crate::engine::protect::roots()").count(),
+            1,
+            "roots() 取一次就够，循环里再取就是白 clone 一整张表"
+        );
+    }
+
+    /// R5a-L14：模块头书面豁免里的「%WINDIR% 规则条数」必须与规则库现算一致——数字是
+    /// 豁免理由的一部分，与盘上不符会让下一个复核者误判豁免是否过期。
+    /// 判红自证：把豁免那行的条数改小 ⇒ 红；规则库增删 %WINDIR% 规则而不改豁免 ⇒ 也红。
+    #[test]
+    fn 豁免条数与规则库现算一致() {
+        let rules: Value = serde_json::from_str(include_str!("../../../data/cleanup-rules.json"))
+            .expect("规则库必须是合法 JSON");
+        fn collect<'a>(groups: &'a [Value], out: &mut Vec<&'a Value>) {
+            for g in groups {
+                if let Some(items) = g.get("items").and_then(Value::as_array) {
+                    out.extend(items.iter());
+                }
+                if let Some(sub) = g.get("subGroups").and_then(Value::as_array) {
+                    collect(sub, out);
+                }
+            }
+        }
+        let mut items: Vec<&Value> = Vec::new();
+        collect(
+            rules.get("groups").and_then(Value::as_array).expect("规则库带 groups"),
+            &mut items,
+        );
+        // 与审查口径同一判据：fileKeys[].path 或 pathPs 里出现 WINDIR
+        // （`%WINDIR%` 与 `$env:WINDIR` 两种写法都算，大小写不敏感）
+        let has_windir = |s: &str| s.to_ascii_uppercase().contains("WINDIR");
+        let mut live = 0usize;
+        for it in &items {
+            let by_path = it.get("pathPs").and_then(Value::as_str).is_some_and(has_windir);
+            let by_file = it
+                .get("fileKeys")
+                .and_then(Value::as_array)
+                .is_some_and(|ks| ks.iter().any(|k| k.get("path").and_then(Value::as_str).is_some_and(has_windir)));
+            if by_path || by_file {
+                live += 1;
+            }
+        }
+        let doc = include_str!("cleanup.rs");
+        assert!(
+            doc.contains(&format!("有 {live} 条合法规则")),
+            "模块头豁免的 %WINDIR% 规则条数必须等于规则库现算值（现算 {live} 条）；改规则库就同步那一行"
+        );
     }
 }

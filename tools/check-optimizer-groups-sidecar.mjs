@@ -12,16 +12,19 @@
 //
 // 所以本门禁的价值是：把「兜底那份」钉死成「侧表那份」的镜像。
 //
-// 另外钉两条纪律（AGENTS §2 + M20 审查结论）：
+// 另外钉三条纪律（AGENTS §2 + M20 审查结论 + T1f-L07）：
 //   ① 侧表**不得含任何颜色字段** —— GROUP_COLORS / GROUP_ACCENT 已在 M20 删除，
 //      借这次搬家请回来就是离表色复活。
 //   ② 渲染层的**未登记分类兜底**（`renderGroups` 里
 //      `Object.keys(byGroup).filter(g => GROUP_ORDER.indexOf(g) === -1)`）必须保留 ——
 //      数据层出现新分类而侧表没登记时，它让新分类仍能显示（而不是整类消失）。
+//   ③ 本门禁读的三张优化侧表（groups / nara 面板 / privacy 面板）的 `schemaVer` 必须等于
+//      契约表 `optimizer.sideTableSchemaVer`（A2；此前只有 optimizer-subitems 那张有人读）。
 'use strict';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadSchema } from './rule-schema.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (...p) => readFileSync(join(ROOT, ...p), 'utf8');
@@ -35,6 +38,9 @@ const check = (ok, label, detail = '') => {
 const sidecar = JSON.parse(read('src-tauri', 'data', 'optimizer-groups.json'));
 const js = read('src', 'scripts', 'optimizer.js');
 const groups = sidecar.groups || {};
+// 两张签名面板也在这里读（A2 的版本对拍 + F 的隐藏集各用一次）——读一次、两处共用。
+const naraPanel = JSON.parse(read('src-tauri', 'data', 'optimizer-nara-panel.json'));
+const privacyPanel = JSON.parse(read('src-tauri', 'data', 'optimizer-privacy-panel.json'));
 
 // ---- A. 侧表形状 ----
 const aProblems = [];
@@ -50,22 +56,58 @@ check(
   aProblems.join('; '),
 );
 
+// ---- A2. 版本对拍（T1f-L07）----
+// `schemaVer` 在 `rule-schema.json` 里只有一个键（`optimizer.sideTableSchemaVer`），而除
+// `optimizer-subitems.json`（由 check-optimizer-subitem-contract / -schema-sync 读）之外
+// 没有任何门禁读过它 ⇒ schema 升级时侧表版本漂移不会红。本门禁本来就在读这三张表，
+// 就地把它钉到契约表上。
+// 另注：`optimizer-defaults` / `-provenance` / `-writes` 的 `schemaVer` 至今没有门禁读
+// （读那三张的是 check-optimizer-write-contract，那里没有版本断言）—— 要覆盖须在那边加，
+// 本文件不复制第三份读取。
+function sideVerProblems(tables, want) {
+  const out = [];
+  if (typeof want !== 'number') out.push(`契约表 optimizer.sideTableSchemaVer 不是数字：${JSON.stringify(want)}`);
+  for (const [name, v] of Object.entries(tables)) {
+    if (v === undefined) out.push(`${name} 没有 schemaVer（版本闸失效）`);
+    else if (v !== want) out.push(`${name} schemaVer=${v} ≠ 契约表 ${want}`);
+  }
+  return out;
+}
+{
+  const want = loadSchema().optimizer?.sideTableSchemaVer;
+  const problems = sideVerProblems({
+    'optimizer-groups.json': sidecar.schemaVer,
+    'optimizer-nara-panel.json': naraPanel.schemaVer,
+    'optimizer-privacy-panel.json': privacyPanel.schemaVer,
+  }, want);
+  check(problems.length === 0,
+    `A2. 三张侧表 schemaVer = 契约表 ${want}（groups / nara 面板 / privacy 面板）`,
+    problems.join('; '));
+}
+
 // ---- B. 侧表**不得含颜色字段**（M20 已删 GROUP_COLORS / GROUP_ACCENT）----
 const COLOR_KEYS = /^(color|colors|accent|accents|groupColor|groupAccent|gradient|gradients|bg|background)$/i;
-const colorHits = [];
 // ⚠️ 判红实验 2 踩到的坑：首版写 `if (pathIn !== '' && COLOR_KEYS.test(k))`，
 // 而 `walk(groups, '')` 的**第一层**（`default` / `custom` / `colors`）的 `pathIn`
 // 恰好是 `''` —— 于是 `groups.colors` 这种最典型的放法**被放过了**。
-// 正确做法：从 `sidecar`（而不是 `groups`）起步，并且**不排除第一层**。
+// 正确做法：从侧表根（而不是 `groups`）起步，并且**不排除第一层**。
 // 键名白名单式匹配（COLOR_KEYS）本身就是精确的，不需要用深度去排除误报。
-(function walk(node, pathIn, depth) {
-  if (!node || typeof node !== 'object') return;
-  for (const [k, v] of Object.entries(node)) {
-    if (k === '_comment' || k === '_rule') continue; // 说明性字段，允许提到颜色
-    if (COLOR_KEYS.test(k)) colorHits.push(`${pathIn ? `${pathIn}.` : ''}${k}`);
-    if (typeof v === 'object' && v !== null) walk(v, pathIn ? `${pathIn}.${k}` : k, depth + 1);
-  }
-})(sidecar, '', 0);
+//
+// T1f-L06：这段 walk 抽成**命名函数**，真判据与文件尾的 POSITIVE_CONTROLS 调同一份 ——
+// 旧自检复刻了第二份，真判据以后加跳过键或改深度条件时自检不会跟着变。
+function colorHitsOf(sidecarObj) {
+  const hits = [];
+  (function walk(node, pathIn) {
+    if (!node || typeof node !== 'object') return;
+    for (const [k, v] of Object.entries(node)) {
+      if (k === '_comment' || k === '_rule') continue; // 说明性字段，允许提到颜色
+      if (COLOR_KEYS.test(k)) hits.push(`${pathIn ? `${pathIn}.` : ''}${k}`);
+      if (typeof v === 'object' && v !== null) walk(v, pathIn ? `${pathIn}.${k}` : k);
+    }
+  })(sidecarObj, '');
+  return hits;
+}
+const colorHits = colorHitsOf(sidecar);
 check(
   colorHits.length === 0,
   'B. 侧表不含任何颜色字段（M20 已删 GROUP_COLORS/GROUP_ACCENT，分类列统一吃 --c/--cf token 兜底）',
@@ -127,20 +169,46 @@ function extractFallback() {
   return JSON.parse(out);
 }
 const fb = extractFallback();
-const cProblems = [];
-if (!fb) {
-  cProblems.push('渲染层找不到 GROUP_FALLBACK（兜底常量被删了？侧表通道一失败分类导航就空白）');
-} else {
-  if (JSON.stringify(fb.default) !== JSON.stringify(groups.default || [])) {
-    cProblems.push(`default 顺序不一致：兜底 ${JSON.stringify(fb.default)} / 侧表 ${JSON.stringify(groups.default)}`);
-  }
-  if (JSON.stringify(fb.groupMap) !== JSON.stringify(groups.custom?.groupMap || {})) {
-    cProblems.push(`groupMap 不一致：兜底 ${JSON.stringify(fb.groupMap)} / 侧表 ${JSON.stringify(groups.custom?.groupMap)}`);
-  }
-  if (JSON.stringify(fb.itemOverride) !== JSON.stringify(groups.custom?.itemOverride || {})) {
-    cProblems.push(`itemOverride 不一致：兜底 ${JSON.stringify(fb.itemOverride)} / 侧表 ${JSON.stringify(groups.custom?.itemOverride)}`);
-  }
+
+// C 的两份比较抽成命名函数，真判据与 POSITIVE_CONTROLS 共用（T1f-L06）。
+// T1f-L06：旧实现一律用 `JSON.stringify(a) !== JSON.stringify(b)`。`default` 是**有序**
+// 分类序列（导航顺序就是契约），顺序不同必须红；而 `groupMap` / `itemOverride` 是**映射**，
+// 键序不是语义 —— 生成器按字母序重排、或手工挪一行，旧实现都会假红。
+// 门禁自己误报比漏报更糟（它会让下一位去改本来正确的那份），所以映射必须做键序无关比较。
+function sameOrdered(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
+function sameMap(a, b) {
+  const A = a && typeof a === 'object' ? a : {};
+  const B = b && typeof b === 'object' ? b : {};
+  const ka = Object.keys(A).sort();
+  const kb = Object.keys(B).sort();
+  if (ka.length !== kb.length) return false;
+  for (let i = 0; i < ka.length; i++) {
+    if (ka[i] !== kb[i]) return false;
+    if (A[ka[i]] !== B[kb[i]]) return false;
+  }
+  return true;
+}
+/** 兜底常量 ⇄ 侧表的全部差异（返回问题列表，空 = 一致） */
+function fallbackProblems(fallback, sidecarGroups) {
+  const out = [];
+  if (!fallback) {
+    out.push('渲染层找不到 GROUP_FALLBACK（兜底常量被删了？侧表通道一失败分类导航就空白）');
+    return out;
+  }
+  if (!sameOrdered(fallback.default, sidecarGroups.default || [])) {
+    out.push(`default 顺序不一致：兜底 ${JSON.stringify(fallback.default)} / 侧表 ${JSON.stringify(sidecarGroups.default)}`);
+  }
+  if (!sameMap(fallback.groupMap, sidecarGroups.custom?.groupMap || {})) {
+    out.push(`groupMap 不一致：兜底 ${JSON.stringify(fallback.groupMap)} / 侧表 ${JSON.stringify(sidecarGroups.custom?.groupMap)}`);
+  }
+  if (!sameMap(fallback.itemOverride, sidecarGroups.custom?.itemOverride || {})) {
+    out.push(`itemOverride 不一致：兜底 ${JSON.stringify(fallback.itemOverride)} / 侧表 ${JSON.stringify(sidecarGroups.custom?.itemOverride)}`);
+  }
+  return out;
+}
+const cProblems = fallbackProblems(fb, groups);
 check(
   cProblems.length === 0,
   'C. 渲染层 GROUP_FALLBACK ⇄ 侧表 双向一致（漂移只在「侧表通道失败」时暴露，必须钉死）',
@@ -201,10 +269,8 @@ function groupCoverageProblems({ runtime, defaultGroups, groupMap, itemOverride,
 }
 {
   const runtime = JSON.parse(read('src-tauri', 'data', 'optimizer-runtime.json'));
-  const privacy = JSON.parse(read('src-tauri', 'data', 'optimizer-privacy-panel.json'));
-  const nara = JSON.parse(read('src-tauri', 'data', 'optimizer-nara-panel.json'));
-  const hiddenUnion = new Set([...(privacy.hiddenFromOptimizer || []), ...(nara.hiddenFromOptimizer || [])]);
-  const privacyHidden = new Set(privacy.hiddenFromOptimizer || []);
+  const hiddenUnion = new Set([...(privacyPanel.hiddenFromOptimizer || []), ...(naraPanel.hiddenFromOptimizer || [])]);
+  const privacyHidden = new Set(privacyPanel.hiddenFromOptimizer || []);
   const base = {
     runtime: [{ id: 'a', group: 'G1' }, { id: 'b', group: 'X' }],
     defaultGroups: ['G1'],
@@ -252,33 +318,35 @@ if (fail > 0) {
 console.log('✓ E7 分类侧表：形状 / 无颜色 / 兜底对拍 / 未登记兜底 / 真消费 全通过');
 
 // ==================== POSITIVE_CONTROLS ====================
-// 逐条对已知违规样本跑同一份判据函数，必须报红。
+// 逐条对已知违规样本跑**与真判据同一份函数**，必须报红（T1f-L06：旧自检复刻了一份
+// `colorHit` / `fallbackMiss`，真判据改了它们不会跟着变，等于自检自己骗自己）。
 (function positiveControls() {
-  // 与 B 组同一份口径：从**侧表根**起步、不排除第一层、跳过 _comment/_rule。
-  // 自检必须复用真判据的行为 —— 首版自检里的复刻版带着「排除第一层」的同一个 bug，
-  // 于是「违规: groupMap 里带 color」那条样本其实测的是另一个形态。
-  const colorHit = (g) => {
-    const hits = [];
-    (function walk(node, p) {
-      if (!node || typeof node !== 'object') return;
-      for (const [k, v] of Object.entries(node)) {
-        if (k === '_comment' || k === '_rule') continue;
-        if (COLOR_KEYS.test(k)) hits.push(`${p ? `${p}.` : ''}${k}`);
-        if (typeof v === 'object' && v !== null) walk(v, p ? `${p}.${k}` : k);
-      }
-    })(g, '');
-    return hits;
-  };
-  const fallbackMiss = (a, b) =>
-    JSON.stringify(a) !== JSON.stringify(b);
-
+  const cleanGroups = { default: ['A'], custom: { groupMap: {}, itemOverride: {} } };
   const cases = [
-    ['干净侧表：无颜色字段', colorHit({ default: ['A'], custom: { groupMap: {}, itemOverride: {} } }).length === 0, true],
-    ['违规：groupMap 里带 color', colorHit({ default: ['A'], custom: { groupMap: { x: 'y' }, color: 'red' } }).length > 0, true],
-    ['违规：default 顺序不一致', fallbackMiss(['A', 'B'], ['B', 'A']), true],
-    ['干净：default 顺序一致', fallbackMiss(['A', 'B'], ['A', 'B']), false],
-    ['违规：groupMap 不一致', fallbackMiss({ k: 'v1' }, { k: 'v2' }), true],
-    ['违规：itemOverride 不一致', fallbackMiss({ k: 'v1' }, {}), true],
+    // B 组：颜色字段（从侧表根起步、不排除第一层、跳过 _comment/_rule）
+    ['干净侧表：无颜色字段', colorHitsOf(cleanGroups).length === 0, true],
+    ['违规：第一层带 colors', colorHitsOf({ ...cleanGroups, colors: ['#fff'] }).length > 0, true],
+    ['违规：groupMap 里带 color', colorHitsOf({ default: ['A'], custom: { groupMap: { x: 'y' }, color: 'red' } }).length > 0, true],
+    ['干净：_comment 里提到 colors 不算', colorHitsOf({ ...cleanGroups, _comment: 'colors 已删除' }).length === 0, true],
+    // C 组：default 有序、映射键序无关
+    ['违规：default 顺序不一致', fallbackProblems({ ...cleanGroups, default: ['B', 'A'] }, cleanGroups).length > 0, true],
+    ['干净：default 顺序一致', fallbackProblems({ ...cleanGroups }, cleanGroups).length === 0, true],
+    [
+      '干净：groupMap / itemOverride 键序不同但语义相同（旧实现会假红）',
+      fallbackProblems(
+        { default: ['A'], groupMap: { b: '2', a: '1' }, itemOverride: { y: 'A', x: 'A' } },
+        { default: ['A'], custom: { groupMap: { a: '1', b: '2' }, itemOverride: { x: 'A', y: 'A' } } },
+      ).length === 0,
+      true,
+    ],
+    ['违规：groupMap 值不一致', fallbackProblems({ ...cleanGroups, groupMap: { k: 'v1' } }, { default: ['A'], custom: { groupMap: { k: 'v2' }, itemOverride: {} } }).length > 0, true],
+    ['违规：groupMap 少一个键', fallbackProblems({ ...cleanGroups, groupMap: { a: '1', b: '2' } }, { default: ['A'], custom: { groupMap: { a: '1' }, itemOverride: {} } }).length > 0, true],
+    ['违规：itemOverride 不一致', fallbackProblems({ ...cleanGroups, itemOverride: { k: 'v1' } }, { default: ['A'], custom: { groupMap: {}, itemOverride: {} } }).length > 0, true],
+    // A2：版本对拍
+    ['干净：三张表版本与契约表一致', sideVerProblems({ a: 1, b: 1 }, 1).length === 0, true],
+    ['违规：某张表版本漂移', sideVerProblems({ a: 1, b: 2 }, 1).length > 0, true],
+    ['违规：某张表缺版本字段', sideVerProblems({ a: 1, b: undefined }, 1).length > 0, true],
+    ['违规：契约表键不是数字', sideVerProblems({ a: 1 }, undefined).length > 0, true],
   ];
   const findings = [];
   for (const [name, got, want] of cases) if (got !== want) findings.push(name);

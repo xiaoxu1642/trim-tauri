@@ -182,21 +182,37 @@ pub fn bench_history_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
     }
 }
 
+/// `bench-history:delete` 的入参判据：缺 id / 空 id 一律拒。
+///
+/// 为什么必须在这里拒：`retain` 的条件是「记录的 id 不等于入参」，而记录的 id 恒非空
+/// ⇒ 空入参会把**每一条**都留下，命令却仍然跑完。成功位不能由「跑完了」派生。
+fn delete_id_problem(id: Option<&str>) -> Option<&'static str> {
+    match id {
+        Some(s) if !s.is_empty() => None,
+        _ => Some("缺少记录 id"),
+    }
+}
+
+/// 按 id 移除记录，返回**真的删掉了几条**（删除命令的成功位由这个数字派生）。
+fn remove_records_by_id(records: &mut Vec<Value>, id: &str) -> usize {
+    let before = records.len();
+    records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
+    before - records.len()
+}
+
 /// bench-history:delete — 按 id 删除单条
 #[tauri::command]
 pub fn bench_history_delete<R: tauri::Runtime>(window: WebviewWindow<R>, id: Option<String>) -> Result<Value, String> {
     guard::guard(&window, guard::MAIN)?;
-    let id = id.unwrap_or_default();
     // 缺 id 时 retain 会把每条记录都保留（记录 id 恒非空），旧实现却回 success:true ——
     // 前端据 success 把条目移出列表，磁盘上还在。成功位必须由「真删到了几条」派生。
-    if id.is_empty() {
-        return Ok(json!({ "success": false, "message": "缺少记录 id" }));
+    if let Some(why) = delete_id_problem(id.as_deref()) {
+        return Ok(json!({ "success": false, "message": why }));
     }
+    let id = id.unwrap_or_default();
     let mut removed = 0usize;
     if let Err(msg) = update_bench_history(|records| {
-        let before = records.len();
-        records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
-        removed = before - records.len();
+        removed = remove_records_by_id(records, &id);
     }) {
         return Ok(json!({ "success": false, "message": format!("记录未删除：{msg}") }));
     }
@@ -214,4 +230,65 @@ pub fn bench_history_clear<R: tauri::Runtime>(window: WebviewWindow<R>) -> Resul
         return Ok(json!({ "success": false, "message": format!("记录未清空：{msg}") }));
     }
     Ok(json!({ "success": true }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{delete_id_problem, remove_records_by_id};
+    use serde_json::json;
+
+    /// R1a-L07：缺 id 的删除必须当场拒，不许回 success:true。
+    ///
+    /// 反面对照是这条用例的真正判据：把空 id 放进 retain 里，**每一条**记录都会被留下
+    /// （`retain` 判的是「id 不等于入参」）—— 所以「缺 id 也能删成功」在实现上等于「一条没删」。
+    #[test]
+    fn 缺记录id的删除必须拒而不是回成功() {
+        assert_eq!(delete_id_problem(None), Some("缺少记录 id"), "缺参必须拒");
+        assert_eq!(delete_id_problem(Some("")), Some("缺少记录 id"), "空串必须拒");
+        assert_eq!(
+            delete_id_problem(Some("1700000000000_abc123")),
+            None,
+            "正常 id 被误拒 ⇒ 前端永远删不掉任何记录"
+        );
+        let mut records = vec![json!({ "id": "a" }), json!({ "id": "b" })];
+        assert_eq!(remove_records_by_id(&mut records, ""), 0, "空 id 居然删掉了记录");
+        assert_eq!(records.len(), 2, "空 id 把记录删掉了");
+    }
+
+    /// R1a-L07：成功位由「真删到了几条」派生 —— 一条都没删掉时必须能与删成功区分。
+    #[test]
+    fn 删除条数由实际移除数派生() {
+        let mut records = vec![
+            json!({ "id": "a" }),
+            json!({ "id": "b" }),
+            json!({ "id": "b" }),
+        ];
+        assert_eq!(remove_records_by_id(&mut records, "b"), 2, "同 id 的重复记录必须全部移除");
+        assert_eq!(records.len(), 1);
+        assert_eq!(remove_records_by_id(&mut records, "不存在的 id"), 0, "未命中必须回 0（不是 1）");
+        // 记录侧 id 缺失或非字符串时不得被字符串入参命中（否则会误删别人的记录）
+        let mut odd = vec![json!({ "x": 1 }), json!({ "id": 5 })];
+        assert_eq!(remove_records_by_id(&mut odd, "5"), 0, "非字符串 id 被字符串入参命中了");
+        assert_eq!(odd.len(), 2, "非字符串 id 的记录被误删");
+    }
+
+    /// 判据必须真的被命令用到：只测纯函数会漏掉「helper 留着、命令改回旧写法」这种回退。
+    #[test]
+    fn 删除命令必须真的走缺id判据与移除计数() {
+        let src = include_str!("benchhistory.rs");
+        let start = src
+            .find("fn bench_history_delete")
+            .expect("找不到 bench_history_delete，判据坐标已漂");
+        let rest = &src[start..];
+        let end = rest.find("\n#[tauri::command]").unwrap_or(rest.len());
+        let body = &rest[..end];
+        assert!(
+            body.contains(&["delete_id_problem", "(id.as_deref())"].concat()),
+            "删除命令没走缺 id 判据 ⇒ 缺参又会回 success:true"
+        );
+        assert!(
+            body.contains(&["removed = remove_records_by_id", "(records, &id);"].concat()),
+            "删除命令没由移除计数派生成功位 ⇒ 删 0 条也会报成功"
+        );
+    }
 }

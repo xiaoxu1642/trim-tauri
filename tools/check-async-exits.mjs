@@ -27,11 +27,14 @@
 // 用法：node tools/check-async-exits.mjs
 
 import { readFileSync, readdirSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { gate } from './lib/gate.mjs';
 import { blankNonCode, skipBraces, splitFunctions, lineAt } from './lib/src-scan.mjs';
 
-const ROOT = process.cwd();
+// 仓根由本文件位置推出，不用 `process.cwd()`：在 src-tauri/ 下单跑时判定对象会变成
+// 「不在本机」而打 SKIP + exit 0，门禁静默变成未校验（T1b-L01）。
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPTS = join(ROOT, 'src', 'scripts');
 const BUSY = /\b([A-Za-z0-9_]*(?:busy|Busy|cleaning|Cleaning|running|Running|locked|Locked|inProgress|pending|Pending)[A-Za-z0-9_]*)\s*=\s*true\b/g;
 const MIN_BUSY = 6; // busy 赋值对象地板（单腿）：低于此数说明 BUSY 正则失效

@@ -107,6 +107,48 @@ function classify(opt) {
 }
 
 // ---------------------------------------------------------------------------
+// 侧表条目正文的判据（T1f-L03：旧实现只查「非空 / 长度 ≥ 6」，`why: '为什么'`、
+// `writes: [123]`、`writes: ['']` 全都能过）。这里把「写得对不对」压成两条机械判据。
+// ---------------------------------------------------------------------------
+
+/**
+ * `writes` 元素：形态是「目标 :: 键=值」（目标可省）—— 必须能看出改了哪个键、改成什么值。
+ * 只写一段路径、或只写键名不带值，都不算把写入面说清楚。
+ */
+function writesProblem(w) {
+  if (typeof w !== 'string' || !w.trim()) return '不是非空字符串';
+  if (!w.includes('=')) return '没有「键=值」：看不出改成什么值';
+  const at = w.lastIndexOf('::');
+  const tail = (at >= 0 ? w.slice(at + 2) : w).trim();
+  if (!/^[^=\s][^=]*=\S+$/.test(tail)) return `「::」后半段不是「键=值」：${tail}`;
+  return '';
+}
+
+/** 概念词元：中文/英文/数字连续段，取长度 ≥ 3 的（`UAC`/`Defender`/`内存完整性` 这类是概念名） */
+function conceptTokens(text) {
+  return new Set(
+    String(text).toLowerCase().split(/[^a-z0-9\u4e00-\u9fff]+/).filter((t) => t.length >= 3),
+  );
+}
+
+/**
+ * `why` 元素：它是高危确认框正文（`optimizer.js` 原样展示给用户），必须说的是这条项
+ * **为什么**降安全面。机器判「名副其实」需要词表 —— 这里拿规则表自己的 `why` 当概念
+ * 词源：该条声明的每条规则，至少要有一个概念词元与本条 `why` 有交集。
+ * 对不上基本等于复制了别条的理由或写成了宣传语（`这条能释放更多磁盘空间` 正是这种）。
+ */
+function whyOffTopic(meta) {
+  const mine = conceptTokens(meta.why);
+  const out = [];
+  for (const rid of Array.isArray(meta.rules) ? meta.rules : []) {
+    const rule = [...VALUE_RULES, ...CMD_RULES].find((r) => r.id === rid);
+    if (!rule) { out.push(`${rid}（规则表里没有这条规则 id）`); continue; }
+    if (![...conceptTokens(rule.why)].some((t) => mine.has(t))) out.push(rid);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // 正向/反向对照自检：判据自己必须先被证明活着，且不许误报
 // ---------------------------------------------------------------------------
 {
@@ -146,6 +188,22 @@ function classify(opt) {
     badFire.length === 0 && badSilent.length === 0,
     `正向/反向对照自检（${cases.length} 条规则 × 命中+静默）`,
     [...badFire, ...badSilent].join('；'),
+  );
+
+  // T1f-L03 的对照：侧表正文判据（writes 形态 / why 概念交集）同样要能判红。
+  const bodyCases = [
+    ['writes 合法（带目标）', writesProblem('HKLM\\X\\Y :: EnableLUA=0') === '', true],
+    ['writes 合法（无目标）', writesProblem('EnableSmartScreen=0') === '', true],
+    ['writes 只写路径', writesProblem('HKLM\\X\\Y') !== '', true],
+    ['writes 值为空', writesProblem('HKLM\\X\\Y :: EnableLUA=') !== '', true],
+    ['why 与规则概念有交集', whyOffTopic({ why: '关闭 UAC：提权不再弹窗', rules: ['uac-off'] }).length === 0, true],
+    ['why 与规则概念无关', whyOffTopic({ why: '这条能释放约 200MB 磁盘空间', rules: ['uac-off'] }).length === 1, true],
+    ['why 引用了不存在的规则', whyOffTopic({ why: '关闭 UAC', rules: ['no-such-rule'] }).length === 1, true],
+  ];
+  const bodyBad = bodyCases.filter(([, got, want]) => got !== want).map(([n]) => n);
+  check(bodyBad.length === 0,
+    `侧表正文判据对照（${bodyCases.length} 条样本）`,
+    bodyBad.join('；'),
   );
 }
 
@@ -214,6 +272,14 @@ const catalog = JSON.parse(R(CATALOG));
 const side = JSON.parse(R(SIDE));
 const byId = new Map(catalog.map((o) => [o.id, o]));
 
+// T1f-L07：`optimizer-security.json` 声明了 version，但 `rule-schema.json` 没有与它对应的
+// 键、Rust 侧（catalog.rs）也只取 items —— 没有任何门禁读它。按现值钉住：删掉字段或
+// 静默改版都会红；真升版时改这里，等于强制有人看一眼这张表为什么升版。
+const SECURITY_TABLE_VERSION = 1;
+check(side.version === SECURITY_TABLE_VERSION,
+  `⓪ 侧表 version = ${SECURITY_TABLE_VERSION}（无 schema 对应键，按现值钉住）`,
+  `实际 ${JSON.stringify(side.version)}`);
+
 const classified = new Map();
 for (const o of catalog) {
   const kinds = classify(o);
@@ -241,17 +307,27 @@ if (!table) {
   );
 
   // ③ 每条要带档位与理由（空理由 = 没写清楚为什么它算降级）
-  // T1f-L03：writes 的元素形状也要查 —— `writes: [123]` / `[""]` 旧实现能过（只查数组非空）。
-  // why 的内容语义（与真实 reg/cmd 文本有交集）需要词表，留给彻底方案，本批只钉类型。
+  // T1f-L03：writes / why 都从「只查非空」升级为查正文形态 —— 元素类型、`目标 :: 键=值`
+  // 形态、以及 why 与所声明的规则之间必须有概念交集（判据见文件头的 writesProblem /
+  // whyOffTopic，两者都有合成对照）。
   const bad = [];
   for (const [id, meta] of Object.entries(table)) {
     if (!meta || typeof meta !== 'object') { bad.push(`${id} 不是对象`); continue; }
     if (!['high', 'medium'].includes(meta.level)) bad.push(`${id} level 非法`);
-    if (typeof meta.why !== 'string' || meta.why.trim().length < 6) bad.push(`${id} 缺 why`);
-    if (!Array.isArray(meta.writes) || !meta.writes.length) bad.push(`${id} 缺 writes`);
-    else if (meta.writes.some((w) => typeof w !== 'string' || !w.trim())) bad.push(`${id} 的 writes 只许非空字符串`);
+    if (typeof meta.why !== 'string' || meta.why.trim().length < 6) {
+      bad.push(`${id} 缺 why`);
+    } else {
+      const offTopic = whyOffTopic(meta);
+      if (offTopic.length) bad.push(`${id} 的 why 与所声明规则 ${offTopic.join('/')} 对不上概念`);
+    }
+    if (!Array.isArray(meta.writes) || !meta.writes.length) {
+      bad.push(`${id} 缺 writes`);
+    } else {
+      const wBad = meta.writes.map((w) => writesProblem(w)).filter(Boolean);
+      if (wBad.length) bad.push(`${id} 的 writes 形态不合法：${wBad.slice(0, 2).join('/')}`);
+    }
   }
-  check(bad.length === 0, '③ 每条带 level(high|medium) / why / writes（writes 元素限非空字符串）', bad.join('；'));
+  check(bad.length === 0, '③ 每条带 level(high|medium) / why（与规则同概念） / writes（键=值形态）', bad.join('；'));
 
   // ④ 侧表声明的命中规则必须与重算一致（防止「写了条目的 why 但判据已经改了」）
   const ruleDrift = [];

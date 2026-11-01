@@ -326,3 +326,42 @@ pub fn syspanel_pagefile_apply<R: Runtime>(
     log::flush_sync();
     pagefile_apply(managed, &entries).map(|state| json!({ "success": true, "data": state }))
 }
+
+#[cfg(test)]
+mod tests {
+    /// 取一条命令的函数体切片：从函数名到下一个命令属性之前。
+    fn command_body<'a>(src: &'a str, fn_name: &str) -> &'a str {
+        let start = src
+            .find(fn_name)
+            .unwrap_or_else(|| panic!("找不到 {fn_name}，判据坐标已漂"));
+        let rest = &src[start..];
+        let end = rest.find("\n#[tauri::command]").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// R1a-L06：真正动系统、且事后追不回的高危命令，必须在调用引擎前刷盘。
+    ///
+    /// 为什么不是「本域每条命令都刷」：刷盘是同步 fsync，只读命令与可回滚的重命名上刷它
+    /// 只换来卡顿。判据面就是尾部不可逆的那几条 —— 删电源方案、导出后删高性能、
+    /// 改虚拟内存（关错会蓝屏），共性都是「进程异常退出后只剩日志能追溯」。
+    #[test]
+    fn 高危系统操作前必须先刷盘() {
+        let src = include_str!("syspanel.rs");
+        let flush = ["log::flush", "_sync();"].concat();
+        let cases = [
+            ("fn syspanel_power_plan_delete", "power_plan_delete("),
+            ("fn syspanel_power_hide_high_performance", "power_high_performance_hide("),
+            ("fn syspanel_pagefile_apply", "pagefile_apply("),
+        ];
+        for (fn_name, engine_call) in cases {
+            let body = command_body(src, fn_name);
+            let at = body
+                .find(engine_call)
+                .unwrap_or_else(|| panic!("{fn_name} 里找不到 {engine_call}，判据已失效"));
+            let flushed = body
+                .find(&flush)
+                .unwrap_or_else(|| panic!("{fn_name} 在动系统之前没有刷盘"));
+            assert!(flushed < at, "{fn_name} 的刷盘写在引擎调用之后，等于没刷");
+        }
+    }
+}

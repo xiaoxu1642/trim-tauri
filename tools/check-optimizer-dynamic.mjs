@@ -268,27 +268,52 @@ check(
   const SCOPE_LABELS = ['none', 'explorer', 'reboot'];
 
   let scopeTbl = null;
+  let scopeVer;
   try {
-    scopeTbl = JSON.parse(R('src-tauri/data/optimizer-scope.json')).scope;
+    const doc = JSON.parse(R('src-tauri/data/optimizer-scope.json'));
+    scopeVer = doc.version;
+    scopeTbl = doc.scope;
   } catch (e) {
     check(false, 'A6 生效粒度侧表 optimizer-scope.json', `读不到或不是合法 JSON：${e.message.slice(0, 60)}`);
   }
   if (scopeTbl) {
+    // T1f-L07：`optimizer-scope.json` 声明 version，但 `rule-schema.json` 没有对应键、
+    // Rust（catalog.rs）只取 scope 段 —— 按现值钉住，删字段或静默改版都会红。
+    const SCOPE_TABLE_VERSION = 1;
+    check(scopeVer === SCOPE_TABLE_VERSION,
+      `A6 侧表 version = ${SCOPE_TABLE_VERSION}（无 schema 对应键，按现值钉住）`,
+      `实际 ${JSON.stringify(scopeVer)}`);
+
     const opts = JSON.parse(dataJson);
     const known = new Set(opts.map((o) => o.id));
+    // 档位重算的唯一实现（真仓与 A6c 合成对照共用）。
+    const scopeOf = (hay) => {
+      if (SCOPE_REBOOT_CMD.test(hay) || SCOPE_REBOOT_KEY.test(hay)) return 'reboot';
+      if (SCOPE_EXPLORER_KEY.test(hay)) return 'explorer';
+      return 'none';
+    };
+    // 步骤 → 判据文本。withPwsh 决定 `pwsh` 是否参与（cmd 与 pwsh 是同语义的命令面）。
+    const hayOf = (o, withPwsh) => [...(o.steps || []), ...(o.restore || [])]
+      .map((s) => `${s.cmd || ''} ${withPwsh ? (s.pwsh || '') : ''} ${s.reg || ''} ${s.service || ''}`)
+      .join(' ; ');
+
+    // T1f-L05：`pwsh` 与 `cmd` 必须同语义 —— 旧实现的 hay 里根本没有 `pwsh`，于是
+    // 「schtasks /change /disable 写在 pwsh 里」这一类整块收不到，同一句话写进 cmd 才判
+    // reboot。但侧表是**签名数据**：把 pwsh 计入后 telemetry_optimize / tf_nvidia_telemetry
+    // 会从 none 变 reboot，表要重出并重签（数据批次的事，不在本门禁改数据）。
+    // 在那之前不许静默：把已确认的差异逐项登记，**任何新增差异**都判红（要么补侧表，
+    // 要么来这里登记理由），登记项消失也要红（僵尸登记）。
+    const PWSH_SCOPE_GAP = new Map([
+      ['telemetry_optimize', 'none→reboot'],
+      ['tf_nvidia_telemetry', 'none→reboot'],
+    ]);
     const recomputed = new Map();
+    const pwshGap = new Map();
     for (const o of opts) {
-      // T1f-L05：规则**刻意**只认 cmd/reg/service 三个字段（`pwsh` 步骤不参与重算）：
-      // 把 `s.pwsh` 纳入后 telemetry_optimize / tf_nvidia_telemetry 会从 none 变 reboot，
-      // 而侧表要同步重签 —— 那是数据批次的事。这里把口径写明，避免下一位把「同语义不同判」
-      // 当成 bug 顺手改掉，也避免手工标 reboot 时被 :292 误判为「表里多标」。
-      const hay = [...(o.steps || []), ...(o.restore || [])]
-        .map((s) => `${s.cmd || ''} ${s.reg || ''} ${s.service || ''}`)
-        .join(' ; ');
-      let sc = 'none';
-      if (SCOPE_REBOOT_CMD.test(hay) || SCOPE_REBOOT_KEY.test(hay)) sc = 'reboot';
-      else if (SCOPE_EXPLORER_KEY.test(hay)) sc = 'explorer';
-      if (sc !== 'none') recomputed.set(o.id, sc);
+      const base = scopeOf(hayOf(o, false));
+      if (base !== 'none') recomputed.set(o.id, base);
+      const withPwsh = scopeOf(hayOf(o, true));
+      if (withPwsh !== base) pwshGap.set(o.id, `${base}→${withPwsh}`);
     }
     const stale = Object.keys(scopeTbl).filter((id) => !known.has(id));
     const badLabel = Object.entries(scopeTbl).filter(([, v]) => !SCOPE_LABELS.includes(v));
@@ -302,6 +327,23 @@ check(
           : missing.length ? `规则判定需要提示但表里没标：${missing.slice(0, 8).join(',')}`
             : extra.length ? `表里标了规则判不出该档位的项（新增提示面须同时改规则）：${extra.slice(0, 8).join(',')}`
               : ''
+    );
+
+    // A6c：`pwsh` 与 `cmd` 同语义（T1f-L05）。差异集合必须恰等于登记集合，
+    // 且合成对照要证明 pwsh 路径真的是活的（写在 pwsh 里的 schtasks 必须判 reboot）。
+    const gapUnknown = [...pwshGap].filter(([id, v]) => PWSH_SCOPE_GAP.get(id) !== v);
+    const gapZombie = [...PWSH_SCOPE_GAP.keys()].filter((id) => !pwshGap.has(id));
+    const ctlStep = { steps: [{ pwsh: 'schtasks /change /tn TrimProbe /disable' }] };
+    const ctlBase = scopeOf(hayOf(ctlStep, false));
+    const ctlPwsh = scopeOf(hayOf(ctlStep, true));
+    check(
+      gapUnknown.length === 0 && gapZombie.length === 0 && ctlBase === 'none' && ctlPwsh === 'reboot',
+      `A6c pwsh 与 cmd 同语义重算（差异 ${pwshGap.size} 项 / 已登记 ${PWSH_SCOPE_GAP.size} 项）`,
+      gapUnknown.length ? `出现未登记的 pwsh 差异（要么把该项补进侧表并重签，要么来 PWSH_SCOPE_GAP 登记理由）：${gapUnknown.map(([id, v]) => `${id}=${v}`).join(',')}`
+        : gapZombie.length ? `登记的 pwsh 差异已消失（僵尸登记，应删除）：${gapZombie.join(',')}`
+          : ctlBase === 'none' && ctlPwsh === 'reboot'
+            ? '' // 全绿时不落原因链（同 A5 的守卫写法）
+            : `判据对照失败：pwsh 里的 schtasks 应判 reboot，实得 ${ctlPwsh}（base=${ctlBase}）`
     );
 
     // ③ 两侧档位序表同键同序
@@ -385,6 +427,25 @@ check(
 
 // ==================== A8. D0 三侧覆盖契约（R0-b 新增） ====================
 //
+/**
+ * 单条覆盖标记的判定（真仓与 A8.5 合成对照共用，T1f-L09）。
+ * - 字符串形态：在该侧**整文件**里出现过即可 —— 只留给写在文件头的 D0-* 契约锚点。
+ * - `{ fn, marker }` 形态：标记必须出现在**消费该字段的函数体内**。旧实现是
+ *   `src.includes(marker)`，只能证明「这串字在文件某处」—— 挪进注释、挪进无关函数都不会红。
+ * 函数体取不到同样判红（改名/搬家时 fail-closed，不许静默空转）。
+ */
+function sideMarkerProblem(src, field, sideName, anchor) {
+  if (!anchor) return '';
+  if (typeof anchor === 'string') {
+    return src.includes(anchor) ? '' : `「${field}」在${sideName}侧无覆盖标记（期望出现 \`${anchor}\`）`;
+  }
+  const body = rustFnBody(src, anchor.fn);
+  if (!body) return `「${field}」${sideName}侧的 fn ${anchor.fn}() 取不到函数体 —— 改名/搬家了要同步本门禁`;
+  return body.includes(anchor.marker)
+    ? ''
+    : `「${field}」${sideName}侧 fn ${anchor.fn}() 体内没有 \`${anchor.marker}\`（文件别处出现不算消费）`;
+}
+
 // 为什么是「三侧」而不是报告 §5.2 设计的「只查 collect_checks」：
 // v0.5.0 的 startType **执行链根本没读这个字段**（`grep -rn startType src-tauri/src/`
 // 全仓 3 处命中全是注释；2026-11-01 复核实测现盘 41 处命中，执行链在 `optimizer/apply.rs:112`
@@ -436,15 +497,32 @@ check(
   // service 的检测锚点与 startType 共用一行（同一个 svcStart 分支），
   // 这里按「该字段是否有任一锚点覆盖」判，不要求一一对应。
   //
-  // 标记一律取**该侧源码里真实存在的字符串**：执行侧 reg 步是直接
-  // `s.get("reg")` 消费（不经独立解析函数），所以判据不能用函数名。
+  // T1f-L09：标记从「整文件出现过」升级为「**消费它的函数体内**出现过」——`src.includes`
+  // 证明不了执行/检测/备份真的走了这条路径（挪进注释或无关函数照样绿）。执行侧 reg 步是
+  // 直接 `s.get("reg")` 消费（不经独立解析函数），所以标记取 `get("reg")` 而**不是**函数名；
+  // 同一步骤在 `build_script`（脚本生成）与 `native_execute_steps`（原生执行）各有一条
+  // 消费路径，两条都要在，少了哪条都在下方点名。
   const FIELD_REQUIRED_SIDES = {
-    reg: { 执行: 'get("reg")', 检测: 'kind: "reg"', 备份: 'parse_reg_targets' },
-    service: { 执行: 'service_stop_pub', 检测: 'kind: "svc"', 备份: 'svc_start_target' },
+    reg: {
+      执行: [{ fn: 'build_script', marker: 'get("reg")' }, { fn: 'native_execute_steps', marker: 'get("reg")' }],
+      检测: [{ fn: 'collect_checks', marker: 'kind: "reg"' }],
+      备份: [{ fn: 'targets_from_steps', marker: 'parse_reg_targets' }],
+    },
+    service: {
+      执行: [{ fn: 'native_execute_steps', marker: 'service_stop_pub' }],
+      检测: [{ fn: 'collect_checks', marker: 'kind: "svc"' }],
+      备份: [{ fn: 'collect_service_start_targets', marker: 'svc_start_target' }],
+    },
+    // startType 的三侧锚点是写在文件头的 D0-* 契约声明（不是函数体标记），保持整文件判。
     startType: { 执行: 'D0-EXEC-SIDE', 检测: 'D0-CHECK-SIDE', 备份: 'D0-BACKUP-SIDE' },
-    disable: { 执行: 'want_disable', 检测: 'kind: "svc"', 备份: 'has_disable' },
+    disable: {
+      执行: [{ fn: 'build_script', marker: 'want_disable' }, { fn: 'native_execute_steps', marker: 'want_disable' }],
+      检测: [{ fn: 'collect_checks', marker: 'kind: "svc"' }],
+      备份: [{ fn: 'collect_service_start_targets', marker: 'has_disable' }],
+    },
   };
 
+  const srcOf = (sideName) => SIDE_ANCHORS.find(([n]) => n === sideName)[1];
   const uncovered = [];
   for (const f of STEP_FIELDS) {
     if (f in UNCOVERED_BY_DESIGN) continue;
@@ -455,10 +533,10 @@ check(
     }
     for (const [sideName] of SIDE_ANCHORS) {
       if (!(sideName in need)) continue;
-      if (!need[sideName]) continue;
-      const src = sideName === '执行' ? rustOpt : sideName === '检测' ? rustOverview : rustBackup;
-      if (!src.includes(need[sideName])) {
-        uncovered.push(`「${f}」在${sideName}侧无覆盖标记（期望出现 \`${need[sideName]}\`）`);
+      const anchors = Array.isArray(need[sideName]) ? need[sideName] : [need[sideName]];
+      for (const a of anchors) {
+        const p = sideMarkerProblem(srcOf(sideName), f, sideName, a);
+        if (p) uncovered.push(p);
       }
     }
   }
@@ -483,6 +561,28 @@ check(
   check(zombie.length === 0,
     'A8.4 白名单无僵尸条目（每条都对应真实存在的字段）',
     zombie.length ? `白名单里的 ${zombie.join(',')} 在数据层已不存在，应删除` : '');
+
+  // ⑤ A8.5 对照：证明 A8.2 的判据本体是「消费该字段的函数体内出现过」而不是「整文件出现过」。
+  //   合成样本里标记只落在 consume_checks 体内：问 consume_checks 放行，问同文件里没有该
+  //   标记的 other 必红 —— 旧实现 `src.includes` 在这三种情形下全是绿。
+  const demo = [
+    'fn consume_checks() {',
+    '  kind: "reg",',
+    '}',
+    'fn other() {',
+    '  let _x = 1;',
+    '}',
+  ].join('\n');
+  const ctlPass = sideMarkerProblem(demo, 'reg', '检测', { fn: 'consume_checks', marker: 'kind: "reg"' }) === '';
+  const ctlOther = sideMarkerProblem(demo, 'reg', '检测', { fn: 'other', marker: 'kind: "reg"' }) !== '';
+  const ctlNoFn = sideMarkerProblem(demo, 'reg', '检测', { fn: 'missing_fn', marker: 'kind: "reg"' }) !== '';
+  check(ctlPass && ctlOther && ctlNoFn,
+    'A8.5 对照：消费函数体内放行 / 标记只落在别的函数体内必红 / 取不到函数体必红',
+    ctlPass
+      ? (ctlOther && ctlNoFn
+        ? ''
+        : `判据失灵：${[!ctlOther ? '别的函数体被当成消费' : '', !ctlNoFn ? '函数体取不到却放行' : ''].filter(Boolean).join('、')}`)
+      : '消费函数体内的标记反而被判红');
 
   // ⑥ 覆盖率棘轮：数据层出现新字段时，三侧覆盖必须跟上。
   //    这条是本门禁的真正价值 —— v0.5.0 那 4 个盲区就是「扩库忘了扩检测器」。

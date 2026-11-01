@@ -259,6 +259,31 @@ fn run_one<R: Runtime>(window: &WebviewWindow<R>, task_id: &str) -> Value {
 // ==================== D-04b 注解函数单测（纯函数，零副作用） ====================
 
 #[cfg(test)]
+mod danger_flush_tests {
+    /// R1a-L06：sfc/DISM 这类最长半小时的操作前必须刷盘。
+    ///
+    /// 刷盘点取 `run_one`（真正开跑的那一层）：放在入口命令体里只能保住「用户点了哪个
+    /// 任务」，而执行中产生的日志早已进入缓冲 —— 进程若以异常退出收场就一起丢了。
+    #[test]
+    fn 维护任务开跑前必须先刷盘() {
+        let src = include_str!("maintenance.rs");
+        let start = src.find("fn run_one").expect("找不到 run_one，判据坐标已漂");
+        let rest = &src[start..];
+        let body = match rest.find("\n// ====") {
+            Some(end) => &rest[..end],
+            None => rest,
+        };
+        let at = body
+            .find("maint_run(")
+            .expect("run_one 里找不到 maint_run，判据已失效");
+        let flushed = body
+            .find(&["log::flush", "_sync();"].concat())
+            .expect("维护任务开跑前没有刷盘");
+        assert!(flushed < at, "刷盘写在 maint_run 之后，等于没刷");
+    }
+}
+
+#[cfg(test)]
 mod winerror_annotation_tests {
     use super::*;
 

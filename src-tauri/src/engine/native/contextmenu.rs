@@ -1692,6 +1692,32 @@ pub fn cm_toggle(items: &[Value]) -> Result<Value, String> {
     }
 }
 
+/// R5a-L09：`AutorunsDisabled*` 是外部工具（Autoruns 一类）用**改名**表达的禁用约定，
+/// shellex 臂只认 `-` 前缀，反转不了它。旧实现在这里按「叶子没有 `-`」直接回
+/// `ok / 已处于启用状态`，前端据此翻勾并弹「已启用」，而键名一动没动。
+/// 返回 `Some(理由)` = 本条必须如实回 `skip`、不做任何写入（理由与界面 tooltip 同源）。
+fn cm_shellex_external_disable(leaf: &str) -> Option<&'static str> {
+    // `-` 是 Trim 自己的禁用前缀，先剥掉再判：`-AutorunsDisabled_x` 剥掉 `-` 之后
+    // 仍叫外部禁用名，照样反转不了（旧实现会把它改名成 `AutorunsDisabled_x` 再回
+    // 「已启用」——同一类假成功）。
+    let rest = leaf.trim_start_matches('-').to_ascii_lowercase();
+    rest.starts_with("autorunsdisabled")
+        .then_some("该项由外部工具以改名方式禁用，Trim 不改动")
+}
+
+/// R5a-L10：屏蔽表的**写侧档位计划**——`(目标是否为启用, 扫描侧记录的来源档)`。
+/// 扫描侧两档同时屏蔽时只记 `machine`，所以「解除 machine 档」必须连 `user` 档一起清：
+/// 只清记录档会回 `ok / 已解除屏蔽`，而另一档的屏蔽值还在，资源管理器依旧不加载该扩展。
+/// 屏蔽方向（`want_enabled=false`）仍只写记录档，不因为这里多一档就扩大写入面。
+fn cm_block_write_scopes(want_enabled: bool, scope: &str) -> &'static [&'static str] {
+    match (want_enabled, scope) {
+        (true, "machine") => &["machine", "user"],
+        (true, _) => &["user"],
+        (false, "machine") => &["machine"],
+        (false, _) => &["user"],
+    }
+}
+
 unsafe fn toggle_cm_item(
     item: &Value, source: &str, target: &str, display_path: &str,
     want_enabled: bool, _id: &str, _name: &str,
@@ -1708,26 +1734,20 @@ unsafe fn toggle_cm_item(
             return Err("系统内置扩展不允许加入屏蔽表（可能导致整个新式右键菜单失效）".into());
         }
         let scope = if blocked_by == "machine" { "machine" } else { "user" };
+        // R5a-L10：机器档与用户档同时屏蔽时（扫描侧已按 machine 优先记录），解除必须
+        // 两档都清——只清记录档会回「已解除屏蔽」而另一档仍生效。档位顺序由
+        // `cm_block_write_scopes` 决定（同一判据也用于回读，写与验不各写一套）。
         let machine_key = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked";
         let user_key = r"Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked";
-        let (hive, key) = if scope == "machine" {
-            (HKEY_LOCAL_MACHINE, machine_key)
-        } else {
-            (HKEY_CURRENT_USER, user_key)
-        };
-        // R5a-L10：机器档与用户档同时屏蔽时（扫描侧已按 machine 优先记录），解除必须
-        // 两档都清——只清记录档会回「已解除屏蔽」而另一档仍生效。屏蔽仍只写记录档，
-        // 不额外扩大写入面。
-        let targets: &[(HKEY, &str)] = if want_enabled && scope == "machine" {
-            &[(HKEY_LOCAL_MACHINE, machine_key), (HKEY_CURRENT_USER, user_key)]
-        } else {
-            &[(hive, key)]
-        };
-        for (th, tk) in targets {
+        let targets: Vec<(HKEY, &str)> = cm_block_write_scopes(want_enabled, scope)
+            .iter()
+            .map(|s| if *s == "machine" { (HKEY_LOCAL_MACHINE, machine_key) } else { (HKEY_CURRENT_USER, user_key) })
+            .collect();
+        for &(th, tk) in &targets {
             let sk = to_wide(tk);
             let mut hk = HKEY::default();
             let mut disp = REG_CREATED_NEW_KEY;
-            if RegCreateKeyExW(*th, PCWSTR(sk.as_ptr()), None, PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disp)).is_err() {
+            if RegCreateKeyExW(th, PCWSTR(sk.as_ptr()), None, PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disp)).is_err() {
                 return Err("无法打开屏蔽表键".into());
             }
             if want_enabled {
@@ -1739,12 +1759,12 @@ unsafe fn toggle_cm_item(
             }
             let _ = RegCloseKey(hk);
         }
-        // 回读：解除时目标档（机器档双档）必须全部为空；屏蔽时记录档必须有值。
+        // 回读：解除时计划内的档位必须全部为空；屏蔽时记录档必须有值。
         let mut still_blocked = false;
-        for (vh, vk) in targets {
+        for &(vh, vk) in &targets {
             let sk2 = to_wide(vk);
             let mut hk2 = HKEY::default();
-            if RegOpenKeyExW(*vh, PCWSTR(sk2.as_ptr()), Some(0), KEY_READ, &mut hk2).is_ok() {
+            if RegOpenKeyExW(vh, PCWSTR(sk2.as_ptr()), Some(0), KEY_READ, &mut hk2).is_ok() {
                 let nm = to_wide(&clsid);
                 let mut ty = REG_VALUE_TYPE::default();
                 let mut size = 0u32;
@@ -2080,11 +2100,11 @@ unsafe fn toggle_cm_item(
                 "message": "已启用（整组还原 ContextMenuHandlers）"
             }));
         }
-        // R5a-L09：`AutorunsDisabled*` 外部改名禁用项（扫描侧 `unknownConvention`，
-        // clsid 为空）本臂无法反转——旧实现按「叶子无 '-'」直接回 `ok / 已处于启用状态`，
-        // 前端据此翻勾并弹「已启用」，键名却没变。如实回 skip，文案与 UI tooltip 对齐。
-        if clsid.is_empty() && leaf.to_lowercase().starts_with("autorunsdisabled") {
-            return Ok(json!({"status": "skip", "message": "该项由外部工具以改名方式禁用，Trim 不改动"}));
+        // R5a-L09：`AutorunsDisabled*` 外部改名禁用项本臂无法反转——旧实现按
+        // 「叶子无 '-'」直接回 `ok / 已处于启用状态`，前端据此翻勾并弹「已启用」，
+        // 键名却没变。这里如实回 skip（文案与 UI tooltip 同源），不回假成功。
+        if let Some(msg) = cm_shellex_external_disable(&leaf) {
+            return Ok(json!({"status": "skip", "message": msg}));
         }
         if want_enabled && !leaf.starts_with('-') {
             return Ok(json!({"status": "ok", "message": "已处于启用状态"}));
@@ -2224,6 +2244,36 @@ mod explorer_restart_tests {
             ),
             Err(e) => eprintln!("SKIP：建符号链接失败（{e}），重解析样本未校验"),
         }
+    }
+
+    /// R5a-L08：重启臂的三条出口都要留日志——解析失败、解析到但不是文件、spawn 失败；
+    /// 「留 PID 与失败原因」不能只落在 spawn 分支上。判红自证：把取 exe 的 `match` 改回
+    /// `if let Ok(exe) = …system_tool(…)`（即删掉 Err 臂与 `!is_file` 臂的日志）⇒
+    /// 前两条断言红。源码形态断言：这三条出口是日志，纯函数测不到，只能盯形态。
+    #[test]
+    fn explorer重启的解析失败与不是文件都留日志() {
+        let src = include_str!("contextmenu.rs");
+        let start = src.find("pub fn cm_restart_explorer").expect("重启臂必须在本文件");
+        let body = &src[start..];
+        let end = body.find("/// 取进程完整路径").expect("重启臂到取路径函数为止");
+        let body = &body[..end];
+        assert!(
+            body.contains("无法解析系统 explorer.exe"),
+            "system_tool 返回 Err 时必须写 warn 日志（事后要能看出为什么没拉起）"
+        );
+        assert!(
+            body.contains("不是文件"),
+            "解析到但不是文件时同样必须写 warn 日志"
+        );
+        assert!(
+            !body.contains("if let Ok(exe)"),
+            "解析结果必须走 match 留下 Err 臂，不能退回静默早退"
+        );
+        assert!(
+            body.contains("拉起 explorer.exe 失败"),
+            "spawn 失败同样要留原因，不能用 is_ok() 把错误折成「没重启」"
+        );
+        assert!(body.contains("已拉起 PID"), "spawn 成功分支的 PID 日志不得被顺手删掉");
     }
 
     /// 真机只读探针：枚举本会话 explorer 候选与系统路径，**不杀进程**。
@@ -2564,5 +2614,40 @@ mod c02_write_gate_tests {
             "点开头的键名不是 `.` 段，不能误杀"
         );
         assert_eq!(cm_path_key(r"\\?\C:\X\Y\"), r"c:\x\y", "verbatim 折回保持不变");
+    }
+}
+
+#[cfg(test)]
+mod cm_toggle_scope_tests {
+    use super::*;
+
+    /// R5a-L09：外部改名禁用项（Autoruns 约定）在 shellex 臂必须如实回 skip，
+    /// 不得回 `ok / 已处于启用状态` 让界面翻出一个与事实相反的勾。
+    /// 判红自证：删掉这条判据、退回「叶子没有 `-` 就回 ok」⇒ 前四条断言红。
+    #[test]
+    fn shellex外部改名禁用项不出假成功() {
+        assert!(cm_shellex_external_disable("AutorunsDisabled_Foo").is_some());
+        assert!(cm_shellex_external_disable("autorunsdisabled").is_some());
+        assert!(cm_shellex_external_disable("AUTORUNSDISABLED_Foo").is_some(), "约定名大小写不敏感");
+        // `-` 是 Trim 自己的禁用前缀：剥掉后仍是外部禁用名，照样反转不了
+        assert!(cm_shellex_external_disable("-AutorunsDisabled_Foo").is_some());
+        // 普通项必须照常走重命名臂，不能被这条豁免吞掉
+        assert!(cm_shellex_external_disable("-7-Zip").is_none());
+        assert!(cm_shellex_external_disable("ContextMenuHandlers").is_none());
+        assert!(cm_shellex_external_disable("Autorun").is_none());
+        assert!(cm_shellex_external_disable("").is_none());
+        // 理由与界面 tooltip 同源：用户看到的必须是同一句话
+        assert!(cm_shellex_external_disable("AutorunsDisabled_X").unwrap().contains("外部工具"));
+    }
+
+    /// R5a-L10：屏蔽表的写侧档位计划。扫描侧两档同时屏蔽时只记 machine，所以解除
+    /// 必须连 user 档一起清；屏蔽方向仍只写记录档（不扩大写入面）。
+    /// 判红自证：让计划恒回单个档位（旧实现的「只删记录档」）⇒ 前两行断言红。
+    #[test]
+    fn 屏蔽表解除机器档必须连用户档一起清() {
+        assert_eq!(cm_block_write_scopes(true, "machine"), &["machine", "user"][..]);
+        assert_eq!(cm_block_write_scopes(true, "user"), &["user"][..]);
+        assert_eq!(cm_block_write_scopes(false, "machine"), &["machine"][..]);
+        assert_eq!(cm_block_write_scopes(false, "user"), &["user"][..]);
     }
 }

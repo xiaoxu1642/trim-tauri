@@ -4753,8 +4753,9 @@ body.theme-light .nav-section-title { color: var(--fg-tertiary); }
 .settings-section,
 .appearance-card,
 .empty-state {
-  /* 审查 F1a-L05：描边不再在此写第二份字面值——各卡片类自身的
-     border: 1px solid var(--border-default) 是唯一来源，改 token 才传导得到卡片。 */
+  /* 审查 F1a-L05：描边不再在此写第二份字面值。.summary-card / .settings-section /
+     .appearance-card 的描边由各自基类规则供给（var(--border-default)）；.card /
+     .table-card / .empty-state 本就没有基类描边，原先这条 border-color 是空转。 */
   box-shadow: none;
 }
 .summary-card:hover { transform: translateY(-1px); background: var(--bg-card-hover); }

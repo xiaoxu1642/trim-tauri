@@ -35,11 +35,14 @@
 // 用法：node tools/check-delete-root-guard.mjs [--verbose]
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { gate } from './lib/gate.mjs';
 import { blankNonCode, splitFunctions, skipBraces, lineAt } from './lib/src-scan.mjs';
 
-const ROOT = process.cwd();
+// 仓根由本文件位置推出，不用 `process.cwd()`：在 src-tauri/ 下单跑时判定对象会变成
+// 「不在本机」而打 SKIP + exit 0，门禁静默变成未校验（T1b-L01）。
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(ROOT, 'src-tauri', 'src');
 const GUARD = 'inspect_root(';
 const READ = 'read_dir(';
