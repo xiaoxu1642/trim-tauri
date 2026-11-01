@@ -118,8 +118,15 @@ fn force_round_corners<R: Runtime>(window: &WebviewWindow<R>) {
 
 pub(crate) struct ShowState {
     /// 显示成功闩锁（R8-M02）：CAS 占位防并发重复显示；显示动作失败会复位，
-    /// 让 3s/8s 兜底与后续首帧还能重试。看门狗读它 = 「主窗已成功显示」。
+    /// 让 3s/8s 兜底与后续首帧还能重试。语义 = 「主窗已成功显示」，
+    /// 不等于「渲染层已就绪」——3s/8s 兜底同样会把它置真（R8-M05）。
     pub(crate) shown: AtomicBool,
+    /// 渲染层首帧（R8-M05）：只由 `app:first-paint` 的 main 分支置位，兜底显示永远不置。
+    ///
+    /// 为什么必须与 `shown` 分开：兜底的定义就是「首帧握手还没到」，此刻页面脚本可能根本
+    /// 没挂载。看门狗若读 `shown`，兜底一旦成功显示就再也不会报警（12s 晚于 8s）；
+    /// 待编辑意图若在兜底路径被取走，事件发到未挂载的页面收不到、意图却已被消耗。
+    pub(crate) painted: AtomicBool,
     maximized: bool,
 }
 
@@ -301,14 +308,8 @@ pub fn show_main_window_when_ready<R: Runtime>(app: &AppHandle<R>, cause: &str) 
     match result {
         Ok(()) => {
             log::write_log("info", &format!("主窗口显示（触发: {cause}）"));
-            // R16：提权后消费到的待编辑意图只在首帧显示之后交给渲染层；页面脚本此时才已挂载。
-            if let Some(state) = app.try_state::<commands::state::PendingEditState>() {
-                if let Some(intent) = state.take() {
-                    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
-                        let _ = window.emit("syspanel:edit-intent", intent);
-                    }
-                }
-            }
+            // R8-M05：待编辑意图的投递挪去 `on_render_first_paint`——它只在真实首帧路径
+            // 执行，兜底路径再也不 `take()`（本函数是三条路径共用的，在这里取必然丢意图）。
             // v3 B3：显示动作落地之后才排队 housekeeping。真实首帧握手与 3s / 8s 两级兜底都经过
             // 这个函数，所以渲染脚本白屏时清理照样会跑；下面的闩锁保证三条路径最多排队一次。
             schedule_startup_housekeeping_once(app);
@@ -317,6 +318,73 @@ pub fn show_main_window_when_ready<R: Runtime>(app: &AppHandle<R>, cause: &str) 
             // 复位 = 允许后续兜底重试；日志必须带拒因，否则「没显示」又成了无证据状态。
             state.shown.store(false, Ordering::SeqCst);
             log::write_log("warn", &format!("主窗口显示失败（触发: {cause}）：{e}"));
+        }
+    }
+}
+
+/// 渲染层首帧到达后的统一入口（R8-M05，唯一调用方 = `app:first-paint` 的 main 分支）。
+///
+/// 顺序：先置 `painted`（这是「页面脚本已挂载」的唯一证据），再走显示握手，最后投递意图。
+/// 投递**不能**只挂在显示成功的分支里：3s/8s 兜底可能已抢先把窗口显示出来，
+/// 本次 `show_main_window_when_ready` 会在抢名额处提前返回，而意图仍必须在此刻送达。
+pub fn on_render_first_paint<R: Runtime>(app: &AppHandle<R>) {
+    match app.try_state::<ShowState>() {
+        Some(state) => {
+            state.painted.store(true, Ordering::SeqCst);
+        }
+        None => {
+            log::write_log(
+                "warn",
+                "首帧握手到达但 ShowState 未建：painted 无法置位（启动顺序异常，看门狗会把白屏误报）",
+            );
+        }
+    }
+    show_main_window_when_ready(app, "渲染层首帧握手");
+    deliver_pending_edit(app);
+}
+
+/// 待编辑意图的取走判据（R8-M05）：只有渲染层真的画出首帧才允许 `take()`。
+///
+/// 抽成纯函数是为了让「兜底路径不取走意图」可被单测判红：`painted == false`
+/// （3s/8s 兜底显示、首帧未到）必须返回 None 并把意图留在槽里，等真实首帧再来取。
+fn take_pending_edit(
+    painted: bool,
+    state: &commands::state::PendingEditState,
+) -> Option<serde_json::Value> {
+    if !painted {
+        return None;
+    }
+    state.take()
+}
+
+/// 首帧后把提权带来的待编辑意图交给渲染层（R8-M05）。
+///
+/// 旧实现在共用显示函数里无条件 `take()`：兜底显示时事件发到未挂载的页面收不到、
+/// 意图却已被消耗，且没有任何留痕。现在取走判据是 `painted`，投递成败各写一条日志。
+fn deliver_pending_edit<R: Runtime>(app: &AppHandle<R>) {
+    let Some(show) = app.try_state::<ShowState>() else {
+        return; // 状态未建 = 启动顺序异常，on_render_first_paint 已留 warn
+    };
+    let painted = show.painted.load(Ordering::SeqCst);
+    let Some(pending) = app.try_state::<commands::state::PendingEditState>() else {
+        return;
+    };
+    let Some(intent) = take_pending_edit(painted, &pending) else {
+        return;
+    };
+    let Some(window) = app.get_webview_window(MAIN_LABEL) else {
+        log::write_log("warn", "提权待编辑意图无处投递：主窗口不存在（已取走，无法重发）");
+        return;
+    };
+    match window.emit("syspanel:edit-intent", intent) {
+        Ok(()) => {
+            log::write_log("info", "提权待编辑意图已投递给渲染层");
+        }
+        Err(e) => {
+            log::write_log(
+                "warn",
+                &format!("提权待编辑意图投递失败（已取走，无法重发）：{e}"),
+            );
         }
     }
 }
@@ -827,6 +895,7 @@ pub fn run() {
 
             app.manage(ShowState {
                 shown: AtomicBool::new(false),
+                painted: AtomicBool::new(false),
                 maximized,
             });
             // v3 B3：housekeeping 的排队闩锁与 ShowState.shown 分开两份状态。
@@ -1051,6 +1120,68 @@ mod tests {
         assert!(src.contains("state.shown.store(false"), "失败必须复位闩锁");
         assert!(!src.contains("shown.swap(true"), "旧语义「先占位后做」不得回来");
         assert!(src.contains("show().map_err"), "show 的失败必须进 Result，不许 let _ = 吞掉");
+    }
+
+    /// 函数体：从签名行起到第一个顶格 `}` 之前（注释里的同名散文不算函数体）。
+    fn fn_body(name: &str) -> &'static str {
+        let src = prod();
+        let at = src.find(name).unwrap_or_else(|| panic!("找不到 {name}——结构变了，断言要同步"));
+        let tail = &src[at..];
+        let end = tail.find("\n}\n").unwrap_or(tail.len());
+        &tail[..end]
+    }
+
+    /// R8-M05（合成单测）：兜底显示时首帧未到 ⇒ 待编辑意图不得被取走；
+    /// 首帧路径 ⇒ 原样取出并只投递一次。
+    #[test]
+    fn m05_pending_edit_survives_fallback_show() {
+        let intent = serde_json::json!({
+            "token": "t-1",
+            "schemeGuid": "381b4222-f694-41f0-9685-ff5bb260df2e",
+            "action": "edit"
+        });
+        let state = crate::commands::state::PendingEditState::new(Some(intent.clone()));
+        assert!(
+            super::take_pending_edit(false, &state).is_none(),
+            "兜底显示（painted=false）必须不取走意图——取走即发送到未挂载的页面并静默丢失"
+        );
+        let got = super::take_pending_edit(true, &state).expect("首帧到达后必须取到槽里的原意图");
+        assert_eq!(got, intent, "首帧路径必须逐字发出原意图");
+        assert!(
+            super::take_pending_edit(true, &state).is_none(),
+            "意图是一次性的，只许投递一次"
+        );
+    }
+
+    /// R8-M05 破坏自证：把 `painted` 置位挪回共用显示函数（三条 show 路径全置位）时，本断言必红。
+    /// 同时钉住两件事：看门狗/意图侧读的是 `painted`，且共用显示函数不再碰待编辑意图。
+    #[test]
+    fn m05_painted_is_set_only_on_first_paint_path() {
+        let src = prod();
+        assert_eq!(
+            src.matches(".painted.store(true").count(),
+            1,
+            "painted 只许有一个置位点（多个 = 某条兜底路径也在声称渲染已就绪）"
+        );
+        let entry = fn_body("fn on_render_first_paint");
+        assert!(
+            entry.contains("state.painted.store(true"),
+            "唯一置位点必须在 on_render_first_paint 里（由 app:first-paint 调用）"
+        );
+        let shared = fn_body("fn show_main_window_when_ready");
+        assert!(
+            !shared.contains("painted.store(true"),
+            "共用显示函数不得置位 painted：3s/8s 兜底也经过它，看门狗会重新失明"
+        );
+        assert!(
+            !shared.contains("PendingEditState"),
+            "共用显示函数不得取走待编辑意图：兜底路径首帧未到"
+        );
+        assert_eq!(
+            src.matches(".painted.load(").count(),
+            1,
+            "投递侧必须恰好读一次 painted（兜底路径在 painted=false 时不取走）"
+        );
     }
 
     /// C06 渲染层回执契约（源码形态）：三条「后端给了、前端裁掉/写错」的修法必须留在线上代码里。

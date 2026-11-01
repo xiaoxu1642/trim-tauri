@@ -150,6 +150,23 @@ const regVectors = [
   { target: 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall', blocked: true, cls: 'Uninstall 容器本身' },
   { target: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths', blocked: true, cls: 'App Paths 容器本身' },
   { target: 'HKLM\\SOFTWARE\\Microsoft\\Tracing', blocked: true, cls: 'Tracing 容器本身' },
+  // —— 拒绝：T1g-M01 补齐「整棵禁删清单 ⇄ 向量」的缺口（原清单里有条目没有向量） ——
+  // 为什么必须逐条有向量：Node 门禁 F1 与 Rust `reg_vectors_match_shared_fixture` 都只
+  // 遍历向量表，清单条目被删而向量没删时两侧仍全绿 —— 受保护面可以静默缩小到「能删
+  // 系统安全单元」。末段是 Windows 命名空间（POLICIES / CLIENTS / NETWORK）的根用
+  // 「其下产品键」形态：等值形态还会被 REG_GENERIC_LEAF 兜住，只有下探一层才钉得住清单条目本身。
+  { target: 'HKLM\\SECURITY', blocked: true, cls: '系统单元（清单等值）' },
+  { target: 'HKLM\\BCD00000000', blocked: true, cls: '系统单元（清单等值）' },
+  { target: 'HKLM\\COMPONENTS', blocked: true, cls: '系统单元（清单等值）' },
+  { target: 'HKLM\\DRIVERS', blocked: true, cls: '系统单元（清单等值）' },
+  { target: 'HKLM\\HARDWARE', blocked: true, cls: '系统单元（清单等值）' },
+  { target: 'HKCU\\Software\\Policies\\Acme', blocked: true, cls: '组策略子树（其下产品键）' },
+  { target: 'HKLM\\SOFTWARE\\WOW6432Node\\Policies\\Acme', blocked: true, cls: '组策略子树（32 位重定向，其下产品键）' },
+  { target: 'HKCU\\Software\\Clients\\Mail\\Acme', blocked: true, cls: '客户端命名空间（其下产品键）' },
+  { target: 'HKLM\\SOFTWARE\\Khronos', blocked: true, cls: '图形接口登记（清单等值）' },
+  { target: 'HKLM\\SOFTWARE\\OpenGL', blocked: true, cls: '图形接口登记（清单等值）' },
+  { target: 'HKCU\\Network\\Acme', blocked: true, cls: '用户网络映射（其下项）' },
+  { target: 'HKCU\\Volatile Environment', blocked: true, cls: '环境层（清单等值）' },
   // —— 拒绝：绕过写法与非法形状 ——
   { target: 'HKEY_LOCAL_MACHINE\\SOFTWARE', blocked: true, cls: '长写法别名' },
   { target: 'hkey_local_machine\\software\\microsoft', blocked: true, cls: '小写别名' },
@@ -172,6 +189,11 @@ const regVectors = [
   { target: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AcmeEditor', blocked: false, cls: '当前用户卸载键' },
   { target: 'HKLM\\SOFTWARE\\Microsoft\\Tracing\\acme_RASAPI32', blocked: false, cls: 'Tracing 叶键' },
   { target: 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\acme.exe', blocked: false, cls: 'App Paths 叶键' },
+  // T1g-M01：Microsoft 树叶放行表里原本有若干条没有任何向量 —— 删掉清单条目时门禁不会红，
+  // 「能删什么」被悄悄收紧或放宽都无信号。逐条给一条「其下产品键」的放行向量。
+  { target: 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths\\acme.exe', blocked: false, cls: 'App Paths 叶键（32 位视图）' },
+  { target: 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\acme.exe', blocked: false, cls: 'App Paths 叶键（当前用户）' },
+  { target: 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Tracing\\acme_RASAPI32', blocked: false, cls: 'Tracing 叶键（32 位视图）' },
   // R-1a 的**非 IFEO 正对照**：产品键路径里**含** "Image File Execution Options" 字样，
   // 但它不在系统 IFEO 那棵树下 ⇒ 必须放行。这条钉的是「判据认全路径、不是认子串」——
   // 只按关键字匹配的实现会在这里红。

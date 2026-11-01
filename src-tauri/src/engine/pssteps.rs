@@ -158,20 +158,75 @@ fn hive_admitted(h: Hive) -> bool {
     matches!(h, Hive::Lm | Hive::Cu)
 }
 
-/// PS 引号字面量。**双引号串只在内容不含 `$`/反引号时接受** —— 依赖展开的串超出
-/// 字面量范围，必须回退 PS（`unquote` 返回 None）。
-fn unquote(s: &str) -> Option<String> {
+/// 整段 `s`（去首尾空白后）必须**恰好**是一个带引号字符串，返回 `(引号内原文, 引号字符)`。
+///
+/// R6c-M03：旧 `unquote` 判的是「首字符与尾字符都是引号」。`$p = 'HKLM:\X' # 'note'`
+/// 于是整串被当成一个字面量，注释文本连同引号被并进值 → 后续在**错误的键名**下建键，
+/// 全程无 Err。这里按字符扫描找**闭合引号**（单引号串里的 `''` 是转义、跳过），
+/// 要求闭合之后只剩空白；多一个 token 就不是字面量，交回逐字通道。
+fn quoted_literal(s: &str) -> Option<(&str, char)> {
     let t = s.trim();
-    if let Some(inner) = t.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')) {
+    let bytes = t.as_bytes();
+    let q = *bytes.first()?;
+    if q != b'\'' && q != b'"' {
+        return None;
+    }
+    let mut i = 1usize;
+    while i < bytes.len() {
+        if bytes[i] == q {
+            if q == b'\'' && bytes.get(i + 1) == Some(&b'\'') {
+                i += 2; // `''` 是转义的单引号，不是闭合
+                continue;
+            }
+            if !t[i + 1..].trim().is_empty() {
+                return None; // 闭合引号之后还有内容（注释 / 多余 token）
+            }
+            return Some((&t[1..i], q as char));
+        }
+        i += 1;
+    }
+    None // 未闭合
+}
+
+/// PS 引号字面量。**整段必须恰是一个带引号串**（闭合引号之后只允许空白，见
+/// [`quoted_literal`]）。**双引号串只在内容不含 `$`/反引号时接受** —— 依赖展开的串
+/// 超出字面量范围，必须回退 PS（`unquote` 返回 None，由 `interpolate` 或逐字通道接手）。
+fn unquote(s: &str) -> Option<String> {
+    let (inner, q) = quoted_literal(s)?;
+    if q == '\'' {
         return Some(inner.replace("''", "'"));
     }
-    if let Some(inner) = t.strip_prefix('"').and_then(|x| x.strip_suffix('"')) {
-        if inner.contains('$') || inner.contains('`') {
-            return None;
-        }
-        return Some(inner.to_string());
+    if inner.contains('$') || inner.contains('`') {
+        return None;
     }
-    None
+    Some(inner.to_string())
+}
+
+/// 切掉行尾注释：引号外的 `#`，且必须处于**词首**（与 [`find_top_level`] 同一口径）。
+///
+/// R6c-M03：`split_statements` 只让注释对切分状态机免疫，并不把注释文本从语句里
+/// 切除。赋值右值先切注释，才能按「整段恰是一个字面量」解析。词中间的 `#`
+/// （`a#b`）是普通字符，不当注释。
+fn strip_trailing_comment(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    let mut in_sq = false;
+    let mut in_dq = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' if !in_dq => {
+                in_sq = !in_sq;
+                i += 1;
+            }
+            b'"' if !in_sq => {
+                in_dq = !in_dq;
+                i += 1;
+            }
+            b'#' if !in_sq && !in_dq && starts_token(bytes, i) => return &s[..i],
+            _ => i += 1,
+        }
+    }
+    s
 }
 
 /// 把一段源码按**顶层** `;` 或换行拆条（引号内与括号/花括号内的分号不算；
@@ -729,7 +784,10 @@ fn parse_assign(stmt: &str, vars: &VarMap) -> Option<(String, Expr)> {
     if name.is_empty() || name.contains(char::is_whitespace) {
         return None;
     }
-    let rhs = rhs.trim();
+    // R6c-M03：先切行尾注释，再按「整段恰是一个字面量」解析。旧实现把注释原样
+    // 留在右值里（`$p = 'HKLM:\X' # 'note'` → 值里带着 `' # 'note`），随后按
+    // 错误键名建键且全程无 Err。
+    let rhs = strip_trailing_comment(rhs).trim();
     // 拼接链（`"a" + $b + "c"`）—— 任何一项求值失败即整体 None
     if let Some(parts) = split_plus(rhs) {
         let mut acc = String::new();
@@ -744,12 +802,11 @@ fn parse_assign(stmt: &str, vars: &VarMap) -> Option<(String, Expr)> {
     if let Some(s) = unquote(rhs) {
         return Some((name, Expr::Str(s)));
     }
-    // 依赖插值的双引号串（`"HKLM:\…Services\$n"` / `"$env:SystemDrive\…"`）
-    if rhs.starts_with('"') && rhs.ends_with('"') {
-        if let Some(s) = interpolate(&rhs[1..rhs.len() - 1], vars) {
-            return Some((name, Expr::Str(s)));
-        }
-        return None;
+    // 依赖插值的双引号串（`"HKLM:\…Services\$n"` / `"$env:SystemDrive\…"`）。
+    // 同样要求整段恰是一个双引号串（R6c-M03）：按首尾字符判定会把闭合引号之后的
+    // 多余 token 一起当成串内容。
+    if let Some((inner, '"')) = quoted_literal(rhs) {
+        return interpolate(inner, vars).map(|s| (name, Expr::Str(s)));
     }
     if !rhs.is_empty() && rhs.bytes().all(|b| b.is_ascii_digit()) {
         return Some((name, Expr::Str(rhs.to_string())));
@@ -2229,6 +2286,64 @@ fn value_remove_err(subkey: &str, name: &str, code: u32) -> String {
     format!("删注册表值失败: {subkey}\\{name} —— {}", reg_err(code))
 }
 
+/// 内联通道 stderr 里的**非终止错误证据**（R6c-M01）。
+///
+/// PS 5.1 对非终止错误（cmdlet 失败 / 路径不存在 / 权限不足）只把**错误记录**写进
+/// stderr，进程退出码仍是 0 —— 只看退出码就会把「实际失败了」记成成功。判据取错误
+/// 记录格式化后**必然出现**的两个字段名：`CategoryInfo` 与 `FullyQualifiedErrorId`
+/// （PS 的格式化字段名不随界面语言翻译，本地化的只有消息正文）。
+///
+/// 为什么不按「stderr 非空」判失败：脚本把进度写进 stderr 是正常行为，误判会把
+/// 成功步骤重跑。命中返回该行，供回执定位到错误类别。
+fn nonterm_error_evidence(stderr: &str) -> Option<&str> {
+    stderr
+        .lines()
+        .find(|l| l.contains("CategoryInfo") || l.contains("FullyQualifiedErrorId"))
+}
+
+/// 回执用的 stderr 摘要：折叠成单行、按**字符**截断（按字节切会切进多字节字符）。
+fn stderr_excerpt(stderr: &str, max_chars: usize) -> String {
+    let flat = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max_chars {
+        return flat;
+    }
+    let mut s: String = flat.chars().take(max_chars).collect();
+    s.push('…');
+    s
+}
+
+/// 内联通道的结局判定（R6c-M01），纯函数：**退出码 + 超时 + stderr 非终止错误证据**
+/// 三者合看。
+///
+/// - 超时：独立结局，先判（子进程树没收回要单列，重试承诺不成立）；
+/// - 非零退出码：失败，文案带 stderr 摘要（旧实现只剩一个数字，无法定位）；
+/// - 退出码 0 但 stderr 里有错误记录：**失败** —— 非终止错误不计入退出码；
+/// - 其余：成功，stdout 交回调用方解析 `@@RECYCLE@@` 协议。
+fn inline_outcome(out: crate::pwsh::PsOutput) -> Result<String, String> {
+    if out.timed_out {
+        return Err(if out.tree_terminate_failed {
+            "内联 PS 步骤执行超时（300s），且子进程树未能收回（重试可能与残留进程并发）".into()
+        } else {
+            "内联 PS 步骤执行超时（300s）".into()
+        });
+    }
+    if out.code != 0 {
+        let tail = stderr_excerpt(&out.stderr, 200);
+        return Err(if tail.is_empty() {
+            format!("内联 PS 步骤退出码 {}", out.code)
+        } else {
+            format!("内联 PS 步骤退出码 {}；stderr: {tail}", out.code)
+        });
+    }
+    if let Some(line) = nonterm_error_evidence(&out.stderr) {
+        return Err(format!(
+            "内联 PS 步骤报告了非终止错误（退出码 0，PowerShell 不把非终止错误计入退出码）: {}",
+            stderr_excerpt(line, 200)
+        ));
+    }
+    Ok(out.stdout)
+}
+
 fn exec_one(op: &PsOp) -> Result<String, String> {
     match op {
         PsOp::KeyCreate { hive, subkey } => {
@@ -2374,17 +2489,9 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
             // 少了两样东西 —— UTF-8 BOM（PS 5.1 按 ANSI 读无 BOM 脚本，中文注释会乱码到解析
             // 失败）和早退路径的脚本清理。改走统一入口后两者由 pwsh 层保证。
             let out = crate::pwsh::run_inbox_script(script, std::time::Duration::from_secs(300), None)?;
-            if out.timed_out {
-                return Err(if out.tree_terminate_failed {
-                    "内联 PS 步骤执行超时（300s），且子进程树未能收回（重试可能与残留进程并发）".into()
-                } else {
-                    "内联 PS 步骤执行超时（300s）".into()
-                });
-            }
-            if out.code != 0 {
-                return Err(format!("内联 PS 步骤退出码 {}", out.code));
-            }
-            Ok(out.stdout)
+            // R6c-M01：成功判据不能只看退出码 —— PS 5.1 的非终止错误不改退出码，
+            // 判定收在 `inline_outcome` 一处（退出码 + 超时 + stderr 错误证据）。
+            inline_outcome(out)
         }
     }
 }
@@ -3097,6 +3204,90 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ops.len(), 1, "注释（含引号）之后的新语句必须仍被识别");
+    }
+
+    /// R6c-M03：赋值右值必须**整段**是一个带引号字面量。
+    ///
+    /// 判红：把 [`quoted_literal`] 退回「首尾字符都是引号」⇒ 「多余 token 以引号
+    /// 结尾」那条被整串吞下；删掉 `parse_assign` 里的 `strip_trailing_comment` ⇒
+    /// 「行尾注释」那条拿不到 `值`（注释文本进了值或整体退回逐字）。
+    #[test]
+    fn 赋值右值必须是完整字面量() {
+        let vars = VarMap::new();
+        assert_eq!(
+            parse_assign("$x = \"值\" # 注释", &vars),
+            Some(("x".into(), Expr::Str("值".into()))),
+            "行尾注释是注释，不得并进值"
+        );
+        assert_eq!(
+            parse_assign("$x = \"值\"", &vars),
+            Some(("x".into(), Expr::Str("值".into()))),
+            "完整字面量必须正常解析（正向对照）"
+        );
+        assert_eq!(
+            parse_assign("$x = \"值\" extra", &vars),
+            None,
+            "多余 token 不得被当作字符串字面量"
+        );
+        // 旧实现只比首尾字符：右值以引号结尾时，多余 token 会被整串吞下
+        assert_eq!(
+            parse_assign("$x = \"值\" extra \"tail\"", &vars),
+            None,
+            "闭合引号之后的内容不得被并进值"
+        );
+        assert_eq!(
+            parse_assign("$p = 'HKLM:\\X' # 'note'", &vars),
+            Some(("p".into(), Expr::Str("HKLM:\\X".into()))),
+            "以引号结尾的注释不得进值"
+        );
+        // 端到端：注释文本不得改变目标键名（旧实现会在 `X' # 'note` 下建键）
+        let ops = compile("$p = 'HKLM:\\TrimNoteProbe' # 'note'\nNew-Item -Path $p -Force | Out-Null")
+            .expect("带注释的赋值必须仍可编译");
+        assert!(
+            matches!(&ops[0], PsOp::KeyCreate { subkey, .. } if subkey == "TrimNoteProbe"),
+            "注释不得被并进键名: {ops:?}"
+        );
+    }
+
+    /// R6c-M01：内联通道的成功判据必须同时看退出码、超时与 stderr 非终止错误证据。
+    ///
+    /// 判红：删掉 `inline_outcome` 里的 `nonterm_error_evidence` 分支 ⇒ 第一条
+    /// （退出码 0 + 错误记录）变 Ok；删掉超时分支 ⇒ 第三条变 Ok。
+    #[test]
+    fn 内联通道不把非终止错误报成成功() {
+        let out = |code: i32, timed_out: bool, stderr: &str| crate::pwsh::PsOutput {
+            stdout: "after".into(),
+            stderr: stderr.into(),
+            code,
+            timed_out,
+            tree_terminate_failed: false,
+        };
+        // 退出码 0 + PS 错误记录（PS 5.1 的非终止错误不改退出码）⇒ 失败
+        let err = inline_outcome(out(
+            0,
+            false,
+            "Get-Item : 找不到路径\n    + CategoryInfo          : ObjectNotFound: (...) [Get-Item], ItemNotFoundException\n    + FullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.GetItemCommand",
+        ))
+        .unwrap_err();
+        assert!(err.contains("非终止错误"), "错误记录必须判失败: {err}");
+        assert!(err.contains("CategoryInfo"), "回执要指到错误类别: {err}");
+        // 退出码 0 + 正常写进 stderr 的进度信息（含 "error" 字样）⇒ 成功
+        assert_eq!(
+            inline_outcome(out(0, false, "正在清理 3/10\n跳过 error.log（被占用）")).unwrap(),
+            "after",
+            "正常 stderr 进度信息不得被误判成失败"
+        );
+        // 超时仍是失败（即使退出码为 0、stderr 干净）
+        assert!(
+            inline_outcome(out(0, true, "")).unwrap_err().contains("超时"),
+            "超时必须判失败"
+        );
+        // 非零退出码要把 stderr 带进文案（旧实现只剩一个数字）
+        let err = inline_outcome(out(1, false, "Access is denied")).unwrap_err();
+        assert!(
+            err.contains("退出码 1") && err.contains("Access is denied"),
+            "非零退出码的失败原因要带 stderr: {err}"
+        );
     }
 
     /// R6c-05：`sc.exe` 的位置词必须真的是 `start=`。

@@ -1588,21 +1588,30 @@ pub struct PathStats {
     pub files_truncated: bool,
 }
 
+/// 单文件目标的两道前置闸（N1a-M03）：目标自身的 reparse 位与 minAge。
+///
+/// 抽成「位 + 元数据」的判定，是为了让 reparse 这一条在没有符号链接权限的机器上
+/// 也能被单测判红（见模块内用例）；生产接线由 `get_path_deletable_stats` 用
+/// `symlink_metadata` 取位后调用。判定顺序与树遍历的 `probe_one` 一致。
+fn single_file_counts(reparse: bool, md: &fs::Metadata, guard: AgeGuard) -> bool {
+    !reparse && guard.old_enough(md)
+}
+
 /// 目录型（pathPs）目标的三态统计。
 ///
 /// `collect_files=true` 时同时产出逐文件清单（受 `cap` 约束）——2026-10-23 起 pathPs
 /// 条目也要有身份证基线与跨条目去重依据，而**判据不许另写一份**（§5.16）：这里仍走
 /// `list_deletable_*` 同一套枚举，只是把收集模式与预算开开。
 fn get_path_deletable_stats(path: &str, guard: AgeGuard, protect: Option<&str>, collect_files: bool, cap: Option<usize>) -> PathStats {
-    // 单文件目标在收集模式下也要出清单（身份证基线对它是同一件事），代价是多读一次 metadata
-    let single_file_list = |size: u64| -> (Vec<(String, u64, u64)>, bool) {
+    // 单文件目标在收集模式下也要出清单（身份证基线对它是同一件事）；size 与出生时间
+    // 来自调用方**同一次** metadata 读取，不再二次读盘（两次读之间被改写会配错身份证）。
+    let single_file_list = |size: u64, bt: u64| -> (Vec<(String, u64, u64)>, bool) {
         if !collect_files {
             return (Vec::new(), false);
         }
         if cap.unwrap_or(usize::MAX) == 0 {
             return (Vec::new(), true);
         }
-        let bt = fs::metadata(path).map(|m| birthtime_ns(&m)).unwrap_or(0);
         (vec![(path.to_string(), size, bt)], false)
     };
     if path.is_empty() {
@@ -1613,22 +1622,30 @@ fn get_path_deletable_stats(path: &str, guard: AgeGuard, protect: Option<&str>, 
     let is_dir = fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false);
     if !is_dir {
         if fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) {
+            // N1a-M03：单文件目标与树分支同等级 —— 目标自身的 reparse 位与 minAge
+            // 两道都要过（对照 `list_deletable_inner` 的单文件分支，两道都在）。
+            // 此前这里只有「保护 + 独占」：带 minAgeDays 的规则若 pathPs 直指刚写入
+            // 的文件，扫描报「可清理一项 / N B」，执行侧却按「太新」跳过。
+            // 必须用 symlink_metadata 才看得见链接自身的 0x400（metadata 会跟随它）。
+            let md = match fs::symlink_metadata(p) {
+                Ok(m) => m,
+                Err(_) => return PathStats { ok: false, unreadable_dirs: 1, ..Default::default() },
+            };
+            if !single_file_counts(md_reparse_flag(&md), &md, guard) {
+                // 太新 / 目标自身是重解析点：与树分支同口径，按「不出现」处理
+                return PathStats { ok: true, missing: false, ..Default::default() };
+            }
             if !scan_deletable(p, protect) {
                 return PathStats { ok: true, missing: false, locked: 1, ..Default::default() };
             }
-            return match fs::metadata(p) {
-                Ok(m) => {
-                    let (files, files_truncated) = single_file_list(m.len());
-                    PathStats {
-                        ok: true,
-                        size: m.len(),
-                        nfiles: 1,
-                        files,
-                        files_truncated,
-                        ..Default::default()
-                    }
-                }
-                Err(_) => PathStats { ok: false, unreadable_dirs: 1, ..Default::default() },
+            let (files, files_truncated) = single_file_list(md.len(), birthtime_ns(&md));
+            return PathStats {
+                ok: true,
+                size: md.len(),
+                nfiles: 1,
+                files,
+                files_truncated,
+                ..Default::default()
             };
         }
         // 既非目录也非文件 = 不存在
@@ -2067,8 +2084,40 @@ fn detect_by_candidates(rule: &Json) -> Option<bool> {
     if saw_candidate { Some(false) } else { None }
 }
 
-fn test_rule_detect(rule: &Json) -> bool {
+/// 设置页可改路径的条目：规则 id → 配置键（`pathbinding.js` 的四个缓存目录键）。
+///
+/// N1a-M01：这张表原先藏在 pathPs 主支里，于是「detect 用的是规则默认路径、
+/// 扫描用的是配置路径」两处各取一次；现在是两处共用的唯一取值入口
+/// （不在表里的条目按规则 id 直接取配置）。
+const CONFIG_KEY_MAP: [(&str, &str); 4] = [
+    ("neteaseMusicCache", "neteaseCacheDir"),
+    ("wechatCache", "wechatCacheDir"),
+    ("douyinCache", "douyinCacheDir"),
+    ("qqCache", "qqCacheDir"),
+];
+
+/// 取设置页已确认的路径绑定值（无配置 / 非字符串 → 空串）。
+///
+/// 只做取值不做判定：detect 与 pathPs 主支拿同一个字符串，消除「检出用 A、扫描用 B」。
+fn configured_override(configured: &Json, cat_id: &str) -> String {
+    let key = CONFIG_KEY_MAP
+        .iter()
+        .find(|(k, _)| *k == cat_id)
+        .map(|(_, mapped)| *mapped)
+        .unwrap_or(cat_id);
+    configured.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+}
+
+fn test_rule_detect(rule: &Json, configured: &str) -> bool {
     let rid = rule.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+    // N1a-M01：设置页「手动填写」的路径是用户显式确认过的强证据，优先级高于自动检测。
+    // 旧实现只在 pathPs 主支读配置，而 detect 排在它前面 ⇒ 应用装在非默认盘时
+    // （正是 pathbinding 提供手动填写的唯一用途）整条条目在这里 continue，
+    // 用户配置的路径一次也没被扫过，且零留痕。判据与主支同源：同一取值 + 同一个
+    // path_exists，不另立口径。
+    if !configured.is_empty() && path_exists(configured) {
+        return true;
+    }
     if let Some(d) = rule.get("detect") {
         if d.ps_count() > 0 {
             // N1a-M09：detect **已声明但不是数组**（如 `{}`）时，旧写法落到 `return false`
@@ -3015,8 +3064,13 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_d
 }
 
 // ==================== regKeys 扫描（Measure-RegRule 口径，P2） ====================
-// 只做存在性 + 规模计数（删除留到执行阶段）：键存在计数 1，无 value 语义时
-// 另加 values 数 + 子键数；value='*' 或具名时只数键本身。
+// 只做存在性 + 规模计数（删除留到执行阶段）。计数口径与执行侧 `cleanup.rs` 的
+// value 三态**同一份**语义（那里的 `wipe_form`）：
+//   · 无 value（None）= RegDeleteTree 删整键 ⇒ 键本身 + 全部子键（子键里的值随之消失）；
+//   · value="*"       = 清空该键全部值、保留子键 ⇒ 键下的值个数；
+//   · value=具名      = 只删那一个值 ⇒ 1。
+// N1a-M02：旧实现恰好反着写（整键只报 1、`*` 反而把子键数也加进来），`regCount`
+// 与执行侧实际会删的量不一致 —— 用户在确认环节按错的规模点「确认」。
 
 /// F-2（2026-09-28 拍板）：规则级 excludePaths 对注册表目标的排除判定（扫描/执行两侧共用）。
 /// 排除条目形态与 regKeys path 同源：`HIVE\KEY`（排除整键）或 `HIVE\KEY::VALUE`
@@ -3052,6 +3106,23 @@ pub fn reg_target_excluded(excludes: &[String], target: &str, value: Option<&str
     false
 }
 
+/// 单个 regKeys 目标的删除规模（N1a-M02）：与执行侧 `cleanup.rs` 的 value 三态
+/// （`None` 删整树 / `"*"` 清全部值 / 具名删单值）同一口径。
+///
+/// `counts` 是 `ffi::reg_key_counts` 的 `(values, subkeys)`；具名值只删一个，
+/// 调用方不必读它。整键与 `*` 在计数读不到时按 1 记（「至少有一个目标」）——
+/// 把一次 RegQueryInfoKeyW 失败报成零项，等于告诉用户这条规则没有可删内容。
+fn reg_wipe_count(value: &str, counts: Option<(u32, u32)>) -> i64 {
+    match value {
+        // 整键删树：键本身 + 其下全部子键（子键里的值随树消失，不单独计）
+        "" => 1 + counts.map(|(_, subkeys)| i64::from(subkeys)).unwrap_or(0),
+        // 清全部值、保留子键：被删的量是键下的值个数，子键一个都不会被删
+        "*" => counts.map(|(values, _)| i64::from(values)).unwrap_or(1),
+        // 具名值：只删这一个值
+        _ => 1,
+    }
+}
+
 fn measure_reg_rule(rule: &Json) -> (bool, i64) {
     let rid = rule.get("id").and_then(|v| v.as_str()).unwrap_or("?");
     let mut exists = false;
@@ -3081,13 +3152,14 @@ fn measure_reg_rule(rule: &Json) -> (bool, i64) {
                 continue;
             }
             exists = true;
-            count += 1;
-            if value.is_empty() {
-                continue;
-            }
-            if let Some((values, subkeys)) = ffi::reg_key_counts(&p) {
-                count += values as i64 + subkeys as i64;
-            }
+            // N1a-M02：按 value 三态计数，与实际会删的量对齐（不再「整键只报 1、
+            // `*` 把子键也数进去」）。具名值不需要键下规模，省掉一次注册表查询。
+            let counts = if value.is_empty() || value == "*" {
+                ffi::reg_key_counts(&p)
+            } else {
+                None
+            };
+            count += reg_wipe_count(value, counts);
         }
     }
     (exists, count)
@@ -3353,8 +3425,11 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
             _ => {}
         }
 
+        // N1a-M01：配置覆盖值必须在 detect **之前**取定 —— 设置页确认过的目录要能
+        // 救活「默认位置不存在」的条目；取值与 pathPs 主支共用 `configured_override`。
+        let configured_value = configured_override(&configured, cat_id);
         // 安装检测——目标应用未安装的条目直接不输出（渲染层扫描后隐藏）
-        if !test_rule_detect(rule) {
+        if !test_rule_detect(rule, &configured_value) {
             continue;
         }
 
@@ -3481,24 +3556,7 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
         let mut auto_path = String::new();
 
         // 应用缓存优先采用设置页已确认的路径；没有确认路径时才走内置候选
-        const CONFIG_KEY_MAP: [(&str, &str); 4] = [
-            ("neteaseMusicCache", "neteaseCacheDir"),
-            ("wechatCache", "wechatCacheDir"),
-            ("douyinCache", "douyinCacheDir"),
-            ("qqCache", "qqCacheDir"),
-        ];
-        let mut configured_value = configured
-            .get(cat_id)
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if let Some((_, mapped)) = CONFIG_KEY_MAP.iter().find(|(k, _)| *k == cat_id) {
-            configured_value = configured
-                .get(mapped)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-        }
+        // （取值为 detect 之前已算好的 `configured_value`，见 N1a-M01）
         if !configured_value.is_empty() {
             // §4.8：设置页存量配置值也可能带未解析 %TOKEN%（按原文永远 0 命中）——
             // 只留痕不拒用，让「为什么这项扫不出来」可对账
@@ -4161,13 +4219,13 @@ mod tests {
             ("globCandidatesPs", arr(vec![q(&format!(r"{}\sub*", here))])),
         ]);
         fs::create_dir_all(root.join("subdir")).unwrap();
-        assert!(test_rule_detect(&by_glob), "候选（通配）真实存在时 detect 必须命中，否则整条规则永远隐身");
+        assert!(test_rule_detect(&by_glob, ""), "候选（通配）真实存在时 detect 必须命中，否则整条规则永远隐身");
         let by_static = obj(vec![
             ("id", Json::Str("probe-static".into())),
             ("pathPs", Json::Str("''".into())),
             ("candidatesPs", arr(vec![q(&here)])),
         ]);
-        assert!(test_rule_detect(&by_static), "候选（静态）存在时同样必须命中");
+        assert!(test_rule_detect(&by_static, ""), "候选（静态）存在时同样必须命中");
 
         // ② 候选都不存在 ⇒ 不命中（放宽就变成「恒显示、执行 0 删」那个老形状）
         let miss = obj(vec![
@@ -4176,27 +4234,27 @@ mod tests {
             ("candidatesPs", arr(vec![q(&format!(r"{}\NoSuchDir", here))])),
             ("globCandidatesPs", arr(vec![q(&format!(r"{}\NoSuchGlob\*", here))])),
         ]);
-        assert!(!test_rule_detect(&miss), "候选全不存在时不得命中");
+        assert!(!test_rule_detect(&miss, ""), "候选全不存在时不得命中");
 
         // ③ 空路径又没有任何候选 ⇒ 不命中（不替它编一个「恒命中」）
         let naked = obj(vec![
             ("id", Json::Str("probe-naked".into())),
             ("pathPs", Json::Str("''".into())),
         ]);
-        assert!(!test_rule_detect(&naked), "既无指向又无发现方式时必须不命中");
+        assert!(!test_rule_detect(&naked, ""), "既无指向又无发现方式时必须不命中");
 
         // ④ 正向对照：pathPs 非空时仍按它自己的存在性判，候选档不许插一手
         let normal_hit = obj(vec![
             ("id", Json::Str("probe-normal".into())),
             ("pathPs", q(&here)),
         ]);
-        assert!(test_rule_detect(&normal_hit), "正常 pathPs 命中路径即命中");
+        assert!(test_rule_detect(&normal_hit, ""), "正常 pathPs 命中路径即命中");
         let normal_miss = obj(vec![
             ("id", Json::Str("probe-normal-miss".into())),
             ("pathPs", q(&format!(r"{}\NoSuchDir", here))),
             ("candidatesPs", arr(vec![q(&here)])),
         ]);
-        assert!(!test_rule_detect(&normal_miss), "pathPs 非空却不存在时，不得靠候选把它救活（那是另一条规则的根）");
+        assert!(!test_rule_detect(&normal_miss, ""), "pathPs 非空却不存在时，不得靠候选把它救活（那是另一条规则的根）");
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -5129,5 +5187,149 @@ mod n1a_m09_tests {
         ] {
             assert!(src.contains(marker), "畸形留痕缺失: {marker}");
         }
+    }
+}
+
+#[cfg(test)]
+mod n1a_m01_m03_tests {
+    use super::*;
+
+    /// N1a-M01 回归钉（端到端）：设置页确认的路径必须能让「默认位置不存在」的条目
+    /// 重新出现在扫描结果里。旧链路把配置覆盖放在 detect 之后 ⇒ 用户在 settings 里
+    /// 手填的缓存目录一次也不被扫，界面上却显示「保存成功」，且零留痕。
+    /// 判红自证：把 `test_rule_detect` 里的 configured 判据删掉 ⇒ 第一条断言红
+    ///（扫描结果里根本没有 @@ITEM@@）。
+    #[test]
+    fn 配置覆盖目录救活默认位置不存在的条目() {
+        let _sb = sandbox(&format!("n1a-m01-{}", std::process::id()));
+        let cache_dir = _sb.path().join("cache");
+        fs::create_dir_all(cache_dir.join("sub")).unwrap();
+        fs::write(cache_dir.join("sub").join("a.tmp"), b"abcd").unwrap();
+        let cache = cache_dir.to_string_lossy().to_string();
+
+        // 默认位置（pathPs）指向必然不存在的目录；配置里给真实目录
+        let default_ps = _sb.path().join("not-installed-default");
+        let rules = format!(
+            r#"{{"groups":[{{"items":[{{"id":"n1aM01","name":"配置路径探针","pathPs":"'{}'"}}]}}]}}"#,
+            default_ps.to_string_lossy().replace('\\', "\\\\")
+        );
+        let cfg = format!(r#"{{"n1aM01":"{}"}}"#, cache.replace('\\', "\\\\"));
+        let (code, out, err) = run_json(
+            &[r#"["n1aM01"]"#.to_string(), cfg, String::new()],
+            &rules,
+            None,
+        );
+        assert_eq!(code, 0, "扫描不得失败: {err}");
+        let item = out
+            .lines()
+            .find(|l| l.starts_with("@@ITEM@@") && l.contains("\"id\":\"n1aM01\""))
+            .unwrap_or_else(|| {
+                panic!("N1a-M01：配置目录存在却没有任何 @@ITEM@@ 输出（detect 把整条条目判死了）: {out}")
+            });
+        assert!(
+            item.contains(&format!("\"path\":\"{}\"", cache.replace('\\', "\\\\"))),
+            "配置路径必须成为本条目的扫描目标（pathSource=configured）: {item}"
+        );
+
+        // 反向对照：无配置时默认位置不存在 ⇒ 条目不出现（不许「恒显示、执行 0 删」）
+        let (code2, out2, err2) = run_json(
+            &[r#"["n1aM01"]"#.to_string(), "{}".to_string(), String::new()],
+            &rules,
+            None,
+        );
+        assert_eq!(code2, 0, "{err2}");
+        assert!(
+            !out2.contains("@@ITEM@@"),
+            "默认位置不存在且无配置时不得输出条目: {out2}"
+        );
+    }
+
+    /// N1a-M02 回归钉：`regCount` 必须等于执行侧实际会删的量（value 三态）。
+    /// 判红自证：整键分支改回「只报 1」⇒ 第一条红；`*` 分支改回
+    /// 「1 + values + subkeys」⇒ 第二条红（把根本不会被删的子键数进了删除规模）。
+    #[test]
+    fn reg_wipe_count_三态与执行侧同一口径() {
+        let counts = Some((7u32, 3u32));
+        assert_eq!(
+            reg_wipe_count("", counts),
+            4,
+            "整键删树 = 键本身 + 全部子键（RegDeleteTree 连子键一起删）"
+        );
+        assert_eq!(
+            reg_wipe_count("*", counts),
+            7,
+            "value='*' 只清该键的值、保留子键：子键不得计进删除规模"
+        );
+        assert_eq!(reg_wipe_count("MSOffice", counts), 1, "具名值只删那一个值");
+        // 键下规模读不到时不许把「有键」报成零项
+        assert_eq!(reg_wipe_count("", None), 1, "整键目标至少有键本身");
+        assert_eq!(reg_wipe_count("*", None), 1, "查询失败不得让已有键显示 0 项");
+    }
+
+    /// N1a-M03 回归钉（纯判定）：reparse 位与 minAge 两道都必须拒绝。
+    /// 判红自证：去掉 `!reparse` ⇒ 第二条红；去掉 `guard.old_enough` ⇒ 第三条红。
+    #[test]
+    fn 单文件两道闸_重解析位与年龄各自可拒() {
+        let _sb = sandbox(&format!("n1a-m03-gate-{}", std::process::id()));
+        let f = _sb.path().join("gate.bin");
+        fs::write(&f, b"x").unwrap();
+        let md = fs::symlink_metadata(&f).unwrap();
+        assert!(single_file_counts(false, &md, AgeGuard::Off), "普通文件 + 无护栏必须放行");
+        assert!(
+            !single_file_counts(true, &md, AgeGuard::Off),
+            "目标自身是重解析点：与树分支同口径必须拒（N1a-M03）"
+        );
+        assert!(
+            !single_file_counts(false, &md, rule_age_guard(Some(1.0), None, None)),
+            "刚写入的文件在任何 minAge 护栏下都必须判太新"
+        );
+    }
+
+    /// N1a-M03 回归钉（统计出口）：单文件目标在 minAge 护栏下必须与树分支同口径
+    /// —— 太新就报零项 / 0 B（旧实现报「一项 / N B」，执行侧却按太新跳过）。
+    /// 判红自证：删掉单文件分支里的 `single_file_counts` 判据 ⇒ 第二条断言红。
+    #[test]
+    fn 单文件目标太新不给可删统计() {
+        let _sb = sandbox(&format!("n1a-m03-age-{}", std::process::id()));
+        let f = _sb.path().join("fresh.bin");
+        fs::write(&f, b"12345").unwrap();
+        let p = f.to_string_lossy().to_string();
+
+        // 正向对照：无护栏时照常报可删（修复前后都必须成立）
+        let off = get_path_deletable_stats(&p, AgeGuard::Off, None, false, None);
+        assert!(off.ok && !off.missing, "文件存在时必须 ok=true / missing=false");
+        assert_eq!((off.nfiles, off.size), (1, 5), "无护栏的单文件必须照常报可删");
+
+        // 1 小时护栏 + 刚写入 ⇒ 太新：零项 0 B（与树分支一致）
+        let guarded = get_path_deletable_stats(&p, rule_age_guard(Some(1.0), None, None), None, false, None);
+        assert!(guarded.ok && !guarded.missing, "太新仍是具体结论，不是「读不到」");
+        assert_eq!(
+            (guarded.nfiles, guarded.size),
+            (0, 0),
+            "单文件目标太新却仍报可删 —— 扫描与执行侧口径分叉（N1a-M03）"
+        );
+    }
+
+    /// N1a-M03 回归钉（统计出口）：目标自身是重解析点时必须报零项 —— 树分支对
+    /// 重解析点一律跳过，单文件分支不许比它松。
+    /// 本机可能没有创建符号链接的权限：拿不到样本就显式 SKIP（绝不静默当通过）；
+    /// 判据本身另由 `单文件两道闸_重解析位与年龄各自可拒` 判红。
+    #[cfg(windows)]
+    #[test]
+    fn 单文件目标自身reparse不给可删统计() {
+        let _sb = sandbox(&format!("n1a-m03-reparse-{}", std::process::id()));
+        let target = _sb.path().join("target.bin");
+        fs::write(&target, b"12345").unwrap();
+        let link = _sb.path().join("link.bin");
+        if std::os::windows::fs::symlink_file(&target, &link).is_err() {
+            println!("SKIP：本机无创建符号链接权限，单文件 reparse 出口未取证（本节未验证）");
+            return;
+        }
+        let st = get_path_deletable_stats(&link.to_string_lossy(), AgeGuard::Off, None, false, None);
+        assert_eq!(
+            (st.nfiles, st.size),
+            (0, 0),
+            "目标自身是重解析点却报可删 —— 树分支对重解析点一律跳过（N1a-M03）"
+        );
     }
 }

@@ -544,7 +544,11 @@
       } else if (d.watchTimedOut) {
         // R2b-M31：监视预算用尽 ≠ 已执行完毕 —— 主进程带码退出，但其派生的提权接力/
         // 家族进程在预算内没绝迹，卸载器可能仍在写盘；不能走 usedSilent 的成功分支。
-        window.app?.toast?.('warning', d.message || '监视预算用尽，卸载器家族可能仍在运行（未强制终止）');
+        // R2b-M02：后端按 watchFamily 分清「确认仍在运行」与「无法确认」——有 message 就播原文，
+        // 兜底文案也只按档位陈述事实，不在这里合成「仍在运行」的结论。
+        window.app?.toast?.('warning', d.message || (d.watchFamily === 'running'
+          ? '监视预算用尽：仍检测到本次卸载器的进程在运行（未强制终止）'
+          : '监视预算用尽：未能确认卸载器是否已结束（未强制终止）'));
       } else if (d.stillListed) {
         window.app?.toast?.('warning', `卸载器已退出，但该程序仍在卸载列表中${meaning}。可稍后再试一次卸载`);
       } else if (Number(d.exitCode) === 3010) {

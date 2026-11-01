@@ -954,21 +954,102 @@ fn in_uninstaller_family(pid: u32, launched_pid: u32, parents: &std::collections
     false
 }
 
+/// 名字档的第二证据（R2b-M02）。
+///
+/// 旧口径下 `unins*` / `un_a*` / `au_.exe` **无条件**命中全系统任意同名进程：别家卸载器、
+/// 常驻的 `uninstallmonitor.exe` 类工具、上一次取消残留的 `Au_.exe`，任何一个都会让监视
+/// 一直轮询到预算用尽，回执还写成「家族可能仍在运行」。现在名字只是必要条件，还必须对上
+/// 一条第二证据；对不上的同名进程一律不计入（方向：宁可不认，也不假报仍在运行）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FamilyTie {
+    /// 强证据：父链能走到本次启动的 pid
+    ParentChain,
+    /// 弱证据：镜像与本次启动的 exe 同目录（Inno/NSIS 把副本放在原目录；也覆盖提权重拉的同名真身）
+    SameDir,
+    /// 弱证据：镜像落在系统临时目录，且 pid 不在监视开始前的基线里（本次启动后新拉起的副本）
+    TempFresh,
+    /// 没有第二证据：同名但路径/出现时间都对不上 —— 不计入本家族
+    None,
+}
+
+/// 名字档要用的第二证据读数（调用方从进程取；拿不到的一律 None，不猜）。
+pub(super) struct ProcEvidence<'a> {
+    pub(super) in_family: bool,
+    /// 镜像完整路径（调用方给什么大小写都行，本函数自己归一）
+    pub(super) image_path: Option<&'a str>,
+    /// pid 不在监视开始前的快照里（= 本次启动之后才出现）
+    pub(super) fresh_after_start: bool,
+}
+
+/// 把读数换算成第二证据（纯函数，单测不碰系统状态）。
+///
+/// 优先级即强弱：父链 > 同目录 > 临时目录 + 本次新出现。**路径不符且不是本次新出现的
+/// 临时副本 ⇒ `None`**，这正是「别家同名进程拖满监视预算」那条缺陷的收口点。
+pub(super) fn family_tie(ev: &ProcEvidence, launched_exe: &str, temp_root: &str) -> FamilyTie {
+    if ev.in_family {
+        return FamilyTie::ParentChain;
+    }
+    let Some(raw) = ev.image_path else {
+        // 镜像路径读不到（权限不足是常态）：无法证明路径对得上，按「没有第二证据」处理
+        return FamilyTie::None;
+    };
+    let image = raw.replace('/', "\\").to_ascii_lowercase();
+    let image_dir = dir_of(&image);
+    let launched_dir = dir_of(&launched_exe.replace('/', "\\").to_ascii_lowercase());
+    if !launched_dir.is_empty() && image_dir == launched_dir {
+        return FamilyTie::SameDir;
+    }
+    if ev.fresh_after_start && under_dir(&image_dir, temp_root) {
+        return FamilyTie::TempFresh;
+    }
+    FamilyTie::None
+}
+
+/// 路径的目录段（小写、去尾分隔符）；没有分隔符返回空串。
+fn dir_of(path_lc: &str) -> String {
+    path_lc
+        .rsplit_once('\\')
+        .map(|(d, _)| d.trim_end_matches('\\'))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// `dir` 是否等于 root 或落在 root 之下（**目录边界**：`C:\Windows.old` 不算 `C:\Windows`
+/// 之下）。两侧都先归一（`/`→`\`、小写、去尾分隔符），与 [`is_third_party_module`] 共用同一份
+/// 判据（§5.16/N6：别写第二份「看起来等价」的）。
+fn under_dir(dir: &str, root: &str) -> bool {
+    let d = dir.replace('/', "\\").to_ascii_lowercase();
+    let r = root.replace('/', "\\").trim_end_matches('\\').to_ascii_lowercase();
+    if r.is_empty() {
+        return false;
+    }
+    // 完全相等也算在内：self_dir 场景里目录本身就可能直接等于根（模块文件就躺在这层目录）；
+    // C:\Windows.old 这类跨段前缀仍由「下一个字符必须是分隔符」挡住。
+    d.starts_with(&r) && matches!(d.as_bytes().get(r.len()), Some(b'\\') | None)
+}
+
+/// Inno/NSIS 复制自身后的副本名字。**只是名字**：是否算本家族还要看 [`FamilyTie`]。
+fn is_installer_copy_name(name: &str) -> bool {
+    name == "au_.exe" || name == "un_a.exe" || name.starts_with("unins") || name.starts_with("un_a")
+}
+
 /// 卸载器家族进程判定：启动的 exe 本名 + Inno/NSIS 临时副本；MSI 引擎只在同家族时算。
 ///
 /// R2b-M04：旧实现把系统里**任何** `msiexec.exe` 都当成自己的卸载器——Windows 更新
-/// 之类同时跑着的另一个 msiexec 会让监视永不结束（假「仍在运行」）。家族关系由调用方
-/// 从 Toolhelp 父链算好注入，本函数保持纯函数（可直接单测，不读系统状态）。
-pub(super) fn is_uninstaller_process(name: &str, launched: &str, in_family: bool) -> bool {
-    if name == launched {
-        // 同名进程也要有家族关系：另一款程序恰好也叫 unins000.exe 不算我们这条链
-        return in_family;
+/// 之类同时跑着的另一个 msiexec 会让监视永不结束（假「仍在运行」）。
+/// R2b-M02：`unins*` / `un_a*` / `au_.exe` 也从「无条件」收紧为**必须有第二证据**
+/// （父链 / 同目录 / 临时目录且本次新出现），见 [`family_tie`]。
+/// 家族关系由调用方从进程快照算好注入，本函数保持纯函数（可直接单测，不读系统状态）。
+pub(super) fn is_uninstaller_process(name: &str, launched: &str, tie: FamilyTie) -> bool {
+    if name == "msiexec.exe" {
+        // MSI 引擎是通用宿主：只认父链（连「同目录」都不够 —— System32 里所有 msiexec 同目录）
+        return tie == FamilyTie::ParentChain;
     }
-    (name == "msiexec.exe" && in_family)
-        || name == "au_.exe"
-        || name == "un_a.exe"
-        || name.starts_with("unins")
-        || name.starts_with("un_a")
+    if name == launched {
+        // 同名进程：父链是强证据；同目录覆盖「UAC 提权重拉的同名真身」（不是子孙、但就是同一个文件）
+        return matches!(tie, FamilyTie::ParentChain | FamilyTie::SameDir);
+    }
+    is_installer_copy_name(name) && tie != FamilyTie::None
 }
 
 // ==================== P2-D4 占用进程与第三方模块只读自检（2026-10-01） ====================
@@ -981,25 +1062,11 @@ pub(super) fn is_uninstaller_process(name: &str, launched: &str, in_family: bool
 /// 模块路径是否「第三方」：不在 Windows 目录、不在本应用自身目录。
 /// 排除自身目录的理由：应用自己的 DLL 占着自己的卸载目标是常态，报出来是噪声。
 pub(super) fn is_third_party_module(module_path: &str) -> bool {
-    fn under(dir_lower: &str, root: &str) -> bool {
-        let r = root.trim_end_matches(['\\', '/']).to_lowercase();
-        if r.is_empty() {
-            return false;
-        }
-        // 完全相等也算在内：self_dir 场景里目录本身就可能直接等于根（模块文件
-        // 就躺在这层目录），只认「下一个字符是分隔符」会把这层漏掉；
-        // C:\Windows.old 这类跨段前缀仍由「下一个字符必须是分隔符」挡住。
-        dir_lower.starts_with(&r)
-            && matches!(
-                dir_lower.as_bytes().get(r.len()),
-                Some(b'\\') | Some(b'/') | None
-            )
-    }
     let lower = module_path.to_lowercase();
     let Some(dir) = lower.rsplit_once('\\').map(|(d, _)| d) else {
         return false;
     };
-    if under(
+    if under_dir(
         dir,
         &std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string()),
     ) {
@@ -1007,7 +1074,7 @@ pub(super) fn is_third_party_module(module_path: &str) -> bool {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(self_dir) = exe.parent().and_then(|p| p.to_str()) {
-            if under(dir, self_dir) {
+            if under_dir(dir, self_dir) {
                 return false;
             }
         }
@@ -1128,7 +1195,52 @@ pub(super) fn occupancy_note(target: &Path) -> String {
     )
 }
 
-/// 句柄退出后继续监视：返回 (stillListed, 是否超时放弃)。
+/// 监视结局（R2b-M02）：预算用尽时必须能区分「确认家族仍在运行」与「无法确认」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WatchEnd {
+    /// 已结束：卸载键消失，或确认家族连续 3 轮绝迹
+    Settled,
+    /// 预算用尽，且最后一轮仍有**确认属于本家族**的进程
+    TimedOutRunning,
+    /// 预算用尽，但没有确认属于本家族的进程（只见到同名无关进程也落这一档）
+    TimedOutUnverified,
+}
+
+/// 监视预算用尽时的回执（R2b-M02）。旧文案把两档都写成「家族可能仍在运行」——
+/// 只见到同名但路径/出现时间对不上的进程时，这句话是错的；这里按结局分开写。
+pub(super) fn watch_timeout_message(end: WatchEnd) -> &'static str {
+    match end {
+        WatchEnd::TimedOutRunning => {
+            "卸载器已退出，但监视预算用尽，仍检测到本次卸载器的进程仍在运行（未强制终止）；稍后再查残留更稳妥"
+        }
+        _ => {
+            "卸载器已退出，但监视预算用尽，未能确认卸载器是否已结束（同名但与本安装器无关的进程未计入，未强制终止）；稍后再查残留更稳妥"
+        }
+    }
+}
+
+/// 进程镜像完整路径（小写）；拿不到 = None（权限不足是常态，不等于「不属于本家族」）。
+fn process_image_path(pid: u32) -> Option<String> {
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    };
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let r = QueryFullProcessImageNameW(
+            h,
+            PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        );
+        let _ = windows::Win32::Foundation::CloseHandle(h);
+        r.ok()?;
+        Some(String::from_utf16_lossy(&buf[..len as usize]).to_ascii_lowercase())
+    }
+}
+
+/// 句柄退出后继续监视：返回 (stillListed, 监视结局)。
 ///
 /// `launched_pid` = 本次真正启动的卸载器 pid（`ShellRunResult` 回传）；家族进程必须
 /// 能从它（或它已退出的子孙）沿父链走到，才认作「自己的卸载器」（R2b-M04）。
@@ -1139,7 +1251,11 @@ pub(super) fn watch_uninstaller(
     launched_exe: &str,
     launched_pid: u32,
     waited: std::time::Duration,
-) -> (bool, bool) {
+    // R2b-M02：**启动前**的 pid 基线（调用方在 `run_started` 处拍）。临时目录里的同名副本
+    // 只有「本次启动之后新出现」才算家族 —— 基线必须在第一次拉起卸载器之前取，否则卸载器
+    // 早已拉起的 `Au_.exe` 会被当成「上一次的残留」漏掉。
+    pid_baseline: &std::collections::HashSet<u32>,
+) -> (bool, WatchEnd) {
     let launched = launched_exe
         .rsplit(['\\', '/'])
         .next()
@@ -1156,22 +1272,53 @@ pub(super) fn watch_uninstaller(
                 UNINSTALL_TOTAL_BUDGET.as_millis()
             ),
         );
-        return (crate::engine::native::reg_key_exists(hive, key_path), true);
+        return (
+            crate::engine::native::reg_key_exists(hive, key_path),
+            WatchEnd::TimedOutUnverified,
+        );
     }
     let deadline = std::time::Instant::now() + remaining;
+    let temp_root = std::env::temp_dir().to_string_lossy().to_string();
     let mut stable = 0u32;
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
         // 键消失 = 卸载完成（最早、最可靠的完成信号）
         if !crate::engine::native::reg_key_exists(hive, key_path) {
-            return (false, false);
+            return (false, WatchEnd::Settled);
         }
         let snap = process_snapshot();
         let parents: std::collections::HashMap<u32, u32> =
             snap.iter().map(|e| (e.pid, e.ppid)).collect();
-        let any = snap.iter().any(|e| {
-            is_uninstaller_process(&e.name, &launched, in_uninstaller_family(e.pid, launched_pid, &parents))
-        });
+        let mut any = false;
+        for e in &snap {
+            // 名字不对的进程连第二证据都不必取（全系统每轮逐个开进程代价太大）
+            if e.name != launched && e.name != "msiexec.exe" && !is_installer_copy_name(&e.name) {
+                continue;
+            }
+            let in_family = in_uninstaller_family(e.pid, launched_pid, &parents);
+            let tie = if in_family {
+                FamilyTie::ParentChain
+            } else if e.name == "msiexec.exe" {
+                // MSI 引擎连「同目录」都不够（System32 里所有 msiexec 同目录），只认父链
+                FamilyTie::None
+            } else {
+                // 同名真身 / Inno·NSIS 副本：读镜像路径与基线差集作第二证据
+                let image = process_image_path(e.pid);
+                family_tie(
+                    &ProcEvidence {
+                        in_family: false,
+                        image_path: image.as_deref(),
+                        fresh_after_start: !pid_baseline.contains(&e.pid),
+                    },
+                    launched_exe,
+                    &temp_root,
+                )
+            };
+            if is_uninstaller_process(&e.name, &launched, tie) {
+                any = true;
+                break;
+            }
+        }
         if any {
             stable = 0;
         } else {
@@ -1182,10 +1329,13 @@ pub(super) fn watch_uninstaller(
             }
         }
         if std::time::Instant::now() > deadline {
-            return (crate::engine::native::reg_key_exists(hive, key_path), true);
+            return (
+                crate::engine::native::reg_key_exists(hive, key_path),
+                if any { WatchEnd::TimedOutRunning } else { WatchEnd::TimedOutUnverified },
+            );
         }
     }
-    (crate::engine::native::reg_key_exists(hive, key_path), false)
+    (crate::engine::native::reg_key_exists(hive, key_path), WatchEnd::Settled)
 }
 
 /// 卸载域·执行原厂卸载（方案 M2 + 用户拍板 2026-09-28）。
@@ -1304,6 +1454,10 @@ pub async fn uninstall_run<R: tauri::Runtime>(
             );
         }
         let run_started = std::time::Instant::now();
+        // R2b-M02：**启动前**拍一次 pid 基线。监视只把「基线之外的同名副本」算作本次家族，
+        // 于是上一次取消残留的 `Au_.exe`（基线内）不会把监视拖满剩余预算。
+        let pid_baseline: std::collections::HashSet<u32> =
+            process_snapshot().iter().map(|e| e.pid).collect();
         let run_original_ui = || -> Result<(Option<u32>, u32), String> {
             log::flush_sync();
             // R2b-M02：原厂界面支路同样执行注册表原文，必须与静默支路共用同一准入函数。
@@ -1458,7 +1612,8 @@ pub async fn uninstall_run<R: tauri::Runtime>(
         // 卸载器家族进程，直到键消失或进程绝迹（总预算扣除已耗时后剩余部分）
         let waited = run_started.elapsed();
         let watch_started = std::time::Instant::now();
-        let (still_listed, timed_out) = watch_uninstaller(hive, &key_path, &exe, launched_pid, waited);
+        let (still_listed, watch_end) = watch_uninstaller(hive, &key_path, &exe, launched_pid, waited, &pid_baseline);
+        let timed_out = !matches!(watch_end, WatchEnd::Settled);
         let watch_ms = watch_started.elapsed().as_millis();
         let total_ms = run_started.elapsed().as_millis();
         log::write_log(
@@ -1483,6 +1638,11 @@ pub async fn uninstall_run<R: tauri::Runtime>(
         } else {
             log::write_log("info", &format!("uninstall_run {display_name}: 卸载完成（码 {code_txt}）"));
         }
+        let watch_family = match watch_end {
+            WatchEnd::Settled => "settled",
+            WatchEnd::TimedOutRunning => "running",
+            WatchEnd::TimedOutUnverified => "unknown",
+        };
         Ok(json!({
             "exitCode": exit_code,
             "exitMeaning": exit_meaning,
@@ -1491,6 +1651,9 @@ pub async fn uninstall_run<R: tauri::Runtime>(
             // R2b-M31：监视预算用尽与退出码是否可得是两个正交维度 —— 带码退出但其派生的
             // 提权接力/家族进程在预算内没绝迹时，不能把「可能还在跑」播成「已执行完毕」。
             "watchTimedOut": timed_out,
+            // R2b-M02：两档必须可辨 —— running = 确认本家族仍在运行；unknown = 无法确认
+            // （只见到同名但路径/出现时间对不上的进程时落这一档）。settled = 正常结束。
+            "watchFamily": watch_family,
             "installerKind": kind,
             "usedSilent": used_silent,
             "fellBack": fell_back,
@@ -1510,7 +1673,8 @@ pub async fn uninstall_run<R: tauri::Runtime>(
             } else if timed_out {
                 // R2b-M31：监视预算用尽 ≠ 已执行完毕 —— 卸载器家族可能仍在写盘，
                 // 此时立刻扫残留会扫到半成品、并与安装器抢文件（前端据本档不开残留窗）。
-                "卸载器已退出，但监视预算用尽，卸载器家族可能仍在运行（未强制终止）；稍后再查残留更稳妥".to_string()
+                // R2b-M02：文案按结局分档，不再把「无法确认」也写成「仍在运行」。
+                watch_timeout_message(watch_end).to_string()
             } else if fell_back {
                 "静默卸载未完成，已自动回退原厂卸载界面并执行完毕".to_string()
             } else {
@@ -1786,13 +1950,107 @@ mod exec_surface_tests {
     #[test]
     fn m04_微软安装引擎只认本家族() {
         assert!(
-            !is_uninstaller_process("msiexec.exe", "unins000.exe", false),
+            !is_uninstaller_process("msiexec.exe", "unins000.exe", FamilyTie::None),
             "系统里任何 msiexec 都算自己的卸载器 = 监视永不结束（R2b-M04）"
         );
-        assert!(is_uninstaller_process("msiexec.exe", "unins000.exe", true));
-        assert!(is_uninstaller_process("unins000.exe", "unins000.exe", true), "本次启动的进程自己算");
-        assert!(!is_uninstaller_process("unins000.exe", "unins000.exe", false), "同名但无家族关系不算");
-        assert!(is_uninstaller_process("au_.exe", "unins000.exe", false), "Inno 临时副本保留无条件");
+        assert!(is_uninstaller_process("msiexec.exe", "unins000.exe", FamilyTie::ParentChain));
+        assert!(
+            !is_uninstaller_process("msiexec.exe", "unins000.exe", FamilyTie::SameDir),
+            "msiexec 是通用宿主：同目录（System32）也不够，只认父链"
+        );
+        assert!(
+            is_uninstaller_process("unins000.exe", "unins000.exe", FamilyTie::ParentChain),
+            "本次启动的进程自己算"
+        );
+        assert!(
+            !is_uninstaller_process("unins000.exe", "unins000.exe", FamilyTie::None),
+            "同名但无家族关系不算"
+        );
+        // R2b-M02：Inno/NSIS 临时副本改为有条件 —— 名字 + 第二证据才计入
+        assert!(
+            is_uninstaller_process("au_.exe", "unins000.exe", FamilyTie::TempFresh),
+            "本次新出现的临时副本（第二证据齐）仍算家族"
+        );
+        assert!(
+            !is_uninstaller_process("au_.exe", "unins000.exe", FamilyTie::None),
+            "同名但路径/出现时间都对不上（别家卸载器、常驻工具、上次残留）不得计入"
+        );
+    }
+
+    /// R2b-M02：第二证据的判据本体 —— 同名但路径不符 / 不是本次新出现的临时副本一律 `None`。
+    ///
+    /// 判红自证：把 `family_tie` 里的路径比较删掉（回到「名字即家族」）⇒ 第一条断言红；
+    /// 把 `fresh_after_start` 的与条件删掉 ⇒ 第二条（上一次残留）红。
+    #[test]
+    fn m02_第二证据路径与新旧都要对得上() {
+        let launched = r"C:\Program Files\Acme\unins000.exe";
+        let temp = r"C:\Users\me\AppData\Local\Temp";
+        let ev = |in_family: bool, image: Option<&'static str>, fresh: bool| ProcEvidence {
+            in_family,
+            image_path: image,
+            fresh_after_start: fresh,
+        };
+
+        // 别家的同名卸载器：路径既非本目录、也不在临时目录 —— 即使本次启动后新出现也不算
+        assert_eq!(
+            family_tie(
+                &ev(false, Some(r"C:\Program Files\Other\unins000.exe"), true),
+                launched,
+                temp
+            ),
+            FamilyTie::None,
+            "同名但路径不符的进程不得计入「家族仍在运行」"
+        );
+        // 上一次取消残留的 Au_.exe：在临时目录，但监视开始前就在（不 fresh）⇒ 不计入
+        assert_eq!(
+            family_tie(
+                &ev(false, Some(r"C:\Users\me\AppData\Local\Temp\~nsu.tmp\Au_.exe"), false),
+                launched,
+                temp
+            ),
+            FamilyTie::None,
+            "基线里就有的同名临时进程属于上一次残留，不得拖满本次预算"
+        );
+        // 镜像路径读不到（权限不足）：不猜 —— 没有第二证据
+        assert_eq!(family_tie(&ev(false, None, true), launched, temp), FamilyTie::None);
+
+        // 正向对照一：同目录副本（Inno/NSIS 常见形态）
+        assert_eq!(
+            family_tie(&ev(false, Some(r"c:\program files\acme\un_a.exe"), true), launched, temp),
+            FamilyTie::SameDir
+        );
+        // 正向对照二：临时目录 + 本次新出现（NSIS 的 Au_.exe）
+        assert_eq!(
+            family_tie(
+                &ev(false, Some(r"c:\users\me\appdata\local\temp\~nsu.tmp\au_.exe"), true),
+                launched,
+                temp
+            ),
+            FamilyTie::TempFresh
+        );
+        // 正向对照三：父链是强证据，读不到镜像路径也认
+        assert_eq!(family_tie(&ev(true, None, false), launched, temp), FamilyTie::ParentChain);
+        // 目录边界：C:\Program Files\Acme2 不是 Acme 的子目录
+        assert_eq!(
+            family_tie(&ev(false, Some(r"C:\Program Files\Acme2\un_a.exe"), true), launched, temp),
+            FamilyTie::None,
+            "前缀相同不算同目录"
+        );
+    }
+
+    /// R2b-M02：超时回执必须区分「确认仍在运行」与「无法确认」。
+    ///
+    /// 判红自证：把两档并回同一句（旧文案）⇒ 前两条断言同时红。
+    #[test]
+    fn m02_超时回执两档可辨() {
+        let running = watch_timeout_message(WatchEnd::TimedOutRunning);
+        let unknown = watch_timeout_message(WatchEnd::TimedOutUnverified);
+        assert!(running.contains("仍在运行"), "确认档必须直说仍在运行：{running}");
+        assert!(
+            unknown.contains("未能确认") && !unknown.contains("仍在运行"),
+            "无法确认档不得写成「仍在运行」：{unknown}"
+        );
+        assert_ne!(running, unknown, "两档文案不得相同");
     }
 
     /// M04：父链遍历识别子孙、对环/自环/零父有界收敛。
@@ -1862,6 +2120,15 @@ mod r2b_p1_receipt_tests {
         assert!(
             src.contains(concat!("\"watchTimedOut\"", ": timed_out")),
             "卸载回执必须带 watchTimedOut（监视预算用尽不得折成「已执行完毕」）"
+        );
+        assert!(
+            src.contains(concat!("\"watchFamily\"", ":")),
+            "监视结局必须回执 watchFamily（确认仍在运行 / 无法确认 两档不得合并，R2b-M02）"
+        );
+        let js = include_str!("../../../../src/scripts/uninstall.js");
+        assert!(
+            js.contains("watchFamily"),
+            "渲染层必须认领 watchFamily，否则两档回执在前端又合并成一句（R2b-M02）"
         );
         assert!(
             !src.contains(concat!("Err(", "\"卸载器已启动但无法等待")),

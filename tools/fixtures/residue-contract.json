@@ -138,6 +138,66 @@
       "cls": "Tracing 容器本身"
     },
     {
+      "target": "HKLM\\SECURITY",
+      "blocked": true,
+      "cls": "系统单元（清单等值）"
+    },
+    {
+      "target": "HKLM\\BCD00000000",
+      "blocked": true,
+      "cls": "系统单元（清单等值）"
+    },
+    {
+      "target": "HKLM\\COMPONENTS",
+      "blocked": true,
+      "cls": "系统单元（清单等值）"
+    },
+    {
+      "target": "HKLM\\DRIVERS",
+      "blocked": true,
+      "cls": "系统单元（清单等值）"
+    },
+    {
+      "target": "HKLM\\HARDWARE",
+      "blocked": true,
+      "cls": "系统单元（清单等值）"
+    },
+    {
+      "target": "HKCU\\Software\\Policies\\Acme",
+      "blocked": true,
+      "cls": "组策略子树（其下产品键）"
+    },
+    {
+      "target": "HKLM\\SOFTWARE\\WOW6432Node\\Policies\\Acme",
+      "blocked": true,
+      "cls": "组策略子树（32 位重定向，其下产品键）"
+    },
+    {
+      "target": "HKCU\\Software\\Clients\\Mail\\Acme",
+      "blocked": true,
+      "cls": "客户端命名空间（其下产品键）"
+    },
+    {
+      "target": "HKLM\\SOFTWARE\\Khronos",
+      "blocked": true,
+      "cls": "图形接口登记（清单等值）"
+    },
+    {
+      "target": "HKLM\\SOFTWARE\\OpenGL",
+      "blocked": true,
+      "cls": "图形接口登记（清单等值）"
+    },
+    {
+      "target": "HKCU\\Network\\Acme",
+      "blocked": true,
+      "cls": "用户网络映射（其下项）"
+    },
+    {
+      "target": "HKCU\\Volatile Environment",
+      "blocked": true,
+      "cls": "环境层（清单等值）"
+    },
+    {
       "target": "HKEY_LOCAL_MACHINE\\SOFTWARE",
       "blocked": true,
       "cls": "长写法别名"
@@ -231,6 +291,21 @@
       "target": "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\acme.exe",
       "blocked": false,
       "cls": "App Paths 叶键"
+    },
+    {
+      "target": "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths\\acme.exe",
+      "blocked": false,
+      "cls": "App Paths 叶键（32 位视图）"
+    },
+    {
+      "target": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\acme.exe",
+      "blocked": false,
+      "cls": "App Paths 叶键（当前用户）"
+    },
+    {
+      "target": "HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Tracing\\acme_RASAPI32",
+      "blocked": false,
+      "cls": "Tracing 叶键（32 位视图）"
     },
     {
       "target": "HKLM\\SOFTWARE\\Acme\\Image File Execution Options\\acme.exe",

@@ -88,6 +88,14 @@ pub(crate) const MAX_WALK_DEPTH: usize = 64;
 const MAX_IO_THREADS: usize = 8;
 /// bigfiles 心跳输出间隔：每累积多少文件输出一行 @@SCANNED:n@@。
 const HEARTBEAT_EVERY: u64 = 8192;
+/// 单目录条目批的冲刷阈值（N1b-M03）。
+///
+/// 批只是「减少 `ScanCtx` 锁竞争」的手段，不是缓冲区：攒到这么多条就并入累积器，
+/// 不等整个目录枚举完。旧实现把整目录的条目先攒在本地 `Vec` 里、循环结束才调一次
+/// `add_batch`，而 `MAX_SCAN_ENTRIES` 的裁剪发生在 `add_batch` **内部** —— 单个无界
+/// 目录（百万级文件）在裁剪前就已全量驻留（按单条字节数外推约数百 MB），正是那条
+/// 上限要防的量级。取值与 `EMPTY_FLUSH` 同档只是巧合：那一份按「文件 + 目录」合计。
+const WALK_FLUSH: usize = 4096;
 
 /// 只初始化一次全局 rayon 线程池（重复调用返回 Err 忽略即可）。
 /// dir_size / walk / bigfiles 任务分片的并行都经它走同一池。
@@ -279,6 +287,13 @@ pub struct ScanCtx {
     unreadable_dirs: TraceCounter,
     /// 条目级类型/元数据读不到的计数（A1-U02）：只留痕不进判定。
     entry_stat_fails: TraceCounter,
+    /// 用例钩子（N1b-M03）：`add_batch` 的调用次数。
+    ///
+    /// 「一个目录的条目被分批入桶」与「整目录枚举完再一次入桶」在结果面上**完全同形**
+    /// （收下的集合、顺序、计数都一样），唯一可观察的差异就是入桶被调了几次。
+    /// 生产代码不读它 —— 它只为让「边枚举边入桶」这条判据能判红而存在。
+    #[cfg(test)]
+    add_batch_calls: AtomicU64,
     cap: usize,
 }
 
@@ -295,6 +310,8 @@ impl ScanCtx {
             skipped_reparse: TraceCounter::new(),
             unreadable_dirs: TraceCounter::new(),
             entry_stat_fails: TraceCounter::new(),
+            #[cfg(test)]
+            add_batch_calls: AtomicU64::new(0),
             cap,
         }
     }
@@ -334,6 +351,8 @@ impl ScanCtx {
 
     /// 条目入桶，返回**实际收下**的条数（供心跳计数）。上限满时置 truncated 并告警一次。
     pub fn add_batch(&self, batch: Vec<ScannedFile>, sink: &dyn Sink) -> usize {
+        #[cfg(test)]
+        self.add_batch_calls.fetch_add(1, Ordering::Relaxed);
         let got = batch.len();
         let mut accepted = got;
         let mut first_hit_cap = false;
@@ -360,6 +379,12 @@ impl ScanCtx {
     /// 上限已满 / 已截断 —— 各层据此停止深入（剩下的 IO 只会产出注定被丢掉的结果）
     fn stopped(&self) -> bool {
         self.truncated.load(Ordering::Relaxed)
+    }
+
+    /// 仅测试用：`add_batch` 被调用的次数（见同名字段的注释；生产代码不读）。
+    #[cfg(test)]
+    fn add_batch_calls(&self) -> u64 {
+        self.add_batch_calls.load(Ordering::Relaxed)
     }
 
     /// 仅测试用：探一眼 `files` 锁此刻是否空闲（= 回调有没有落在临界区之外）
@@ -415,6 +440,22 @@ fn walk_level(
     depth: usize,
     sink: &dyn Sink,
 ) {
+    walk_level_flush(dir, ctx, min_size, depth, sink, WALK_FLUSH)
+}
+
+/// [`walk_level`] 的实现体。`flush_every` 是批冲刷阈值的**注入位**：生产恒为
+/// [`WALK_FLUSH`]，只有用例会传小值 —— 「一个目录的条目真的被分批入桶」在结果面上
+/// 与「整目录一次入桶」同形，只能从入桶次数上观察（N1b-M03）。
+fn walk_level_flush(
+    dir: &Path,
+    ctx: &ScanCtx,
+    min_size: u64,
+    depth: usize,
+    sink: &dyn Sink,
+    flush_every: usize,
+) {
+    // 0 会让每条都冲刷（等于关掉合批），不是本函数的用法；兜底成 1 而不是除零/空转
+    let flush_every = flush_every.max(1);
     // 已截断就别再花 IO 了（子孙目录继续走只会白读）
     if ctx.stopped() {
         return;
@@ -467,13 +508,20 @@ fn walk_level(
                 let sz = md.len();
                 if sz >= min_size {
                     batch.push((ent.path(), sz, md.modified().ok()));
+                    // N1b-M03：边枚举边入桶。上限在 `add_batch` **内部**裁剪，所以
+                    // 「先攒满整目录再入桶」等于把单个目录的驻留量交给文件系统决定。
+                    // 各批按枚举顺序 append，收下的集合与顺序与旧实现逐条相同。
+                    if batch.len() >= flush_every {
+                        ctx.add_batch(std::mem::take(&mut batch), sink);
+                    }
                 }
             } else {
                 // A1-U02：元数据读不到就不知道大小/时间，只能丢；但丢多少要能数出来。
                 ctx.note_entry_stat_fail();
             }
         }
-    }    if !batch.is_empty() {
+    }
+    if !batch.is_empty() {
         // 审查 M7：条目上限在此收口。放不下的部分丢弃并置位 truncated，
         // 让调用方知道「结果不完整」而不是「就这么些重复」。
         ctx.add_batch(batch, sink);
@@ -484,11 +532,11 @@ fn walk_level(
     }
     if depth < PAR_DEPTH {
         subdirs.par_iter().for_each(|d| {
-            walk_level(d, ctx, min_size, depth + 1, sink);
+            walk_level_flush(d, ctx, min_size, depth + 1, sink, flush_every);
         });
     } else {
         for d in subdirs {
-            walk_level(&d, ctx, min_size, depth + 1, sink);
+            walk_level_flush(&d, ctx, min_size, depth + 1, sink, flush_every);
         }
     }
 }
@@ -2219,10 +2267,16 @@ pub fn sizes(paths: &[String], sink: &dyn Sink) {
 #[cfg(windows)]
 /// 手写 SHFileOperationW（回收站优先）。`pub` 供 Tauri 侧清理执行链复用
 /// （cleanup:execute 的 toRecycle 分支 / D 批删除链）——三端同源的回收站语义，避免各写一份。
-/// 带 `FOF_WANTNUKEWARNING`：回收站装不下时先警告、可中止，绝不静默永久删。
+///
+/// N1b-M04：`FOF_WANTNUKEWARNING` 只覆盖「回收站装不下时先警告」这一个档位。卷上没有
+/// 回收站（FAT/exFAT U 盘）、超配额、网络位置、单文件超过回收站上限时，`FOF_ALLOWUNDO`
+/// 不生效，shell 会**永久删除而 rc 仍为 0** —— 返回码分辨不出「进了回收站」与「被永久
+/// 删除」。因此本模块的成功判据只认「目标确实不在原位」，结果文案不得承诺回收站
+/// （见 [`send_to_trash_os`] 与调用点 `delete` 的 Ok 分支）。
 pub mod recycle {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
 
     const FO_DELETE: u32 = 3;
     const FOF_SILENT: u16 = 0x0004;
@@ -2232,6 +2286,8 @@ pub mod recycle {
     /// 无法回收、将被永久销毁时弹警告并可中止（部分覆盖 FOF_NOCONFIRMATION）。
     /// 缺它 + NOCONFIRMATION 时，回收站不可用（卷禁用/超配额/FAT/网络位置）
     /// 会静默永久删且 rc=0，而结果行还写「已移入回收站」。
+    /// N1b-M04 后它仍在 flags 里（不许被简化成裸 ALLOWUNDO），但**不再当作保证**：
+    /// 结果行已改为不承诺回收站，成功判据另加「目标确实不在原位」的复核。
     const FOF_WANTNUKEWARNING: u16 = 0x4000;
 
     // 结构与 FFI 声明已上移 `crate::util::ffi`（v3 C-3）。
@@ -2244,6 +2300,9 @@ pub mod recycle {
     /// 的 `to_string_lossy()`，而门面的存在让「先 lossy 再传 &str」这类误用编译得过。
     /// 只留 `_os` 版后，任何 `to_string_lossy()` 的产物要传给本函数必须显式写出转换，
     /// 误用在编译期即暴露。src-tauri 侧 8 个调用点已全部改为 `_os`。
+    ///
+    /// N1b-M04：`Ok` 的含义是「shell 接受了删除请求**且**目标确实不在原位」，不是
+    /// 「已进回收站」—— 永久删除同样会 rc=0。判据见 [`removal_verdict`]。
     pub fn send_to_trash_os(path: &OsStr) -> Result<(), String> {
         let mut from: Vec<u16> = path.encode_wide().collect();
         from.push(0);
@@ -2263,11 +2322,24 @@ pub mod recycle {
             lpsz_progress_title: std::ptr::null(),
         };
         let rc = unsafe { SHFileOperationW(&mut op) };
-        if rc == 0 && op.f_any_operations_aborted == 0 {
-            Ok(())
-        } else {
-            Err(format!("rc={} aborted={}", rc, op.f_any_operations_aborted))
+        removal_verdict(path, rc, op.f_any_operations_aborted)
+    }
+
+    /// `SHFileOperationW` 回执 → 结果判定（N1b-M04）。
+    ///
+    /// 判据分两步：① `rc==0 && aborted==0` 只说明 shell 接受了请求；② 目标必须确实不在
+    /// 原位（`symlink_metadata` 报「不存在」）。第②步是唯一能堵住「没删却报成功」的核验，
+    /// 而真机造不出「rc=0 但目标还在」的回收站形态 —— 所以判据写成纯函数，由用例直接
+    /// 喂 rc/aborted 组合钉住（`删除回执_只有目标不在原位才算成功`）。
+    /// 复核只读元数据、不动文件；调用前目标已过完保护清单与 reparse 闸。
+    pub(super) fn removal_verdict(path: &OsStr, rc: i32, aborted: i32) -> Result<(), String> {
+        if rc != 0 || aborted != 0 {
+            return Err(format!("rc={} aborted={}", rc, aborted));
         }
+        if std::fs::symlink_metadata(Path::new(path)).is_ok() {
+            return Err("删除后目标仍在原位（shell 报成功但未确认移除）".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -2301,7 +2373,7 @@ fn del_item(sink: &dyn Sink, t: &str, path: &Path, kind: &str, status: &str, fre
 /// 只做小写（verbatim 路径 OS 不做组件折叠，键必须逐字稳定），由调用方
 /// [`is_protected_path`] 对这类残留形态 fail-closed。旧实现无脑剥前缀，把
 /// `\\?\Volume{...}\dir` 剥成相对串，保护前缀比对必然不命中 ⇒ 放行删除（穿闸实锤）。
-fn lexically_normalize(p: &str) -> String {
+pub(crate) fn lexically_normalize(p: &str) -> String {
     let s = p.trim();
     if s.is_empty() {
         return String::new();
@@ -2455,7 +2527,10 @@ fn star_match(pattern: &str, seg: &str) -> bool {
 /// `child` 是否等于 `base` 或位于其下（按段边界；`C:\WindowsApps` 不是 `C:\Windows`
 /// 的子树）。2026-10-23 扫描提速：此前每个保护根都比一次 `format!("{base}\\")`，
 /// 一次扫描按「文件数 × 根数」分配临时串；改成字节边界判定后零分配、语义不变。
-fn is_same_or_under(child: &str, base: &str) -> bool {
+///
+/// N1b-M02：`perf::resolve_bench_dir`（`--bench-dir` 必须在 `--path` 之下）复用的
+/// 就是这一条 —— 路径包含判定只此一份，不许在别处再写一遍字符串前缀比较。
+pub(crate) fn is_same_or_under(child: &str, base: &str) -> bool {
     child == base
         || (child.len() > base.len()
             && child.as_bytes()[base.len()] == b'\\'
@@ -2728,13 +2803,14 @@ pub fn protect_flags(protect_json: Option<&str>, vectors: &[String]) -> Vec<bool
         .collect()
 }
 
-/// 删除单项：只移入回收站（用户可还原）。
+/// 删除单项：走回收站原语（优先移入回收站，不降级为永久删除）。
 /// M3（v3.6.5）N-5（安全红线）：回收站失败时**不再降级为永久删除**。
 /// 根因：原实现在 send_to_trash 失败后直接 permanent_delete，把「移入回收站失败」静默
 /// 变成不可逆的永久删除——用户以为文件进了回收站可还原，实际已被彻底删除。
-/// 新约定：Ok(()) = 已进回收站；Err(reason) = **文件保持原样、未删除**，失败原因透传给
-/// 调用方（JSON 结果行 status=fail + message 标注原因），由上层决定如何告知用户。
-/// 本函数在任何分支都不会删除文件。
+/// 新约定（N1b-M04 收紧）：`Ok(())` = **目标确实不在原位**（shell 已接受删除请求，
+/// 但进没进回收站分辨不出来，见 `recycle::removal_verdict`）；`Err(reason)` = 已确认
+/// 未删除/未移除，失败原因透传给调用方（JSON 结果行 status=fail + message 标注原因）。
+/// 本函数在任何分支都不会自行删除文件。
 #[cfg(windows)]
 fn delete_one(p: &Path, _kind: &str) -> Result<(), String> {
     // 审查 v2-M5：走 OsStr 版，不做 UTF-8 往返 —— 名字含孤立代理项的目标此前被换成
@@ -2815,6 +2891,11 @@ pub fn reparse_ancestor(p: &Path) -> Option<String> {
 /// `tools/gen-finder-delete-modes.mjs` 生成）与消费侧 `src-tauri/src/commands/finder.rs`
 /// （`classify_delete_result_mode`）——跨 crate 不能共享代码，靠夹具字节对齐；
 /// 本文件 `mod tests` 的夹具对拍会在改名不同步时当场判红。
+///
+/// N1b-M04：`MODE_RECYCLED` 的值 `recycled` **不是**「已在回收站可还原」——它现在的
+/// 语义是「shell 接受了删除请求且目标已不在原位」。回收站是否真的收到无法从返回码
+/// 分辨（无回收站的卷/超配额/网络位置上 shell 会永久删除且 rc 仍为 0），故结果行
+/// 文案改为中性语义；字面量不动（夹具与消费侧靠字节对齐）。
 const MODE_RECYCLED: &str = "recycled";
 const MODE_REJECTED: &str = "rejected";
 const MODE_UNRECOVERABLE_NAME: &str = "unrecoverable-name";
@@ -2878,7 +2959,9 @@ pub fn delete(items: &[(String, OsString)], protect_json: Option<&str>, sink: &d
             Ok(()) => {
                 ok += 1;
                 freed += sz;
-                del_item(sink, "delresult", p, kind, "ok", sz, "已移入回收站", MODE_RECYCLED);
+                // N1b-M04：文案不得承诺「已移入回收站」—— 无回收站的卷/超配额/网络位置上
+                // shell 会永久删除且 rc 仍为 0，本层能确认的只有「目标已不在原位」。
+                del_item(sink, "delresult", p, kind, "ok", sz, "已从原位置移除", MODE_RECYCLED);
             }
             // M3（v3.6.5）N-5：回收站失败即视为删除失败——文件仍在原位，freed 计 0，
             // 真实原因随结果行回传，绝不静默转为永久删除。
@@ -5221,6 +5304,73 @@ mod depth_cap_tests {
             .max()
             .unwrap_or(0);
         assert!(total >= 8192, "短路径根经 canonical 后应看见两个 4096 字节深文件，实得 {total}");
+    }
+
+    /// N1b-M03 正面：`walk_level` 必须**边枚举边入桶** —— 批只是减少锁竞争的手段，
+    /// 不是把整个目录先攒进本地 `Vec` 的缓冲区（上限在 `add_batch` 内部裁剪，单目录
+    /// 无界时裁剪前的驻留量就没有上界）。
+    /// 判红自证：删掉循环内的冲刷段（退回「`read_dir` 结束后一次 `add_batch`」）⇒
+    /// 入桶次数不符即红；把 `>=` 写成 `>` ⇒ 同批被拆成两段（入桶次数反而减少），同样红。
+    #[test]
+    fn walk_level_边枚举边入桶_单目录也分批() {
+        // 本模块自己的空汇聚器（`CapSink` 属 `mod tests`，兄弟模块拿不到）
+        struct NullSink;
+        impl Sink for NullSink {
+            fn item(&self, _p: &Path, _l: &str) {}
+            fn progress(&self, _n: u64) {}
+            fn scanned(&self, _n: u64) {}
+            fn warn(&self, _m: &str) {}
+        }
+        let _sb = sandbox(&format!("n1b-m03-{}", std::process::id()));
+        let root = _sb.path().join("big");
+        fs::create_dir_all(&root).unwrap();
+        for i in 0..5 {
+            fs::write(root.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        let sink = NullSink;
+
+        // 正面：小阈值 ⇒ 同批条目按阈值分成多批入桶
+        let ctx = ScanCtx::new();
+        walk_level_flush(&root, &ctx, 0, 0, &sink, 2);
+        assert_eq!(ctx.add_batch_calls(), 3, "5 条按 2 条一批必须入桶 3 次（整目录一次入桶=旧形态）");
+        let files = ctx.finish(&sink);
+        assert_eq!(files.len(), 5, "分批不得改变收下的条目集合");
+
+        // 反向对照：阈值大于条目数 ⇒ 只入桶一次（同一条代码路径，证明上面数的不是常量）
+        let ctx2 = ScanCtx::new();
+        walk_level_flush(&root, &ctx2, 0, 0, &sink, 64);
+        assert_eq!(ctx2.add_batch_calls(), 1, "阈值大于条目数时不该拆批");
+        assert_eq!(ctx2.finish(&sink).len(), 5, "分批阈值不得影响结果条数");
+    }
+
+    /// N1b-M04 正反样本：`rc==0` 不等于「已进回收站」，成功必须由「目标确实不在原位」判。
+    /// 真机造不出「rc=0 但目标还在」的回收站形态，所以判据是纯函数、直接喂回执组合。
+    /// 判红自证：删掉 `removal_verdict` 里的 `symlink_metadata` 复核 ⇒ 第一条红（假成功）；
+    /// 把 rc 判据改成只看 aborted ⇒ 第二、三条红。
+    #[cfg(windows)]
+    #[test]
+    fn 删除回执_只有目标不在原位才算成功() {
+        let _sb = sandbox(&format!("n1b-m04-{}", std::process::id()));
+        let p = _sb.path().join("still-here.txt");
+        fs::write(&p, b"x").unwrap();
+
+        // 反：shell 说成功、目标仍在原位 —— 永久删/根本没删在返回码上就是同形，
+        // 这一档必须判失败，不能把「没删」记成「已移除」。
+        let e = super::recycle::removal_verdict(p.as_os_str(), 0, 0).expect_err("目标仍在原位时不得报成功");
+        assert!(e.contains("仍在原位"), "失败原因必须点名「仍在原位」：{e}");
+        // 反：非 0 回执 / 被中止永远不是成功（哪怕目标碰巧已经不在）
+        assert!(super::recycle::removal_verdict(p.as_os_str(), 0x7C, 0).is_err(), "rc≠0 必须判失败");
+        assert!(super::recycle::removal_verdict(p.as_os_str(), 0, 1).is_err(), "aborted≠0 必须判失败");
+
+        // 正：rc=0 且目标确实不在原位 ⇒ 成功
+        fs::remove_file(&p).unwrap();
+        assert!(super::recycle::removal_verdict(p.as_os_str(), 0, 0).is_ok(), "目标已不在原位应判成功");
+
+        // 正（整条链路）：真跑一次回收站原语，原位置必须消失（自建自清，只碰本用例的临时文件）
+        let q = _sb.path().join("to-bin.txt");
+        fs::write(&q, b"y").unwrap();
+        super::recycle::send_to_trash_os(q.as_os_str()).expect("真实回收站原语应成功");
+        assert!(fs::symlink_metadata(&q).is_err(), "提交删除后原位置必须消失");
     }
 
 }

@@ -144,23 +144,25 @@ const fn node_arch() -> &'static str {
 /// 留足慢盘与杀软扫描的余量——宁可漏报，也不要在正常启动后凭空写一条 WARN。
 const BOOT_WATCHDOG_MS: u64 = 12_000;
 
-/// 看门狗到点的判据：只有「没收到首帧握手」才需要记一条日志。
+/// 看门狗到点的判据：只有「渲染层没画出首帧」才需要记一条日志。
 ///
 /// 单独抽成纯函数，是因为线程 + 定时器的组合在没有窗口的测试里跑不了，
 /// 而"什么情况下该报警"恰恰是这条机制唯一有判断含量的部分。
-fn boot_watchdog_note(shown: bool) -> Option<&'static str> {
-    if shown {
+/// 参数是 `painted` 而不是 `shown`（R8-M05）：3s/8s 兜底显示的窗口同样 `shown == true`，
+/// 用它当判据会让看门狗结构上永远不报警，而白屏正是被测对象。
+fn boot_watchdog_note(painted: bool) -> Option<&'static str> {
+    if painted {
         return None;
     }
     Some("启动看门狗：主窗首帧握手超时未到，界面可能白屏或渲染脚本未执行；可导出日志反馈（日志已含渲染层异常行）")
 }
 
-/// 挂启动看门狗：到点检查主窗是否已因首帧握手而 show 出来。
+/// 挂启动看门狗：到点检查主窗是否收到了**真实首帧握手**。
 ///
 /// 为什么需要：白屏、材质不渲染、脚本抛错这类问题此前**只在 DevTools 里可见**，
 /// 用户侧一句"打开是空的"没有任何可诊断信息（v2-U4 长期挂着的未验证项就是这个）。
-/// 信号复用现成的 `ShowState.shown`：它由 `app:first-paint` 这条真实渲染完成通知置位，
-/// 不新增状态、也不为此再开一条 IPC 通道。
+/// 信号是 `ShowState.painted`（R8-M05）：它在 `on_render_first_paint` 里由 `app:first-paint`
+/// 置位；旧实现读 `shown`，而 3s/8s 兜底也会把它置真（12s 晚于 8s），看门狗因此失明。
 ///
 /// 刻意**不自动 reload**（竞品那种做法在这里不安全）：本应用的窗口显示与提权重启握手
 /// 耦合（§5.7 文件握手状态机），重载可能把用户正在确认的危险操作打断。只记录，不干预。
@@ -171,8 +173,8 @@ pub fn start_boot_watchdog<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
         let Some(state) = app.try_state::<crate::ShowState>() else {
             return; // 状态都没建起来 = 启动更早就断了，不在这里重复报
         };
-        let shown = state.shown.load(std::sync::atomic::Ordering::SeqCst);
-        if let Some(note) = boot_watchdog_note(shown) {
+        let painted = state.painted.load(std::sync::atomic::Ordering::SeqCst);
+        if let Some(note) = boot_watchdog_note(painted) {
             crate::engine::log::write_log("warn", &format!("{note}（阈值 {BOOT_WATCHDOG_MS}ms）"));
         }
     });
@@ -202,17 +204,69 @@ pub fn app_first_paint<R: tauri::Runtime>(app: AppHandle<R>, window: WebviewWind
         );
         return;
     }
-    crate::show_main_window_when_ready(&app, "渲染层首帧握手");
+    // R8-M05：这里必须走 `on_render_first_paint` 而不是直接 `show_main_window_when_ready`。
+    // 前者先置 `ShowState.painted` 再显示、再投递待编辑意图；绕过它 = 首帧信号永不置位，
+    // 看门狗会对着正常启动报白屏、提权意图永远留在槽里。
+    crate::on_render_first_paint(&app);
 }
 #[cfg(test)]
 mod boot_watchdog_tests {
     use super::boot_watchdog_note;
 
-    /// 看门狗只在没收到首帧时说话：正常启动不得凭空留一条 WARN。
+    const SELF: &str = include_str!("app.rs");
+
+    /// 只取生产段：所有 `#[cfg(test)]` 模块以下不参与匹配，避免断言里的字面量被自己数进去。
+    fn prod() -> &'static str {
+        let cut = SELF
+            .find("#[cfg(test)]")
+            .expect("找不到 #[cfg(test)]——断言的截断锚点变了");
+        &SELF[..cut]
+    }
+
+    /// 函数体：从签名行起到第一个顶格 `}` 之前（注释里的同名散文不算函数体）。
+    fn fn_body(name: &str) -> &'static str {
+        let src = prod();
+        let at = src.find(name).unwrap_or_else(|| panic!("找不到 {name}——结构变了，断言要同步"));
+        let tail = &src[at..];
+        let end = tail.find("\n}\n").unwrap_or(tail.len());
+        &tail[..end]
+    }
+
+    /// 看门狗只在没收到首帧时说话：正常启动不得凭空留一条 WARN；
+    /// 兜底显示（`shown == true` 但 `painted == false`）必须仍然报警（R8-M05）。
     #[test]
-    fn watchdog_stays_silent_once_first_paint_arrived() {
-        assert!(boot_watchdog_note(true).is_none(), "已 show 还报警就是噪音");
+    fn watchdog_stays_silent_only_once_first_paint_arrived() {
+        assert!(boot_watchdog_note(true).is_none(), "已收到首帧还报警就是噪音");
         let note = boot_watchdog_note(false).expect("未收到首帧必须给出可诊断的一条");
         assert!(note.contains("白屏") && note.contains("导出日志"), "文案要指向下一步动作: {note}");
+    }
+
+    /// R8-M05 破坏自证：看门狗改回读 `shown` 时必红。
+    /// 3s/8s 兜底显示也会把 `shown` 置真（12s 看门狗晚于 8s 兜底），读它 = 白屏永远不报警。
+    #[test]
+    fn watchdog_reads_painted_not_shown() {
+        let body = fn_body("pub fn start_boot_watchdog");
+        assert!(
+            body.contains("state.painted.load("),
+            "看门狗必须读「渲染层首帧」信号 painted"
+        );
+        assert!(
+            !body.contains("state.shown"),
+            "读 shown 等于把兜底显示当成渲染就绪，白屏告警结构上失效"
+        );
+    }
+
+    /// R8-M05：首帧命令必须经置位入口，直接调共用显示函数 = `painted` 永不置位。
+    #[test]
+    fn first_paint_goes_through_painted_entry() {
+        let body = fn_body("pub fn app_first_paint");
+        assert!(
+            body.contains("crate::on_render_first_paint(&app)"),
+            "首帧命令必须经 on_render_first_paint（置位 + 显示 + 投递意图）"
+        );
+        assert!(
+            !body.contains("crate::show_main_window_when_ready("),
+            "绕过置位入口直接显示：看门狗会对正常启动报白屏、意图永远送不出去"
+        );
     }
 }

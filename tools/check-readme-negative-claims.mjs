@@ -14,7 +14,15 @@
 // **真源迁移（2026-10-15 用户裁定）**：承诺原文原在 readme 的「不做的事」章节；用户决定
 // 该章节从用户文档删除，承诺迁入本机资料区「否定式承诺-不做的清单」（本仓库其他规范流程下），
 // 本门禁改读该文件（文件名保留历史，不改名）。该文件**不入库**——按 AGENTS「门禁读未跟踪
-// 文件必须先 existsSync 再判定」的红线：文件缺失时显式 SKIP 并声明「本门禁未校验」，不崩、也不打 ✓。
+// 文件必须先 existsSync 再判定」的红线：文件缺失时显式 SKIP 并声明「本节未校验」，不崩、也不打 ✓。
+//
+// **断言分两段（2026-11-02，T1b-M04）**：旧实现在真源缺席时整条门禁直接 exit 0，于是它虽是
+// MUST_RUN，默认验收链上却是「零断言 × SKIP」——roster 的自报统计虽诚实，名分仍会被读成
+// 「已覆盖」。现在按断言来源拆开：
+//   · 数据层段（活动目录 ⇄ allow 反向棘轮 / hardZero）与承诺文档无关，**照常执行**，
+//     默认链上就能判红；
+//   · 文档段（docAnchor / scopeDocAnchor 原文在场）才随真源缺席显式 SKIP 并声明「本节未校验」。
+// 承诺文档存在时两段都必须有可判红断言，杜绝 0 对象静默通过。
 //
 // 判定原则（每条主题都是双向棘轮，两个方向都会红）：
 //   1. `docAnchor` 原文必须在承诺文档里 —— 承诺行被人删掉或改弱，等于静默放宽，红；
@@ -23,7 +31,8 @@
 //      白名单烂掉比没有白名单更危险，它会让人以为那道闸还在拦东西；
 //   4. `hardZero` 主题（BCD / UCPD）不允许任何 allow 条目，命中即红。
 //
-// 用法：node tools/check-readme-negative-claims.mjs
+// 用法：node tools/check-readme-negative-claims.mjs [--vault-root <Obsidian 库根>]
+//       （或设 TRIM_VAULT_ROOT；不给根时文档段显式 SKIP、数据层段照常断言）
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -35,14 +44,14 @@ const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 const optimizer = JSON.parse(read('src-tauri/data/optimizer-runtime.json'));
 const retired = new Set(JSON.parse(read('src-tauri/data/retired-optimizations.json')).items.map((x) => x.id));
 
-// ---- 承诺真源（本机资料区，不入库）：缺失即 SKIP（红线口径），不崩也不打 ✓ ----
+// ---- 承诺真源（本机资料区，不入库）：缺失时只有文档段 SKIP（红线口径），不崩也不打 ✓ ----
 // T1a-K01：本机资料区的真实路径不得写进跟踪文件（含门禁源码），用段拼接；
 // 「本机资料区」措辞本身是 AGENTS §2 认可的合法指代。
 //
 // A-4 / 拍板 D2（2026-10-25）：文档已从仓库内 `docs/` 搬进 Obsidian 库，本门禁**直接读
 // 同一份**，不复制第二份。库根只从 `--vault-root <路径>` 或 `TRIM_VAULT_ROOT` 传入。
-// 三档：没给根且仓内副本不在 ⇒ SKIP（未校验）；给了根 ⇒ 必须读得到，读不到判红并列出两个
-// 候选路径（给根就是声明「真源该在这儿」，静默 SKIP 会把搬家做成长期失明）。
+// 三档：没给根且仓内副本不在 ⇒ 文档段显式 SKIP（未校验），数据层段照跑；给了根 ⇒ 必须读得到，
+// 读不到整条判红并列出两个候选路径（给根就是声明「真源该在这儿」，静默 SKIP 会把搬家做成长期失明）。
 const CLAIMS_DOC_SEGMENTS = ['本仓库其他规范流程', '否定式承诺-不做的清单.md'];
 const argOf = (name) => {
   const i = process.argv.indexOf(name);
@@ -54,19 +63,15 @@ const claimsCandidates = [
   path.join(ROOT, 'docs', ...CLAIMS_DOC_SEGMENTS),
 ].filter(Boolean);
 const claimsPath = claimsCandidates.find((p) => fs.existsSync(p)) || '';
-if (!claimsPath) {
-  console.warn('=== 否定式承诺门禁 ===\n');
-  if (vaultRoot) {
-    console.error(`✗ 给了 --vault-root / TRIM_VAULT_ROOT 却找不到承诺真源：${claimsCandidates.join(' ; ')}`);
-    console.error('  ⇒ 库根传错、文件改名或搬家未同步本门禁 —— 按失败处理，不静默 SKIP');
-    process.exit(1);
-  }
-  console.warn(`⚠ 承诺真源缺失（本机资料区·${CLAIMS_DOC_SEGMENTS.join('/')}）——本门禁全部**未校验**（SKIP，不是通过）`);
-  console.warn('  · 该文件属本机资料区、不入库；干净克隆 / 他机下按 SKIP 处理是红线口径。');
-  console.warn('  · 本机要真实执行：node tools/check-readme-negative-claims.mjs --vault-root <Obsidian 库根>（或设 TRIM_VAULT_ROOT）。');
-  process.exit(0);
+if (!claimsPath && vaultRoot) {
+  console.error(`✗ 给了 --vault-root / TRIM_VAULT_ROOT 却找不到承诺真源：${claimsCandidates.join(' ; ')}`);
+  console.error('  ⇒ 库根传错、文件改名或搬家未同步本门禁 —— 按失败处理，不静默 SKIP');
+  process.exit(1);
 }
-const claimsDoc = fs.readFileSync(claimsPath, 'utf8');
+// 真源缺席只收窄文档段：数据层段不读承诺文档，下面照常执行（这是默认必跑链上
+// 「有断言可判红」的前提）。文档段一律走 skip()，不打 ✓。
+const docPresent = Boolean(claimsPath);
+const claimsDoc = docPresent ? fs.readFileSync(claimsPath, 'utf8') : '';
 
 /**
  * 主题表：一条 = 承诺文档里的一句否定式承诺。
@@ -233,20 +238,36 @@ function matchesTheme(item, matcher) {
 }
 
 let fail = 0;
+let asserted = 0;
+let skipped = 0;
 const check = (ok, label, detail = '') => {
+  asserted++;
   console.log(`${ok ? '✓' : '✗'} ${label}${detail ? ' — ' + detail : ''}`);
   if (!ok) fail++;
 };
+// 显式 SKIP：不计入 ✓、也不计失败；末尾汇总单列节数（同 check-comment-rot 的 SKIP 口径）。
+const skip = (label, detail = '') => {
+  skipped++;
+  console.log(`⊘ ${label}${detail ? ' — ' + detail : ''}`);
+};
 
-console.log(`=== 否定式承诺门禁（真源：本机资料区·${CLAIMS_DOC_SEGMENTS.join('/')}） ===\n`);
+console.log(`=== 否定式承诺门禁（承诺真源：${docPresent ? claimsPath : '缺席'}） ===\n`);
+if (!docPresent) {
+  console.warn(`⚠ 承诺真源缺失（本机资料区·${CLAIMS_DOC_SEGMENTS.join('/')}）——承诺文档侧断言**未校验**（SKIP，不是通过）；数据层断言照常执行。`);
+  console.warn('  · 该文件属本机资料区、不入库；干净克隆 / 他机下文档侧按 SKIP 处理是红线口径。');
+  console.warn('  · 本机要连承诺原文一起校验：node tools/check-readme-negative-claims.mjs --vault-root <Obsidian 库根>（或设 TRIM_VAULT_ROOT）。');
+}
 console.log(`真源读数：活动优化项 ${optimizer.length} / 退役账本 ${retired.size}\n`);
+// 对象地板：活动目录为空时主题匹配全部空转，「没有命中」会被读成「承诺没有漂移」。
+check(optimizer.length > 0, '活动优化目录非空（否则主题匹配全部空转）', `读到 ${optimizer.length} 项`);
 
 for (const t of THEMES) {
-  const problems = [];
+  const docProblems = []; // 文档段：锚点原文必须还在承诺文档里
+  const problems = [];    // 数据层段：活动项 ⇄ allow / hardZero（不读承诺文档）
 
-  // 1. 承诺原文必须还在承诺文档里
-  if (!claimsDoc.includes(t.docAnchor)) {
-    problems.push(`承诺行在承诺文档里找不到原文（锚点 ${JSON.stringify(t.docAnchor)}）—— 承诺被删或被改弱，等于静默放宽`);
+  // 1. 承诺原文必须还在承诺文档里（真源缺席时本节 SKIP，不打 ✓）
+  if (docPresent && !claimsDoc.includes(t.docAnchor)) {
+    docProblems.push(`承诺行在承诺文档里找不到原文（锚点 ${JSON.stringify(t.docAnchor)}）—— 承诺被删或被改弱，等于静默放宽`);
   }
 
   // 2. 活动清单逐条命中核对
@@ -272,8 +293,8 @@ for (const t of THEMES) {
     }
     if (!a.scope || !a.why) problems.push(`allow 条目 ${a.id} 缺书面 scope 或 why`);
     // scope 的用户可见版本必须在承诺文档里留痕，否则「边界写死」只存在于门禁内部
-    if (a.scopeDocAnchor && !claimsDoc.includes(a.scopeDocAnchor)) {
-      problems.push(`allow 条目 ${a.id} 的 scope 在承诺文档里找不到原文（${JSON.stringify(a.scopeDocAnchor)}）—— 豁免边界必须留痕`);
+    if (docPresent && a.scopeDocAnchor && !claimsDoc.includes(a.scopeDocAnchor)) {
+      docProblems.push(`allow 条目 ${a.id} 的 scope 在承诺文档里找不到原文（${JSON.stringify(a.scopeDocAnchor)}）—— 豁免边界必须留痕`);
     }
   }
 
@@ -283,7 +304,12 @@ for (const t of THEMES) {
     if (hits.length) problems.push(`本主题为 hardZero，却命中 ${hits.map((h) => h.id).join(' / ')}`);
   }
 
-  check(problems.length === 0, `${t.topic}（命中 ${hits.length} / allow ${t.allow.length} / hardZero ${t.hardZero ? '是' : '否'}）`,
+  if (docPresent) {
+    check(docProblems.length === 0, `${t.topic} · 承诺原文与豁免边界在场`, docProblems.join('；'));
+  } else {
+    skip(`${t.topic} · 承诺原文与豁免边界在场`, '承诺真源缺席：本节未校验');
+  }
+  check(problems.length === 0, `${t.topic} · 数据层对齐（命中 ${hits.length} / allow ${t.allow.length} / hardZero ${t.hardZero ? '是' : '否'}）`,
     problems.join('；'));
 }
 
@@ -293,16 +319,27 @@ for (const t of THEMES) {
 const audioIds = ['audio_mmcss_priority', 'audio_mmcss_schedule'];
 const audioActive = optimizer.filter((o) => audioIds.includes(o.id)).map((o) => o.id);
 if (audioActive.length) {
-  check(
-    claimsDoc.includes('音频任务调度**的两项不在本条范围内'),
-    `MMCSS 音频两项仍在活动清单（${audioActive.join(' / ')}），承诺文档的范围声明必须在场`,
-    '找不到「音频任务调度的两项不在本条范围内」这句 —— 撤掉声明就等于把承诺悄悄扩回音频面',
-  );
+  if (docPresent) {
+    check(
+      claimsDoc.includes('音频任务调度**的两项不在本条范围内'),
+      `MMCSS 音频两项仍在活动清单（${audioActive.join(' / ')}），承诺文档的范围声明必须在场`,
+      '找不到「音频任务调度的两项不在本条范围内」这句 —— 撤掉声明就等于把承诺悄悄扩回音频面',
+    );
+  } else {
+    skip('MMCSS 音频两项的范围声明', '承诺真源缺席：本节未校验');
+  }
 }
 
 console.log('');
 if (fail > 0) {
-  console.error(`门禁失败：${fail} 个主题的否定式承诺与数据层不对齐`);
+  console.error(`门禁失败：${fail} 条断言不通过（已执行断言 ${asserted} 条 / SKIP ${skipped} 节）`);
   process.exit(1);
 }
-console.log('否定式承诺门禁全部通过');
+if (!docPresent) {
+  console.log(
+    `check-readme-negative-claims: 数据层断言 ${asserted} 条通过；承诺文档侧 ${skipped} 节**未校验**` +
+      '（SKIP，不是通过；给 --vault-root 或 TRIM_VAULT_ROOT 才执行文档段）',
+  );
+  process.exit(0);
+}
+console.log(`否定式承诺门禁全部通过（断言 ${asserted} 条）`);

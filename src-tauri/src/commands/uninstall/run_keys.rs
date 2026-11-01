@@ -21,6 +21,8 @@
 
 use serde_json::{Value, json};
 use super::residue_update::contribs;
+// R2b-M01：落点存在性三态复用服务键面已有的 `classify_landing`（§5.16/N6 只留一份实现）。
+use super::services_orphan::{LandingState, classify_landing};
 
 /// 单根值枚举上限（Run/RunOnce 常态几条到几十条，给足但设限）
 const RUN_VALUE_CAP: usize = 512;
@@ -198,16 +200,49 @@ fn unquoted_head(s: &str) -> Result<&str, ()> {
     Ok(first)
 }
 
-/// 目标是否"在本机可用"。
+/// 目标落点状态（R2b-M01）：`Exists` / `Missing` / `Unknown` 三态。
 ///
-/// 含路径分隔符 = 具体文件路径，直接判存在；裸名字 = 命令名，走系统常规落点
+/// 含路径分隔符 = 具体文件路径，判 `symlink_metadata` 的三态；裸名字 = 命令名，走系统常规落点
 /// （复用 IFEO 那条 `image_executable_present`：System32 / SysWOW64 / Windows / App Paths）
 /// —— 一处实现，两个域共用，别在这里再写一份。
-pub(super) unsafe fn run_target_present(target: &str) -> bool {
+///
+/// **读不到落点（权限不足 / IO 失败 / 网络盘离线）不等于落点已失踪**：旧写法用 `is_file()`
+/// 把两者压成同一个 `false`，删除侧据此放行，等于删掉一条仍活着的自启动（与 K07 同型）。
+pub(super) unsafe fn run_target_state(target: &str) -> LandingState {
     if target.contains('\\') || target.contains('/') {
-        return std::path::Path::new(target).is_file();
+        return classify_landing(std::fs::symlink_metadata(target));
     }
-    super::ifeo_orphan::image_executable_present(&target.to_ascii_lowercase())
+    // 裸名分支不枚举目录、只查固定落点：拿不到 %SystemRoot% 才是「不可判」，
+    // 「常规落点里没有这个名字」是确定的 Missing。
+    if std::env::var_os("SystemRoot").is_none() {
+        return LandingState::Unknown("读不到 %SystemRoot%，无法判断裸命令落点".to_string());
+    }
+    if super::ifeo_orphan::image_executable_present(&target.to_ascii_lowercase()) {
+        LandingState::Exists
+    } else {
+        LandingState::Missing
+    }
+}
+
+/// 删除侧结论：只有**确认不存在**才算「目标已失踪」（返回 `false` = 允许走删值分支）。
+/// `Unknown` 按「仍在用」处理 —— 与 K07 服务键删除面同向 fail-closed。
+pub(super) fn target_still_usable(state: &LandingState) -> bool {
+    !matches!(state, LandingState::Missing)
+}
+
+/// 目标是否"仍可用"（删除侧放行判据，R2b-M01 起 fail-closed）。
+///
+/// 返回 `false` 只代表「确认落点不存在」；读不到一律返回 `true`（不放行删除），
+/// 并留一条日志说明原因 —— 报告里把「读不到」写成「已失踪」是这条缺陷的另一半。
+pub(super) unsafe fn run_target_present(target: &str) -> bool {
+    let state = run_target_state(target);
+    if let LandingState::Unknown(ref e) = state {
+        crate::engine::log::write_log(
+            "warn",
+            &format!("启动项目标落点读不到（{target}: {e}），按「无法判断」不放行删除"),
+        );
+    }
+    target_still_usable(&state)
 }
 
 /// 报告里的目标串：`HKLM\<子路径>::值名`（`reg_value` 的形状闸按 `::` 拆，见
@@ -226,16 +261,22 @@ pub(super) struct RunRaw {
     pub(super) data: Option<String>,
 }
 
-/// 纯判定：`present` 注入目标存在性（单测因此不碰注册表与磁盘）。
+/// 纯判定：`state_of` 注入目标落点三态（单测因此不碰注册表与磁盘）。
 ///
-/// 返回 (候选, notes)。目标可用 ⇒ 不出候选（仍在使用中的程序的正常配置）。
-pub(super) fn run_findings(raws: &[RunRaw], present: &dyn Fn(&str) -> bool, cap: usize) -> (Vec<Value>, Vec<String>) {
+/// 返回 (候选, notes)。目标可用 ⇒ 不出候选（仍在使用中的程序的正常配置）；
+/// **落点读不到 ⇒ 不判消失、不出候选**（R2b-M01），只在 notes 里如实说明有几条读不到。
+pub(super) fn run_findings(
+    raws: &[RunRaw],
+    state_of: &dyn Fn(&str) -> LandingState,
+    cap: usize,
+) -> (Vec<Value>, Vec<String>) {
     let mut out = Vec::new();
     let mut notes = Vec::new();
     let mut alive = 0usize;
     let mut no_target = 0usize;
     let mut unparseable = 0usize;
     let mut protected = 0usize;
+    let mut unreadable: Vec<String> = Vec::new();
     for raw in raws {
         // 输入链护栏：与启动项域共用同一份判据（§5.16，两侧各写一份就会「面板拦得住、残留清单漏过去」）。
         // 这一族一旦目标解析不到（`present` 判据查不到落点），旧口径会把它当「厂商残留」上报，
@@ -258,13 +299,21 @@ pub(super) fn run_findings(raws: &[RunRaw], present: &dyn Fn(&str) -> bool, cap:
                 unparseable += 1;
                 ("run_unparseable", "启动项的值形态解析不出可执行目标（引号未闭合，或含无法展开的变量）", String::new())
             }
-            RunTarget::Target(t) => {
-                if present(&t) {
+            RunTarget::Target(t) => match state_of(&t) {
+                LandingState::Exists => {
                     alive += 1;
                     continue;
                 }
-                ("run_target_missing", "启动项指向的可执行目标在本机不存在（程序已卸载或路径已变）", t)
-            }
+                LandingState::Unknown(_) => {
+                    // R2b-M01：读不到落点（ACL / IO / 离线盘）不判消失 —— 这条候选若放出去，
+                    // 删除侧再拿同一个读不到结论放行，删的就是一条仍活着的自启动。
+                    unreadable.push(t);
+                    continue;
+                }
+                LandingState::Missing => {
+                    ("run_target_missing", "启动项指向的可执行目标在本机不存在（程序已卸载或路径已变）", t)
+                }
+            },
         };
         if out.len() >= cap {
             notes.push(format!("启动项候选已达上限 {cap} 条，其余省略"));
@@ -306,6 +355,15 @@ pub(super) fn run_findings(raws: &[RunRaw], present: &dyn Fn(&str) -> bool, cap:
     }
     if no_target > 0 || unparseable > 0 {
         notes.push(format!("{no_target} 条值里没有目标、{unparseable} 条形态解析不出，已按不可解析单独列出（未猜路径）"));
+    }
+    if !unreadable.is_empty() {
+        // R2b-M01：读不到与「已失踪」是两件事 —— 不报候选，但必须让用户看见有这一批没判。
+        let sample: Vec<&str> = unreadable.iter().take(3).map(|s| s.as_str()).collect();
+        notes.push(format!(
+            "{} 条启动项的目标落点读不到（权限不足、IO 失败或网络盘离线），按「无法判断」不报为残留：{}",
+            unreadable.len(),
+            sample.join("；")
+        ));
     }
     (out, notes)
 }
@@ -656,7 +714,7 @@ mod tests {
             raw(RunView::HklmX64, "Broken", Some(r#""C:\unterminated"#)),
             raw(RunView::HklmX64, "Gone", Some(r"C:\Uninstalled\app.exe")),
         ];
-        let (items, _) = run_findings(&raws, &|_: &str| false, 10);
+        let (items, _) = run_findings(&raws, &|_: &str| LandingState::Missing, 10);
         let classes: Vec<&str> = items.iter().map(|i| i["class"].as_str().unwrap_or("")).collect();
         assert_eq!(classes, vec!["run_no_target", "run_unparseable", "run_target_missing"]);
         let reasons: Vec<&str> = items.iter().map(|i| i["reason"].as_str().unwrap_or("")).collect();
@@ -681,9 +739,53 @@ mod tests {
     #[test]
     fn alive_targets_are_not_reported() {
         let raws = vec![raw(RunView::Hkcu, "Good", Some(r#""C:\Apps\live.exe""#))];
-        let (items, notes) = run_findings(&raws, &|_: &str| true, 10);
+        let (items, notes) = run_findings(&raws, &|_: &str| LandingState::Exists, 10);
         assert!(items.is_empty(), "目标存在不得产候选: {items:?}");
         assert!(notes.iter().any(|n| n.contains("仍存在")), "应如实说明有一条被跳过: {notes:?}");
+    }
+
+    /// R2b-M01：读不到落点 ≠ 落点失踪 —— 不产 `run_target_missing` 候选，也不静默。
+    ///
+    /// 判红自证：把 `LandingState::Unknown` 臂并回 `Missing`（或让它落进候选分支），
+    /// 第一条断言当场红；删掉那条 note，第二条红。
+    #[test]
+    fn unreadable_landing_is_not_reported_as_missing() {
+        let raws = vec![raw(RunView::HklmX64, "Locked", Some(r"C:\Restricted\app.exe"))];
+        let (items, notes) = run_findings(
+            &raws,
+            &|_: &str| LandingState::Unknown("拒绝访问".to_string()),
+            10,
+        );
+        assert!(items.is_empty(), "读不到落点不得作为「目标已失踪」候选: {items:?}");
+        assert!(
+            notes.iter().any(|n| n.contains("读不到") && n.contains("无法判断")),
+            "必须如实说明有目标读不到、且未按失踪处理: {notes:?}"
+        );
+        // 反向对照：同一条值在**确认失踪**时才出候选 —— 否则「一律不报」也能让上面两条过。
+        let (items, _) = run_findings(&raws, &|_: &str| LandingState::Missing, 10);
+        assert_eq!(items.len(), 1, "确认失踪必须照常出候选: {items:?}");
+        assert_eq!(items[0]["class"], "run_target_missing");
+    }
+
+    /// R2b-M01：删除侧只认「确认不存在」—— 读不到一律按仍可用处理（fail-closed）。
+    ///
+    /// 判红自证：把 `target_still_usable` 改成 `matches!(state, Exists)`，第二条断言红；
+    /// 把 `classify_landing` 换回 `Path::is_file()`（任何 Err 都折成 false），第一条红。
+    #[test]
+    fn delete_side_only_allows_confirmed_missing() {
+        assert!(target_still_usable(&LandingState::Exists), "落点还在：不许删");
+        assert!(
+            target_still_usable(&LandingState::Unknown("拒绝访问".to_string())),
+            "读不到落点不得放行删值（R2b-M01：这是删除判据）"
+        );
+        assert!(!target_still_usable(&LandingState::Missing), "只有确认不存在才允许走删值分支");
+        // 走一遍真实映射：权限失败必须落 Unknown，只有 NotFound 才是 Missing
+        let denied = classify_landing(Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)));
+        assert!(matches!(&denied, LandingState::Unknown(_)), "权限不足不得折成「已失踪」");
+        assert!(target_still_usable(&denied), "权限不足时不许删");
+        let gone = classify_landing(Err(std::io::Error::from(std::io::ErrorKind::NotFound)));
+        assert_eq!(gone, LandingState::Missing, "NotFound 才是确认失踪");
+        assert!(!target_still_usable(&gone), "确认失踪时放行删值分支");
     }
 
     /// 两个视图分别列项：同名值挂在两侧 ⇒ 两条候选，且 `target` 带各自的视图路径。
@@ -703,7 +805,7 @@ mod tests {
                 data: Some(r"C:\Gone\acme.exe".to_string()),
             },
         ];
-        let (items, _) = run_findings(&raws, &|_: &str| false, 10);
+        let (items, _) = run_findings(&raws, &|_: &str| LandingState::Missing, 10);
         assert_eq!(items.len(), 2, "两侧各一条，不得合并: {items:?}");
         let targets: Vec<&str> = items.iter().map(|i| i["target"].as_str().unwrap_or("")).collect();
         assert!(
@@ -723,7 +825,7 @@ mod tests {
     fn readable_flag_distinguishes_no_data_from_no_candidates() {
         // 只看形状：本用例不碰注册表，`collect_run_raws` 的真机面由发布前人工跑
         let raws: Vec<RunRaw> = vec![];
-        let (items, notes) = run_findings(&raws, &|_: &str| false, 10);
+        let (items, notes) = run_findings(&raws, &|_: &str| LandingState::Missing, 10);
         assert!(items.is_empty());
         assert!(notes.is_empty(), "空输入不得编出 note: {notes:?}");
     }

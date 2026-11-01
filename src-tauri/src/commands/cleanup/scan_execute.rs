@@ -1085,6 +1085,10 @@ pub async fn cleanup_item_detail<R: tauri::Runtime>(window: WebviewWindow<R>, id
 // ==================== cleanup:check-locked / kill-locked-processes ====================
 
 /// `@@LOCKED@@` 行协议解析结果（占用检测与占用查询共用，判定不重写）。
+///
+/// `Default` 只服务 `cleanup_query_locked` 的「一个文件都没登记就早退」分支：那份回执与
+/// 正常回执必须**同一张字段表**（R4-M01 收口），空的解析结果就是它的零值。
+#[derive(Default)]
 pub(super) struct LockedParse {
     pub(super) locked: Vec<Value>,
     pub(super) by_app: Map<String, Value>,
@@ -1242,7 +1246,9 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
     // 白名单每次检测覆盖（防「检测 A 文件后延时结束 B 进程」的窗口）；
     // 只有走到这一行（检测全成功）才有名单，失败路径留在前的 reset 上空槽（R4-M03）
     store_lock_whitelist(&label, std::mem::take(&mut parsed.whitelist));
-    locked_receipt(parsed, scanned, truncated, None)
+    // 占用检测的候选来自扫描快照，没有「整树遍历」这一步 ⇒ 第五个参数传 None，
+    // 回执形状与本轮之前完全一致（整树放弃分类只属于 query-locked，R4-M01）。
+    locked_receipt(parsed, scanned, truncated, None, None)
 }
 
 /// 引擎 stderr 留痕 → 一条能读完的日志（真机反馈 2026-10-25）。
@@ -1312,7 +1318,16 @@ fn ellide_middle(s: &str, cap: usize) -> String {
 /// 撞上的是一条删除失败。`malformed` 与 `partial` 进回执之后两者才可分辨；
 /// 收在一处也堵住以后「改一侧漏一侧」的双源形状。
 /// `path` 只有查询侧带（它查的是单条路径，回执要原样标出来；检测侧是一批条目，无单一 path）。
-fn locked_receipt(parsed: LockedParse, scanned: usize, truncated: bool, path: Option<&str>) -> Value {
+/// `walk` 同样只有查询侧带：整树收集的放弃分类（`skippedTree` + `skippedReasons`，R4-M01）
+/// 是 query-locked 独有的字段。检测侧的候选来自扫描快照，无整树遍历可放弃，传 `None`。
+/// 两条链仍共用同一张字段表 —— 以后加字段只改这里。
+fn locked_receipt(
+    parsed: LockedParse,
+    scanned: usize,
+    truncated: bool,
+    path: Option<&str>,
+    walk: Option<&QueryWalkSkips>,
+) -> Value {
     let mut out = json!({
         "success": true,
         "locked": parsed.locked,
@@ -1327,6 +1342,10 @@ fn locked_receipt(parsed: LockedParse, scanned: usize, truncated: bool, path: Op
     if let Some(p) = path {
         out["path"] = json!(p);
     }
+    if let Some(w) = walk {
+        out["skippedTree"] = json!(w.total());
+        out["skippedReasons"] = w.reasons_json();
+    }
     out
 }
 
@@ -1334,37 +1353,153 @@ fn locked_receipt(parsed: LockedParse, scanned: usize, truncated: bool, path: Op
 /// 文件足够覆盖任何真实目录，超限截断并如实标注，不许静默少查）。
 pub(super) const QUERY_LOCK_CAP: usize = 20_000;
 
+/// 占用查询整树收集的「放弃路径」分类计数（R4-M01）。
+///
+/// 六条放弃路径里除「命中 QUERY_LOCK_CAP」（它本来就把 `truncated` 置真）以外的五条，
+/// 此前全是静默 `return`/`continue`：用户的目录深处、读不动的子目录、stat 失败的条目、
+/// reparse 子项都被跳过，而回执是 `truncated:false` + `scanned:N` —— 即「我查全了，
+/// 没人占用」。这五格就是那些出口的账单：跳过可以，但必须分类留痕（与
+/// `native-scanner/src/cleanup_scan.rs` 的 `skippedReparse` / `unreadableDirs` 并列
+/// 呈现的口径一致）。
+#[derive(Default, Debug)]
+struct QueryWalkSkips {
+    /// 深度到 `QUERY_WALK_MAX_DEPTH` 而未下钻的目录数
+    depth_cap: usize,
+    /// `read_dir` 失败（权限不足 / 目录被独占 / 枚举期间被删）而整棵子树未查的目录数
+    read_dir_failed: usize,
+    /// `read_dir` 迭代中单项 Err（目录在枚举期间变化）而未查的条目数
+    entry_failed: usize,
+    /// 条目 metadata（stat）失败、无法判定是目录还是文件的条目数
+    stat_failed: usize,
+    /// reparse 点（junction / 符号链接）跳过数：与扫描、执行两侧同一判据，不追进去以免成环
+    reparse_skipped: usize,
+}
+
+impl QueryWalkSkips {
+    /// 放弃总数：>0 即「没查全」，`truncated` 必须随之为真。
+    fn total(&self) -> usize {
+        self.depth_cap
+            + self.read_dir_failed
+            + self.entry_failed
+            + self.stat_failed
+            + self.reparse_skipped
+    }
+
+    /// 回执字段：分类计数（键名与 `native-scanner/src/cleanup_scan.rs` 的
+    /// `skippedReparse` 同风格，渲染层按需选用）。
+    fn reasons_json(&self) -> Value {
+        json!({
+            "depthCap": self.depth_cap,
+            "readDirFailed": self.read_dir_failed,
+            "entryFailed": self.entry_failed,
+            "statFailed": self.stat_failed,
+            "reparseSkipped": self.reparse_skipped,
+        })
+    }
+
+    /// 日志用摘要：只列非零分类，避免把五类全打成一句读不完的话。
+    fn summary(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        if self.depth_cap > 0 {
+            parts.push(format!("深度上限 {}", self.depth_cap));
+        }
+        if self.read_dir_failed > 0 {
+            parts.push(format!("读目录失败 {}", self.read_dir_failed));
+        }
+        if self.entry_failed > 0 {
+            parts.push(format!("目录项枚举失败 {}", self.entry_failed));
+        }
+        if self.stat_failed > 0 {
+            parts.push(format!("元数据读取失败 {}", self.stat_failed));
+        }
+        if self.reparse_skipped > 0 {
+            parts.push(format!("reparse 跳过 {}", self.reparse_skipped));
+        }
+        if parts.is_empty() {
+            "无跳过".to_string()
+        } else {
+            parts.join("、")
+        }
+    }
+}
+
 /// 占用查询的目录整树收集（清浊坑①：RM 只对**注册进去的文件**报告占用者，只注册
 /// 目录本身不会覆盖树内文件 ⇒ 目录查询必须整树下钻）。跳过 reparse 点（与扫描/执行
 /// 两侧同一判据 `protect::is_reparse`）、深度上限与 native-scanner `MAX_WALK_DEPTH`
-/// 同口径；触上限即截断并由调用方标注「已截断」。
-fn collect_query_tree(root: &str, out: &mut Vec<String>, truncated: &mut bool) {
+/// 同口径。
+///
+/// R4-M01：本函数**没有**一条静默放弃路径 —— 深度上限、读目录失败、目录项枚举失败、
+/// stat 失败、reparse 跳过各进 `skips` 的一格；`skips.total() > 0` 即「没查全」，
+/// 由本函数置 `truncated = true`。调用方必须把总数与分类一起写进回执：只回
+/// `truncated:false` + 空的 `locked` 就是「我查全了，没人占用」的假阴性。
+fn collect_query_tree(
+    root: &str,
+    out: &mut Vec<String>,
+    truncated: &mut bool,
+    skips: &mut QueryWalkSkips,
+) {
     // 深度口径同 native-scanner MAX_WALK_DEPTH=64（v2-L4P-11/C-1）：超深目录树会把
     // 查询清单撑爆，而环状结构经普通目录绕不开 reparse 判定也构造不出来。
     const QUERY_WALK_MAX_DEPTH: usize = 64;
-    fn walk(dir: &str, depth: usize, out: &mut Vec<String>, truncated: &mut bool) {
+    fn walk(
+        dir: &str,
+        depth: usize,
+        out: &mut Vec<String>,
+        truncated: &mut bool,
+        skips: &mut QueryWalkSkips,
+    ) {
         if depth >= QUERY_WALK_MAX_DEPTH {
+            // 整个子树没查：计数（回执据此标「没查全」），不许静默 return。
+            skips.depth_cap += 1;
             return;
         }
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
-        for entry in rd.filter_map(|e| e.ok()) {
+        let rd = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(_) => {
+                // 权限不足 / 被独占 / 枚举期间被删：整棵子树都没查，不是「没有占用」。
+                skips.read_dir_failed += 1;
+                return;
+            }
+        };
+        for entry in rd {
             if out.len() >= QUERY_LOCK_CAP {
                 *truncated = true;
                 return;
             }
-            let Ok(meta) = entry.metadata() else { continue };
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => {
+                    // 旧写法 `filter_map(|e| e.ok())` 把这一项整个吞掉，连「少了一个」都不知道。
+                    skips.entry_failed += 1;
+                    continue;
+                }
+            };
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => {
+                    skips.stat_failed += 1;
+                    continue;
+                }
+            };
             if crate::engine::protect::is_reparse(&meta) {
+                // 设计与扫描侧一致：不追进 reparse 目标（防环），但跳过本身要留痕。
+                skips.reparse_skipped += 1;
                 continue;
             }
             let p = entry.path().to_string_lossy().to_string();
             if meta.is_dir() {
-                walk(&p, depth + 1, out, truncated);
+                walk(&p, depth + 1, out, truncated, skips);
             } else if meta.is_file() {
                 out.push(p);
             }
         }
     }
-    walk(root, 0, out, truncated);
+    walk(root, 0, out, truncated, skips);
+    // 唯一判据：只要有一格非零就是「没查全」。五条出口都只做裸 `+= 1`，是否置
+    // truncated 集中在收口处判 —— 不存在「计了数却忘了置位」的中间态。
+    if skips.total() > 0 {
+        *truncated = true;
+    }
 }
 
 /// 占用查询的 `checklocked_json` 输入装配：files 元素必须是「对象」形态
@@ -1426,18 +1561,36 @@ pub async fn cleanup_query_locked<R: tauri::Runtime>(
     // 坑①：目录 ⇒ 整树文件（上限 QUERY_LOCK_CAP，截断如实标注）；文件 ⇒ 单条。
     let mut files: Vec<String> = Vec::new();
     let mut truncated = false;
+    let mut walk_skips = QueryWalkSkips::default();
     if meta.is_dir() {
-        collect_query_tree(&expanded, &mut files, &mut truncated);
+        // R4-M01：五条放弃路径各进一格计数；任何一格非零都会由 collect_query_tree
+        // 把 truncated 置真，下面的回执不得再出现「查全了」的形态。
+        collect_query_tree(&expanded, &mut files, &mut truncated, &mut walk_skips);
     } else {
         files.push(expanded.clone());
     }
+    let skipped_tree = walk_skips.total();
+    if skipped_tree > 0 {
+        // 日志与回执同一份计数：日志给排障（哪几类降级发生了），回执给渲染层如实标注。
+        log::write_log(
+            "warn",
+            &format!(
+                "占用查询未查全：{skipped_tree} 处目录/条目被跳过（{}），回执已标 truncated=true：{expanded}",
+                walk_skips.summary()
+            ),
+        );
+    }
     let scanned = files.len();
     if files.is_empty() {
-        // 空目录 / 全是 reparse 点：没有可注册的文件 ⇒ 无占用可言（明说，不放空结果充数）
-        return json!({
-            "success": true, "path": expanded, "locked": [], "byApp": {},
-            "procs": [], "lockedByItem": {}, "scanned": 0, "truncated": truncated
-        });
+        // 空目录 / 全是 reparse 点：没有可注册的文件 ⇒ 无占用可言（明说，不放空结果充数）。
+        // 与正常回执共用 locked_receipt 的字段表（R4-M01）：空解析结果 + 整树放弃分类。
+        return locked_receipt(
+            LockedParse::default(),
+            0,
+            truncated,
+            Some(&expanded),
+            Some(&walk_skips),
+        );
     }
     // R10（2026-10-15）同口径：保护清单随候选一起注入（可删判定与扫描/执行侧同源）。
     // C1-1：files 必须经 query_files_entries 装配成对象数组——直接下发字符串数组会让
@@ -1475,8 +1628,9 @@ pub async fn cleanup_query_locked<R: tauri::Runtime>(
     // 白名单每次查询覆盖（与 check-locked 同键同语义：紧随其后的结束进程只认这份名单，
     // 防「查询 A 路径后延时结束 B 进程」的窗口）
     store_lock_whitelist(&label, std::mem::take(&mut parsed.whitelist));
-    // P1-6C：与占用检测同一构造处（同字段表、同 `malformed`/`partial` 语义）
-    locked_receipt(parsed, scanned, truncated, Some(&expanded))
+    // P1-6C：与占用检测同一构造处（同字段表、同 `malformed`/`partial` 语义）；
+    // R4-M01：整树放弃分类（skippedTree / skippedReasons）与 truncated 一起下发。
+    locked_receipt(parsed, scanned, truncated, Some(&expanded), Some(&walk_skips))
 }
 
 /// 结束进程用的 kernel32 绑定（零依赖原则：手写 FFI，与 native-scanner 同风格）
@@ -1805,16 +1959,141 @@ mod p1_6c_malformed_tests {
         assert_eq!(parsed.locked.len(), 1, "合法行照常收下，畸形计数不得连带吞掉好数据");
         assert_eq!(parsed.malformed, 3, "非 JSON / 缺 path / path 空 三条都要逐条计数");
 
-        let out = locked_receipt(parsed, 1, false, Some(r"C:\a.txt"));
+        let out = locked_receipt(parsed, 1, false, Some(r"C:\a.txt"), None);
         assert_eq!(out["malformed"], json!(3));
         assert_eq!(out["partial"], json!(true), "有畸形行即 partial，不许回「全量已查」的单态");
         assert_eq!(out["success"], json!(true), "partial 不等于整批失败：查到的那条仍要给用户");
         assert_eq!(out["path"], json!(r"C:\a.txt"), "查询侧的 path 字段是既有契约，收拢构造时不许丢");
 
-        let clean = locked_receipt(parse_locked_lines("@@LOCKED@@{\"path\":\"C:\\\\b.txt\"}\n", 1), 1, false, None);
+        let clean = locked_receipt(parse_locked_lines("@@LOCKED@@{\"path\":\"C:\\\\b.txt\"}\n", 1), 1, false, None, None);
         assert_eq!(clean["malformed"], json!(0));
         assert_eq!(clean["partial"], json!(false), "全干净时不得挂着 partial，否则两档又混回一潭");
         assert!(clean.get("path").is_none(), "检测侧没有单一 path，不得凭空造一个");
+    }
+}
+
+#[cfg(test)]
+mod query_walk_tests {
+    use super::*;
+
+    /// 跑一次整树收集（三个出参一起回，断言才看得到「计数 + 截断」的联动）。
+    fn walk_tree(root: &std::path::Path) -> (Vec<String>, bool, QueryWalkSkips) {
+        let mut out: Vec<String> = Vec::new();
+        let mut truncated = false;
+        let mut skips = QueryWalkSkips::default();
+        collect_query_tree(root.to_string_lossy().as_ref(), &mut out, &mut truncated, &mut skips);
+        (out, truncated, skips)
+    }
+
+    /// 正常小树：一条放弃路径都不该出现。这条是「零误报」的正向对照 —— 没有它，
+    /// 把所有样本都判成 truncated 的实现也能过下面两条反例。
+    /// 判红自证：给任意一格无条件 `+= 1` ⇒ 本用例的零计数断言红。
+    #[test]
+    fn 正常小树不置截断且零跳过() {
+        let sb = crate::testutil::Sandbox::new(&format!("query-walk-ok-{}", std::process::id()));
+        let root = sb.join("root");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.txt"), b"a").unwrap();
+        std::fs::write(root.join("sub").join("b.txt"), b"b").unwrap();
+
+        let (out, truncated, skips) = walk_tree(&root);
+        let mut names: Vec<String> = out
+            .iter()
+            .map(|p| {
+                std::path::Path::new(p)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["a.txt".to_string(), "b.txt".to_string()],
+            "正常小树的文件必须全部收集: {out:?}"
+        );
+        assert!(!truncated, "正常小树不得挂 truncated（否则界面永远显示「已截断」）");
+        assert_eq!(skips.total(), 0, "正常小树不得有任何放弃计数: {skips:?}");
+        let reasons = skips.reasons_json();
+        for key in ["depthCap", "readDirFailed", "entryFailed", "statFailed", "reparseSkipped"] {
+            assert_eq!(reasons[key], json!(0), "正常小树 {key} 必须为 0: {reasons}");
+        }
+    }
+
+    /// 深度超限：root 下第 64 层目录到达 `QUERY_WALK_MAX_DEPTH`，整个子树没查 ⇒ 必须计
+    /// 一次「深度上限」并把 truncated 置真。旧实现在这里裸 `return`，回执照旧声称查全。
+    /// 判红自证：把 walk 开头的 `skips.depth_cap += 1` 删掉 ⇒ 计数与 truncated 两条断言红。
+    #[test]
+    fn 深度超限必须置截断并记深度原因() {
+        let sb = crate::testutil::Sandbox::new(&format!("query-walk-depth-{}", std::process::id()));
+        let root = sb.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("shallow.txt"), b"x").unwrap();
+        // 同名目录逐层套：唯一性只在同一父目录内要求，路径长度因此可控；
+        // 建 64 层 ⇒ 第 64 层目录落在 walk 的 depth=64 上限，不会被 read_dir。
+        let mut deep = root.clone();
+        for _ in 0..64 {
+            deep = deep.join("d");
+            std::fs::create_dir(&deep).unwrap();
+        }
+        std::fs::write(deep.join("too-deep.txt"), b"x").unwrap();
+
+        let (out, truncated, skips) = walk_tree(&root);
+        assert_eq!(
+            skips.depth_cap, 1,
+            "第 64 层目录必须计一次「深度上限」，不得静默 return: {skips:?}"
+        );
+        assert_eq!(skips.total(), 1, "本样本只该出现一条放弃路径: {skips:?}");
+        assert!(truncated, "命中深度上限即「没查全」⇒ 回执不得再标 truncated=false");
+        assert_eq!(out.len(), 1, "只有根上的浅文件可被收集（超深文件不得混进来）: {out:?}");
+        assert!(out[0].ends_with("shallow.txt"), "{out:?}");
+        assert_eq!(skips.reasons_json()["depthCap"], json!(1));
+    }
+
+    /// 读目录失败（样本：把**文件**当根传进来，`read_dir` 必失败）⇒ 必须计一次分类，
+    /// 且回执不能呈现成「查全了、没有占用」。判红自证：把 Err 分支改回
+    /// `let Ok(rd) = ... else { return }` ⇒ 计数、truncated、回执三条断言同时红。
+    #[test]
+    fn 读目录失败必须计数并进回执() {
+        let sb = crate::testutil::Sandbox::new(&format!("query-walk-readdir-{}", std::process::id()));
+        let file = sb.join("not-a-dir.txt");
+        std::fs::write(&file, b"x").unwrap();
+
+        let (out, truncated, skips) = walk_tree(&file);
+        assert!(out.is_empty(), "读目录失败时不可能有文件被登记");
+        assert_eq!(skips.read_dir_failed, 1, "整棵子树没查必须计一次读目录失败: {skips:?}");
+        assert_eq!(skips.total(), 1);
+        assert!(truncated, "读目录失败 = 没查全，truncated 必须为真（否则就是「无占用」假阴性）");
+
+        // 回执形态与命令里同一构造点：truncated + 总数 + 分类一起下发。
+        let receipt =
+            locked_receipt(LockedParse::default(), 0, truncated, Some(r"C:\probe"), Some(&skips));
+        assert_eq!(receipt["truncated"], json!(true));
+        assert_eq!(receipt["skippedTree"], json!(1), "回执必须点名跳过了几处: {receipt}");
+        assert_eq!(
+            receipt["skippedReasons"]["readDirFailed"],
+            json!(1),
+            "读目录失败的分类必须可辨: {receipt}"
+        );
+        assert_eq!(
+            receipt["skippedReasons"]["depthCap"],
+            json!(0),
+            "没发生的原因不得凭空计数: {receipt}"
+        );
+        assert_eq!(receipt["scanned"], json!(0));
+        assert_eq!(receipt["success"], json!(true), "查不到文件不等于整批失败，但必须被标成不完整");
+    }
+
+    /// 检测侧回执不得凭空长出整树字段（它没有整树遍历这一步）；传 None 时字段必须缺席。
+    #[test]
+    fn 检测侧回执不带整树放弃字段() {
+        let out = locked_receipt(LockedParse::default(), 0, false, None, None);
+        assert!(out.get("skippedTree").is_none(), "检测侧无整树遍历，不得长出 skippedTree: {out}");
+        assert!(
+            out.get("skippedReasons").is_none(),
+            "检测侧无整树遍历，不得长出 skippedReasons: {out}"
+        );
+        assert_eq!(out["truncated"], json!(false));
     }
 }
 

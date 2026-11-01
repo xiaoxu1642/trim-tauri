@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 
 import { writeFileAtomic } from './lib/atomic-write.mjs';
 import { nextRulesVersion } from './lib/next-rules-version.mjs';
+import { allItems } from './lib/rule-shape.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RULES_REL = path.join('src-tauri', 'data', 'cleanup-rules.json');
@@ -522,22 +523,26 @@ function loadRules() {
   return JSON.parse(fs.readFileSync(path.join(ROOT, RULES_REL), 'utf8'));
 }
 
-function existingFingerprints(rules) {
+function fingerprintsOf(items) {
   const set = new Set();
   const ids = new Set();
   const paths = new Set();
-  for (const g of rules.groups) {
-    for (const s of g.subGroups || []) {
-      for (const it of s.items || []) {
-        ids.add(it.id);
-        for (const fk of it.fileKeys || []) {
-          set.add(`file|${String(fk.path).toLowerCase()}|${fk.pattern ?? '*'}|${fk.recurse === false ? 'false' : 'true'}`);
-          paths.add(String(fk.path).toLowerCase());
-        }
-      }
+  for (const it of items) {
+    ids.add(it.id);
+    for (const fk of it.fileKeys || []) {
+      set.add(`file|${String(fk.path).toLowerCase()}|${fk.pattern ?? '*'}|${fk.recurse === false ? 'false' : 'true'}`);
+      paths.add(String(fk.path).toLowerCase());
     }
   }
   return { fps: set, ids, paths };
+}
+
+function existingFingerprints(rules) {
+  // T1c-M03：必须走 allItems（subGroups[].items ∪ groups[].items）——special 域的若干条
+  // 顶层条目挂在 groups[].items 上，只遍历 subGroups 时 A3 指纹与「宽窄包含」闸都看不见
+  // 它们（`%WINDIR%\System32\spool\PRINTERS` 这类目标能被新条目重复收进来，而 A3 的真判红
+  // 发生在写盘之后的门禁里，正是本工具头注要消灭的顺序）。
+  return fingerprintsOf(allItems(rules));
 }
 
 function buildItem(c, cls, rulesVersion, seen) {
@@ -695,16 +700,13 @@ function build() {
   }
   // cap 计数要把**库里已有**的同组条目算进去：扩库是第二轮动作，第一轮已收的
   // 软件（Chrome/Edge 各 4 条）若不计入，A=6 的上限会被再灌 6 条成 10+。
+  // T1c-M03：同 existingFingerprints，必须走 allItems —— 只数 subGroups 会漏掉 special 域。
   const existingByGroup = new Map();
-  for (const g of rules.groups) {
-    for (const sg of g.subGroups || []) {
-      for (const it of sg.items || []) {
-        const det = (it.detect || [])[0];
-        if (!det || !det.path) continue;
-        const k = groupKeyOf({ detectFile: det.path, section: it.name || '', owner: '' });
-        existingByGroup.set(k, (existingByGroup.get(k) || 0) + 1);
-      }
-    }
+  for (const it of allItems(rules)) {
+    const det = (it.detect || [])[0];
+    if (!det || !det.path) continue;
+    const k = groupKeyOf({ detectFile: det.path, section: it.name || '', owner: '' });
+    existingByGroup.set(k, (existingByGroup.get(k) || 0) + 1);
   }
   const picked = [];
   const overCap = { n: 0 };
@@ -774,13 +776,14 @@ function apply() {
     console.error(`✗ rulesVersion ${rulesVersion} 未大于当前库 ${rules.rulesVersion}——拒绝写盘（版本倒序会让「哪一版判的」无从对齐）`);
     process.exit(1);
   }
-  const before = rules.groups.reduce((n, g) => n + (g.subGroups || []).reduce((m, s) => m + (s.items || []).length, 0), 0);
+  const before = allItems(rules).length;
   rules.rulesVersion = rulesVersion;
-  // 每条 ver 必须等于顶层 rulesVersion（契约 A12）：整库统一重刷，不是只刷新增的
-  const stamp = (it) => { it.ver = rulesVersion; return it; };
-  for (const g of rules.groups) {
-    for (const s of g.subGroups || []) (s.items || []).forEach(stamp);
-  }
+  // 每条 ver 必须等于顶层 rulesVersion（契约 A12）：整库统一重刷，不是只刷新增的。
+  // T1c-M03：遍历同样走 allItems —— 只刷 subGroups 会把 special 域条目留在旧 ver 上，
+  // 写盘后立刻违反 A12（等于「导入成功」与「契约判红」同时发生）。
+  for (const it of allItems(rules)) it.ver = rulesVersion;
+  // 落位只认 subGroups：导入条目只能进 `domain/group` 形式的子类目，special 域的顶层
+  // items 是有专用执行器的系统项，不接受 WinApp2 候选（故这里刻意不走 allItems）。
   const index = new Map();
   for (const g of rules.groups) {
     for (const s of g.subGroups || []) index.set(`${g.key}/${s.id}`, s);
@@ -803,7 +806,7 @@ function apply() {
   }
   const out = path.join(ROOT, RULES_REL);
   writeFileAtomic(out, `${JSON.stringify(rules, null, 2)}\n`);
-  const after = rules.groups.reduce((n, g) => n + (g.subGroups || []).reduce((m, s) => m + (s.items || []).length, 0), 0);
+  const after = allItems(rules).length;
   console.log(`已写入 ${path.relative(ROOT, out)}`);
   console.log(`  条目 ${before} → ${after}（新增 ${placed}）  rulesVersion=${rulesVersion}`);
   console.log('  下一步：node tools/sign-cleanup-rules.mjs sign && node tools/sign-cleanup-rules.mjs gen-fallback && node tools/check-data-parity.mjs');

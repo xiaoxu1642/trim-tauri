@@ -27,7 +27,7 @@
 //    必须重跑一次生成器；`check-data-parity.mjs` 的 P4 按这个口径给了显式提示。
 
 import { createRequire } from 'node:module';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -215,13 +215,30 @@ export const FIXTURE_PATH = join(REPO_ROOT, 'tools', 'fixtures', 'protect-parity
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   // 直跑 = 显式重生成路径：这一档才允许 spawn PS 产 psVectors（T1c-M07 的开关意义）
   const result = buildParityFixture({ runPs: true });
+  // T1c-M05：PS 端验证是「PS 侧唯一的自动化执行验证」，它失败时这一档不许以 exit 0 收场，
+  // 也不许落盘 —— 写下去的夹具只会带着一个「看起来有值」的 psVectors（{error}，或与 JS
+  // 判定不一致的布尔表），唯一的判红点在 cargo test 里，等于直跑档自己没有失败信号。
+  if (!Array.isArray(result.psVectors)) {
+    const why = result.psVectors && result.psVectors.error ? result.psVectors.error : '未产出 psVectors';
+    console.error(`✗ PS 端执行验证失败，夹具未写：${why}`);
+    process.exit(1);
+  }
+  const mismatched = result.psVectors
+    .map((h, i) => ({ i, p: result.vectors[i].p, js: result.vectors[i].protected, ps: h }))
+    .filter((x) => x.js !== x.ps);
+  if (mismatched.length) {
+    console.error(`✗ PS 端判定与 JS 权威实现不一致（${mismatched.length}/${result.vectors.length} 条），夹具未写：`);
+    for (const m of mismatched) {
+      console.error(`  [${m.i}] ${JSON.stringify(m.p)}`);
+      console.error(`       JS=${m.js}  PS=${m.ps}`);
+    }
+    process.exit(1);
+  }
   mkdirSync(join(FIXTURE_PATH, '..'), { recursive: true });
   writeFileAtomic(FIXTURE_PATH, JSON.stringify(result, null, 2));
   const denied = result.vectors.filter(v => v.protected).length;
-  const psMatch = Array.isArray(result.psVectors)
-    && result.psVectors.every((h, i) => h === result.vectors[i].protected);
   console.log(`✓ 夹具已生成: ${FIXTURE_PATH}`);
   console.log(`  清单：subtree ${result.roots.subtree.length} / exact ${result.roots.exact.length} / anyDrive ${result.roots.anyDrive.length} / neverNames ${result.roots.neverNames.length}`);
   console.log(`  向量：${result.vectors.length} 条（判拒 ${denied} / 放行 ${result.vectors.length - denied}）`);
-  console.log(`  PS 真实执行：${psMatch ? '与 JS 判定逐项一致 ✓' : '与 JS 不一致 ✗ ' + JSON.stringify(result.psVectors).slice(0, 120)}`);
+  console.log(`  PS 真实执行：与 JS 判定逐项一致 ✓（${result.psVectors.length} 条）`);
 }

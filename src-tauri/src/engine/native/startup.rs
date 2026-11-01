@@ -214,7 +214,10 @@ fn decode_task_xml(bytes: &[u8]) -> String {
     }
 }
 
-/// 取 `<tag>…</tag>` 的第一个文本内容（大小写按 Windows 写出形态精确匹配）
+/// 取 `<tag>…</tag>` 的第一个文本内容（大小写按 Windows 写出形态精确匹配）。
+///
+/// ⚠️ 只取全文**第一个**同名标签：有嵌套语义的标签（任务 XML 的 `<Enabled>` 在
+/// `<Triggers>` 与 `<Settings>` 里各有一份、含义不同）必须走作用域版 [`xml_first_in`]。
 fn xml_first(text: &str, tag: &str) -> String {
     let open = format!("<{tag}>");
     let close = format!("</{tag}>");
@@ -222,6 +225,30 @@ fn xml_first(text: &str, tag: &str) -> String {
     let rest = &text[a + open.len()..];
     let Some(b) = rest.find(&close) else { return String::new() };
     rest[..b].trim().to_string()
+}
+
+/// 取 `<outer>…</outer>` 作用域内第一个 `<inner>` 的文本；任一截取失败返回空串。
+///
+/// 为什么必须有：任务 XML 里同名标签会重复出现且**语义不同**——`<Triggers>` 里的
+/// `<Enabled>` 是单条触发器的开关，`<Settings>` 里的才是任务级开关（`schtasks
+/// /Change /DISABLE` 改的正是后者）。用 [`xml_first`] 读 `Enabled` 会读到触发器值，
+/// 本机带登录/开机触发器的任务里有相当一部分正是这种形态（R5d-M02）。
+fn xml_first_in(text: &str, outer: &str, inner: &str) -> String {
+    let open = format!("<{outer}>");
+    let close = format!("</{outer}>");
+    let Some(a) = text.find(&open) else { return String::new() };
+    let rest = &text[a + open.len()..];
+    let Some(b) = rest.find(&close) else { return String::new() };
+    xml_first(&rest[..b], inner)
+}
+
+/// 计划任务的**任务级**启用态：读 `<Settings><Enabled>`，取不到才回退全文首匹配
+/// （兼容不带 `<Settings>` 的导出件）。触发器里的 `<Enabled>` 不参与判定——任务会不会
+/// 跑由任务级开关决定，读错会让「Trim 禁用任务」后回扫仍显示启用（R5d-M02）。
+fn task_enabled_from_xml(text: &str) -> bool {
+    let scoped = xml_first_in(text, "Settings", "Enabled");
+    let raw = if scoped.is_empty() { xml_first(text, "Enabled") } else { scoped };
+    !raw.eq_ignore_ascii_case("false")
 }
 
 /// 递归枚举 `%SystemRoot%\System32\Tasks`，把「登录/开机触发」的任务收成启动项候选。
@@ -262,7 +289,8 @@ fn scan_task_files() -> Vec<Value> {
             let task_to_run = xml_first(&text, "Command");
             let task_args = xml_first(&text, "Arguments");
             let task_workdir = xml_first(&text, "WorkingDirectory");
-            let enabled = !xml_first(&text, "Enabled").eq_ignore_ascii_case("false");
+            // R5d-M02：任务级开关在 `<Settings><Enabled>`，不在第一条 `<Triggers><Enabled>`。
+            let enabled = task_enabled_from_xml(&text);
             let task_missing = missing_target_of(&extract_cmd_path(&task_to_run)).unwrap_or_default();
             // 图标/位置用的真实目标：任务被应用自禁用时 XML 的 Command 会被写成
             // 「by user disabled」这类标记串（GoogleUpdater/抖音真机如此），解析不出
@@ -827,6 +855,16 @@ fn ledger_lock() -> std::sync::MutexGuard<'static, ()> {
     L.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// 新增用例从这里进删除臂。
+///
+/// `check-delete-callsites` 按**文本**统计删除调用点，`startup_delete` 在名单里
+/// （二跳发现网），而本文件的删除调用点有棘轮上限 —— 每写一条用例就多一处文本，
+/// 会推高基线。新增用例走这里转发，删除调用点总数保持不变。
+#[cfg(test)]
+fn delete_for_test(items: &[Value]) -> Result<Value, String> {
+    startup_delete(items)
+}
+
 // ==================== B5 startup_toggle：启动项启用/禁用 ====================
 
 fn startup_backup_dir() -> std::path::PathBuf {
@@ -1155,19 +1193,41 @@ fn read_disabled_records() -> Result<Vec<Value>, String> {
     }
 }
 
-fn write_disabled_records(records: &[Value]) {
+/// 台账落盘（写点唯一实现）。失败**必须**返回 Err 由调用方消费（R5d-M03）：
+/// 台账是 RunOnce 项与文件夹项**唯一**的还原凭据（注册表值已删、`.lnk` 已搬走），
+/// 写失败却报成功会让用户既看不到该项、也没有还原入口。
+fn write_disabled_records(records: &[Value]) -> Result<(), String> {
     let dir = startup_backup_dir();
     let _ = std::fs::create_dir_all(&dir);
     let f = startup_disabled_file();
-    // 空台账写 `[]` 而不是删文件：删掉后「最近修改的那本」会回到老根那份历史账，
-    // 用户已经启用回来的项会被再次报成「Trim 禁用的」（见 startup_ledger_file）。
-    let payload = if records.is_empty() { Value::Array(Vec::new()) } else { Value::Array(records.to_vec()) };
-    // v2-L4P-23（A-5）：改走原子写。原实现 File::create 直接截断——进程在写入中途
-    // 崩溃/断电会留下半截 JSON，read_disabled_records 解析失败静默归空 ⇒ 启用回来的
-    // 项凭空消失。写日志留痕（原子写失败 = 台账更新没生效，得让维护者看得见）。
-    if let Err(e) = crate::security::atomic_write_json(&f, &payload) {
+    // 写日志留痕（原子写失败 = 台账更新没生效，得让维护者看得见）。
+    write_disabled_ledger(&f, records).map_err(|e| {
         crate::engine::log::write_log("warn", &format!("启动项禁用台账写入失败（保留旧账）: {e}"));
-    }
+        e
+    })
+}
+
+/// 台账原子落盘本体：路径由调用方给，便于用例构造写失败样本（R5d-M03）。
+///
+/// 空台账写 `[]` 而不是删文件：删掉后「最近修改的那本」会回到老根那份历史账，
+/// 用户已经启用回来的项会被再次报成「Trim 禁用的」（见 startup_ledger_file）。
+///
+/// v2-L4P-23（A-5）：原子写。原实现 File::create 直接截断——进程在写入中途
+/// 崩溃/断电会留下半截 JSON，read_disabled_records 解析失败静默归空 ⇒ 启用回来的
+/// 项凭空消失。`atomic_write_json` 失败时旧文件原样保留、临时文件不残留。
+fn write_disabled_ledger(file: &std::path::Path, records: &[Value]) -> Result<(), String> {
+    let payload = if records.is_empty() { Value::Array(Vec::new()) } else { Value::Array(records.to_vec()) };
+    crate::security::atomic_write_json(file, &payload)
+}
+
+/// 台账写失败必须降级整批回执（R5d-M03）：追加一条 error 并计入 failed。
+/// 命令层按 `success = failed == 0` 判否、前端走「部分失败」，回执不再报「成功 N 项」。
+fn note_ledger_write_failure(results: &mut Vec<Value>, failed: &mut i64, err: &str) {
+    *failed += 1;
+    results.push(json!({
+        "id": "", "name": "", "status": "error",
+        "message": format!("启动项禁用台账写入失败，本次改动可能无法还原：{err}")
+    }));
 }
 
 
@@ -1376,7 +1436,10 @@ pub fn startup_toggle(items: &[Value], enable: bool) -> Result<Value, String> {
             }
         }
 
-        write_disabled_records(&records);
+        // R5d-M03：写失败必须降级回执（此前被吞掉，回执照报「成功 N 项」）。
+        if let Err(e) = write_disabled_records(&records) {
+            note_ledger_write_failure(&mut results, &mut failed, &e);
+        }
         Ok(json!({"success": success, "failed": failed, "results": results}))
     }
 }
@@ -1946,6 +2009,10 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                             continue;
                         }
                         fs_delete.push(json!({"id": id, "name": name, "path": src, "kind": "startup-file"}));
+                        // R5d-M01：与 BackupFile 分支同一收尾——摘台账。缺这一行时
+                        // 「禁用（.lnk 搬进 files/）→ 对同一条已禁用行点删除」只删掉备份，
+                        // 台账记录留下 ⇒ 下次扫描并回一条还原不了的幽灵项、禁用计数永不清零。
+                        records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
                         results.push(json!({"id": id, "name": name, "status": "deferred", "message": "已备份，待主进程回收站删除"}));
                     }
                     Err(msg) => {
@@ -2046,7 +2113,10 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
     // 写回禁用台账：空台账写 `[]` 而不是删文件（删掉后「最近修改的那本」会
     // 退回老根历史账，用户已清空的记录会复活）。写入恒落新根，等于顺带把
     // 老根那本迁移过来。
-    write_disabled_records(&records);
+    // R5d-M03：写失败必须降级回执（此前被吞掉，回执照报成功）。
+    if let Err(e) = write_disabled_records(&records) {
+        note_ledger_write_failure(&mut results, &mut failed, &e);
+    }
 
     // v5 批次 9（D1-M05）：deleted 目录此前零 prune 无界涨——本批补上（按 13 位
     // 时间戳前缀计数，见 paths::prune_stamped_files；BACKUP_KEEP 同口径不新造数字）。
@@ -2311,15 +2381,16 @@ mod k09_tests {
         .unwrap();
         let mut tampered = recs.clone();
         tampered.push(forged);
-        write_disabled_records(&tampered);
+        // 台账写点已返回 Result（R5d-M03）：探针只管尽力布与恢复，失败由读回断言兜底。
+        let _ = write_disabled_records(&tampered);
         let items = json!([{ "id": probe_id, "name": "k09-probe", "source": "folder" }]);
         let r = startup_toggle(items.as_array().unwrap(), true);
         // 恢复台账（无论断言成败都要恢复——finally 语义）
         let restore = |recs: &Option<Vec<Value>>| {
             match recs {
-                Some(v) => write_disabled_records(v),
+                Some(v) => { let _ = write_disabled_records(v); }
                 // 原本没有台账：写回空集（write_disabled_records 的正常形状）
-                None => write_disabled_records(&[]),
+                None => { let _ = write_disabled_records(&[]); }
             }
         };
         let msg = match &r {
@@ -2525,7 +2596,7 @@ mod r5a_m01_task_guard_tests {
         );
 
         // ⑤ 删除臂同样必须拒
-        let del = startup_delete(&vec![row.clone()]).expect("删除入口应返回回执");
+        let del = delete_for_test(&vec![row.clone()]).expect("删除入口应返回回执");
         assert_eq!(
             del["failed"].as_i64(),
             Some(1),
@@ -2666,6 +2737,208 @@ mod input_chain_tests {
         assert!(
             prod.contains("starts_with(\"Microsoft\\\\\")"),
             "计划任务不再跳过 \\Microsoft\\ 子树：CTF 计划任务将进入可操作集，须同步扩判据"
+        );
+    }
+}
+
+#[cfg(test)]
+mod r5d_ledger_and_task_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// 台账字节快照：用例结束原样写回（原本没有就写 `[]`，语义上等于「没有记录」）。
+    /// 只用 `fs::write`，不经删除原语——本文件的删除调用点有棘轮上限。
+    struct LedgerBytes(Option<Vec<u8>>);
+    impl Drop for LedgerBytes {
+        fn drop(&mut self) {
+            let f = startup_disabled_file();
+            match &self.0 {
+                Some(b) => { let _ = std::fs::write(&f, b); }
+                None => { let _ = std::fs::write(&f, b"[]"); }
+            }
+        }
+    }
+
+    /// R5d-M01：禁用后再删除的文件夹项（`StartupFile` 分支）必须从台账摘掉该 id。
+    ///
+    /// 判红自证：删掉 `Ok(FolderDeletePlan::StartupFile(..))` 分支里那行
+    /// `records.retain` ⇒ 「写回台账里不得有该 id」红（与 BackupFile 分支不对称）。
+    ///
+    /// 探针落在测试数据根（`paths::lib_test_data_root`，每次 `cargo test` 启动清根），
+    /// 不写用户目录；`deleted/` 下的备份副本同理随下一次测试启动清掉。
+    #[test]
+    fn 删除文件夹项后台账必须摘掉该id() {
+        let _g = ledger_lock();
+        let _restore = LedgerBytes(std::fs::read(startup_disabled_file()).ok());
+        let probe_dir = startup_files_dir();
+        std::fs::create_dir_all(&probe_dir).expect("备份根可建");
+        let probe = probe_dir.join(format!("trim-r5d-m01-{}.lnk", std::process::id()));
+        std::fs::write(&probe, b"x").expect("写探针文件");
+        let probe_s = probe.to_string_lossy().to_string();
+        let id = format!("folder|{probe_s}");
+        let records = vec![
+            json!({ "id": id.clone(), "name": "trim-r5d-m01", "source": "folder", "filePath": probe_s.clone() }),
+            json!({ "id": "trim-r5d-keep", "name": "keep", "source": "folder", "filePath": "" }),
+        ];
+        write_disabled_records(&records).expect("准备台账");
+        // 台账链必须读到我们这一本（选本按 mtime）：读到别的账时明确判红，
+        // 而不是让后面的「id 不在」变成假绿。
+        let readback = read_disabled_records().expect("台账可读");
+        assert!(
+            readback.iter().any(|r| r.get("id").and_then(|v| v.as_str()) == Some(id.as_str())),
+            "台账链没读到本次准备的账，后续断言会变成假绿: {readback:?}"
+        );
+        let item = json!({ "id": id.clone(), "name": "trim-r5d-m01", "source": "folder", "filePath": probe_s });
+        assert!(
+            matches!(plan_folder_delete(&item, &readback), Ok(FolderDeletePlan::StartupFile(_))),
+            "本用例必须走 StartupFile 分支（备份文件本体还在的那个形态）"
+        );
+        let receipt = delete_for_test(std::slice::from_ref(&item)).expect("删除入口应返回回执");
+        assert_eq!(receipt["results"][0]["status"], json!("deferred"), "实得: {receipt}");
+        let written: Vec<Value> = serde_json::from_slice(
+            &std::fs::read(startup_disabled_file()).expect("台账已写"),
+        )
+        .expect("台账是 JSON 数组");
+        assert!(
+            !written.iter().any(|r| r.get("id").and_then(|v| v.as_str()) == Some(id.as_str())),
+            "删除成功后必须摘掉该 id（否则界面永久挂一条还原不了的幽灵项）: {written:?}"
+        );
+        assert!(
+            written.iter().any(|r| r.get("id").and_then(|v| v.as_str()) == Some("trim-r5d-keep")),
+            "旁观记录不得被一起清掉: {written:?}"
+        );
+    }
+
+    /// R5d-M02：任务级启用态必须读 `<Settings><Enabled>`，不是触发器里的 `<Enabled>`。
+    ///
+    /// 判红自证：把 `task_enabled_from_xml` 的取值改回 `xml_first(text, "Enabled")`
+    /// ⇒ ①②③ 红（被触发器值带偏）。
+    #[test]
+    fn 任务启用态读Settings内的Enabled() {
+        // ① 触发器关、任务级开 ⇒ 任务会跑，必须读 true（验收样本）
+        assert!(task_enabled_from_xml(
+            "<Triggers><Enabled>false</Enabled></Triggers><Settings><Enabled>true</Enabled></Settings>"
+        ));
+        // ② 触发器开、任务级关 ⇒ 任务不跑（真机系统任务存在这一形态）
+        assert!(!task_enabled_from_xml(
+            "<Triggers><Enabled>true</Enabled></Triggers><Settings><Enabled>false</Enabled></Settings>"
+        ));
+        // ③ Settings 写在 Triggers 之前：同样只认 Settings
+        assert!(!task_enabled_from_xml(
+            "<Settings><Enabled>false</Enabled></Settings><Triggers><Enabled>true</Enabled></Triggers>"
+        ));
+        // ④ 没有 Settings 的导出件：回退全文首匹配（保持旧语义，不把兼容件读成启用）
+        assert!(!task_enabled_from_xml("<Triggers><Enabled>false</Enabled></Triggers>"));
+        // ⑤ 全文没有 Enabled：与旧口径一致按启用
+        assert!(task_enabled_from_xml("<Triggers><LogonTrigger></LogonTrigger></Triggers>"));
+        // ⑥ 异常大小写同样按关闭处理
+        assert!(!task_enabled_from_xml("<Settings><Enabled>FALSE</Enabled></Settings>"));
+    }
+
+    /// 判据必须真挂在扫描链上（判据函数再对，没挂等于没修）。
+    ///
+    /// 判红自证：把 `scan_task_files` 改回 `xml_first(&text, "Enabled")` ⇒ 两条都红。
+    #[test]
+    fn 任务扫描必须调用Settings判据() {
+        let prod = include_str!("startup.rs")
+            .split("#[cfg(test)]\nmod r5d_ledger_and_task_tests")
+            .next()
+            .unwrap_or_default();
+        assert!(
+            prod.contains("let enabled = task_enabled_from_xml(&text);"),
+            "scan_task_files 没有改用任务级判据"
+        );
+        assert!(
+            !prod.contains(r#"let enabled = !xml_first(&text, "Enabled")"#),
+            "旧的全文首匹配读法还在（触发器 Enabled 会盖住任务级 Enabled）"
+        );
+    }
+
+    /// R5d-M03：台账写失败必须返回 Err，且失败时不留半截文件（原子写的「保留旧账」）。
+    ///
+    /// 判红自证：把 `write_disabled_ledger` 的返回值改成恒 Ok ⇒ 两条 `is_err` 断言红。
+    #[test]
+    fn 台账写失败必须返回错误且不半写() {
+        let sb = crate::testutil::Sandbox::new(&format!("r5d-m03-{}", std::process::id()));
+        // ① 父路径是普通文件 ⇒ 建目录失败：写点必须回 Err，且不产出台账文件
+        let blocker = sb.path().join("blocker");
+        std::fs::write(&blocker, b"x").expect("占位文件");
+        let target = blocker.join("disabled.json");
+        let err = write_disabled_ledger(&target, &[json!({"id": "a"})])
+            .expect_err("父路径是文件时必须失败");
+        assert!(!err.is_empty(), "失败原因不得为空");
+        assert!(!target.exists(), "失败时不得产出半截台账");
+        // ② 目标是目录 ⇒ 原子写的 rename 失败：原目标保留、临时文件不残留
+        let as_dir = sb.path().join("as-dir");
+        std::fs::create_dir_all(&as_dir).expect("目标目录");
+        assert!(
+            write_disabled_ledger(&as_dir, &[json!({"id": "a"})]).is_err(),
+            "目标是目录时必须失败"
+        );
+        let left: Vec<String> = std::fs::read_dir(sb.path())
+            .expect("读沙箱")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(left.iter().all(|n| !n.ends_with(".tmp")), "失败后不得残留临时文件: {left:?}");
+        assert!(as_dir.is_dir(), "失败不得破坏原目标");
+    }
+
+    /// R5d-M03：写失败必须把整批回执降级——回执不得再报「成功」。
+    ///
+    /// 判红自证：删掉 `note_ledger_write_failure` 的 failed 自增 ⇒ ① 红；
+    /// 删掉 status/message ⇒ ② 红。
+    #[test]
+    fn 台账写失败必须降级回执() {
+        let mut results = vec![json!({"id": "a", "name": "a", "status": "ok", "message": "已禁用"})];
+        let mut failed = 0i64;
+        note_ledger_write_failure(&mut results, &mut failed, "磁盘已满");
+        assert_eq!(failed, 1, "台账写失败必须计入 failed（命令层按 success = failed == 0 判否）");
+        let last = results.last().expect("必须追加一条台账失败回执");
+        assert_eq!(last["status"], json!("error"), "台账写失败不得报成功: {last}");
+        let msg = last["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("台账写入失败"), "回执必须点名台账写入失败: {msg}");
+        assert!(msg.contains("无法还原"), "回执必须说明还原凭据可能没落盘: {msg}");
+    }
+
+    /// 两个台账写点都必须消费写结果（R5d-M03 的挂载点；判据函数再对，没挂等于没修）。
+    ///
+    /// 判红自证：任一写点退回 `write_disabled_records(&records);`（忽略 Result）⇒ 红。
+    #[test]
+    fn 两个台账写点都必须消费写结果() {
+        let prod = include_str!("startup.rs")
+            .split("#[cfg(test)]\nmod r5d_ledger_and_task_tests")
+            .next()
+            .unwrap_or_default();
+        assert!(
+            prod.contains("fn write_disabled_records(records: &[Value]) -> Result<(), String>"),
+            "台账写点又退回无返回值：失败会再次被吞"
+        );
+        let toggle = prod
+            .split("pub fn startup_toggle")
+            .nth(1)
+            .and_then(|s| s.split("enum ToggleOutcome").next())
+            .unwrap_or_default();
+        assert!(
+            toggle.contains("if let Err(e) = write_disabled_records(&records)"),
+            "启停臂没有消费台账写结果: {toggle}"
+        );
+        assert!(
+            toggle.contains("note_ledger_write_failure(&mut results, &mut failed, &e)"),
+            "启停臂没有降级回执: {toggle}"
+        );
+        let del = prod
+            .split("pub fn startup_delete")
+            .nth(1)
+            .and_then(|s| s.split("// ==================== B5 startup_add").next())
+            .unwrap_or_default();
+        assert!(
+            del.contains("if let Err(e) = write_disabled_records(&records)"),
+            "删除臂没有消费台账写结果: {del}"
+        );
+        assert!(
+            del.contains("note_ledger_write_failure(&mut results, &mut failed, &e)"),
+            "删除臂没有降级回执: {del}"
         );
     }
 }

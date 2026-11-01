@@ -658,6 +658,21 @@ fn recycle_one(file_path: &str) -> (bool, bool, String) {
     }
 }
 
+/// `fileclean:execute` 删除循环的产出（全仓-2026-11-01-重审 `R1d-M02`）。
+///
+/// 循环搬进 `spawn_blocking` 后，这批累加量没法再靠 async 体的局部变量共享：要么由闭包
+/// 一次性带回（本结构），要么套一层 `Arc<Mutex<…>>`（多一道锁、多一个死锁面，也回答不了
+/// 「join 失败时账目算成了什么」）。选前者——闭包返回它，命令体在 join 成功后才拆包。
+struct DeleteOutcome {
+    freed: u64,
+    success_n: usize,
+    failed: usize,
+    recycled_n: usize,
+    details: Vec<Value>,
+    manifest_entries: Vec<Value>,
+    removed_keys: HashSet<String>,
+}
+
 /// fileclean:delete-file —— 主窗内嵌 LiteBox 删除当前图片
 ///
 /// 档位 = **`guard::MAIN`**（v7.2 `R1d-L02` 校正此前两处互相矛盾的注释：预览子窗已退役、
@@ -807,47 +822,88 @@ pub async fn fileclean_execute<R: Runtime>(
         }
     }
 
-    crate::engine::log::flush_sync();
-    let mut freed = 0u64;
-    let mut success_n = 0usize;
-    let mut failed = 0usize;
-    let mut recycled_n = 0usize;
-    let mut details: Vec<Value> = Vec::new();
-    let mut manifest_entries: Vec<Value> = Vec::new();
-    let mut removed_keys: HashSet<String> = HashSet::new();
+    // 全仓-2026-11-01-重审 `R1d-M02`：逐项回收站删除整体进阻塞池（与扫描侧的
+    // `fileclean_scan`、同仓 `finder_delete` 同形）。旧写法把最多 1 万次
+    // `SHFileOperationW`（`recycle_one` → `send_to_trash_os`）串行跑在 async 命令体里，
+    // 一个 tokio worker 被连续占住数十秒到数分钟，期间该 worker 上的其它命令排队。
+    // 循环体内没有 `.await`、只碰 `files` 与上述累加量，搬进闭包不改变执行顺序；
+    // 回执仍在命令体里拼装（形状与文案一字未动）。
+    let outcome = match tauri::async_runtime::spawn_blocking(move || {
+        // 危险操作前刷盘：挪进闭包后仍排在第一次 recycle 之前（AGENTS §3）。
+        crate::engine::log::flush_sync();
+        let mut freed = 0u64;
+        let mut success_n = 0usize;
+        let mut failed = 0usize;
+        let mut recycled_n = 0usize;
+        let mut details: Vec<Value> = Vec::new();
+        let mut manifest_entries: Vec<Value> = Vec::new();
+        let mut removed_keys: HashSet<String> = HashSet::new();
 
-    for f in &files {
-        let p = f
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-        let (ok, recycled, message) = recycle_one(&p);
-        if ok {
-            freed += size;
-            success_n += 1;
-            if recycled {
-                recycled_n += 1;
+        for f in &files {
+            let p = f
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            let (ok, recycled, message) = recycle_one(&p);
+            if ok {
+                freed += size;
+                success_n += 1;
+                if recycled {
+                    recycled_n += 1;
+                }
+                manifest_entries.push(json!({
+                    "path": p.replace('/', "\\"),
+                    "kind": "file",
+                    // R1d-M03：清单读侧只认 size；旧实现写 freed ⇒ 该批每条体积恒 0。
+                    "size": size,
+                    "recycled": recycled
+                }));
+                removed_keys.insert(path_key(&p));
+            } else {
+                failed += 1;
             }
-            manifest_entries.push(json!({
-                "path": p.replace('/', "\\"),
-                "kind": "file",
-                // R1d-M03：清单读侧只认 size；旧实现写 freed ⇒ 该批每条体积恒 0。
-                "size": size,
-                "recycled": recycled
+            details.push(json!({
+                "path": p,
+                "status": if ok { "ok" } else { "error" },
+                "freed": if ok { size } else { 0 },
+                "message": if ok { Value::Null } else { json!(message) }
             }));
-            removed_keys.insert(path_key(&p));
-        } else {
-            failed += 1;
         }
-        details.push(json!({
-            "path": p,
-            "status": if ok { "ok" } else { "error" },
-            "freed": if ok { size } else { 0 },
-            "message": if ok { Value::Null } else { json!(message) }
-        }));
-    }
+
+        DeleteOutcome {
+            freed,
+            success_n,
+            failed,
+            recycled_n,
+            details,
+            manifest_entries,
+            removed_keys,
+        }
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            // join 失败（闭包 panic / 运行时关停）时**可能已有条目被送进回收站**，
+            // 不能当「零删除」回 success:true —— 与扫描侧 join 失败同一口径，如实报失败。
+            log::write_log("error", &format!("文件清理删除任务异常结束: {e}"));
+            return json!({
+                "success": false,
+                "message": "删除任务异常结束，部分文件可能已删除，请重新扫描确认"
+            });
+        }
+    };
+    let DeleteOutcome {
+        freed,
+        success_n,
+        failed,
+        recycled_n,
+        details,
+        manifest_entries,
+        removed_keys,
+    } = outcome;
 
     // R2a-M03：文件清理链的**回收站失败**项记进命令体侧的删除失败回执台账 ——
     // 「登记重启后删除」的第一道约束（只收删除失败项）从此有命令体判据，不再只由
@@ -1570,4 +1626,90 @@ mod tests {
         assert!(!t_fit);
     }
 
+    /// 全仓-2026-11-01-重审 `R1d-M02`：`fileclean_execute` 的逐项回收站删除必须在阻塞池里。
+    ///
+    /// 判据是**位置**而不是「文件里出现过 spawn_blocking」——本文件扫描侧早有同类调用
+    /// （`fileclean_scan`），只查存在会被它蹭绿。做法：截出命令体，再截出
+    /// `spawn_blocking(move || {` 到本次 `.await` 之间的闭包区间，要求 `recycle_one(` 的
+    /// **全部**出现都落在闭包内，且至少一条（空集不算通过）。
+    /// 破坏自证：把 `for f in &files { … }` 搬回 async 体 ⇒ 区间外出现 `recycle_one(`
+    /// ⇒ 第一条断言红；连循环一起删掉 ⇒ 第二条「至少一条」红。
+    /// 字面量用 `concat!` 拆词：`include_str!` 会把本测试自身也算成语料。
+    #[test]
+    fn 批量删除循环必须整体进阻塞池() {
+        let body = execute_body(include_str!("fileclean.rs"));
+
+        let open = concat!("spawn_blocking(move ||", " {");
+        let open_at = body.find(open).expect("回收站删除循环必须进 spawn_blocking 闭包");
+        // 闭包体里不可能出现 `.await`（非 async 闭包编译不过）⇒ 命令体内它之后的第一个
+        // `.await` 就是这次 join 的收口点。
+        let close_at = body[open_at..]
+            .find(".await")
+            .map(|i| open_at + i)
+            .expect("spawn_blocking 的结果必须 .await 取回（否则 join 失败无从判定）");
+        let closure = &body[open_at..close_at];
+
+        let call = concat!("recycle", "_one(");
+        let all = body.matches(call).count();
+        let inside = closure.matches(call).count();
+        assert_eq!(
+            all, inside,
+            "`recycle_one` 只允许出现在阻塞池闭包里：命令体 {all} 处、闭包内 {inside} 处\
+             （async 体里留一次，1 万次 SHFileOperationW 就会重新占住 tokio worker）"
+        );
+        assert!(
+            inside >= 1,
+            "闭包内必须真的执行删除（0 次说明判据在空集上恒真，本用例不算验收）"
+        );
+
+        // join 失败不得吞成「零删除、成功」：闭包要带回一份可区分的产出，
+        // 命令体在 `.await` 之后要另给 `Err` 分支。
+        assert!(
+            closure.contains(concat!("Delete", "Outcome {")),
+            "闭包必须以产出结构收口（返回 () 时 join 失败与「零删除」在回执上同形）"
+        );
+        let after = &body[close_at..];
+        let err_at = after
+            .find("Err(")
+            .expect("阻塞池 join 的失败臂必须在（写成 unwrap_or_default 会把 panic 报成零删除）");
+        assert!(
+            after[err_at..].contains(concat!("\"success\":", " false")),
+            "join 失败必须回 success:false（吞成成功 = 把未知账目报成零删除）"
+        );
+    }
+
+    /// `fileclean_execute` 回执是渲染层的消费面：cleanup.js 按名累加
+    /// `totalFreed/success/failed` 并展开 `details`，失败项按 `path/status` 登记「重启后删除」。
+    /// 循环搬进阻塞池时字段一个都不许改名。
+    #[test]
+    fn execute_回执字段与渲染层消费面一致() {
+        let body = execute_body(include_str!("fileclean.rs"));
+        for k in ["totalFreed", "success", "failed", "recycled", "details"] {
+            assert!(
+                body.contains(&format!("\"{k}\": ")),
+                "回执缺 `{k}`（cleanup.js 按这个名累加/渲染）"
+            );
+        }
+        for k in ["path", "status", "freed", "message"] {
+            assert!(
+                body.contains(&format!("\"{k}\": ")),
+                "明细条目缺 `{k}`（失败项要按 path/status 登记「重启后删除」）"
+            );
+        }
+    }
+
+    /// 截出 `fileclean_execute` 的命令体（到下一个命令或测试模块为止）。
+    fn execute_body(src: &str) -> &str {
+        let head = concat!("pub async fn fileclean", "_execute");
+        let start = src
+            .find(head)
+            .expect("命令 fileclean_execute 必须存在（本用例的判定对象）");
+        let rest = &src[start..];
+        let end = ["#[tauri::command]", "#[cfg(test)]"]
+            .iter()
+            .filter_map(|m| rest.find(*m))
+            .min()
+            .expect("fileclean_execute 之后应出现下一个命令或测试模块");
+        &rest[..end]
+    }
 }

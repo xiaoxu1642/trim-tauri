@@ -327,10 +327,67 @@ unsafe fn open_bench_file(path: &str, size: u64, nobuf: bool) -> *mut core::ffi:
     h
 }
 
+/// 测速期占用的「句柄 + 自己建的文件」（N1b-M01）。
+///
+/// 句柄是裸 `*mut c_void`、文件是盘上至多 `threads × max(seq_per, rand_per)` 字节的
+/// `tb_*.bin`，两者都只在 `diskbench_core` 里成对释放。旧实现把「关句柄 + 删文件」
+/// 抄在两处判定失败分支上，而四个 `run_stage(...)?` 直接 `return Err` —— 跳过全部收尾。
+/// `run_stage` 的 Err 里正好有一条是「测速线程 panic」，也就是一次 IO 层异常就能在
+/// Tauri 长驻进程里漏掉若干句柄，并把文件以**不带 `FILE_SHARE_DELETE`** 的方式一直
+/// 开着：下一轮 `sweep_stale_bench_files` 必然删不掉（只留一条「失败 N 个」），
+/// 残留占到进程重启。收进 `Drop` 后，正常返回、`?` 提前返回、panic 展开三条路走同一段收尾。
+struct BenchFiles {
+    handles: Vec<*mut core::ffi::c_void>,
+    files: Vec<String>,
+    /// 收尾期告警（删文件失败）。只有**这一轮确实出了数**时才并进回执 —— 失败轮整份作废，
+    /// 调用方只看错误消息（与 `diskbench_core` 尾注同一理由）。
+    warn: Vec<String>,
+}
+
+impl BenchFiles {
+    fn new() -> Self {
+        Self { handles: Vec::new(), files: Vec::new(), warn: Vec::new() }
+    }
+
+    /// 建一个测速文件并登记；建不起来返回 false（调用方按「句柄数不足」处理）。
+    fn add(&mut self, dir: &str, name: &str, size: u64, nobuf: bool) -> bool {
+        let full = format!("{dir}\\{name}");
+        let h = unsafe { open_bench_file(&full, size, nobuf) };
+        if h.is_null() {
+            return false;
+        }
+        self.handles.push(h);
+        self.files.push(full);
+        true
+    }
+
+    /// 关句柄 + 删自己建的文件。幂等：`Drop` 会再调一次，那时两个清单都已空。
+    fn release(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        // 先把两份清单取走再处理：`Drop` 里也不留半途状态（中途 panic 也不会重复关同一句柄）。
+        let handles = std::mem::take(&mut self.handles);
+        let files = std::mem::take(&mut self.files);
+        // 顺序固定：先关句柄再删文件 —— 文件以 FILE_SHARE_READ|FILE_SHARE_WRITE 打开
+        // （没有 FILE_SHARE_DELETE），句柄没关掉时 DeleteFileW 必然失败。
+        for h in handles {
+            unsafe { let _ = CloseHandle(h); }
+        }
+        for f in files {
+            delete_bench_file(&f, &mut self.warn);
+        }
+    }
+}
+
+impl Drop for BenchFiles {
+    fn drop(&mut self) {
+        // panic 展开也必须收尾：这里不做任何可能再 panic 的事（返回值一律丢弃）
+        self.release();
+    }
+}
+
 /// 磁盘测速核心：Ok = 最终结果 JSON 文本；Err = 失败原因消息。
 /// CLI 与 lib 共用**同一实现**（`run_diskbench` 只做 stdout 写回包装，不得另写一份）。
 fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<String, String> {
-    use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceW;
     let dir = match arg_value(args, "path") {
         Some(p) => p.trim_end_matches('\\').to_string(),
@@ -383,29 +440,21 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
         // （上层只是不再等它），同名文件会让下一轮和这一轮抢同一块盘、互相把对方的
         // 字节数算进自己的结果。不同名至少保证两轮的测量对象互不相干。
         let stamp = format!("{}_{}", std::process::id(), mono_ms());
-        let mut handles: Vec<*mut core::ffi::c_void> = Vec::new();
-        let mut files: Vec<String> = Vec::new();
+        // N1b-M01：句柄与文件交给守卫保管 —— 下面任意一条 `?`（含 `run_stage` 的
+        // 「测速线程 panic」）或 panic 展开都会经 `Drop` 收尾，不再靠每个失败分支各抄一遍。
+        let mut bench = BenchFiles::new();
         for t in 0..threads {
             let name = format!("tb_{t}_{stamp}.bin");
-            let full = format!("{}\\{}", bench_dir, name);
-            let h = open_bench_file(&full, seq_per.max(rand_per), nobuf);
-            if h.is_null() { break; }
-            handles.push(h);
-            files.push(full);
-        }
-        if handles.is_empty() {
-            for f in &files { delete_bench_file(f, &mut arg_warn); }
-            return Err("测试文件创建失败".to_string());
+            if !bench.add(&bench_dir, &name, seq_per.max(rand_per), nobuf) {
+                break;
+            }
         }
         // 审查 v2-M6：句柄数不足时**不能**继续 —— 原实现 `break` 后照样往下测，
         // 最终 JSON 里却写请求的 `threads`（请求 8 线程实开 1 线程），
         // 于是测速历史里出现口径不自洽的曲线，且 `measured:true` 让上层护栏永不触发。
         // 开测前先判一次：没必要为注定作废的结果再跑满一整轮（duration 最长 16s×4 段）。
-        if let Err(msg) = bench_setup_verdict(handles.len(), threads) {
-            let opened = handles.len();
-            let _ = opened;
-            for h in handles { let _ = CloseHandle(h); }
-            for f in &files { delete_bench_file(f, &mut arg_warn); }
+        // 建不出文件（零个）与只建成一部分走同一条出口：Drop 会清掉已建的那些。
+        if let Err(msg) = bench_setup_verdict(bench.handles.len(), threads) {
             return Err(msg);
         }
         let t0 = mono_ms();
@@ -413,12 +462,13 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
         let half_ms = duration * 500;
         // HANDLE 是 *mut c_void 不满足 Send；edition2021 精确捕获会连字段位置一起抓，
         // 包装体也绕不开 → 跨线程一律先转 usize（Send），闭包内再转回 HANDLE（同进程内安全）
+        let hs: Vec<usize> = bench.handles.iter().map(|h| *h as usize).collect();
         let run_stage = |kind: u8, io: usize, ms: u64, seq: u64, offs: &[u64]| -> Result<(u64, u64, u128), String> {
             let start = mono_ms();
-            let hs: Vec<usize> = handles.iter().map(|h| *h as usize).collect();
             std::thread::scope(|s| {
                 let mut js = Vec::new();
-                for hz in hs {
+                for hz in &hs {
+                    let hz = *hz;
                     js.push(s.spawn(move || bench_phase(hz as *mut core::ffi::c_void, kind, io, start + ms, qd_eff, seq, offs)));
                 }
                 let mut acc = (0u64, 0u64, 0u128);
@@ -457,10 +507,8 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
         // 审查 v2-M6：`measured:true` 以前是**无条件**写死的。盘被配额/只读/杀软拦下时
         // 每个阶段都是 0 次完成，输出却是 `0 MB/s 且 measured:true`，被当成一次真实测量
         // 写进测速历史（上层唯一的护栏就是 measured）。这里先判"到底测到没有"。
-        let opened = handles.len();
+        let opened = bench.handles.len();
         if let Err(msg) = bench_verdict(opened, threads, [seq_w.1, seq_r.1, rd_r.1, wr_r.1]) {
-            for h in handles { let _ = CloseHandle(h); }
-            for f in &files { delete_bench_file(f, &mut arg_warn); }
             return Err(msg);
         }
         let base = format!(
@@ -470,8 +518,10 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
         );
         // 失败分支（上面的 `Err(msg)`）不带 warn：那一轮的结果整份作废，调用方只看错误消息，
         // 再拼一条参数回落反而会把真正的失败原因挤掉。留痕只针对「这一轮确实出了数」。
-        for h in handles { let _ = CloseHandle(h); }
-        for f in &files { delete_bench_file(f, &mut arg_warn); }
+        // 正常出数的一轮显式收尾，把「删文件失败」的告警并进回执（`Drop` 还会再调一次
+        // `release`，那时两个清单都已空，幂等）。
+        bench.release();
+        arg_warn.append(&mut bench.warn);
         let result = close_bench_json(&base, &arg_warn);
         Ok(result)
     }
@@ -525,16 +575,33 @@ fn bench_setup_verdict(opened: usize, requested: usize) -> Result<(), String> {
 /// 现在目录名只有调用方这一个来源，原生只做「必须确实在 `--path` 之下」的形状校验
 /// （原生只在这里建文件、删自己建的文件，不删目录，所以这不是删除面守卫，
 ///  而是防止调用方把测速写到盘上任意位置）。
+///
+/// N1b-M02：这条护栏原先只有**纯字符串前缀** `g.starts_with(&b)` —— 既没有分隔符边界
+/// （`…\Downloads2` 是 `…\Downloads` 的兄弟目录却判通过），也不折叠 `..`
+/// （`…\Downloads\..\..\Windows\Temp` 同样判通过）。而该目录随后会被建文件、
+/// 按名删 `tb_*.bin`、并可能截断同名已存在文件，护栏宣称的目的因此不成立。
+/// 现在归一到「同一形态」后按路径分量判包含（复用扫描侧的 `is_same_or_under`，
+/// 判据只此一份），并要求严格位于根之下（等于根本身仍拒）。
 fn resolve_bench_dir(dir: &str, raw: Option<&str>) -> Result<String, String> {
+    use crate::scan::{is_same_or_under, lexically_normalize};
     let base = dir.trim_end_matches('\\');
     let got = match raw {
         Some(s) => s.to_string(),
         None => format!("{base}\\Trim-DiskBench"),
     };
-    let (b, g) = (base.to_ascii_lowercase(), got.to_ascii_lowercase());
-    if !g.starts_with(&b) || g.len() <= b.len() + 1 {
-        return Err("非法参数（--bench-dir 必须位于 --path 之下）".to_string());
+    let bad = || "非法参数（--bench-dir 必须位于 --path 之下）".to_string();
+    // 归一化：折叠 `.`/`..`、统一分隔符、小写 —— 比的是「落在哪个目录」，不是字面量。
+    let nb = lexically_normalize(base);
+    let ng = lexically_normalize(&got);
+    // 盘符根归一后带尾分隔符（`C:` → `c:\`），而 `is_same_or_under` 要求分隔符落在
+    // base.len() 处 ⇒ 判包含时先剥掉尾分隔符（`c:`），否则「以盘符根为 --path」必被误拒。
+    let nb_key = nb.trim_end_matches('\\');
+    // 空根会让包含判定恒真（任何路径都在空根之下），fail-closed 拒；
+    // `ng == nb` 用未剥尾的形态比，保证「--bench-dir 就是根自己」仍拒。
+    if nb_key.is_empty() || ng == nb || !is_same_or_under(&ng, nb_key) {
+        return Err(bad());
     }
+    // 返回值保持原样：调用方用它建目录/建文件，这里只做校验不做改写。
     Ok(got)
 }
 
@@ -1487,6 +1554,44 @@ mod p1_6e_arg_tests {
         assert!(resolve_bench_dir("C:\\base", Some("C:\\base")).is_err(), "目录等于根本身要拒（清理动作会指向用户的整个目录）");
         assert!(resolve_bench_dir("C:\\base", Some("c:\\BASE\\Trim-DiskBench-1")).is_ok(), "Windows 路径大小写不敏感");
     }
+
+    /// N1b-M02：`--bench-dir` 的「必须在 --path 之下」必须按**路径分量**判，而不是
+    /// 字符串前缀 —— 兄弟目录与 `..` 逃逸都曾判通过，而该目录随后会被建文件、
+    /// 按名删 `tb_*.bin`、并可能截断同名已存在文件。
+    /// 判红自证：把判据改回 `g.starts_with(&b)` ⇒ 对应两条断言红；去掉 `..` 折叠 ⇒ 对应用例红；
+    /// 去掉「等于根本身要拒」⇒ 对应用例红。
+    #[test]
+    fn 测速目录必须按路径分量位于测速根之下() {
+        let base = r"C:\Users\me\Downloads";
+        // 正：正常子目录放行，且**原样返回**（校验不改写交给调用方的路径）
+        assert!(resolve_bench_dir(base, Some(r"C:\Users\me\Downloads\Trim-DiskBench-7")).is_ok());
+        assert_eq!(
+            resolve_bench_dir(base, Some(r"C:\Users\me\Downloads\Sub\Trim-DiskBench")).ok(),
+            Some(r"C:\Users\me\Downloads\Sub\Trim-DiskBench".to_string()),
+            "返回值必须原样（归一化只用于比对）"
+        );
+        // 正：分隔符形态 / verbatim 前缀归一到同一棵树后仍判在之下
+        assert!(resolve_bench_dir(base, Some(r"C:/Users/me/Downloads/Trim-DiskBench")).is_ok(), "正斜杠形态是同一目录");
+        assert!(resolve_bench_dir(base, Some(r"\\?\C:\Users\me\Downloads\Trim-DiskBench")).is_ok(), "verbatim 前缀是同一目录");
+        // 反：兄弟目录（字符串前缀相同，但不是子树）
+        assert!(
+            resolve_bench_dir(base, Some(r"C:\Users\me\Downloads2\Trim-DiskBench")).is_err(),
+            "兄弟目录不是子树（旧 string starts_with 会放行）"
+        );
+        // 反：`..` 逃出测速根
+        assert!(
+            resolve_bench_dir(base, Some(r"C:\Users\me\Downloads\..\..\Windows\Temp\Trim-DiskBench")).is_err(),
+            "`..` 必须折叠后再判，逃出去即拒"
+        );
+        // 反：等于根本身 / 根本身在目标之下
+        assert!(resolve_bench_dir(r"C:\base", Some(r"C:\base")).is_err(), "等于根要拒");
+        assert!(resolve_bench_dir(r"C:\base\sub", Some(r"C:\base")).is_err(), "祖先不是子树");
+        // 正：盘符根作测速根（`--path C:\`）仍要放行其子目录（归一化后根带尾分隔符）
+        assert!(resolve_bench_dir(r"C:\", Some(r"C:\Trim-DiskBench-7")).is_ok(), "盘符根之下是合法子树");
+        assert!(resolve_bench_dir(r"C:\", Some(r"C:\")).is_err(), "盘符根本身仍要拒");
+        // 反：空 --path 会让包含判定恒真 ⇒ fail-closed
+        assert!(resolve_bench_dir("", Some(r"C:\Trim-DiskBench")).is_err(), "空根下没有「之下」可言");
+    }
 }
 
 #[cfg(test)]
@@ -1506,5 +1611,91 @@ mod p2e_m17_tests {
         assert_eq!((removed, failed), (2, 0));
         assert!(dir.join("keep.txt").exists(), "不得误删非测速文件");
         assert!(!dir.join("tb_0_111_222.bin").exists());
+    }
+}
+
+#[cfg(test)]
+mod n1b_m01_tests {
+    use super::*;
+
+    /// N1b-M01 正面：`run_stage` 的 Err（含「测速线程 panic」）会让 `diskbench_core`
+    /// 提前 `return`，收尾只能靠守卫在 **panic 展开**时完成；而且必须先关句柄再删文件
+    /// —— 文件以 `FILE_SHARE_READ|FILE_SHARE_WRITE`（没有 DELETE）打开，句柄没关就删不掉。
+    /// 所以「文件确实没了」同时证明这两步都做了。
+    /// 判红自证：删掉 `impl Drop for BenchFiles` 的实现体 ⇒ 两条断言全红；只删「删文件」
+    /// 那一半 ⇒ 文件仍在；只删「关句柄」那一半 ⇒ DeleteFileW 被共享冲突挡下，文件同样还在。
+    #[cfg(windows)]
+    #[test]
+    fn 测速句柄与文件在panic展开时也必须收尾() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let sb = crate::util::sandbox(&format!("n1b-m01-panic-{}", std::process::id()));
+        let dir = sb.display().to_string();
+        let mut bench = BenchFiles::new();
+        let mut paths: Vec<String> = Vec::new();
+        for t in 0..2 {
+            let name = format!("tb_{t}_m01.bin");
+            assert!(bench.add(&dir, &name, 4096, false), "测速文件应能建起来：{name}");
+            paths.push(sb.join(&name).to_string_lossy().into_owned());
+        }
+        assert_eq!(bench.handles.len(), 2, "应登记两个句柄");
+
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // 预期内的 panic，不刷屏
+        let r = catch_unwind(AssertUnwindSafe(move || {
+            let _bench = bench; // 守卫随 panic 展开析构
+            panic!("模拟 run_stage 的「测速线程 panic」后 ? 展开");
+        }));
+        std::panic::set_hook(hook);
+        assert!(r.is_err(), "用例必须真的走到 panic 展开分支");
+        for p in &paths {
+            assert!(
+                std::fs::symlink_metadata(p).is_err(),
+                "panic 展开后测速文件必须已删除（句柄没关 ⇒ 共享冲突 ⇒ 删不掉）: {p}"
+            );
+        }
+    }
+
+    /// N1b-M01 反面：守卫只收自己登记的文件（不许扫目录误删邻居），且「删不掉」必须
+    /// 留痕进回执 —— 不许静默把失败当收干净。
+    /// 判红自证：把 `release` 里的 `delete_bench_file` 换成 `std::fs::remove_file(..).ok()`
+    /// ⇒ 第三条断言红（没有 warn）；把清理改成清空整个目录 ⇒ 第二条红。
+    #[cfg(windows)]
+    #[test]
+    fn 测速守卫只删自己建的文件且删除失败要留痕() {
+        let sb = crate::util::sandbox(&format!("n1b-m01-keep-{}", std::process::id()));
+        let dir = sb.display().to_string();
+        std::fs::write(sb.join("keep.bin"), b"k").unwrap();
+
+        // 正：正常收尾删自己建的文件、不碰邻居、无告警
+        let mut bench = BenchFiles::new();
+        assert!(bench.add(&dir, "tb_0_keep.bin", 4096, false));
+        bench.release();
+        assert!(!sb.join("tb_0_keep.bin").exists(), "自己建的文件必须删掉");
+        assert!(sb.join("keep.bin").exists(), "不得碰不是自己登记的文件");
+        assert!(bench.warn.is_empty(), "删成功不该有告警：{:?}", bench.warn);
+        assert!(
+            bench.handles.is_empty() && bench.files.is_empty(),
+            "收尾后清单必须清空（Drop 再调一次要幂等）"
+        );
+
+        // 反：删不掉时必须留痕（只读属性让 DeleteFileW 返回 ACCESS_DENIED）
+        let ro = sb.join("tb_1_ro.bin");
+        let mut bench2 = BenchFiles::new();
+        assert!(bench2.add(&dir, "tb_1_ro.bin", 4096, false));
+        let mut perm = std::fs::metadata(&ro).unwrap().permissions();
+        perm.set_readonly(true);
+        std::fs::set_permissions(&ro, perm).unwrap();
+        bench2.release();
+        assert_eq!(bench2.warn.len(), 1, "删不掉必须留一条告警（不许静默）：{:?}", bench2.warn);
+        assert!(
+            bench2.warn[0].contains("测速文件未删除"),
+            "告警要点名文件删不掉：{:?}",
+            bench2.warn
+        );
+        assert!(std::fs::symlink_metadata(&ro).is_ok(), "只读文件确实删不掉（反样本成立）");
+        // 收尾：恢复可写，让沙箱 Drop 删得干净
+        let mut perm = std::fs::metadata(&ro).unwrap().permissions();
+        perm.set_readonly(false);
+        std::fs::set_permissions(&ro, perm).unwrap();
     }
 }
