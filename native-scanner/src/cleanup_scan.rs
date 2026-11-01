@@ -28,8 +28,29 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use crate::util::sandbox;
+
+// ==================== 协作式取消（2026-11-02：扫描按钮「停止扫描」） ====================
+// 扫描是进程内直调的长任务，不能直接 kill；由宿主置位，本引擎在**条目边界**检查并提前返回。
+// 粒度 = 单条目：正在扫的那一条会跑完（DISM/大目录可能较久），已扫条目原样返回。
+static SCAN_CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// 请求停止正在进行的清理扫描（宿主命令调用）。
+pub fn request_scan_cancel() {
+    SCAN_CANCEL.store(true, Ordering::SeqCst);
+}
+
+/// 新一轮扫描开始前复位取消位。
+pub fn reset_scan_cancel() {
+    SCAN_CANCEL.store(false, Ordering::SeqCst);
+}
+
+/// 本轮扫描是否已被请求停止（宿主据此在回执里标 cancelled）。
+pub fn scan_cancel_requested() -> bool {
+    SCAN_CANCEL.load(Ordering::SeqCst)
+}
 
 // ==================== 输出汇聚：数据返回式入口（Tauri 进程内直调） ====================
 // CLI 形态沿用「写 stdout/stderr + 进程退出」；Tauri 侧需要「一次调用拿回数据」的入口：
@@ -3557,6 +3578,10 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
     // N1a-M09：请求项与返回项的差额必须可对账 —— 宿主以 cats.len() 做分母，
     // 「请求的项数与实际回来的项数」静默发生时没人看得见（未知 id / 畸形条目必须留痕）。
     for cat in &categories {
+        if SCAN_CANCEL.load(Ordering::SeqCst) {
+            err_line("[cleanup-scan] 扫描已被用户停止，未扫描的条目已跳过");
+            break;
+        }
         let Some(cat_id) = cat.as_str() else {
             err_line("[cleanup-scan] categories 存在非字符串条目，已跳过（N1a-M09）");
             continue;
