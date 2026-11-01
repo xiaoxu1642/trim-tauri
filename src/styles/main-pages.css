@@ -274,8 +274,14 @@
   overflow: auto;
   padding: 6px;
 }
+/* 重审-2026-11-01 F1c-M02：忙态不再整块压 opacity —— 0.7 会把 11px 元信息压到亮色 2.83:1（破 AA）。
+   只弱化容器描边这一处非文本装饰并给出进行中的指针形态，正文与元信息保持原色不变。 */
 .syspanel-pwr-tree.is-busy,
-.syspanel-pwr-detail.is-busy { pointer-events: none; opacity: 0.7; }
+.syspanel-pwr-detail.is-busy {
+  pointer-events: none;
+  border-color: var(--border-subtle);
+  cursor: progress;
+}
 .syspanel-pwr-group + .syspanel-pwr-group {
   margin-top: 4px;
   padding-top: 4px;
@@ -337,7 +343,10 @@
   font-family: var(--font-mono);
   font-size: calc(11px * var(--font-size-scale, 1));
 }
-.syspanel-pwr-item.is-locked { opacity: 0.65; }
+/* 重审-2026-11-01 F1c-M02：锁定态「只降色不降整块」—— opacity 0.65 把项名压到亮色 2.98:1、11px 元信息
+   2.65:1；改走 --fg-tertiary 后两主题分别是 5.28:1 / 6.13:1，仍明显弱于未锁定的
+   --fg-secondary 一档。锁定标记本身另由 data-tip 与详情区的拒绝原因承担。 */
+.syspanel-pwr-item.is-locked { color: var(--fg-tertiary); }
 .syspanel-pwr-detail {
   min-height: 260px;
   padding: 12px 14px;
@@ -1682,11 +1691,38 @@
   color: var(--warning);
   background: rgba(var(--warning-rgb), 0.14);
 }
+/* 重审-2026-11-01 F1c-M01：四种执行状态此前只有基类（无前景色/底色/描边），「已完成 / 部分完成 / 失败」
+   在卡片上视觉同形，只能逐字读标签分辨。补齐四态，浓度照搬同族 .rt-badge（main.css 的
+   状态徽章段）；再淡一档会跌破 AA。对比度现算（前景 / 本色淡底叠页底，WCAG 2.1 相对亮度）：
+   亮 ok 5.19 · warn 4.80 · error 5.29 · running 4.60；暗 7.46 · 7.59 · 4.90 · 5.89 —— 全部 ≥4.5:1。 */
 .maint-status {
+  flex: none;
   font-size: calc(11px*var(--font-size-scale,1));
   line-height: 1.5;
   padding: 0 7px;
+  border: 1px solid transparent;
   border-radius: var(--radius-btn);
+  white-space: nowrap;
+}
+.maint-status-ok {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  border-color: color-mix(in srgb, var(--success) 35%, transparent);
+}
+.maint-status-warn {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+}
+.maint-status-error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+.maint-status-running {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
 }
 /* .maint-nara-banner__btn 随 2026-10-22 撤横幅一并删除（横幅不再产出该按钮） */
 
@@ -1733,6 +1769,14 @@
   font-size: var(--fs-meta);
   color: var(--fg-secondary);
   white-space: nowrap;
+}
+/* 重审-2026-11-01 F1c-M03：本文件里三处「宽度/位移会动的过渡」就近补进 RM 块。main.css 的全窗归零段
+   （把 transition-duration 归零并标 !important）已能让它们不产生可见位移，这里再显式关一次，
+   RM 口径在本文件就近可对照，新增过渡照此登记。 */
+@media (prefers-reduced-motion: reduce) {
+  .settings-collapse-chevron,
+  .bench-progress-fill,
+  .maint-batch-progress-fill { transition: none; }
 }
 
 /* 快捷指令页（69 条系统快捷入口）：卡片样式对齐图3——独立白色容器 + 图标色块 + 名称 + 分类标签 + 描述 */

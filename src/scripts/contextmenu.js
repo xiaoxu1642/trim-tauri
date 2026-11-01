@@ -665,7 +665,12 @@
       // 真正的拒绝原因被丢掉。先认 success。
       // F4a2-L03：与 startup.js 的回执判序统一为 `!== true`——`undefined` 同样不是成功，
       // 不能被当成「有 data 就继续」。
-      if (!resp || resp.success !== true) {
+      // 重审-2026-11-01 F4a2-M02：`success !== true` 不等于「整批失败」。命令层在**部分成功**时同样回
+      // `{success:false, message, data:{results}}`（commands/contextmenu.rs），旧判据在此无条件
+      // 返回，于是已生效项的 enabled、重命名后的新注册表路径、待生效集合三样一起丢：列表停在
+      // 切换前的快照（再点一次就是反向操作）、反向切换定位不到键、「重启资源管理器后生效」
+      // 条幅不出现。只有「没有任何逐项结果」才是命令层整批拒绝。
+      if (!resp || (resp.success !== true && !results.length)) {
         window.app?.toast('error', (resp && resp.message) || '切换未生效');
         renderList();
         updateUI();
@@ -712,9 +717,12 @@
         }
       }
       if (failed > 0) {
-        window.app?.toast('error', lastErr
-          ? `${failed} 项切换失败：${lastErr}`
-          : `${failed} 项切换失败（可能需要管理员权限）`);
+        // 重审-2026-11-01 F4a2-M02：成功与未生效必须写在同一句里 —— 后端 message 只带「第一条非 ok 的原因」，
+        // 旧文案只管报失败，成功那部分一个字都没说，读起来等同整批失败。
+        const reason = lastErr || '可能需要管理员权限';
+        window.app?.toast(changed > 0 ? 'warning' : 'error', changed > 0
+          ? `${changed} 项已生效 · ${failed} 项未生效：${reason}`
+          : `${failed} 项切换失败：${reason}`);
       } else if (payloads.length === 1) {
         const p = payloads[0];
         window.app?.toast(p.enabled ? 'success' : 'info', `${p.item.name} ${p.enabled ? '已启用' : '已禁用'}`);

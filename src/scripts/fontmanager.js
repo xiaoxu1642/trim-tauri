@@ -114,12 +114,17 @@
       settings.family = modal.select.value;
       settings.weight = Math.min(1000, Math.max(100, Number(modal.weightInput.value) || WEIGHT_BASE));
       settings.size = Math.min(24, Math.max(12, Number(modal.sizeInput.value) || SIZE_BASE));
+      // 预览即时生效（不落盘），失败时**不回滚**：回滚需要用旧值再刷一遍三个根变量与选择器状态，
+      // 面板已按新值渲染，回滚反而让界面与提示各说一套。这里如实告知「重启会恢复原设置」。
       applyToRoot();
-      // P1-7（F4c-M01）：IPC reject 必须有出口
+      // P1-7（F4c-M01）：IPC reject 必须有出口；F4c-M04：失败只出失败提示，成功提示不许在其后出现
       try {
         await saveConfig();
         window.app?.toast('success', `已应用：${settings.family} · 字重 ${settings.weight} · 字号 ${settings.size}px`);
-      } catch (e) { window.app?.toast('error', '应用失败：' + ((e && e.message) || e)); }
+      } catch (e) {
+        window.app?.toast('error', '应用失败：字体配置未保存，重启后会恢复原设置（'
+          + ((e && e.message) || e) + '）');
+      }
     });
     // 「恢复默认」：把预览区和设置都改回默认（尚未全局应用，需再点「应用」）
     modal.resetBtn.addEventListener('click', () => {
@@ -184,8 +189,15 @@
           renderSelect();
           renderPreview();
           refreshDeleteBtn();
-          saveConfig();
-          window.app?.toast('success', '已删除导入字体');
+          // F4c-M04：saveConfig 已改成只上抛 —— 本路径必须自己收口并保持提示先后次序：
+          // 先落盘、再决定发哪条提示，不能让「已删除」的成功提示压在写盘失败之上。
+          try {
+            await saveConfig();
+            window.app?.toast('success', '已删除导入字体');
+          } catch (e) {
+            window.app?.toast('warning', '已删除导入字体，但回退的字体配置未保存，重启后可能仍指向该字体（'
+              + ((e && e.message) || e) + '）');
+          }
         } else {
           window.app?.toast('error', (resp && resp.message) || '删除导入字体失败');
         }
@@ -195,12 +207,12 @@
     });
   }
 
+  // F4c-M04：只上抛、不在这里 toast，也不吞错 —— 旧实现把 reject 吃成一句 toast 后正常 resolve，
+  // 于是「应用」的 try/catch 永不触发、失败后照样发「已应用」，且成功提示压在失败提示之上。
+  // 文案与后续动作由调用点决定（删除路径另有自己的失败出口）。
   async function saveConfig() {
-    try {
-      if (window.api?.fonts?.saveConfig) await window.api.fonts.saveConfig(settings);
-    } catch (e) {
-      window.app?.toast('error', '字体配置保存失败');
-    }
+    if (!window.api?.fonts?.saveConfig) throw new Error('本地接口未就绪');
+    await window.api.fonts.saveConfig(settings);
   }
 
   // ---------- 数据加载（open 时静默刷新；startup 时仅恢复应用） ----------

@@ -1566,7 +1566,9 @@
        （各自 PAGE_SCRIPTS 前置）。子窗（process-manager-window.html）自带这两个标签，
        与本文件无关；residue-window.js 只用 xtable-* 类名、不调 API，所以它不挂 xtable.js
        不是缺失依赖，别补。 -->
-  <script src="scripts/liquid-glass.js" defer></script>
+  <!-- P1（2026-11-02）：liquid-glass.js 移出首屏，改由 app.js 的 IDLE_SCRIPTS 在首帧空闲后注入。
+       它是视觉增强件（只挂 window.liquidBar，页面全部经 `?.` 调用），移出后首屏不再等它；
+       顺序约束不变：IDLE_SCRIPTS 里它仍排在 spotlight.js 之前。 -->
   <script src="scripts/overview.js" defer></script>
   <!-- deviceinfo.js：系统概览（默认首页）用它归一化硬件信息，留在首屏避免首屏降级为空 -->
   <script src="scripts/deviceinfo.js" defer></script>

@@ -343,14 +343,24 @@
     // 本窗三处按动作命名：清理与登记用「仍然清理 / 仍然登记」，撤回是安全方向、走「撤回全部」。
     // 主窗同族确认里既有「仍然X」也有沿用动作名的档位（口径未完全统一，不在本窗单方改动）；
     // 档位本身不变：残留删除是批量且注册表侧不可逐项撤销，仍走红色。
-    const ok = await confirmViaModal({
-      title: '确认清理残留',
-      message: '将删除选中的 ' + picked.length + ' 项残留。文件与目录移入回收站（可还原）；注册表项删除前自动导出备份。',
-      confirmText: '仍然清理',
-      cancelText: '取消',
-      danger: true,
-      dangerHint: '低置信项为名称启发式结果，请确认路径确实属于已卸载的程序再勾选。'
-    });
+    // F4a1-M04：确认件的 await 必须在 try 内。modal.confirm 的 Promise 执行器里同步调 create()，
+    // 装配抛错（focusTrap/节点/样式异常）即整条 Promise reject；旧写法三处 await 都在 try 之外，
+    // reject 只能落到全局 unhandledrejection（ds.js 只写日志、不弹 toast）⇒ 用户看到「点了没反应」。
+    // catch 按 fail-closed 收口：确认件异常一律当「未确认」，本次条目不删。
+    let ok = false;
+    try {
+      ok = await confirmViaModal({
+        title: '确认清理残留',
+        message: '将删除选中的 ' + picked.length + ' 项残留。文件与目录移入回收站（可还原）；注册表项删除前自动导出备份。',
+        confirmText: '仍然清理',
+        cancelText: '取消',
+        danger: true,
+        dangerHint: '低置信项为名称启发式结果，请确认路径确实属于已卸载的程序再勾选。'
+      });
+    } catch (e) {
+      toast('error', '确认组件异常，本次不执行任何清理');
+      return;
+    }
     if (!ok) {
       toast('info', '已取消：本次已发现的 ' + state.rows.length + ' 项候选不会被删除，内容保持原样');
       return;
@@ -391,9 +401,15 @@
 
   // ==================== 重启后删除（PFRO） ====================
 
+  // 撤回按钮的基线 data-tip 快照（见 updatePendingButtons 的说明）；null = 尚未取过
+  let revBtnBaselineTip = null;
+
   function updatePendingButtons(failedFiles) {
     const addBtn = el('rsBtnPending');
     const revBtn = el('rsBtnPendingRevoke');
+    // 撤回按钮的基线提示以 HTML 为真源，只在首次（任何降级态覆盖之前）取一次：
+    // 下面 degraded / 读取失败两支会改写 data-tip，恢复正常时必须还原，否则用户看到的是过期原因。
+    if (revBtnBaselineTip === null && revBtn) revBtnBaselineTip = revBtn.getAttribute('data-tip') || '';
     if (addBtn) {
       if (Array.isArray(failedFiles)) state.pendingFailed = failedFiles;
       addBtn.style.display = state.pendingFailed.length ? '' : 'none';
@@ -418,21 +434,37 @@
           revBtn.style.display = n ? '' : 'none';
           revBtn.disabled = !n;
           revBtn.textContent = `撤回重启后删 ${n} 项`;
+          if (revBtnBaselineTip) revBtn.setAttribute('data-tip', revBtnBaselineTip);
+          else revBtn.removeAttribute('data-tip');
         }
-      }).catch(function () {});
+      }).catch(function (e) {
+        // F4a1-M04：待删清单读不到就不能装成「没有待删项」（旧写法空 catch，按钮停在上一轮的
+        // 显隐）。与上面 degraded 支同姿势：不隐藏（PFRO 里可能仍挂着登记）、置灰、data-tip 说明。
+        revBtn.style.display = '';
+        revBtn.disabled = true;
+        revBtn.textContent = '重启后删状态未知';
+        revBtn.setAttribute('data-tip', '待删清单读取失败（' + ((e && e.message) || e) + '），无法确认哪些条目仍挂起；PFRO 里的登记可能仍会在下次重启时执行。');
+      });
     }
   }
 
   async function addPendingDeletes() {
     if (!state.pendingFailed.length) return;
-    const ok = await confirmViaModal({
-      title: '登记重启后删除',
-      message: `把 ${state.pendingFailed.length} 个回收站删不掉的文件登记为「下次重启时删除」。这是永久删除：不进回收站、无法还原；重启前可撤回。目录不支持该机制，登记时会被跳过。`,
-      confirmText: '仍然登记',
-      cancelText: '取消',
-      danger: true,
-      dangerHint: '将写入系统 PendingFileRenameOperations，重启动作由系统在会话管理器阶段执行，Trim 不参与那一步。'
-    });
+    // F4a1-M04：与 cleanSelected 同姿势——确认件 await 纳入 try，异常按「未确认」fail-closed
+    let ok = false;
+    try {
+      ok = await confirmViaModal({
+        title: '登记重启后删除',
+        message: `把 ${state.pendingFailed.length} 个回收站删不掉的文件登记为「下次重启时删除」。这是永久删除：不进回收站、无法还原；重启前可撤回。目录不支持该机制，登记时会被跳过。`,
+        confirmText: '仍然登记',
+        cancelText: '取消',
+        danger: true,
+        dangerHint: '将写入系统 PendingFileRenameOperations，重启动作由系统在会话管理器阶段执行，Trim 不参与那一步。'
+      });
+    } catch (e) {
+      toast('error', '确认组件异常，本次不登记任何条目');
+      return;
+    }
     if (!ok) return;
     // K12（v6）：残留执行一批最多 200 个目标，失败文件可能超后端单批上限，旧流程一次性全送
     // 必被整批拒「请分批登记」，故按上限切片顺序登记、聚合回执。上限不写在这里：真源在 Rust，
@@ -465,13 +497,21 @@
     // F4a1-M09：撤回是**安全方向**（把登记摘掉、文件保持原样），主窗同一动作走黄档
     // （cleanup.js 的 openPendingListModal）。红色留给「登记=永久删」那一发；两窗档位
     // 相反会训练用户「红色也可以直接点」，稀释真正不可逆操作的警示强度。
-    const ok = await confirmViaModal({
-      title: '撤回重启后删除',
-      message: '将把已登记的「重启后删除」条目从系统中摘除：相关文件不会被删除，保持原样。',
-      confirmText: '撤回全部',
-      cancelText: '取消',
-      warning: true
-    });
+    // F4a1-M04：与另两处确认同姿势——撤回是本窗「重启前可撤回」的唯一前端出口，
+    // 确认件异常时必须明示且不动作，不能静默成「点了没反应」。
+    let ok = false;
+    try {
+      ok = await confirmViaModal({
+        title: '撤回重启后删除',
+        message: '将把已登记的「重启后删除」条目从系统中摘除：相关文件不会被删除，保持原样。',
+        confirmText: '撤回全部',
+        cancelText: '取消',
+        warning: true
+      });
+    } catch (e) {
+      toast('error', '确认组件异常，本次不撤回任何登记');
+      return;
+    }
     if (!ok) return;
     try {
       const resp = await window.api.uninstall.pendingRevoke();

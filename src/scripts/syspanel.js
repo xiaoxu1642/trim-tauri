@@ -2189,17 +2189,28 @@
     const syncManualArea = () => { if (manualArea) manualArea.style.display = managedBox?.checked ? 'none' : ''; };
     managedBox?.addEventListener('change', syncManualArea);
     syncManualArea();
+    // F4c-M02：「添加卷」与「删除行」都走 tbody.innerHTML = renderRows(...) 整表重建，
+    // 原先的删除监听是创建时对那批节点逐个绑的 ⇒ 重建后新节点零监听，
+    // 表现为「操作过一次后所有行的删除按钮全部失效」。
+    // tbody 节点本身不重建（只换 innerHTML），在它上面委托一次即可覆盖整个编辑会话。
+    const tbody = document.getElementById('syspanelPfTbody');
+    const rerenderRows = (list) => { if (tbody) tbody.innerHTML = renderRows(list); };
     document.getElementById('btnSyspanelPfAdd')?.addEventListener('click', () => {
       const list = collectPfForm();
       list.push({ drive: 'D:', initialMb: 0, maxMb: 4096 });
-      document.getElementById('syspanelPfTbody').innerHTML = renderRows(list);
+      rerenderRows(list);
     });
-    mount.querySelectorAll('[data-pf-remove]').forEach((b) => b.addEventListener('click', () => {
+    tbody?.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-pf-remove]');
+      if (!b || !tbody.contains(b)) return;
+      // 行号取自重建时写入的 data-pf-remove，与 collectPfForm 的 DOM 顺序一致；
+      // 越界/非法值直接忽略，避免 splice 掉别的行。
       const idx = Number(b.dataset.pfRemove);
       const list = collectPfForm();
+      if (!Number.isInteger(idx) || idx < 0 || idx >= list.length) return;
       list.splice(idx, 1);
-      document.getElementById('syspanelPfTbody').innerHTML = renderRows(list);
-    }));
+      rerenderRows(list);
+    });
     document.getElementById('btnSyspanelPfCancel')?.addEventListener('click', () => {
       mount.style.display = 'none';
       if (btn) btn.style.display = '';
@@ -2464,6 +2475,14 @@
       loadPower();
     });
     document.getElementById('btnSyspanelPowerNew')?.addEventListener('click', onNewPowerPlan);
+    // F4c-M03：虚拟内存卡的「刷新」（index.html 的 btnSyspanelPagefileRefresh）原先全仓零接线，
+    // data-tip 承诺「重新读取分页文件配置」，点击却永远没反应。编辑态下重读会整块重建卡片、
+    // 直接抹掉未保存的改动，故与电源卡同口径：先提示，不重读。
+    document.getElementById('btnSyspanelPagefileRefresh')?.addEventListener('click', () => {
+      const pfEditor = document.getElementById('syspanelPfEditor');
+      if (pfEditor && pfEditor.style.display !== 'none') { pwrToast('info', '正在编辑中，请先保存或取消'); return; }
+      loadPagefile();
+    });
     // v5 P2：窗口重新激活 = 用户可能刚在别的工具里改过设置，节流地自动重读
     window.addEventListener('focus', scheduleAutoRefresh);
     document.addEventListener('visibilitychange', scheduleAutoRefresh);

@@ -139,6 +139,10 @@
      把第二套口径原样留在引用点，改 token 不会传下去（`main-pages.css` 已同样收敛，现算零残留）。 */
   --font-mono: 'Consolas', 'Cascadia Code', 'Courier New', monospace;
   --font-size-scale: 1;
+  /* 字重侧同一条约束（审查 F1a-M02）：本文件的 font-weight 只许 `calc(N * var(--font-weight-scale, 1))`
+     一种写法，写死三位数会让「设置 → 字重缩放」对那一行静默失效（曾漏在 13 处：高危确认框
+     红色/黄色警示块、外设与维护分节标题、查找器列头、外观卡标题等）。唯一豁免：开屏
+     `.splash-*`（固定浅色调色板，刻意不跟缩放走）。 */
   --font-weight-scale: 1;
 
   /* 字号 token：四级字阶（随 --font-size-scale 联动全局字号缩放）
@@ -970,7 +974,7 @@ body {
   background: var(--danger-soft);
   color: var(--danger);
   font-size: var(--fs-secondary);
-  font-weight: 600;
+  font-weight: calc(600 * var(--font-weight-scale, 1));
   line-height: 1.6;
 }
 .confirm-danger-hint svg {
@@ -989,7 +993,7 @@ body {
   background: var(--warning-soft);
   color: var(--warning);
   font-size: var(--fs-secondary);
-  font-weight: 600;
+  font-weight: calc(600 * var(--font-weight-scale, 1));
   line-height: 1.6;
 }
 .confirm-warning-hint svg {
@@ -1330,11 +1334,20 @@ body {
      padding 与描边，floor 打在**轨道**上、子项常态保持 transparent —— 若给每个 .filter-tab
      都铺 floor，.lg-thumb 玻璃滑块（z-index:0，子项 z-index:1）会被自己身后那层底盖掉，
      分段选中指示就没了。
-     写法照抄仓内既有的宿主先例（.ds-menu / .ds-tooltip = floor + --bg-elevated），不新造一档：
-     只写 floor 单层是不成立的——floor 0.45 单层对 --fg-secondary 的标签文字在身后近黑时
-     只有 1.46:1，比改之前（alpha 0、透出深色壁纸，3.04:1）还差；叠上 elevated 这一档才有
-     正文档的 AA。滑块那侧用的是 floor + 双 tint（总覆盖 ≈83% vs 轨道 ≈66%），浓度差保留。 */
-  background: linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)), var(--bg-elevated);
+     审查 F1a-M01 订正此处旧注释与旧底栈：原注释称「floor + --bg-elevated 叠上 elevated
+     这一档就有 AA」，实际只对 --fg-primary 成立；常态未选中标签读的是 --fg-secondary
+     （#5C5770 相对亮度 0.1027，要过 AA 底灰需 ≥209），旧栈在导入近黑壁纸上只有 189 →
+     3.65:1（floor 未抬 2.89:1）。照 .btn 补一层 tint 仍不够：单条 165deg 渐变的两端是
+     两个 alpha，暗端（tertiary 0.42）复算只有 4.31:1。故在 floor 与 --bg-elevated 之间
+     垫一层**常量** --lg-tint-primary（与 floor 同写法的同色双 stop，不是一个渐变的两端），
+     总覆盖 66% → 85%，四个状态现算 4.82 / 5.27 / 5.41 / 6.79:1 全过 AA。
+     不新增 token、不改设计语言：轨道仍是「白玻璃 + 单色胶囊」，胶囊与轨道的浓度差由
+     40 灰阶收窄到 4（无壁纸态本来就只差 1），选中指示改由 1px 描边 + 内高光 + 投影
+     承担（真机观感未验证）。 */
+  background:
+    linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
+    linear-gradient(var(--lg-tint-primary), var(--lg-tint-primary)),
+    var(--bg-elevated);
   padding: 4px;
   border-radius: var(--radius-small);
   border: 1px solid var(--border-default);
@@ -1777,7 +1790,7 @@ body.lg-reduce-motion .lg-thumb {
   text-align: left;
   border-bottom: 1px solid var(--border-default);
 }
-.syspanel-pf-table th { color: var(--fg-tertiary); font-weight: 500; background: var(--bg-hover); }
+.syspanel-pf-table th { color: var(--fg-tertiary); font-weight: calc(500 * var(--font-weight-scale, 1)); background: var(--bg-hover); }
 .syspanel-pf-table .empty-cell { color: var(--fg-tertiary); text-align: center; padding: 12px; }
 .syspanel-pf-managed {
   display: flex; align-items: center; gap: 8px;
@@ -3180,7 +3193,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   border-radius: var(--radius-medium);
   min-width: 0;
 }
-.startup-defend-state { font-size: var(--fs-meta); color: var(--success); font-weight: 600; flex-shrink: 0; }
+.startup-defend-state { font-size: var(--fs-meta); color: var(--success); font-weight: calc(600 * var(--font-weight-scale, 1)); flex-shrink: 0; }
 .startup-defend-state.off { color: var(--fg-tertiary); }
 
 /* 启动项列表 */
@@ -3991,7 +4004,7 @@ img.ctx-col-icon {
   margin-left: auto;
   flex: 0 0 auto;
   font-size: calc(11px * var(--font-size-scale, 1));
-  font-weight: 600;
+  font-weight: calc(600 * var(--font-weight-scale, 1));
   color: var(--accent);
   background: transparent;
   border: 1px solid var(--accent-light);
@@ -4039,7 +4052,7 @@ img.ctx-col-icon {
 }
 .peri-section-title {
   display: flex; align-items: center; gap: 8px; margin: 0 0 3px;
-  font-size: calc(15px * var(--font-size-scale, 1)); font-weight: 700; color: var(--fg-primary);
+  font-size: calc(15px * var(--font-size-scale, 1)); font-weight: calc(700 * var(--font-weight-scale, 1)); color: var(--fg-primary);
 }
 .peri-section-title svg { color: var(--accent); flex: 0 0 auto; }
 .peri-card {
@@ -4067,7 +4080,7 @@ img.ctx-col-icon {
 .peri-explain-btn {
   display: inline-flex; align-items: center; gap: 4px;
   margin-left: 4px; padding: 1px 9px;
-  font-size: calc(11px * var(--font-size-scale, 1)); font-weight: 600; line-height: 1.6;
+  font-size: calc(11px * var(--font-size-scale, 1)); font-weight: calc(600 * var(--font-weight-scale, 1)); line-height: 1.6;
   /* 审查 M-13（2026-10-03 L4）：--accent-text 是 accent 实底专用墨色，配 -soft 染底
      合成后暗 1.13/亮 1.17:1 两主题不可见；--accent 在同底上暗 5.14/亮 4.60:1 达标 */
   color: var(--accent);
@@ -4252,7 +4265,7 @@ img.ctx-col-icon {
 }
 .appearance-card-head h4 {
   font-size: calc(13.5px * var(--font-size-scale, 1));
-  font-weight: 700;
+  font-weight: calc(700 * var(--font-weight-scale, 1));
   color: var(--fg-primary);
   margin: 0 0 3px;
 }
@@ -4579,7 +4592,7 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
   align-items: center;
   gap: 7px;
   font-size: var(--fs-secondary);
-  font-weight: 600;
+  font-weight: calc(600 * var(--font-weight-scale, 1));
   color: var(--fg-primary);
   cursor: pointer;
   user-select: none;
@@ -4880,7 +4893,7 @@ body.bg-image-on .main-content {
     linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)),
     var(--accent-light);
   border-color: var(--accent);
-  font-weight: 600;
+  font-weight: calc(600 * var(--font-weight-scale, 1));
 }
 .finder-empty {
   padding: 40px 16px;
@@ -4894,7 +4907,7 @@ body.bg-image-on .main-content {
   gap: 8px;
   padding: 8px 12px;
   font-size: var(--fs-secondary);
-  font-weight: 600;
+  font-weight: calc(600 * var(--font-weight-scale, 1));
   color: var(--fg-secondary);
   border-top: 1px solid var(--border-subtle); /* v2-L6：--border-soft 无定义，恒吃 fallback rgba(0,0,0,.06) → 取既有同档 token */
 }
@@ -4911,7 +4924,7 @@ body.bg-image-on .main-content {
 .finder-table thead th {
   text-align: left;
   padding: 8px 12px;
-  font-weight: 600;
+  font-weight: calc(600 * var(--font-weight-scale, 1));
   color: var(--fg-tertiary);
   border-bottom: 1px solid var(--border-default); /* v2-L6：--border-soft 无定义，恒吃 fallback rgba(0,0,0,.08) → 取 --border-default（浅色 9%） */
   white-space: nowrap;
@@ -5007,7 +5020,7 @@ body.bg-image-on .main-content {
 .empty-pane.collapsed .empty-pane-chevron { transform: rotate(-90deg); }
 .empty-pane-title {
   font-size: var(--fs-body);
-  font-weight: 700;
+  font-weight: calc(700 * var(--font-weight-scale, 1));
   color: var(--fg-primary);
 }
 .empty-pane-body { padding: 4px 10px 10px; min-width: 0; }

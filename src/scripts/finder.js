@@ -871,7 +871,7 @@
     for (const r of filtered) {
       const when = r.mtimeMs ? new Date(Number(r.mtimeMs)).toLocaleDateString() : '-';
       html += `<tr>
-        <td><div class="finder-cell"><span class="finder-name-text">${esc(nameOf(r.path))}</span><span class="finder-path-text" style="opacity:.55" data-tip="${esc(r.path)}">${esc(middleEllipsis(r.path, 58))}</span></div></td>
+        <td><div class="finder-cell"><span class="finder-name-text">${esc(nameOf(r.path))}</span><span class="finder-path-text" style="color:var(--fg-tertiary)" data-tip="${esc(r.path)}">${esc(middleEllipsis(r.path, 58))}</span></div></td>
         <td class="finder-col-size">${formatSize(r.size)}</td>
         <td class="finder-col-size">${esc(when)}</td>
         <td class="finder-col-size"><span class="finder-reveal" data-reveal="${esc(r.path)}" data-tip="在资源管理器中定位" style="cursor:pointer">定位</span> · <span data-an-del-file="${esc(r.path)}" data-tip="移入回收站" style="cursor:pointer;color:var(--danger-text)">删除</span></td>
@@ -936,7 +936,7 @@
     for (const r of layer.dirs) {
       const pct = Math.min(100, Math.round(r.size * 100 / total));
       html += `<tr>
-        <td><div class="finder-cell"><span class="finder-name-text" data-an-drill="${esc(r.path)}" data-tip="点击下钻到 ${esc(r.path)}" style="color:var(--accent);cursor:pointer">${esc(nameOf(r.path))} ▸</span><span class="finder-path-text" style="opacity:.55" data-tip="${esc(r.path)}">${esc(middleEllipsis(r.path, 58))}</span></div></td>
+        <td><div class="finder-cell"><span class="finder-name-text" data-an-drill="${esc(r.path)}" data-tip="点击下钻到 ${esc(r.path)}" style="color:var(--accent);cursor:pointer">${esc(nameOf(r.path))} ▸</span><span class="finder-path-text" style="color:var(--fg-tertiary)" data-tip="${esc(r.path)}">${esc(middleEllipsis(r.path, 58))}</span></div></td>
         <td class="finder-col-size">${formatSize(r.size)}</td>
         <td><div style="height:6px;border-radius:3px;background:var(--accent-light)"><div style="height:6px;border-radius:3px;background:var(--accent);width:${pct}%"></div></div></td>
         <td class="finder-col-size"><span class="finder-reveal" data-reveal="${esc(r.path)}" data-tip="在资源管理器中定位" style="cursor:pointer">定位</span> · <span data-an-del="${esc(r.path)}" data-tip="整树移入回收站" style="cursor:pointer;color:var(--danger-text)">删除</span></td>

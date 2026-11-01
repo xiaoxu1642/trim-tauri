@@ -62,24 +62,41 @@
   }
 
   let currentProcesses = [];
+  // F4b-M04：读取失败 = 「未知」，不是「空」。null 表示本轮读取成功，字符串即失败原因。
+  // 原实现把失败折成空数组，计数位写「无进程」、列表写「暂无进程数据」，一起宣称
+  // 「这台机器一个进程都没跑」，失败证据只剩 2-4 秒的 toast（方法论 B：禁止把读取失败
+  // 伪装成确无结果）。
+  let loadError = null;
 
   function render() {
     const kw = (el('pmSearch') && el('pmSearch').value || '').trim();
     const root = el('pmBody');
+    const cnt = el('pmCount');
+    // 失败态优先：错误文案持久显示，计数位写「—」，直到下一次「刷新」成功才退出该态。
+    // 放在搜索框重渲染之前，避免一次 input 又把失败画面刷成「没有匹配的进程」。
+    if (loadError) {
+      if (root) {
+        root.innerHTML = '<div class="empty-state"><p>读取进程列表失败：'
+          + escapeHtml(loadError) + '（列表状态未知，点击右上角「刷新」重试）</p></div>';
+      }
+      if (cnt) cnt.textContent = '—';
+      return;
+    }
     if (window.ProcessTools) {
       window.ProcessTools.renderTree(root, currentProcesses, { onKill, toast, filter: kw });
     }
     const total = (currentProcesses || []).length;
-    const cnt = el('pmCount');
     if (cnt) cnt.textContent = total ? `${total} 个进程` : '无进程';
   }
 
   async function load() {
     try {
       currentProcesses = await window.ProcessTools.fetchProcesses();
+      loadError = null;
     } catch (e) {
       toast('error', '读取进程列表失败：' + e.message);
       currentProcesses = [];
+      loadError = (e && e.message) || '未知错误';
     }
     render();
   }
@@ -112,6 +129,9 @@
 
   // 向主窗口推送本次操作后的统计，供「内存清理」页卡片中间区回显
   function reportProgress() {
+    // F4b-M04：失败态下 totalCount 没有意义，不把 0 推给主窗口卡片
+    // （否则「内存清理」页会把「读取失败」显示成「无进程」）。
+    if (loadError) return;
     const total = (currentProcesses || []).length;
     if (window.api?.processManager?.report) {
       window.api.processManager.report({ totalCount: total, updatedAt: Date.now() });

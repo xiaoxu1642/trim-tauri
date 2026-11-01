@@ -730,6 +730,12 @@
   // 总计数因此虚高、与分组计数（已按 hiddenIds 过滤）分裂；三处判据同源到本函数。
   function selectableIds() { return ALL_IDS.filter(id => !hiddenIds.has(id)); }
 
+  // 实际可清理集合（F4a1-M01）：勾选里**已有扫描结果**的那些条目。
+  // selectedIds 还承担「扫描范围」语义（见下方 scan() 的 scopeIds），所以不能把未扫描项
+  // 清出勾选；改由本函数单独回答「现在点开始清理，真能清掉什么」——「全选 → 开始清理」
+  // 这条零动作却报成功的路径，靠 #btnClean 的判据与 clean() 的空计划早退共同堵住。
+  function selectedWithResultIds() { return Array.from(selectedIds).filter(id => scanResults.has(id)); }
+
   function selectAll() {
     for (const id of selectableIds()) selectedIds.add(id);
     updateUI();
@@ -820,9 +826,10 @@
     if (countEl) countEl.textContent = selectedIds.size;
     updateSelectAllButton();
 
-    // 清理按钮
+    // 清理按钮：勾选了但没有一项带扫描结果时不可点（F4a1-M01 —— 否则空计划会走完整个
+    // 清理流程并弹「清理完成！释放 0 B」，用户点了半天什么都没发生）
     const cleanBtn = document.getElementById('btnClean');
-    if (cleanBtn) cleanBtn.disabled = selectedIds.size === 0 || isScanning || isCleaning;
+    if (cleanBtn) cleanBtn.disabled = selectedWithResultIds().length === 0 || isScanning || isCleaning;
 
     // 顶层分组汇总（条目数量 + 总占用大小，兼容扁平分组）
     // P2：计数与已选数量按当前筛选口径展示（无筛选时与原口径一致）；
@@ -1026,6 +1033,11 @@
         for (const id of fcScope) {
           const item = getItemById(id);
           if (!item || !item.fileCleanType) continue;
+          // F4a1-M03：档位取规则库字段（缺省才退 low）。旧写法在三处 results.push 里把档位
+          // 写死为 low，规则库把 qqFileClean / wechatFileClean 升到 medium/high 之后
+          // confirmCleanPlan 的分档（判据是 scanResults.get(id).risk）不会跟着升，升档静默失效；
+          // 这也与 confirmCleanPlan 自述的「信任源统一为 $rule.risk，渲染层不做二次映射」冲突。
+          const fcRisk = item.risk || 'low';
           const customPath = item.fileCleanType === 'qq' ? pathConfig.qqFileDir : pathConfig.wechatFileDir;
           try {
             const fcResp = await window.api.fileclean.scan(item.fileCleanType, customPath);
@@ -1042,7 +1054,7 @@
                 path: fcResp.data.scanPath,
                 pathSource: 'configured',
                 size: fcResp.data.totalSize,
-                risk: 'low',
+                risk: fcRisk,
                 exists: true
               });
             } else {
@@ -1056,7 +1068,7 @@
                 path: customPath ? `扫描失败：${why}` : '未配置',
                 pathSource: 'configured',
                 size: 0,
-                risk: 'low',
+                risk: fcRisk,
                 exists: false
               });
             }
@@ -1068,7 +1080,7 @@
               path: customPath ? `扫描失败：${e.message}` : '未配置',
               pathSource: 'configured',
               size: 0,
-              risk: 'low',
+              risk: fcRisk,
               exists: false
             });
           }
@@ -1347,14 +1359,36 @@
     if (killBtn) killBtn.disabled = killable.length === 0;
     if (killText) killText.textContent = killable.length ? `结束进程（${killable.length}）` : '结束进程';
     const scanned = Number(resp.scanned) || 0;
-    const truncNote = resp.truncated ? '；目录文件数超过 2 万上限，结果已截断' : '';
+    // R4 残留：查询侧的 truncated 有六条出口共同置真 —— 命中 2 万上限，以及深度到 64 层
+    // （depthCap）、read_dir 失败（readDirFailed）、目录项枚举失败（entryFailed）、stat 失败
+    // （statFailed）、reparse 跳过（reparseSkipped）五条；后五条另进 skippedReasons 分类计数
+    // （scan_execute.rs 的 QueryWalkSkips）。旧文案一律说「目录文件数超过 2 万上限」，把
+    // 「子目录读不动」「联接点未跟随」也说成容量上限，用户据此以为再扫一次就能查全。
+    // 现按原因分档：分类计数非零就逐类报；2 万上限本身不进分类计数，只有分类全零时才是它。
+    const skipReasons = (resp.skippedReasons && typeof resp.skippedReasons === 'object') ? resp.skippedReasons : {};
+    const skipCount = (k) => Number(skipReasons[k]) || 0;
+    const notFull = [];
+    if (skipCount('depthCap') > 0) notFull.push(`${skipCount('depthCap')} 处目录超过 64 层未深入`);
+    if (skipCount('readDirFailed') > 0) notFull.push(`${skipCount('readDirFailed')} 处子目录无法读取`);
+    if (skipCount('entryFailed') > 0) notFull.push(`${skipCount('entryFailed')} 个目录项枚举失败`);
+    if (skipCount('statFailed') > 0) notFull.push(`${skipCount('statFailed')} 个条目状态读取失败`);
+    if (skipCount('reparseSkipped') > 0) notFull.push(`${skipCount('reparseSkipped')} 处联接点未跟随`);
+    // 分类计数全零而 skippedTree 非零（后端将来新增分类）：不猜原因，只报总数，不留静默
+    const skippedTree = Number(resp.skippedTree) || 0;
+    if (!notFull.length && skippedTree > 0) notFull.push(`${skippedTree} 处目录或条目被跳过`);
+    const truncNote = !resp.truncated ? ''
+      : notFull.length ? `；未查全：${notFull.join('、')}`
+      : '；目录文件数超过 2 万上限，清单已截断';
     // X0-6 S3：同一回执的另一个消费方（清理前占用检测）已提示畸形行数，
     // 查询卡片此前不读 malformed —— 协议被打断时界面会照常显示「没有发现占用」。
     const malformed = Number(resp.malformed) || 0;
     const partialText = malformed > 0
       ? `占用查询有 ${malformed} 条输出畸形已跳过，结果可能不完整。` : '';
     if (!procs.length) {
-      box.innerHTML = `<div class="empty-state"><p>没有发现占用${scanned > 0 ? `（已检查 ${scanned} 个文件${truncNote}）` : '（目录内没有可查询的文件）'}。${escapeHtml(partialText)}</p></div>`;
+      // 「已检查 N 个文件」只在真查到过文件时给；但「没查全」（truncNote 非空）必须照样露出来——
+      // 根目录就 read_dir 失败时 scanned=0，旧口径会显示「目录内没有可查询的文件」，
+      // 把「读不动」说成了「没有」。
+      box.innerHTML = `<div class="empty-state"><p>没有发现占用${(scanned > 0 || truncNote) ? `（已检查 ${scanned} 个文件${truncNote}）` : '（目录内没有可查询的文件）'}。${escapeHtml(partialText)}</p></div>`;
       return;
     }
     // 进程行复用清理前占用检测弹窗的既有样式（lock-app-*，零新增视觉 token）
@@ -1503,12 +1537,22 @@
 
     // D10：中风险二次确认（黄色），与高风险红色确认分级
     if (mediumRisk.length > 0) {
+      // F4a1-M02：旧警示语宣称「清理后若个别程序异常，可由系统自带层面恢复」——那是**不存在的
+      // 退路**：本链 toRecycle 恒 false（见下方 clean() 的 v3.3.0 裁定），常规清理项在 Rust
+      // 原生链里直接永久删，回收站支不可达。唯一可用的退路是 Trim 自己的备份（含注册表项的
+      // 条目导出 .reg；永久删的文件在既有单文件/批次体积上限内留副本），且**有上限、可能
+      // 没有副本**。文案按实际删除方式分两种（文件清理项走回收站，判定见 fileclean.rs 的
+      // recycle_one），措辞与备份还原页（备份说明）同源，不再承诺系统级恢复。
+      const hasFileClean = mediumRisk.some(r => FILECLEAN_IDS.includes(r.id));
+      const deletionNote = hasFileClean
+        ? '常规清理项直接永久删除、不进入回收站（含注册表项的条目删除前自动导出 .reg 备份，永久删除的文件在 64MB/文件、256MB/批次上限内自动留副本）；文件清理项移入回收站，可从回收站还原。'
+        : '本链直接永久删除、不进入回收站，删后不可恢复；含注册表项的条目删除前自动导出 .reg 备份，永久删除的文件在 64MB/文件、256MB/批次上限内自动留副本。';
       const ok = await window.app?.confirmWarning(
         '中风险操作确认',
         `您选择了 ${mediumRisk.length} 个中风险项（建议清理前核对用途）：\n${mediumRisk.map(r => '• ' + r.name).join('\n')}`,
         '确认清理',
         '取消',
-        '部分中风险项可能被应用在使用，清理后若个别程序异常，可通过系统自带方式恢复。',
+        '部分中风险项可能正被应用使用，清理后若个别程序异常需要重新安装或重建缓存。' + deletionNote,
         consequenceItems(mediumRisk)
       );
       // F4a1-M02：取消支必须走调用方的收尾，本段不再自己复位 busy（busy 已移到确认之后才置起）
@@ -1617,6 +1661,17 @@
     }
     if (!plan) return;
     const { allItems, regularItems, fileCleanItems, recycleItems, force, explorerPickIds } = plan;
+    // F4a1-M01：空计划必须在置 busy 之前早退。旧写法把「全选（全部条目进 selectedIds，
+    // 但 scanResults 为空）」一路放行到底：一个确认弹窗都不弹、三条执行链一条都不发，
+    // 却合成 {totalFreed:0} 回执再弹绿色「清理完成！释放 0 B 空间」。两条可达路径都不需要
+    // 异常条件：① 进页即「全选 → 开始清理」；② 正常清理之后（成功项已从 scanResults 删除）
+    // 再「全选 → 开始清理」。此处 await 数为 0，不破坏下方 busy-window 判据。
+    if (allItems.length === 0) {
+      window.app?.toast?.('info', selectedWithResultIds().length === 0
+        ? '所选条目还没有扫描结果，请先点「扫描大小」再开始清理'
+        : '所选条目本次都被跳过（多因被其他程序占用），没有可执行的清理项');
+      return;
+    }
     // P1-7：busy 一经置起，到下面执行段 `try` 之间**一个 await 都不许有**
     // （`tools/check-async-exits.mjs` 的 busy-window 判据钉的就是这条）。
     isCleaning = true;
@@ -1768,7 +1823,12 @@
         };
       }
 
-      setProgress(100, '清理完成');
+      // F4a1-M01：零值回执不得报「完成」。判据取「释放 0 B 且成功零项」两条件同时成立——
+      // 只看释放量会把「只清掉了零字节的空目录（success>0）」误判成什么也没干。
+      const freedNow = Number(result.totalFreed) || 0;
+      const okNow = Number(result.success) || 0;
+      const nothingDone = freedNow === 0 && okNow === 0;
+      setProgress(100, nothingDone ? '没有清理任何内容' : '清理完成');
       clearInterval(progressTimer);
 
       // 从结果中移除已清理的
@@ -1787,10 +1847,19 @@
         updateUI();
         // K13：清理后刷新「重启后删除」入口——本批可能刚登记了失败项
         refreshPendingBadge();
-        const freed = result.totalFreed || 0;
+        const freed = freedNow;
         // F4a1-L05：原「审查 M-3」分支读 result.recycledBytes/recycledCount——两字段
         // 在本文件只有读点、后端回执链零写点（v3.3.0 已固定 toRecycle=false），属死分支。
+        // F4a1-M01：零值回执只说事实（「没有清理成功任何项」），不再以绿色 success 报「清理完成」。
+        let toastType = 'success';
         let toastMsg = `清理完成！释放 ${formatSize(freed)} 空间`;
+        if (nothingDone) {
+          const anyFailure = (Number(result.failed) || 0) > 0 || (Number(result.partial) || 0) > 0;
+          toastType = anyFailure ? 'warning' : 'info';
+          toastMsg = anyFailure
+            ? '本次没有清理成功任何项，释放 0 B'
+            : '本次没有清理任何内容，释放 0 B';
+        }
         // F4a1-L02：后端 skip 档（受保护 / 太新 / 已排除）此前读出后零消费，
         // 清零时仍报「完成」。有跳过项就并入同一句，不另起一条 toast。
         if (result.skipped > 0) toastMsg += `；另有 ${result.skipped} 项按策略跳过`;
@@ -1800,7 +1869,7 @@
         if (explorerDone) {
           toastMsg += '；图标与缩略图缓存将在重启资源管理器后重建';
         }
-        window.app?.toast('success', toastMsg);
+        window.app?.toast(toastType, toastMsg);
         // P3 残留复查提示 + 2026-10-13 失败引导：explorer 等进程占着句柄的文件在
         // 内核层就删不掉，光提示「关闭相关程序」是把难题丢回给用户（真机裁定：
         // 「每次都提示我结束 explorer，真结束了资源管理器不就没了吗」）。现在给

@@ -614,13 +614,25 @@
     el.style.removeProperty('--lg-press');
   }
 
+  // F5-M07：两趟化——先把所有可见成员的盒子读完，再统一写 CSS 变量。
+  // 旧版每个元素「读 rect → 写 --lg-sx/sy/tx/ty」交错，下一圈次的读会被上一圈次的写判脏，
+  // N 个可见按钮就是每帧 N 次同步样式重算（同 measureGlass/commitGlass 的两趟纪律、xtable 的批量写）。
+  // 等价性前提：--lg-* 只参与 .lg-elastic 的 transform（main.css），transform 不参与布局，
+  // 元素 i 的行内写不会改变元素 j 的 rect ⇒ 两趟与逐元素交错读到同一组盒子，形变终值不变。
+  // 保留阅读顺序与早退分支：脱离文档的成员就地出册，零宽（隐藏页）元素跳过不写。
   function updateElastics() {
     elasticRaf = 0;
     if (mode !== 'full') return;
+    const boxes = [];
     elasticEls.forEach((el) => {
       if (!el.isConnected) { elasticEls.delete(el); return; }
       const r = el.getBoundingClientRect();
       if (!r.width) return;
+      boxes.push({ el: el, r: r });
+    });
+    for (let i = 0; i < boxes.length; i++) {
+      const el = boxes[i].el;
+      const r = boxes[i].r;
       const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
       const dx = pointer.x - cx, dy = pointer.y - cy;
       const edgeX = Math.max(0, Math.abs(dx) - r.width / 2);
@@ -628,7 +640,7 @@
       const edge = Math.sqrt(edgeX * edgeX + edgeY * edgeY);
       if (edge > ELASTIC_ZONE) {
         if (el.__lgActive) { resetElasticVars(el); el.__lgActive = false; }
-        return;
+        continue;
       }
       const fadeIn = 1 - edge / ELASTIC_ZONE;
       const dist = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -643,7 +655,7 @@
       el.style.setProperty('--lg-sy', sy.toFixed(4));
       el.style.setProperty('--lg-tx', tx.toFixed(2) + 'px');
       el.style.setProperty('--lg-ty', ty.toFixed(2) + 'px');
-    });
+    }
   }
 
   function onPointerMove(e) {
@@ -835,6 +847,9 @@
     mount.appendChild(thumb);
     state.thumb = thumb;
     state.mount = mount; // placeThumb 判「active 是否在本包含块内」用
+    // F5-M06：「关闭」档建节点时就收起——挂载到位到首个 rAF 之间不许露出空壳玻璃块。
+    // 之后的可见性一律由 placeThumb 单点决定，这里只给初始态。
+    if (mode === 'off') thumb.style.display = 'none';
     return thumb;
   }
 
@@ -862,6 +877,16 @@
   function placeThumb(bar, state, animate) {
     const thumb = state.thumb;
     if (!thumb) return;
+    // F5-M06：「关闭」档必须整枚撤掉滑块，且已写入的行内 backdrop-filter 一并清空。
+    // 只清滤镜不够——.lg-thumb 自带 CSS 玻璃底（--lg-glass-floor + tint + 高光描边），
+    // 留着 display 就是一枚实心胶囊，与「off = 隐藏滑块、不注入任何滤镜」的档位语义相反。
+    // 判据放这里、先于下面的常态 display 复位：refreshBars / init 曾各自写 display=none，
+    // 都被本函数的 display='' 掀开，关闭态因此长期复现。
+    if (mode === 'off') {
+      thumb.style.display = 'none';
+      setBackdrop(thumb, '');
+      return;
+    }
     const tab = findActiveTab(bar);
     const vertical = isSidebarBar(bar);
     // 2026-10-15（目检：「设置」页底部多出游离玻璃块）：「设置」在 footer、不在滑块
@@ -1028,7 +1053,8 @@
     });
     states.forEach((state, bar) => {
       if (!state.thumb) return;
-      state.thumb.style.display = mode === 'off' ? 'none' : '';
+      // F5-M06：这里曾经写 display=none（off 档），但紧接着 schedulePlace 的 placeThumb
+      // 在常态分支无条件写 display=''，把关闭态掀开。可见性与行内滤镜改由 placeThumb 单点决定。
       schedulePlace(bar, animate !== false);
     });
   }
@@ -1221,9 +1247,9 @@
       attachGlassAll(document.querySelectorAll(REFRACT_SELECTOR + ',' + FLOATING_SELECTOR));
       attachedMode = mode;
     }
-    states.forEach((state) => {
-      if (state.thumb) state.thumb.style.display = mode === 'off' ? 'none' : '';
-    });
+    // F5-M06：这里原有一次 states.forEach 写 display（off ⇒ none），但它在 mountAll 排出的
+    // placeThumb rAF 之前执行，rAF 后置又写回 ''——冷启动偏好即 off 也照样露出滑块。
+    // 关闭态的可见性现由 placeThumb 的 off 分支负责，此处不再重复。
   }
 
   window.liquidBar = {

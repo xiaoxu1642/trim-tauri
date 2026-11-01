@@ -7,6 +7,7 @@
 
   let loading = false;
   let backdrop = null;   // 当前弹窗遮罩（v3.2.0：骨架由 modal.js 工厂创建）
+  let ctrl = null;       // F4c-M01：工厂 ctrl 必须留用 —— 关闭只能走 ctrl.close()
 
   function q(sel) { return backdrop ? backdrop.querySelector(sel) : null; }
 
@@ -259,7 +260,7 @@
             创建还原点
           </button>
           <button class="btn btn-primary" id="btnSrClose" type="button">完成</button>`;
-    const ctrl = window.modal.create({
+    const created = window.modal.create({
       id: 'sysRestoreBackdrop',
       title: '系统还原点管理',
       backdropClass: 'rt-sr-backdrop',
@@ -267,21 +268,27 @@
       bodyClass: 'rt-sr-body',
       bodyHtml,
       footerHtml,
-      onClose() { backdrop = null; }
+      // F4c-M01：esc/遮罩/× 由工厂自己关窗时也要同步清掉本模块的两个引用，
+      // 否则下次 open 的 close() 会拿着已关闭的 ctrl 空转。
+      onClose() { backdrop = null; ctrl = null; }
     });
-    backdrop = ctrl.backdrop;
+    ctrl = created;
+    backdrop = created.backdrop;
 
-    ctrl.footer.querySelector('#btnSrClose').addEventListener('click', close);
-    ctrl.footer.querySelector('#btnRestoreRefresh').addEventListener('click', () => load());
-    ctrl.footer.querySelector('#btnRestoreCreate').addEventListener('click', () => create());
-    ctrl.footer.querySelector('#btnSrFrequency').addEventListener('click', () => restoreFrequency());
+    created.footer.querySelector('#btnSrClose').addEventListener('click', close);
+    created.footer.querySelector('#btnRestoreRefresh').addEventListener('click', () => load());
+    created.footer.querySelector('#btnRestoreCreate').addEventListener('click', () => create());
+    created.footer.querySelector('#btnSrFrequency').addEventListener('click', () => restoreFrequency());
 
     load();
   }
 
   function close() {
-    // v3.2.0：骨架由 modal.js 工厂创建，close 即销毁（Esc/遮罩由工厂接管）
-    if (backdrop) { const el = backdrop; backdrop = null; el.remove(); }
+    // v3.2.0：骨架由 modal.js 工厂创建，close 必须走 ctrl.close()——
+    // 只有它会解绑 document 级 Esc 监听、释放焦点陷阱（焦点还给触发元素 #btnSysRestore）
+    // 并把 ctrl 移出 liveCtrls。F4c-M01：原实现直接把遮罩节点从文档摘掉，上述三件事全跳过，
+    // 每轮开合都留一对监听与一个登记残留，关窗后焦点落到 body。
+    if (ctrl) ctrl.close(); // onClose 里把 ctrl/backdrop 置空，重复调用安全
   }
 
   function init() {

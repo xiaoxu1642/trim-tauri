@@ -349,6 +349,11 @@
       }
       const prevIds = new Set(items.map(i => i.id));
       const next = Array.isArray(resp.data) ? resp.data : [];
+      // 重审-2026-11-01 F4a2-M03：degraded = 本次真实扫描失败、后端回落旧缓存（commands/startup.rs 那条
+      // `degraded: true` 分支，形态恒为 { success:true, cached:true, cachedAt, degraded:true }）。
+      // 旧代码对它零引用 ⇒ 照旧弹绿色「扫描完成」，用户以为刚扫过，随后拿过期快照启停，
+      // 已从系统消失的项会在原生侧逐项报错。失败回落必须与「扫描完成」分开说。
+      const degraded = resp.degraded === true;
       // 按 启用状态 -> 来源 -> 名称 排序，禁用项置底
       next.sort((a, b) => {
         if (!!a.enabled !== !!b.enabled) return a.enabled ? -1 : 1;
@@ -371,7 +376,10 @@
       // 防恢复机制：黑名单拦截 + 顽固恢复计数（可能自动删除并刷新列表）
       await enforceStartupDefend();
       render();
-      if (!silent) window.app?.toast('success', `扫描完成，共发现 ${items.length} 项启动项`);
+      if (!silent) {
+        if (degraded) window.app?.toast('warning', '本次扫描失败，已回落到上次的缓存结果，可能与系统现状不一致');
+        else window.app?.toast('success', `扫描完成，共发现 ${items.length} 项启动项`);
+      }
     } catch (e) {
       if (silent) { window.app?.log?.('warn', `启动项后台重扫异常: ${e.message}`); return; }
       renderError(`扫描启动项失败: ${e.message}`);

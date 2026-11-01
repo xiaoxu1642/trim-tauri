@@ -52,11 +52,39 @@
     }
   }
 
+  // F3-M02：子窗最大化不透明护栏（类名与 main.css 的 win-maximized 段同一口径）。
+  // 三子窗保留原生装饰 ⇒ 用户可最大化，但此前 `win-maximized` 的生产者只有主窗 app.js：
+  // 子窗最大化后 body.electron-mica 仍命中 main.css 的 :not(.win-maximized) 分支，--mat-veil 半透明
+  // 面纱压在最大化期间可能失效的 DWM 材质层上（AGENTS §3：body.win-maximized 必须完全不透明）。
+  // 判据不取 api.window.onResized 的 bounds.maximized：子窗 capabilities/subwindows.json 未给
+  // core:window:allow-is-maximized（其描述写明该命令已删），桥接里 is_maximized 必然被拒并在 catch
+  // 回落 maximized:false —— 订阅它只会永远挂不上类（假绿）。改用渲染层自证的等价判据：
+  // 最大化时客户区宽度恰等于屏幕工作区宽度，高度只少掉原生标题栏（本机实测标准缩放、标准装饰，
+  // 工作区 1920x1032、客户区 1920x1009，差 23 = 标题栏）。宽度卡死、高度留标题栏余量 ⇒
+  // 只有「铺满工作区宽 + 接近满高」的窗口才判最大化；这种窗口本来也没有壁纸可透，按不透明处理无损失。
+  // 若将来补回上述命令权限，应收敛回主窗的 is_maximized 判据。
+  // 两个常量：WIDTH_TOLERANCE 是 DPI 取整容差；CAPTION_ALLOWANCE 是标题栏高度余量（CSS px，随 DPI 缩放后仍在 64 内）
+  var WIDTH_TOLERANCE = 2;
+  var CAPTION_ALLOWANCE = 64;
+  function syncMaximized() {
+    var max = window.innerWidth >= window.screen.availWidth - WIDTH_TOLERANCE &&
+              window.innerHeight >= window.screen.availHeight - CAPTION_ALLOWANCE;
+    if (document.body.classList.contains('win-maximized') === max) return;
+    document.body.classList.toggle('win-maximized', max);
+    // 与主窗 app.js 的 onResized 同口径：强制一次回流，让合成器立即提交不透明帧，消除最大化/还原残帧
+    void document.body.offsetHeight;
+  }
+
   function init() {
     applyTheme();
     if (!HAS_BRIDGE) {
       return;
     }
+    // F3-M02：窗口创建时可能已是最大化态，先对齐一次，再按 resize 实时跟随
+    syncMaximized();
+    window.addEventListener('resize', syncMaximized);
+    // 尺寸监听与 IPC 订阅共用同一收账出口（teardownSubscriptions 一并摘除）
+    trackSubscription(function () { window.removeEventListener('resize', syncMaximized); });
     Promise.all([
       window.api.app.getInfo().catch(function () { return null; }),
       window.api.appearance?.getMaterial?.().catch(function () { return null; })

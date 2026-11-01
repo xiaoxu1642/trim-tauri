@@ -129,7 +129,12 @@ input[type="range"].ds-slider:focus-visible {
   max-width: 280px;
   padding: 6px 10px;
   border-radius: 6px;
-  background: var(--bg-elevated);
+  /* 口径 v2·B 类（宿主承载面）：浮层底必须由浮层自己成立，不挂在宿主状态上。原先只有半透明
+     的 --bg-elevated，floor 由 main.css 的 body.electron-mica / body[data-material="none"]
+     两条宿主前件补——无材质子窗与 mica 不受支持的主窗两条都不命中，正文就压在身后内容上
+     随底漂移（对比度取值以 check-contrast 的现算为准）。按 .ds-menu 同一「floor + elevated」
+     口径自铺，材质前件只再额外提供磨砂。 */
+  background: linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)), var(--bg-elevated);
   border: 1px solid var(--border-strong);
   color: var(--fg-primary);
   font-size: calc(12px * var(--font-size-scale, 1));

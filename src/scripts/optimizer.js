@@ -762,6 +762,9 @@
   // ==================== 列表渲染：胶囊卡片（一行 3 / 6 列） ====================
   // 优化中心分类过滤（'全部' 显示全部分组）
   let activeCategory = '全部';
+  // F4b-M02：目录「不可用」视图态。renderFallback 之后 OPTIONS 恒为空，此时任何
+  // renderGroups 都会把失败/降级文案改写成「该分类下暂无优化项」——setCategory 据此让路。
+  let catalogUnavailable = false;
   const OPT_CATEGORY_KEY = 'trim-optcat-active';
   // 审查 2026-09-27 L11：「游戏安全诊断」无任何数据项映射（12 个最终展示组外），常驻
   // 空分类已删除；如日后新增该分组任务，在此补回即可
@@ -793,6 +796,11 @@
       el.classList.toggle('active', on);
       el.setAttribute('aria-selected', on ? 'true' : 'false');
     });
+    // F4b-M02：目录失败/降级态下只换 chip 高亮，**不接管** #optimizerGroups。
+    // 否则 renderGroups([]) 会把「优化中心加载失败…请重启应用重试；若持续失败请到
+    // 「日志」页排查」整块换成「该分类下暂无优化项 / 尝试切换左侧其它分类」——
+    // 失败证据消失，还给出反向指引（让人去换分类）。
+    if (catalogUnavailable) return;
     renderGroups(OPTIONS);
   }
 
@@ -1524,8 +1532,11 @@
     // 2026-10-06（任务二）：**可否恢复只在详情弹窗判定**（弹窗消费 restorable / restoreAvailable），
     // 主列表只做灰显。行内的「立即恢复 / 无法还原」按钮已整条下线 ——
     // 一处判定、一处入口，避免两个地方对「能不能还原」各说各话（B4 的判据在弹窗里继续生效）。
+    // F4b-M01：还原入口只在详情弹窗里，而这一行此前是裸 div（无 role / 无 tabindex）⇒
+    // 键盘用户打不开弹窗，灰态项的「还原」完全不可达。role/tabindex 在此给，
+    // Enter/Space 的激活在 bindEvents 里与 bindCheckboxKeys 同源合成 click（见该处注释）。
     return `
-      <div class="opt-row${isOpt ? ' optimized' : ''}" data-id="${id}" data-tip="${isOpt ? '该项优化已生效，点击查看详情与还原入口' : '点击查看「' + escapeHtml(o.title) + '」详情'}">
+      <div class="opt-row${isOpt ? ' optimized' : ''}" role="button" tabindex="0" data-id="${id}" data-tip="${isOpt ? '该项优化已生效，点击查看详情与还原入口' : '点击查看「' + escapeHtml(o.title) + '」详情'}">
         <div class="checkbox${selectedIds.has(o.id) ? ' checked' : ''}${isOpt ? ' disabled' : ''}" data-check="${id}" role="checkbox" tabindex="0" aria-checked="${selectedIds.has(o.id) ? 'true' : 'false'}"${isOpt ? ' aria-disabled="true"' : ''} data-tip="${isOpt ? '已优化的项不可勾选，点击行查看详情' : '勾选/取消选择该优化项'}"></div>
         <span class="opt-row-index">${index}</span>
         <span class="opt-row-name">${escapeHtml(o.title)}</span>
@@ -1877,7 +1888,7 @@
       });
     }
     // 「一键应用」= 把状态不明的项重新写成优化目标值。刻意**不另起一条 apply 链**：
-    // 直接把这批 id 装进选择集再走 runSelected，这样高危红色二次确认、还原点检查、
+    // 把这批项作为显式 entries 交给 runSelected（F4b-M03），这样高危红色二次确认、还原点检查、
     // 提权中断续跑（batchRemainingIds）、批次生效粒度提示一条都不会绕过去。
     const applyBtn = document.getElementById('btnStaleApply');
     if (applyBtn) {
@@ -1887,16 +1898,15 @@
         applyBtn.setAttribute('data-tip', '这些项已不在优化目录里，只能按原值还原');
       }
       applyBtn.onclick = guardAsync('一键重新应用', async () => {
-        // 保住用户此前的手勾：本入口只是"临时借用选择集"，不该把人家的勾选清掉
-        const keep = new Set(selectedIds);
-        selectedIds.clear();
-        applicable.forEach((id) => selectedIds.add(id));
-        await runSelected();
-        if (keep.size) {
-          selectedIds.clear();
-          keep.forEach((id) => selectedIds.add(id));
-          renderGroups(OPTIONS);
-        }
+        // F4b-M03：显式把 entries 交给 runSelected，不再「塞进 selectedIds 再调不带参的
+        // runSelected()」。后者用 displayList(OPTIONS) 取集合，会把侧表成员
+        // （hiddenFromOptimizer 侧表成员）静默剔掉：混合批次少跑而不解释，
+        // 全是侧表成员时还会倒过来提示「请先勾选」；借用的选择集在 keep 为空时也不回滚，
+        // 「执行所选」按钮残留常亮。与永劫/隐私面板同一写法（runSelected(entries)）。
+        const entries = applicable
+          .map((id) => ALL_OPTIONS.find((o) => o.id === id))
+          .filter(Boolean);
+        await runSelected(entries);
       });
     }
     // 根治第三出口（2026-10-03 用户拍板）：「不再提醒」= per-id 记进主进程记账的
@@ -2729,7 +2739,11 @@
     const entries = entriesOverride
       || displayList(OPTIONS).filter(o => selectedIds.has(o.id));
     if (!entries.length) {
-      window.app?.toast('warning', '请先勾选要执行的优化项');
+      // F4b-M03：两种「空」因不同、处置也不同——主页面是「没勾选」，显式传集合的调用方
+      // 是「勾了但不在本列表」。对后者说「请先勾选」是反向指引，用户明明点的是横幅按钮。
+      window.app?.toast('warning', entriesOverride
+        ? '这些优化项已不在当前优化目录里，无法重新应用，只能按原值还原'
+        : '请先勾选要执行的优化项');
       return;
     }
     // 先收选择再报清单：dynamic 项的档位要先拿到（预览与真正执行的参数同一份）。
@@ -3093,6 +3107,8 @@
           if (hiddenIds.size) opts = opts.filter(o => !hiddenIds.has(o.id));
           OPTIONS = opts;
           activeCategory = getSavedCategory();
+          // F4b-M02：目录就绪即解除「不可用」态，否则一次失败会让后续渲染永远停在失败文案
+          catalogUnavailable = false;
           // 审查 v3：本地执行记录必须在渲染之前载入，否则首屏会短暂显示「未优化」，
           // 用户在这一瞬勾选并重复执行——正是本次要防的形态。
           loadAppliedLocal();
@@ -3151,6 +3167,8 @@
   function renderFallback(reason) {
     // F4b-M02：reason 非空 = 目录读取失败/初始化异常，必须与「浏览器预览模式」的
     // 降级文案区分开——把失败归因成预览模式会误导用户去怀疑运行环境而不是查日志。
+    // 两者都是「目录不可用」：置位后 setCategory 不再改写这块文案（见上方同名变量注释）。
+    catalogUnavailable = true;
     renderCatNav(); // 预览/降级模式下也渲染分类栏，保持布局一致
     const root = document.getElementById('optimizerGroups');
     if (!root) return;
@@ -3171,6 +3189,19 @@
 
     // P3-1（可达性）：看板行勾选框键盘激活（Space/Enter ⇒ 合成 click，走同一 toggleSelect）
     window.ds?.bindCheckboxKeys?.(root, '.checkbox[data-check]');
+
+    // F4b-M01：看板行 role="button" 的键盘等价。同样合成一次**真实 click**，复用下面的
+    // click 委托（不另写第二套激活逻辑）；Space 必须 preventDefault，否则页面跟着滚动。
+    // 焦点在行内勾选框时交回 bindCheckboxKeys 处理（它已 preventDefault 并切换勾选），
+    // 否则一次按键会既切换勾选又弹窗。
+    root.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      if (e.target.closest('.checkbox[data-check], button')) return;
+      const row = e.target.closest('.opt-row');
+      if (!row) return;
+      e.preventDefault();
+      row.click();
+    });
 
     // 看板行点击打开弹窗；点击勾选框仅切换选择状态；列底「全选本类」批量勾选；
     // 已优化（灰态）行点击 → 弹「是否还原此项优化？」确认

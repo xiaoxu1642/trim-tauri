@@ -211,6 +211,9 @@
     'scripts/a11y-live.js',
     'scripts/mouse-trail.js',
     'scripts/tilt.js',
+    // P1（2026-11-02）：液态玻璃从首屏移入空闲清单（视觉增强、全部 `?.` 调用）；
+    // 仍排在 spotlight.js 之前 —— 首屏 tag 顺序的既有约束在这里继续成立。
+    'scripts/liquid-glass.js',
     'scripts/spotlight.js',
     'scripts/updater-ui.js',
     'scripts/pathbinding-appearance.js',
@@ -343,6 +346,14 @@
     window.liquidBar?.refreshAll?.(true);
   }
 
+  // F3-M01：导航序号令牌。switchPageInner 有两处 await（本页脚本注入 / 清理查找器的子视图脚本），
+  // 而全部落笔动作都在 await 之后：重页首次进入要注入 1~4 个脚本，首屏页的 loadScript 只让出一个微任务。
+  // 于是「先点重页、再点轻页」时轻页先落笔，重页的续体后到会把导航高亮、页面 active 与
+  // ACTIVE_PAGE_KEY 整块覆写回重页（下次启动继续恢复错页；反向顺序恰好正确，故症状偶发）。
+  // 判据固定为「最后一次点击赢」：每次调用入口领一个序号，任一 await 之后发现序号已过期就整体放弃，
+  // 落笔与进页钩子只归最新那一次；后来者再加 await 也必须沿用同一判据。
+  let navSeq = 0;
+
   // v3.7.0：switchPage 改 async（需先 await 本页脚本加载）。外层吞掉异常，
   // 避免导航点击处未 await 的 Promise 变成 unhandledrejection。
   function switchPage(pageName) {
@@ -350,6 +361,7 @@
   }
 
   async function switchPageInner(pageName) {
+    const seq = ++navSeq;
     // 磁盘清理四合一：旧子页地址（cleanup-dups 等）统一映射到主页并恢复对应分段
     let cleanupView = 'cleanup';
     if (CLEANUP_VIEWS.indexOf(pageName) > -1) {
@@ -359,11 +371,15 @@
     }
     // v3.7.0 议题五：先补齐本页脚本，再执行页面进入逻辑（否则 load()/onEnter() 是空操作）
     await ensurePageScripts(pageName);
+    // F3-M01：等待期间又点了别的页 ⇒ 本次已过期，不落笔、不进页（否则旧结果会盖掉最后一次点击）
+    if (seq !== navSeq) return;
     if (cleanupView && cleanupView !== 'cleanup') {
       await ensurePageScripts('cleanup-finder');
+      if (seq !== navSeq) return;
       window.finder?.ensureInit?.();
     }
-    // 持久化活跃页（窗口状态记忆：启动恢复上次页面）
+    // 持久化活跃页（窗口状态记忆：启动恢复上次页面）。走到这里的一定是最新那次点击 ——
+    // 过期续体已在上面两处 return，故本行是 ACTIVE_PAGE_KEY 的唯一写入口，只会写最终生效页。
     try { localStorage.setItem(ACTIVE_PAGE_KEY, pageName); } catch (e) {}
     document.querySelectorAll('.nav-item').forEach(el => {
       el.classList.toggle('active', el.dataset.page === pageName);

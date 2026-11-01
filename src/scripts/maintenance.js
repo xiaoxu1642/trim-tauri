@@ -243,7 +243,7 @@
       return `
         <div class="maint-card${isSelected ? ' selected' : ''}${isRunning ? ' running' : ''}" data-id="${escapeHtml(t.id)}">
           <label class="maint-check" data-tip="勾选后可批量执行">
-            <input type="checkbox" data-check="${escapeHtml(t.id)}" ${isSelected ? 'checked' : ''} ${busy ? 'disabled' : ''} />
+            <input type="checkbox" data-check="${escapeHtml(t.id)}" ${isSelected ? 'checked' : ''} ${busy ? 'disabled' : ''} aria-label="选择 ${escapeHtml(t.title)}" />
           </label>
           <div class="maint-card-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z"/></svg>

@@ -199,7 +199,8 @@
             <span class="pw-item-label">${escapeAttr(item.label)}</span>
             <div class="pw-item-input">
               <input type="text" class="field-input pw-input" data-key="${escapeAttr(item.key)}"
-                     value="${escapeAttr(value)}" placeholder="${escapeAttr(item.placeholder)}" spellcheck="false" />
+                     value="${escapeAttr(value)}" placeholder="${escapeAttr(item.placeholder)}" spellcheck="false"
+                     aria-label="${escapeAttr(group.name + item.label)}" />
               <div class="pw-hint ${hintCls}" data-hint="${escapeAttr(item.key)}">${escapeAttr(hint)}</div>
             </div>
             <button class="btn btn-secondary btn-small pw-browse" data-key="${escapeAttr(item.key)}" data-tip="浏览选择文件夹">浏览</button>
@@ -216,6 +217,38 @@
         </section>`;
     }).join('');
     bindBodyEvents();
+  }
+
+  // 重审-2026-11-01 F4a2-M04：整块重绘（openModal 里的图标补齐、autoScan 完成后的刷新）会重建整个 body，
+  // 输入框的 value 只来自 pathConfig ⇒ 用户「正在输入、还没 change/blur」的路径被静默丢弃，
+  // 焦点也一并甩到 body。重绘前记下「与已存配置不一致的单元格 + 焦点与选区」，重绘后原地
+  // 还原：已存配置与本次扫描到的新值照常上屏，只有用户改过的单元格保留原文。
+  function renderBodyKeepingEdits() {
+    if (!modal) return;
+    const dirty = [];
+    let focusKey = null, selStart = null, selEnd = null;
+    modal.body.querySelectorAll('.pw-input').forEach(input => {
+      const key = input.dataset.key;
+      if (input.value.trim() !== (pathConfig[key] || '')) dirty.push([key, input.value]);
+      if (document.activeElement === input) {
+        focusKey = key;
+        selStart = input.selectionStart;
+        selEnd = input.selectionEnd;
+      }
+    });
+    renderBody();
+    dirty.forEach(([key, value]) => {
+      const input = modal.body.querySelector(`.pw-input[data-key="${key}"]`);
+      if (input) input.value = value;
+    });
+    if (!focusKey) return;
+    const input = modal.body.querySelector(`.pw-input[data-key="${focusKey}"]`);
+    if (!input) return;
+    input.focus();
+    // 选区端点可能是 null（输入类型不支持选区 API），只在两端都是整数时还原
+    if (Number.isInteger(selStart) && Number.isInteger(selEnd)) {
+      try { input.setSelectionRange(selStart, selEnd); } catch (e) { /* 不支持选区的输入类型忽略 */ }
+    }
   }
 
   function bindBodyEvents() {
@@ -346,7 +379,7 @@
           pathConfig.scannedAt = resp.data.scannedAt;
         }
         await loadIcons();
-        renderBody();
+        renderBodyKeepingEdits();
         updateFooter();
         if (!silent) {
           const tail = rejected.length ? `；${rejected.length} 项被拒绝未绑定` : '';
@@ -451,7 +484,7 @@
     // 先渲染已保存配置，再后台补齐图标，避免等待图标造成白屏
     renderBody();
     updateFooter();
-    loadIcons().then(() => renderBody());
+    loadIcons().then(() => renderBodyKeepingEdits());
   }
 
   function closeModal() {
