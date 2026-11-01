@@ -36,8 +36,7 @@ fn empty_state() -> Value {
 /// prefs.recent:   [id, …]        上限 RECENT_LIMIT，**最近的在前**（索引 0 = 最新）
 /// ```
 ///
-/// `recent` 用「**删掉旧位置 → 插到索引 0 → 截尾**」实现 LRU。选这个方向而不是
-/// 「追加到尾部 + 读取时排序」：读取端只要取前 N 个，不用每次渲染都排一遍。
+/// `recent` 用「**删掉旧位置 → 插到索引 0 → 截尾**」实现 LRU。
 ///
 /// ## favorites 为什么整链下线（2026-10-03 用户裁定）
 ///
@@ -47,25 +46,6 @@ fn empty_state() -> Value {
 /// 与命令面（`optimizer:set-favorite` 通道）一并摘掉，避免留下永不被调用的死通道。
 /// `favorites` 键在**旧状态文件里可能已存在**，读侧一律忽略、不迁移、不展示。
 const RECENT_LIMIT: usize = 10;
-
-/// 读偏好段。**孤儿 id 静默忽略**。
-///
-/// 为什么静默而不是报错：用户打开过某个优化项，之后目录把它退役了（`retired-optimizations.json`
-/// 收编、或直接删掉）。那不是用户的错，也不是数据损坏 —— 报「记录项不存在」只会让用户
-/// 以为应用坏了。调用方（渲染层）拿到的列表里不会有那些 id。
-pub fn prefs_view() -> Vec<String> {
-    let st = load();
-    st.get("prefs")
-        .and_then(|p| p.get("recent"))
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .filter(|id| !id.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
-}
 
 /// 记一次「最近使用」。LRU：移到最前 + 截尾到 RECENT_LIMIT。
 pub fn touch_recent(id: &str) -> bool {
@@ -117,7 +97,7 @@ fn load_state() -> (Value, bool) {
             }
             // E10：prefs 段缺失时补空骨架（老状态文件没有这段）。
             // 刻意**不校验内容**：recent 里的 id 可能在目录删项后变成孤儿，
-            // 那是**预期内**的（见 prefs_view 的注释），不是损坏。
+            // 那是**预期内**的，不是损坏。
             // `favorites` 只在骨架里保留占位：旧状态文件里可能有它，读侧一律忽略。
             if !o.get("prefs").map(|x| x.is_object()).unwrap_or(false) {
                 o.insert("prefs".into(), json!({ "favorites": [], "recent": [] }));
@@ -544,6 +524,22 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
     }
 
+    /// 读侧抓手（测试专用）：生产读侧 `prefs_view` 已按 R6b-L12 删除（零调用方），
+    /// 但 `touch_recent` 的 LRU/截断/孤儿语义仍需从落盘结果验证，故直接读持久化状态。
+    fn recent_ids() -> Vec<String> {
+        let st = super::load();
+        st.get("prefs")
+            .and_then(|p| p.get("recent"))
+            .and_then(|r| r.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .filter(|id| !id.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// E10：最近使用（recent）的行为契约（LRU / 幂等 / 空 id / 孤儿 id）+ 收藏已下线的反向断言。
     ///
     /// 三条要断的理由各不相同：
@@ -568,7 +564,7 @@ mod tests {
         for i in 0..12 {
             assert!(st::touch_recent(&format!("id{i}")), "写 recent 失败（id{i}）");
         }
-        let r3 = st::prefs_view();
+        let r3 = recent_ids();
         assert_eq!(r3.len(), 10, "recent 超过上限 10 却没有截断：len={}", r3.len());
         assert_eq!(r3[0], "id11", "最近的必须在最前，实际 index0={}", r3[0]);
         assert!(
@@ -577,7 +573,7 @@ mod tests {
         );
         // 重复 touch 同一个 id：移到最前且**不重复**
         assert!(st::touch_recent("id11"), "重复 touch 失败");
-        let r4 = st::prefs_view();
+        let r4 = recent_ids();
         assert_eq!(
             r4.iter().filter(|x| *x == "id11").count(),
             1,
@@ -609,10 +605,10 @@ mod tests {
             !ov.contains("pub async fn optimizer_set_favorite"),
             "收藏写侧命令又出现了 —— 通道已下线"
         );
-        // 正向：recent 的生产段必须还在（防「反向判据通过是因为整段被删了」这种假绿）
+        // 正向：recent 的写侧必须还在（防「反向判据通过是因为整段被删了」这种假绿）
         assert!(
-            prod.contains("pub fn prefs_view") && prod.contains("pub fn touch_recent"),
-            "recent 的读/写函数都不见了 —— 下线判据是因为代码被误删才通过的（假绿）"
+            prod.contains("pub fn touch_recent"),
+            "recent 的写函数不见了 —— 下线判据是因为代码被误删才通过的（假绿）"
         );
 
         // ③ 孤儿 id 静默忽略：目录删项后 recent 里的 id 仍能被读出，由渲染层决定
@@ -625,7 +621,7 @@ mod tests {
         //    全部用例持同一把锁，不并发交错）—— 合并只对当时那两条有效，新增第三条
         //    就会复发（`stale忽略与失败原因记账契约` 加进来时确实又红过）。
         assert!(st::touch_recent("__已退役的优化项__"), "写入夹具失败");
-        let r5 = st::prefs_view();
+        let r5 = recent_ids();
         assert!(
             r5.contains(&"__已退役的优化项__".to_string()),
             "recent 里的孤儿 id 被后端悄悄剔除了 —— 语义应是「读出后由渲染层决定不显示」，             后端剔除会让「这项曾被打开过」这个事实消失（退役清单里仍可能想找回）：{r5:?}"

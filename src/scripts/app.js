@@ -576,11 +576,10 @@
   }
 
   // v3.7.0 议题一：FIFO 挤出最旧的 Toast，保证同屏不超过 MAX_VISIBLE_TOASTS。
-  // 跳过 toast-shutdown（关闭流程提示不可手动关闭，也不参与挤出）。
   function trimToasts() {
     let guard = activeToasts.length + 1;
     while (activeToasts.length > MAX_VISIBLE_TOASTS && guard-- > 0) {
-      const idx = activeToasts.findIndex((t) => t && t.el && !t.el.classList.contains('toast-shutdown'));
+      const idx = activeToasts.findIndex((t) => t && t.el);
       if (idx < 0) return;
       const oldest = activeToasts[idx];
       if (typeof oldest.remove === 'function') oldest.remove();
@@ -608,11 +607,11 @@
     const t = e.target;
     if (!(t instanceof Element)) return;
     // 点击交互控件 / 弹窗 / Toast 本体时保留原有功能，不触发关闭
-    if (t.closest('button, a, input, select, textarea, label, .toast, .usage-backdrop, .ctx-detail-backdrop, .nav-item, .nav-subitem, .filter-tab, .checkbox, .context-item, .category-item, .ctx-cat-header, [contenteditable]')) return;
-    // 自顶向下找最近添加且未移除的 Toast（关闭流程 Toast 不可手动关闭）
+    if (t.closest('button, a, input, select, textarea, label, .toast, .usage-backdrop, .nav-item, .nav-subitem, .filter-tab, .checkbox, .context-item, .category-item, .ctx-cat-header, [contenteditable]')) return;
+    // 自顶向下找最近添加且未移除的 Toast
     for (let i = activeToasts.length - 1; i >= 0; i--) {
       const entry = activeToasts[i];
-      if (entry.el && !entry.el.classList.contains('toast-shutdown')) {
+      if (entry.el) {
         entry.remove();
         return;
       }

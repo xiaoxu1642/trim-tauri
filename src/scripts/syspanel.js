@@ -2470,7 +2470,7 @@
     consumePendingEditIntent();
   }
 
-  window.syspanel = { init, loadPower, loadPagefile, onEditIntent };
+  window.syspanel = { init, onEditIntent };
 
   // 延迟加载脚本守卫（AGENTS §4 check-idle-scripts 断言 1）：顶层 DOMContentLoaded 注册
   // 必须在 readyState 判定内；本文件是"按需注入"，注入时通常已 Completed，走 else 立即 init。

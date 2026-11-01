@@ -1573,27 +1573,6 @@ body.lg-reduce-motion .lg-thumb {
   transform: translateY(-50%);
 }
 
-.speed-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-medium);
-  padding: 24px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-}
-.ring-fill {
-  fill: none;
-  stroke: url(#ringGradient);
-  stroke-width: 12;
-  stroke-linecap: round;
-  stroke-dasharray: 534;
-  stroke-dashoffset: 534;
-  transition: stroke-dashoffset 0.5s var(--ease-emphasized);
-}
-
 .metric-card {
   background: var(--bg-card);
   border: 1px solid var(--border-default);
@@ -2262,10 +2241,6 @@ body.win-maximized .sidebar {
 /* 四种窗口材质差异化显示（body[data-material] 由 theme.js/pathbinding.js 同步）
    Mica=柔和云母（默认） / Mica Alt(tabbed)=层次云母（着色更清晰）
    亚克力=磨砂玻璃（中等着色+高光渗透） / 细亚克力=更透亮（最轻着色） */
-/* Mica Alt：层次感更强的分区着色。
-   批次：悬浮岛侧边栏 —— 四材质对岛的区分着色已并入下方「材质 2.0」段的岛规则
-   （mica-alt 82% / acrylic 68% / thin-acrylic 58% --surface-solid 调配），旧贴边着色删除 */
-body.electron-mica[data-material="mica-alt"] .sidebar { /* 见「材质 2.0」段岛规则 */ }
 
 /* 亚克力：磨砂玻璃，着色适中 + 左上高光渗透，强化「磨砂」质感
    （批次：悬浮岛侧边栏 —— 旧 .sidebar 着色已并入「材质 2.0」段岛规则） */
@@ -2318,7 +2293,6 @@ input[type="radio"]:focus-visible {
 
 /* Windows 11 圆角规范微调（25H2 略增圆角） */
 .summary-card,
-.speed-card,
 .metric-card,
 .settings-section {
   border-radius: var(--radius-large); /* 14px，对齐 Win11 25H2 卡片规范 */
@@ -2335,7 +2309,6 @@ input[type="radio"]:focus-visible {
 
 /* 高刷新率优化：允许独立合成层 */
 .progress-fill,
-.ring-fill,
 .toast {
   will-change: transform;
 }
@@ -2699,14 +2672,6 @@ body.xtable-resizing * { cursor: col-resize !important; }
 }
 .xtable-row:last-child { border-bottom: none; }
 .xtable-row:hover { background: var(--bg-card-hover); }
-/* 分批渲染「加载更多」入口（render-batch） */
-.xtable-more {
-  display: flex;
-  justify-content: center;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-.xtable-more:last-child { border-bottom: none; }
 
 /* 虚拟滚动（windowing）：容器限高可滚动；行高由 --vrow 统一（与 scroll 数学对齐） */
 .xtable.xtable-virtual .xtable-body {
@@ -2874,14 +2839,6 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 .nav-scroll {
   overflow-y: auto;
   overflow-x: hidden;
-}
-
-/* 窗口最大化/缩放命中区域稳定性
-   原生 Mica 和标题栏 overlay 不使用 CSS blur/transform 合成层，
-   避免 Chromium 在客户区变化后保留过期的鼠标命中缓存。 */
-.electron-mica .titlebar,
-.electron-mica .sidebar {
-  /* v3.0：旧的「岛不磨砂」禁令已删——侧边岛纳入全局白容器统一参数（磨砂随滑块联动） */
 }
 
 /* 实时网速监控 */
@@ -5166,20 +5123,6 @@ body.electron-mica.win-maximized .sidebar {
   background: var(--surface-solid);
 }
 
-/* 卡片级磨砂：内容滚动时卡片底下模糊，材质与背景保持通透 */
-body.electron-mica .card,
-body.electron-mica .table-card,
-body.electron-mica .settings-section,
-body.electron-mica .appearance-card,
-body.electron-mica .overview-card,
-body.electron-mica .summary-card,
-body.electron-mica .empty-state,
-body.electron-mica .mw-card,
-body.electron-mica .peri-card,
-body.electron-mica .pw-topbar {
-  /* v3.0 批次：saturate 从 1.5 收敛到 1.35，与全局白容器统一规则一致——
-     消除 electron-mica 异步挂载时的磨砂饱和度跳变（原 1.35→1.5 视觉上像"过一会才嵌套"） */
-}
 /* 口径 v2·M2：材质态原先在这里把二级按钮底再顶回一次 --bg-card（第三份常态底）。
    现在 .btn 的 floor 栈与材质开关无关，本段不再需要按钮专属覆写——材质只影响容器分账。 */
 /* 浮层：更强磨砂保证可读 */
@@ -5449,7 +5392,6 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
 .filter-tabs,
 .progress-section,
 .category-list,
-.speed-card,
 .metric-card,
 .settings-entry-card,
 .process-entry-card,

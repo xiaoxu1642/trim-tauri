@@ -1,6 +1,6 @@
 // spotlight.js - 跟随聚光 · Spotlight（Motion.Lab spotlight-follow 改，窗口界面升级3）
 // 仅作用于「选择块」：按钮(.btn) / 分段标签(.filter-tab) / 分类胶囊(.maint-tab) /
-// 材质卡(.material-card) / 单选行(.radio-row)。光斑是一层绝对定位的 .spot-layer，
+// 材质卡(.material-card)。光斑是一层绝对定位的 .spot-layer，
 // radial 渐变按宿主圆角裁剪；坐标由 document 级事件委托写入 --spot-x/--spot-y，
 // 不给元素逐个挂监听，动态渲染的列表按钮（复制/打开/清理该项等）同样生效。
 // prefers-reduced-motion 实时求值：reduce 时不生成光斑、残留光斑立即熄灭（design-system 硬性约束 3）。
@@ -14,7 +14,7 @@
     return !!(window.ds && window.ds.reducedMotion && window.ds.reducedMotion());
   }
 
-  var HOST_SELECTOR = '.btn, .filter-tab, .maint-tab, .material-card, .radio-row';
+  var HOST_SELECTOR = '.btn, .filter-tab, .maint-tab, .material-card';
   var LAYER_CLASS = 'spot-layer';
   var current = null;
   // 性能 v3 ②：原实现每个 pointermove 都做「closest → getBoundingClientRect → 写两个

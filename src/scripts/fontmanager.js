@@ -336,5 +336,5 @@
     refreshDeleteBtn();
   }
 
-  window.fontmanager = { open, close, restore, applyToRoot };
+  window.fontmanager = { open, restore };
 })();

@@ -712,27 +712,11 @@
   color: var(--fg-primary);
 }
 
-/* 优雅关闭 Toast（感谢使用） */
-.toast-shutdown {
-  width: min(360px, calc(100vw - 48px));
-  max-width: 360px;
-}
-
 /* 审查 v3-L2：`.shutdown-steps` 容器与 `.shutdown-step*` 全块删除——关机编排
    UI 未随 Tauri 迁移，JS/HTML 零引用（全仓 grep 证实）；块内还有一条 E3-1
    同族的 `color: white` 不可达兜底（暗色 2.19:1），一并清除 */
 
 /* 右键菜单详情弹窗（Fluent Design，适配浅色/深色主题） */
-.ctx-detail-backdrop {
-  position: fixed;
-  inset: 0;
-  /* 刻意设计：详情弹窗遮罩仅极轻磨砂（4px），重模糊会喧宾夺主——独立观感，不并入玻璃档位 */
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  /* 背景/z-index/animation 只在下方的同选择器规则里写一份（审查 F1c-M03：重复 prelude 后写压前写，改上面等于假编辑） */
-}
-
 .ctx-detail-grid {
   display: flex;
   flex-direction: column;
@@ -1027,13 +1011,6 @@
   display: flex;
   gap: 8px;
   padding: 4px 2px 0;
-}
-
-/* 右键管理详情弹窗：对齐使用说明弹窗的遮罩与卡片风格 */
-.ctx-detail-backdrop {
-  background: color-mix(in srgb, var(--bg-app) 60%, rgba(0, 0, 0, 0.4));
-  z-index: 10000;
-  animation: fadeIn var(--duration-base) var(--ease-standard);
 }
 
 /* 设置页：功能入口三卡片（安装路径绑定 / 大模型管理 / 字体选择）
@@ -2079,13 +2056,6 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
 .netcheck-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .netcheck-links { border-top: 1px solid var(--border-subtle); padding-top: 10px; }
 .netcheck-links-label { font-size: var(--fs-meta); color: var(--fg-tertiary); }
-/* v3.7.0 议题六 P1：网卡高级属性只读区（三级缩进区分「网卡 / 状态行 / 属性行」） */
-/* v2-L6：--fg 全仓无定义（真源是 --fg-primary/--fg-secondary/--fg-tertiary 三级）且无 fallback
-   ⇒ 这条 color 一直被丢弃、实际继承 body 的 --fg-primary；改成显式 --fg-primary，观感不变。 */
-.nic-prop-head { color: var(--fg-primary); font-weight: calc(600*var(--font-weight-scale,1)); margin-top: 6px; }
-.nic-prop-sub { color: var(--fg-tertiary); }
-.nic-prop-item { padding-left: 14px; }
-
 /* 审查v4-L8：浏览器预览模式全局横幅（preload 缺失的降级路径）。
    无动效、不拦截点击（pointer-events:none），常驻顶部直到页面关闭。 */
 .preview-mode-banner {

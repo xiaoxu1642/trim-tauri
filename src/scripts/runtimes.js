@@ -274,5 +274,5 @@
     if (!items.length && !scanning) startCollect();
   }
 
-  window.runtimes = { init, onEnter, startCollect };
+  window.runtimes = { init, onEnter };
 })();

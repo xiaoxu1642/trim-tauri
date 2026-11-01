@@ -14,7 +14,6 @@
     '.table-card',
     '.summary-card',
     '.metric-card',
-    '.speed-card',
     '.benchmark-panel'
   ].join(',');
 

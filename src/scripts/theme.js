@@ -23,26 +23,6 @@
     // （main.css 的 --bg-app 同值）—— 静态值首帧即被本行覆盖，两处各写一个离表色等于首帧与稳定态各说各话。
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) meta.setAttribute('content', '#F6F4FB');
-
-    ensureRingGradientDef();
-  }
-
-  // 审查 7-2：名实一致——本函数只在首次调用时创建 defs（之后幂等返回），非每次更新
-  // 审查 5-2：环形进度渐变改走强调色 token（两 stop 同色保 url() 引用结构），主题/强调色切换自动跟随
-  function ensureRingGradientDef() {
-    let defs = document.getElementById('ringGradientDef');
-    if (!defs) {
-      defs = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      defs.setAttribute('width', '0');
-      defs.setAttribute('height', '0');
-      defs.style.position = 'absolute';
-      defs.innerHTML = '<defs><linearGradient id="ringGradient" x1="0%" y1="0%" x2="100%" y2="100%">' +
-        '<stop offset="0%" stop-color="var(--accent, #6A59C9)"/>' +
-        '<stop offset="100%" stop-color="var(--accent, #6A59C9)"/>' +
-        '</linearGradient></defs>';
-      defs.id = 'ringGradientDef';
-      document.body.appendChild(defs);
-    }
   }
 
   window.theme = {

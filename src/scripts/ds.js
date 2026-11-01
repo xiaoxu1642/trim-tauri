@@ -1,4 +1,4 @@
-// ds.js - Trim Design-System 高频五件套 API（Badge / Progress / Slider / Switch）
+// ds.js - Trim Design-System 高频 API（Badge / Progress / Slider / Tooltip）
 // 行为规格参考 shadcn/ui（Radix）源码直译；视觉见 styles/ds.css（Fluent token）。
 // Dialog（确认弹窗）的行为层在 modal.js 内实现（B10 焦点陷阱），不经过本文件。
 // 零依赖、零框架；window.ds 暴露，任意窗口引入 ds.css + ds.js 即可使用。
@@ -26,7 +26,7 @@
     }
   } catch (e) { /* 存储不可用不拦启动 */ }
 
-  const ds = { version: '1.0.0' };
+  const ds = {};
 
   // reduced-motion 的唯一求值口径：缓存 MediaQueryList **对象**（监听 change 需要同一对象），
   // 每次读它的 .matches 仍是实时值。所有脚本一律走 window.ds.reducedMotion()，
@@ -149,34 +149,6 @@
       syncSlider(el);
       el.addEventListener('input', () => syncSlider(el));
     });
-  }
-
-  // ---------- ④ Switch ----------
-  // 与 main.css 既有 .toggle-switch 标记结构完全一致，动态内容直接可用。
-  function sw({ checked = false, label = '', title = '', id = '', onChange = null } = {}) {
-    const wrap = document.createElement('label');
-    wrap.className = 'toggle-switch';
-    if (title) wrap.setAttribute('data-tip', title); // LG-3（2026-09-15）：data-tip 替代原生 title
-    const input = document.createElement('input');
-    input.type = 'checkbox';
-    input.checked = !!checked;
-    if (id) input.id = id;
-    if (label) input.setAttribute('aria-label', label);
-    const track = document.createElement('span');
-    track.className = 'toggle-track';
-    const thumb = document.createElement('span');
-    thumb.className = 'toggle-thumb';
-    track.appendChild(thumb);
-    wrap.appendChild(input);
-    wrap.appendChild(track);
-    if (typeof onChange === 'function') {
-      input.addEventListener('change', () => onChange(input.checked));
-    }
-    return {
-      el: wrap,
-      input,
-      set(v) { input.checked = !!v; }
-    };
   }
 
   // ---------- ⑤ Tooltip（data-tip 委托，替代原生 title 避免双气泡） ----------
@@ -464,8 +436,6 @@
   ds.badgeHtml = badgeHtml;
   ds.progress = { setFill, circle };
   ds.slider = { sync: syncSlider, initAll: initSliders };
-  ds.switch = sw;
-  ds.tooltip = { show: tooltipShow, hide: tooltipHide };
   ds.menu = menu;
   ds.skeletonRows = skeletonRows;
   ds.accordion = { enhance: accordionEnhance };

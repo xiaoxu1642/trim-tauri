@@ -288,5 +288,5 @@
     document.getElementById('btnSysRestore')?.addEventListener('click', open);
   }
 
-  window.sysrestore = { init, open, close, load };
+  window.sysrestore = { init };
 })();
