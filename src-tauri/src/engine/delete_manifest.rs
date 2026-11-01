@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use crate::engine::{civil_from_days, log, paths};
 use crate::security;
 
-/// 只保留最近 50 个批次（对照 FILECLEAN_MANIFEST_KEEP）
+/// 只保留最近 50 个批次（对照 MANIFEST_KEEP）
 const MANIFEST_KEEP: usize = 50;
 
 /// 删除清单目录

@@ -73,7 +73,7 @@
   const glassStates = new Map(); // el  -> { kind, w, h, radius, blur, refract }
   // 容量上限（性能 v3 ①，写法对齐 MAP_CACHE_MAX / FILTER_BUCKETS_MAX）：glassStates 此前没有上限——
   // MAX_REFRACT 28 只管折射名额、FILTER_BUCKETS_MAX 48 只管滤镜桶，纯磨砂元素照样逐个进 Map 并被 glassRo.observe。
-  // 现算挂载面：index.html 静态命中 84 个候选（btn-primary 13 + btn-accent 6 + btn-secondary 56 + field-input 8 +
+  // 现算挂载面：index.html 静态命中 90 个候选（btn-primary 14 + btn-accent 7 + btn-secondary 59 + field-input 9 +
   // usage-modal 1），但零尺寸（未激活页/未显示弹窗）在 measureGlass 就被挡下；卸载页每应用 3 个 .btn-secondary，百应用即 300+。
   // 512 给到静态面 6 倍余量，只在「DOM 里同时存在上千克个玻璃候选」时生效。超限的降级是「不再挂新元素」（不 observe、
   // 不挂弹性、不写行内 backdropFilter），**不回改已挂元素**：已挂元素的视觉终值一个都不动；未挂元素走 main.css 的 CSS floor，

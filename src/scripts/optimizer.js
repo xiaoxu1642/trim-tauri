@@ -447,7 +447,7 @@
   // ==================== 高危项红色警告（合规强化） ====================
   // 以下项会显著削弱系统安全防护，执行前必须弹红色警示确认。
   // 审查 v2-K3：这份手写清单的定位是「比数据层 risk=high 更严的例外集」，通用判据见
-  // needsHazardConfirm()。原有的 tf_microcode_del / spectre_off 在 116 项数据里不存在
+  // needsHazardConfirm()。原有的 tf_microcode_del / spectre_off 在 134 项数据里不存在
   // （死条目，只会让这份清单看起来「已核对」），已删；集合差由 check-channel-map 门禁 F
   // 的三条对拍（Rust ⇄ JS ⇄ 数据层 risk=high）钉住，双向差集非空即红。
   const HAZARD_OPTION_IDS = new Set([
@@ -713,8 +713,8 @@
     if (s.service) return '停止服务 ' + s.service + (s.disable ? ' 并设为禁用' : '');
     if (s.reg) return '导入注册表项（多键值原样写入）';
     if (s.pwsh) {
-      // 执行引擎如实报：数据层标 pwsh 的 56 个步骤里 45 个走主进程原生解释器
-      // （execMode 由 optimizer:list 按 pssteps::compile 实算下发）。
+      // 执行引擎如实报：数据层标 pwsh 的步骤 apply 31 个（含 restore 40 个），哪几条走主进程原生
+      // 解释器由 execMode 逐条实算（optimizer:list 按 pssteps::compile 下发），不在注释里写死条数。
       // 一律写「执行 PowerShell 内联脚本」是在谎报引擎，会让人以为应用依赖 PowerShell。
       if (s.execMode === 'inbox-ps') return '改系统设置（经系统自带的 Windows PowerShell，无需安装任何组件）';
       if (s.execMode === 'native') return '改系统设置（主进程原生执行）';

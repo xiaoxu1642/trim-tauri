@@ -1,6 +1,8 @@
 // check-css-tokens.mjs —— 「引用了未定义的自定义属性」的机器断言（审查 v2-L6）
 //
-// 为什么要这条门禁：main.css 里躺着 5 处 `var(--bg-elev)` / `var(--border-soft)` ——
+// 为什么要这条门禁：门禁上线前 main.css 里存在 `var(--bg-elev)` / `var(--border-soft)`
+// （2026-11 复核实测现盘已归零；现存计数以现算为准：
+// `rg -n "var\(--bg-elev\)|var\(--border-soft\)" src/styles/main.css`）——
 // 名字全仓**没有定义**，于是每一处都静默退到 fallback 字面值（`--bg-elev` 就是
 // `--bg-elevated` 写漏了后缀）。更糟的形态是**连 fallback 都没写**的那几条：
 // 按 CSS 变量规范，引用未定义且无 fallback 的声明在 computed-value 阶段被判 invalid，

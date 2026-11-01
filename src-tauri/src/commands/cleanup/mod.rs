@@ -1,4 +1,4 @@
-//! cleanup 域（C 批）：cleanup 9 条通道（规则库 / 扫描 / 执行 / 占用检测 / 明细）
+//! cleanup 域（C 批）：cleanup 16 条通道（规则库 / 扫描 / 执行 / 占用检测 / 明细；模块总 17，另含 `cleanup_allow_preview_assets`）
 //!
 //! 对照 Electron `main.js` 1188-2042（含规则在线更新 1560-1786）。
 //!

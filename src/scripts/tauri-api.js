@@ -162,7 +162,7 @@
     'paths:browse': 'paths_browse',
     'paths:app-icon': 'paths_app_icon',
     'paths:file-icon': 'paths_file_icon',
-    // fileclean（4）
+    // fileclean（3）
     'fileclean:scan': 'fileclean_scan',
     'fileclean:execute': 'fileclean_execute',
     'fileclean:delete-file': 'fileclean_delete_file',
@@ -208,7 +208,7 @@
     'optimizer:nara-panel': 'optimizer_nara_panel',
     'optimizer:privacy-panel': 'optimizer_privacy_panel',
     'optimizer:external-scan': 'optimizer_external_scan',
-    // system / startup（5）
+    // system / startup（8）
     'system:disk-type': 'system_disk_type',
     'system:disk-list': 'system_disk_list',
     'startup:scan': 'startup_scan',

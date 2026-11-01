@@ -285,7 +285,7 @@ if (settingsRs && uninstallJs) {
 console.log(`\ncheck-appearance-prefs: 命中断言 ${hits.length} 条，失败 ${failures} 条`);
 // ---- C 组：外观域键表 ⇄ 渲染层键表对拍 + 迁移口径 + 四处同步（v7.2 P1 · F4a2-M01）----
 // 来源：单元代理片段 uF4a2m1-gate.snippet.mjs 的 S2，主 agent 2026-10-22 合并。
-// 抓什么：外观域 11 个键的真源从 localStorage 迁到后端 appearance.json 之后，键表在两侧各有一份
+// 抓什么：外观域 10 个键的真源从 localStorage 迁到后端 appearance.json 之后，键表在两侧各有一份
 // 字面量（Rust 的 `APPEARANCE_PREF_KEYS` 与渲染层同名表）。任一侧单独增删键 ⇒ 前端推的键被后端
 // 判成「未知的外观键」，设置写不进真源而界面看着像成功（§4.1 的「没报错」型假绿）。
 // 断言的假绿防线：任何一侧抽不到体或抽空 ⇒ 判红并说明「不是相等，是没抽到」，不打 ✓。

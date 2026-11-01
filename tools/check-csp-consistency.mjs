@@ -1,11 +1,11 @@
-// check-csp-consistency.mjs —— 5 份 CSP meta 共同前缀一致性门禁（审查 v3-L4）
+// check-csp-consistency.mjs —— 4 份 CSP meta 共同前缀一致性门禁（审查 v3-L4）
 //
 // 为什么判红：CSP 唯一真源在 index.html 的 meta 标签（AGENTS §5.9），3 个子窗 HTML
 // 各带一份逐字拷贝（历史上靠人肉同步）。改 index.html 的 CSP 而忘了子窗 → 叠加取严
 // 之下子窗行为漂移，且没有任何报错。
 //
 // 判定：去掉 index.html 独有的 `frame-src`（网速页内嵌测速 iframe 必需，属**收窄**，
-// 白名单候选③）之后，5 份 meta 的 content 必须逐字相等。
+// 白名单候选③）之后，4 份 meta 的 content 必须逐字相等。
 //
 // 审查 L-2（2026-10-03）补：frame-src 剥离是「去掉再比」，一份子窗若**新增**自己的
 // frame-src（放宽 iframe 来源）也会被一起剥掉 ⇒ 漏判。故对 frame-src 出现次数另立

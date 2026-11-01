@@ -152,8 +152,9 @@
 
   // 渲染脚本按需加载（v3.7.0 议题五）：非首屏脚本从 index.html 摘出，进入对应页面（或首帧空闲）时动态注入；
   // 改造前 38 个脚本标签全部同步加载、启动时一次性 init，首屏解析量级约 0.8 MB。
-  // 选型：动态 script 注入与现有 CSP（script-src 只允许 self）完全兼容，无需把 25 个 IIFE 改成 ESM、无需构建
-  // 步骤、零新增依赖（AGENTS.md §5 红线）。数组内按依赖顺序排列，先加载的先执行（如 modelpicker ← intro ← contextmenu）。
+  // 选型：动态 script 注入与现有 CSP（script-src 只允许 self）完全兼容，无需把现盘 IIFE 脚本
+  // （src/scripts/*.js，现算：rg -c "^\s*\(function" src/scripts/*.js）改成 ESM、无需构建步骤、
+  // 零新增依赖（AGENTS.md §2 红线）。数组内按依赖顺序排列，先加载的先执行（如 modelpicker ← intro ← contextmenu）。
   const PAGE_SCRIPTS = {
     // v3 C（2026-10-02）：磁盘清理域两份脚本从 index.html 摘出，进页时按需注入（首屏最重的两块）。
     // 顺序固定 —— fallback 先于 cleanup：cleanup.js 的顶层 IIFE 要读 window.CLEANUP_RULES_FALLBACK 构建分类。

@@ -89,7 +89,7 @@ if (unused) {
 }
 
 // ---- v2-L4P-45（F-11）：src-tauri/icons 只读枚举台账 ----
-// 此前门禁只扫 frontendDist（src/），看不见 src-tauri/icons：那里 13 个
+// 此前门禁只扫 frontendDist（src/），看不见 src-tauri/icons：那里 17 个
 // Square*/StoreLogo 等 Windows 打包位图不在 bundle.icon 清单里、语料也零引用，
 // 但它们由 Tauri bundler 按 targets 隐式消费，**不可删**。这里做双向台账：
 // 盘上→清单（orphan 打印）、清单→盘上（missing 判红）——bundle.icon 指向缺失文件时，

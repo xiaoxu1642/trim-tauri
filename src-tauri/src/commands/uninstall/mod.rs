@@ -18,12 +18,25 @@
 //! 整条退役后**保留为内部代码**（只由 residue 的四类扫描复用），不再暴露命令。
 //! 跨契约面的回归网单独放 residue_trace_tests（cfg(test)）。
 //!
-//! 注册（lib.rs generate_handler + CHANNEL_MAP + check-guard-tiers MUST_MAIN 同步落）：
+//! 注册（lib.rs generate_handler + CHANNEL_MAP + check-guard-tiers MUST_MAIN 同步落；
+//! 条目数以 lib.rs 注册为准，现算：`rg -c "commands::uninstall::" src-tauri/src/lib.rs`）：
 //! ```text
 //! commands::uninstall::uninstall_list,
 //! commands::uninstall::uninstall_run,
+//! commands::uninstall::uninstall_modify,
+//! commands::uninstall::uninstall_pending_add,
+//! commands::uninstall::uninstall_pending_list,
+//! commands::uninstall::uninstall_pending_revoke,
 //! commands::uninstall::uninstall_residue_scan,
 //! commands::uninstall::uninstall_residue_execute,
+//! commands::uninstall::uninstall_dir_size,
+//! commands::uninstall::uninstall_reg_backup_list,
+//! commands::uninstall::uninstall_reg_backup_restore,
+//! commands::uninstall::uninstall_batch_list,
+//! commands::uninstall::uninstall_batch_restore,
+//! commands::uninstall::uninstall_report_list,
+//! commands::uninstall::uninstall_report_get,
+//! commands::uninstall::uninstall_appx_logo,
 //! ```
 
 mod appx;

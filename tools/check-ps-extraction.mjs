@@ -20,7 +20,7 @@
 // 需要把「未验证」也当失败的场景（发布前验收）加 `--strict`。
 //
 // 用法：node tools/check-ps-extraction.mjs [--run [--only a,b]] [--strict] [--no-run]
-//   --run         执行行为层（真起 pwsh，只跑不带 noRun 的 15 条）；缺 pwsh 即判红
+//   --run         执行行为层（真起 pwsh，只跑不带 noRun 的映射；现 MAPPING 仅 1 项且带 noRun ⇒ 可跑 0 条）；缺 pwsh 即判红
 //   --only        配合 --run，只跑名字匹配的映射（排障用）
 //   --strict      把「行为层未验证」也算作失败（退出码 1）——发布前验收用这条
 //   --no-run      历史姿势，现为默认行为的显式写法（保留兼容，不判错）

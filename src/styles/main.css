@@ -97,8 +97,9 @@
   --knob-bg: #ffffff;
 
   /* 玻璃模糊档位：基准值与 ds.GLASS_MAX_BLUR_PX 同值（check-css-tokens 逐值对拍），挂玻璃皮肤后由
-     「背景模糊度」滑块实时改写，未挂皮肤时回落基准值。mid 档 = 主档 ×0.77，
-     reduced-motion 段的实底折算走 ×0.6（与已退役的 soft 档同系数，不要顺手改成乘 mid）。
+     「背景模糊度」滑块实时改写，未挂皮肤时回落基准值。mid 档 = 主档 ×0.77。
+     系统「减少动效」只归零动画、不动模糊；系统关「透明效果」时 --glass-blur 直接归零
+     （prefers-reduced-transparency 段），不存在按比例折算的模糊档。
      弱/柔/强三档全仓零消费已删——加档前先确认有消费方，档位表不留「四档」的空名头。 */
   --glass-blur: 26px;
   --glass-blur-mid: calc(var(--glass-blur) * 0.77);
@@ -1705,7 +1706,7 @@ body.lg-reduce-motion .lg-thumb {
   font-size: calc(11px * var(--font-size-scale, 1));
   color: var(--fg-tertiary);
   border: 1px solid var(--border-default);
-  border-radius: 999px; /* 胶囊徽章例外（AGENTS §5 允许） */
+  border-radius: 999px; /* 胶囊徽章例外（AGENTS §2 允许） */
 }
 .syspanel-card-head .syspanel-tag + .btn { margin-left: 8px; }
 /* 头部相邻按钮只让首个吃 auto 靠右，后一个跟 8px（两个 auto 会均分空间撑出空隙） */
@@ -2320,7 +2321,7 @@ input[type="radio"]:focus-visible {
 .speed-card,
 .metric-card,
 .settings-section {
-  border-radius: var(--radius-large); /* 12px，对齐 Win11 25H2 卡片规范 */
+  border-radius: var(--radius-large); /* 14px，对齐 Win11 25H2 卡片规范 */
 }
 
 /* 展开收起动画（Fluent 强调曲线） */
@@ -3236,7 +3237,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   display: flex;
   align-items: center;
   justify-content: center;
-  /* 审查 v3-L2：`color:#fff` 兜底删除——4 个变体各自覆写 color，这条白字
+  /* 审查 v3-L2：`color:#fff` 兜底删除——3 个变体（reg / folder / task）各自覆写 color，这条白字
      是下一个变体忘写 color 时的隐形对比度陷阱（E3-1 同族） */
 }
 .startup-item-icon.reg { background: color-mix(in srgb, var(--info) 16%, transparent); color: var(--info); }
@@ -4262,7 +4263,7 @@ img.ctx-col-icon {
   font-size: calc(11px * var(--font-size-scale, 1));
   line-height: 1.6;
   padding: 0 9px;
-  border-radius: 999px; /* 状态胶囊例外（AGENTS §5 允许） */
+  border-radius: 999px; /* 状态胶囊例外（AGENTS §2 允许） */
   white-space: nowrap;
   color: var(--fg-tertiary);
   background: var(--bg-card-hover);
@@ -4788,7 +4789,7 @@ body.theme-light .nav-section-title { color: var(--fg-tertiary); }
   .btn > .btn-ripple { display: none; }
   /* 批次：悬浮岛侧边栏 —— 岛与轨道的宽度/阴影过渡一并关断 */
   .btn, .summary-card, .nav-item, .sidebar, .sidebar-rail { transition: none !important; }
-  /* v3.2.0（列表项卡片统一）：卡片行 hover 上浮关断（AGENTS §5 reduced-motion 无动画），只留背景/边框变化 */
+  /* v3.2.0（列表项卡片统一）：卡片行 hover 上浮关断（AGENTS §2 reduced-motion 无动画），只留背景/边框变化 */
   .row-card, .maint-card, .startup-item { transition: none !important; }
   .row-card:hover, .maint-card:hover, .startup-item:hover { transform: none !important; }
 }
@@ -5667,7 +5668,7 @@ body:has(.splash-overlay:not(.finished)) .titlebar-title { visibility: hidden; }
   color: #fff;
   background: var(--splash-brand);
   border: none;
-  border-radius: 999px; /* 胶囊按钮例外（AGENTS §5 允许） */
+  border-radius: 999px; /* 胶囊按钮例外（AGENTS §2 允许） */
   cursor: pointer;
   opacity: 0;
   box-shadow: 0 12px 26px -10px rgba(var(--splash-brand-rgb), .55);
@@ -5834,7 +5835,7 @@ body.electron-mica:not(.win-maximized) .titlebar-title {
   font-size: calc(11px * var(--font-size-scale, 1));
 }
 
-/* 全窗 prefers-reduced-motion 归零段（五窗都加载本文件）
+/* 全窗 prefers-reduced-motion 归零段（四窗都加载本文件）
    v5-K05 批次 8（2026-10-13）：本段曾在 P0 子窗 CSS 按需（6a8f02b）时被搬进
    只主窗加载的 main-pages.css，四子窗动效归零整段失效（可达动效 32/19/14/16 条
    照播）而门禁的「main+pages 合并判」照绿——搬错文件被合并集掩盖。现搬回本文件，

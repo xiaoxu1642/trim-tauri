@@ -62,7 +62,7 @@
   let CATEGORIES = CATEGORIES_FALLBACK;
 
   // 性能 v3 ③：id -> 归属索引。原 getItemById / groupKeyForItem 每次线性扫全库
-  // （规则库现算 5 组 / 22 子组 / 187 条 ⇒ 一次扫描约 7 万次比较），且 groupKeyForItem
+  // （规则库现算 5 组 / 21 子组 / 182 条 ⇒ 一次扫描约 7 万次比较），且 groupKeyForItem
   // 每组都调 getGroupItems ⇒ 每次分配约 10 个临时数组。
   // 铁律：索引**只存原始条目**（item 直接引用 CATEGORIES 里的对象，不复制、不裁剪），
   // 「是否可见」的判定留在调用侧走 hiddenIds —— 在索引里烘焙可见性会把 detect 未命中项
@@ -414,7 +414,7 @@
           }
           // F4a1-M01 残留射程（2026-10-23）：data-tip 的展示判据含 focusin，但无 tabindex
           // 的 span 拿不到焦点 ⇒ 键盘/读屏用户永远看不到后果。只对**确实写了后果**的条目
-          // 开放焦点（现算全库 3 条），不给 187 行的每个名称格都加停靠点。
+          // 开放焦点（现算全库 60 条），不给 182 行的每个名称格都加停靠点。
           const focusable = item.ifDeleted ? ' tabindex="0"' : '';
           inner = `<span class="xtable-cell-text"${focusable} data-tip="${escapeHtml(tipLines.join('\n'))}">${escapeHtml(xtable.middleEllipsis(item.name, 40))}</span>`;
           break;

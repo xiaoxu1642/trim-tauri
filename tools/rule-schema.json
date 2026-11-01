@@ -4,7 +4,7 @@
     "规则库契约表：**只承载词汇表与数值上限**（字段白名单 / 必填 / 枚举 / 上限 / token 登记集）。",
     "判定逻辑不进这张表：注册表禁删面（engine/protect.rs 与 Node 侧独立实现）、target 形态与单星 glob、",
     "excludePaths 的 :: 具名值约束、residue 三条件组≥2、token 的「禁 token 根 / 一段路径只允许一个变量」等都是**代码**，",
-    "把它们塞进数据文件就是在造通用规则引擎 —— 82 条库的规模不需要，且 AGENTS §2 是零新增依赖。",
+    "把它们塞进数据文件就是在造通用规则引擎 —— 260 条库的规模不需要，且 AGENTS §2 是零新增依赖。",
     "两个域的同名条目**刻意不同值**（tokens 的清理侧 14 个大小写敏感、残留侧 10 个不敏感且额外禁 token 根）：",
     "合并成一份等价清单会制造假一致，这是 tools/rule-tokens.mjs 头注释与 AGENTS §5.16/N6 的既有裁定。",
     "消费者有两个且必须同源：tools/check-cleanup-rule-contract.mjs + tools/check-residue-rule-contract.mjs（发布前门禁）",

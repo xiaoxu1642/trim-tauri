@@ -512,7 +512,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::netcheck::netcheck_collect,
         commands::netcheck::netcheck_repair,
         commands::diskbench::diskbench_run,
-        // ---- C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细，9 条）----
+        // ---- C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细，16 条）----
         commands::cleanup::cleanup_rules,
         commands::cleanup::cleanup_reg_backup_list,
         commands::cleanup::cleanup_reg_backup_restore,
@@ -556,7 +556,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::fonts::fonts_remove_imported,
         commands::fonts::fonts_save_config,
         commands::paths::paths_scan,
-        // ---- D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设，37 条）----
+        // ---- D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设，39 条）----
         commands::fileclean::fileclean_scan,
         commands::fileclean::fileclean_delete_file,
         commands::fileclean::fileclean_execute,
@@ -609,7 +609,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::appearance::appearance_set_pref,
         // ---- E 批：elevate（UAC 自提权 + 新旧实例交接）----
         commands::elevate::elevate_request,
-        // ---- E 批：updater（多线路容灾 + minisign 断代，6 条）----
+        // ---- E 批：updater（多线路容灾 + minisign 断代，5 条）----
         commands::updater::updater_check,
         commands::updater::updater_completion,
         commands::updater::updater_download,

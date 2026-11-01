@@ -86,8 +86,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  /* 审查 v3-L2：删掉不可达的 `color: white` 兜底——20/20 个使用点都带内联
-     --icon-bg + color，这条白字是指下一次「去掉内联 style」时的对比度陷阱 */
+  /* 审查 v3-L2：删掉不可达的 `color: white` 兜底——23/23 个使用点（index.html 20 + sysrestore.js 3）
+     都带内联 --icon-bg + color，这条白字是指下一次「去掉内联 style」时的对比度陷阱 */
   flex-shrink: 0;
 }
 
@@ -1750,7 +1750,7 @@
   white-space: nowrap;
 }
 
-/* 快捷指令页（63 条系统快捷入口）：卡片样式对齐图3——独立白色容器 + 图标色块 + 名称 + 分类标签 + 描述 */
+/* 快捷指令页（69 条系统快捷入口）：卡片样式对齐图3——独立白色容器 + 图标色块 + 名称 + 分类标签 + 描述 */
 .qc-toolbar {
   display: flex;
   align-items: center;
