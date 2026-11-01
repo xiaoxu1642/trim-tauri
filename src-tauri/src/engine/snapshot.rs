@@ -69,6 +69,32 @@ pub fn domain_key(label: &str, domain: &str) -> String {
     format!("{label}|{domain}")
 }
 
+/// 归一化后的 id **唯一化**：`by_id` 是 `id → 项` 的 Map，同 id 的两条里后一条静默
+/// 覆盖前一条（界面上两行都能点，写操作却永远打到同一个坐标）。
+///
+/// 为什么不能只追加一次后缀就罢手：兜底名本身可能撞上更早出现的字面 id ——
+/// 上游一旦产出一条 id 形如 `x#2` 的项，后面 `x` 的两条依次得到 `x`、`x#2`，
+/// 与它同 id。所以后缀要递增试探到真正插入成功为止。
+///
+/// `index` 是该项在本轮数组里的序号（各域原有的后缀起点），`used` 是本轮已发放的 id 集。
+pub fn unique_snapshot_id(
+    used: &mut std::collections::HashSet<String>,
+    base: &str,
+    index: usize,
+) -> String {
+    if used.insert(base.to_string()) {
+        return base.to_string();
+    }
+    let mut n = index;
+    loop {
+        let candidate = format!("{base}#{n}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 /// 扫描项数组 → `id → 项`。
 ///
 /// **不按 id 长度剔除**：长路径/长参数的项（如启动项 id = `reg|<path>|<name>`）被剔除后，
@@ -107,6 +133,21 @@ mod tests {
         let m = by_id(&[json!({ "v": 1 }), json!({ "id": 7 }), json!({ "id": "ok" })]);
         assert_eq!(m.len(), 1);
         assert!(m.contains_key("ok"));
+    }
+
+    /// 唯一化必须试探到不撞为止：兜底名与既有字面 id（`x#N` 形态）相同时，
+    /// 旧写法丢弃第二次 insert 的返回值，两条项同 id 而后者覆盖前者。
+    /// 判红自证：把 `unique_snapshot_id` 改回「追加一次 `#index` 就返回」⇒ 末两条断言红。
+    #[test]
+    fn unique_id_retries_past_existing_suffix() {
+        let mut used = std::collections::HashSet::new();
+        assert_eq!(unique_snapshot_id(&mut used, "x", 0), "x");
+        assert_eq!(unique_snapshot_id(&mut used, "x", 0), "x#0");
+        assert_eq!(unique_snapshot_id(&mut used, "x", 0), "x#1", "已占用则继续递增");
+        // 对抗样本：下一项基名恰好等于前面发放的兜底名
+        assert_eq!(unique_snapshot_id(&mut used, "x#0", 0), "x#0#0");
+        assert_eq!(unique_snapshot_id(&mut used, "x", 0), "x#2");
+        assert_eq!(used.len(), 5, "每次发放都必须真的进集合");
     }
 
     /// 分槽隔离：清除 A 窗口的槽不得波及 B 窗口（跨窗口互不覆盖）。

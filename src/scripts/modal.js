@@ -138,9 +138,15 @@
   // opts: { id, title, bodyHtml, footerHtml, backdropClass, modalClass, bodyClass, footerClass, width,
   //         onRequestClose(reason)->false 可阻止关闭, iconSvg, metaHtml }（v3.2.0 弹窗统一批次：header 左侧可选图标 +
   //         标题下元信息行，供优化中心详情等带徽章头的弹窗复用；iconSvg/metaHtml 为调用方生成的可信 HTML）
-  // 返回 { backdrop, modal, body, footer, close() }；关闭时触发 opts.onClose(reason)
+  // 返回 { backdrop, modal, body, footer, close(reason) }；关闭时触发 opts.onClose(reason)
+  // （未传原因按 'close' 结算，见 ctrl.close 的注释）
   function create(opts = {}) {
     const id = opts.id || 'modal-' + Date.now();
+    // F3-L06：同 id 重开必须是「替换」而不是「摘节点」——裸 remove 会让旧 ctrl 的 escHandler 与
+    // 焦点陷阱留在文档上、onClose 不触发（confirm 的 Promise 永不 resolve），liveCtrls 也继续持有死条目。
+    // 按登记表找回旧 ctrl 走它自己的 close()；不在登记表里的静态同 id 节点仍走 remove 兜底。
+    const previous = Array.from(liveCtrls).find(function (c) { return c.backdrop && c.backdrop.id === id; });
+    if (previous) previous.close('replace');
     document.getElementById(id)?.remove();
 
     const backdrop = document.createElement('div');
@@ -186,14 +192,16 @@
       modal: modalEl,
       body: modalEl.querySelector('.usage-body'),
       footer: useFooter ? modalEl.querySelector('.usage-footer') : null,
-      close() {
+      close(reason) {
         if (closed) return;
         closed = true;
         liveCtrls.delete(ctrl); // F3-L04：关闭即出登记表
         document.removeEventListener('keydown', escHandler);
         backdrop.remove();
         trap.release();
-        if (opts.onClose) opts.onClose('close');
+        // F3-L06：真实关闭原因透传给 onClose（es / btn / backdrop / replace 由 requestClose 等传入），
+        // 外部直接调 close() 时保持旧口径 'close'
+        if (opts.onClose) opts.onClose(reason || 'close');
       }
     };
     liveCtrls.add(ctrl);
@@ -201,7 +209,7 @@
     function requestClose(reason) {
       if (closed) return;
       if (opts.onRequestClose && opts.onRequestClose(reason) === false) return;
-      ctrl.close();
+      ctrl.close(reason);
     }
 
     modalEl.querySelector('.usage-close').addEventListener('click', () => requestClose('btn'));

@@ -727,6 +727,10 @@
       };
       const vs = compile(gl.VERTEX_SHADER, this.vertSrc);
       const fs = compile(gl.FRAGMENT_SHADER, this.fragSrc);
+      // F5-L16：compile 失败返回 null，而 attachShader 的入参是非空 IDL 类型 —— 传 null 抛 TypeError，
+      // 异常会从 attach → commitGlass → attachGlassAll 一路冒出 setTimeout 批次，同批剩余元素全被跳过。
+      // 这里与后面的 LINK_STATUS 判据配成一对：装配失败只放弃本元素，不外溢。
+      if (!vs || !fs) return;
       const prog = gl.createProgram();
       gl.attachShader(prog, vs);
       gl.attachShader(prog, fs);
@@ -749,6 +753,13 @@
       const item = { canvas, gl, prog, uRes, uTime, uRadius, raf: 0, last: 0, dead: false };
       this.items.set(el, item);
       el.insertBefore(canvas, el.firstChild);
+      // F5-L18：上下文丢失后 draw 的退出条件（dead / isConnected / mode）都不成立，rAF 会继续对着
+      // 失效的上下文 clear/drawArrays，画布停在空白或上一帧残影。丢失即销毁自身；上下文恢复后
+      // 由 scheduleScan 走正常挂载路径重建，不在本处原地复活。
+      canvas.addEventListener('webglcontextlost', (ev) => {
+        ev.preventDefault();
+        this.destroy(el);
+      });
 
       const draw = (now) => {
         if (item.dead || !el.isConnected || mode !== 'full') {
@@ -1105,6 +1116,18 @@
       document.removeEventListener('pointercancel', onPressOut, true);
     }
   }
+  // F5-L15：reduce 关闭后的补挂必须自己做 —— commitGlass 只对 measureGlass 返回非空的新元素执行，
+  // 而 measureGlass 对已在册元素（glassStates.has）直接返回 null；scheduleScan / tryUpgradeGlass
+  // 只升折射、不碰焦散与弹性。原注释写「下一轮扫描自然回来」，对本情形不成立。
+  // 判据与 commitGlass 同一口径：只有 full 档的 floating 挂焦散、button 挂弹性。
+  function restoreMotionEffects() {
+    if (mode !== 'full') return;
+    glassStates.forEach((st, el) => {
+      if (!el.isConnected) return;
+      if (st.kind === 'floating') shimmer.attach(el);
+      else if (st.kind === 'button') { el.classList.add('lg-elastic'); elasticEls.add(el); }
+    });
+  }
   function syncReduceMotion() {
     const was = reduceMotion;
     reduceMotion = prefersReduceMotion();
@@ -1112,8 +1135,9 @@
     if (reduceMotion !== was) bindReducePointerListeners(!reduceMotion);
     // F5-M02：成对回收——翻到 reduce 时在途 WebGL 焦散画布必须销毁。CSS 的 @media reduce 只 display:none 藏画布，
     // rAF 循环与 shader 照跑（无效 GPU/CPU 功耗，与本文件自带的电池降级口径不对等）；shimmer.attach 已拒绝新元素，
-    // 这里补齐存量回收。反向（reduce 关闭）不用补挂：浮层重开/下一轮扫描自然回来。
+    // 这里补齐存量回收。反向（reduce 关闭）由 restoreMotionEffects 补挂，见该函数注释。
     if (reduceMotion && !was) shimmer.destroyAll();
+    else if (!reduceMotion && was) restoreMotionEffects();
   }
 
   function init() {

@@ -16,6 +16,26 @@
 
   var TYPE_COLORS = { error: 'var(--danger)', success: 'var(--success)', warning: 'var(--warning)' };
 
+  // F3-L07：stack 形态补同屏上限，口径与主窗 app.js 的 MAX_VISIBLE_TOASTS 一致 ——
+  // 子窗原先无上限，一批并行失败会把窗口压成一整列提示。超出的对最旧一条走退场动画。
+  var MAX_VISIBLE_TOASTS = 4;
+  var EXIT_MS = 300;
+
+  function retire(el) {
+    if (!el || el.classList.contains('removing')) return;
+    el.classList.add('removing');
+    setTimeout(function () { el.remove(); }, EXIT_MS);
+  }
+
+  function trim(host) {
+    var alive = [];
+    Array.prototype.forEach.call(host.children, function (child) {
+      if (!child.classList.contains('removing')) alive.push(child);
+    });
+    // 退场中的条目不占名额：它们已在动画里、即将离开文档
+    for (var i = 0; i < alive.length - MAX_VISIBLE_TOASTS; i++) retire(alive[i]);
+  }
+
   // 提示行形态：宿主元素 id 由调用方给定（各窗 HTML 各有一行专属提示位）
   function hintLine(hostId, type, message) {
     var host = document.getElementById(hostId);
@@ -50,10 +70,8 @@
     text.textContent = String(message);
     el.appendChild(text);
     host.appendChild(el);
-    setTimeout(function () {
-      el.classList.add('removing');
-      setTimeout(function () { el.remove(); }, 300);
-    }, 4000);
+    trim(host);
+    setTimeout(function () { retire(el); }, 4000);
   }
 
   window.subToast = { hintLine: hintLine, stack: stack };

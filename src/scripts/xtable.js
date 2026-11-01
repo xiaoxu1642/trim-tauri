@@ -56,7 +56,7 @@
         data-col="${col.key}" style="${style}" data-align="${align}"${a11y}${sortable ? ' data-tip="点击排序"' : ''}>
         <span class="xtable-th-label">${window.ds.esc(col.label)}</span>
         ${sortable && state ? sortIndicatorHtml(state, col.key) : ''}
-        ${col.resizable === false ? '' : `<span class="xtable-resizer" data-resize="${col.key}" data-tip="拖动调整列宽"></span>`}
+        ${col.resizable === false ? '' : `<span class="xtable-resizer" data-resize="${col.key}" data-tip="拖动或方向键调整列宽" tabindex="0" role="separator" aria-orientation="vertical" aria-label="调整列宽" aria-valuemin="0"></span>`}
       </div>`;
     }).join('');
     return `<div class="xtable-head${opts.compact ? ' xtable-head-compact' : ''}" role="row">${cells}</div>`;
@@ -89,6 +89,23 @@
   // 用已失效的 startX/startW 造成宽度跳变，body.xtable-resizing（col-resize 光标）
   // 也会残留。注册表放模块级（而不是每个 resizer 一份），换组前先拆旧组。
   let activeResize = null;
+
+  // 列宽下限：再窄表头文案与排序箭头放不下（与键盘步进共用同一口径）
+  const RESIZE_MIN_WIDTH = 48;
+  // 键盘单次步进：一次方向键的列宽增量
+  const RESIZE_KEY_STEP = 8;
+
+  // F5-L17 / F5-L20：列宽写入的单点，鼠标拖拽与键盘步进共用。
+  // 「表头与数据行共用同一组宽度」是 buildLayout 的列对齐不变量：已在场的行带着渲染当时写死的 px，
+  // 只刷表头会让行留在旧宽（拖完即错位，再渲染才自愈）。行单元格带 data-cell（cleanup.js 渲染，
+  // 与表头 data-col 同 key 同源，check-html-contract 锚定），两侧同步刷。
+  function applyColWidth(key, w) {
+    colWidths[key] = w;
+    document.querySelectorAll(`.xtable-th[data-col="${key}"], .xtable-td[data-cell="${key}"]`).forEach(o => {
+      o.style.width = w + 'px';
+      o.style.flex = '0 0 auto';
+    });
+  }
 
   // 绑定表头交互：点击排序 + 拖拽列宽（幂等：重复调用不会重复绑定）
   function bindHeader(container, state, onChange) {
@@ -134,29 +151,56 @@
     container.querySelectorAll('.xtable-resizer').forEach(rz => {
       if (headerBound.has(rz)) return;
       headerBound.add(rz);
+      const key = rz.dataset.resize;
+      // separator 的当前值：优先用已登记的宽度，首次交互时退回表头实测宽（二者同口径取整）
+      const currentWidth = () => {
+        if (colWidths[key]) return colWidths[key];
+        const th = rz.closest('.xtable-th');
+        const measured = th ? Math.round(th.getBoundingClientRect().width) : 0;
+        return measured || RESIZE_MIN_WIDTH;
+      };
+      const syncValue = (w) => rz.setAttribute('aria-valuenow', String(w));
+      syncValue(currentWidth());
+      // F5-L20：键盘可达 —— Tab 落到手柄后 ←/→ 步进，与拖拽共用 applyColWidth。
+      // Enter/Space 必须就地吞掉：它们会冒到表头触发排序（鼠标路径已由 click 里的 closest 排除）。
+      rz.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); return; }
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        e.preventDefault();
+        e.stopPropagation();
+        const step = e.key === 'ArrowRight' ? RESIZE_KEY_STEP : -RESIZE_KEY_STEP;
+        const next = Math.max(RESIZE_MIN_WIDTH, currentWidth() + step);
+        applyColWidth(key, next);
+        syncValue(next);
+      });
       // F5-M03：拖拽会话全局单例（见 activeResize 声明处）
       rz.addEventListener('mousedown', e => {
         e.preventDefault();
         e.stopPropagation();
-        const key = rz.dataset.resize;
         const th = rz.closest('.xtable-th');
         if (!th) return;
         if (activeResize) activeResize.teardown();
         const startX = e.clientX;
         const startW = th.getBoundingClientRect().width;
+        // F5-L17：拖拽期间不合帧的话，每个 mousemove 都要整文档查一次表并逐节点写宽 ——
+        // 事件率由鼠标回报率决定（高回报率设备即每秒上千次查询+写）。这里只记待写宽度，rAF 里落一次。
+        let pendingW = 0, raf = 0;
+        const flush = () => {
+          raf = 0;
+          if (!pendingW) return;
+          applyColWidth(key, pendingW);
+          syncValue(pendingW);
+          pendingW = 0;
+        };
         const onMove = ev => {
-          const w = Math.max(48, Math.round(startW + ev.clientX - startX));
-          colWidths[key] = w;
-          // 「表头与数据行共用同一组宽度」是 buildLayout 的列对齐不变量：已在场的行
-          // 带着渲染当时写死的 px，只刷表头会让行留在旧宽（拖完即错位，再渲染才自愈）。
-          // 行单元格带 data-cell（cleanup.js 渲染，与表头 data-col 同 key 同源，
-          // check-html-contract 锚定），拖拽时两侧同步刷。
-          document.querySelectorAll(`.xtable-th[data-col="${key}"], .xtable-td[data-cell="${key}"]`).forEach(o => {
-            o.style.width = w + 'px';
-            o.style.flex = '0 0 auto';
-          });
+          pendingW = Math.max(RESIZE_MIN_WIDTH, Math.round(startW + ev.clientX - startX));
+          if (!raf) raf = requestAnimationFrame(flush);
         };
         const teardown = () => {
+          // 收尾必须落最后一次读数：mouseup 与最后一个 mousemove 同帧时，被取消的 rAF 里还压着宽度
+          if (raf) cancelAnimationFrame(raf);
+          raf = 0;
+          flush();
           document.removeEventListener('mousemove', onMove);
           document.removeEventListener('mouseup', onUp);
           document.body.classList.remove('xtable-resizing');

@@ -1302,8 +1302,14 @@ mod tests {
             "A3-L02：焦点实际落在内层 .checkbox，焦点规则必须指向它"
         );
         assert!(
-            include_str!("../../src/styles/main-pages.css")
-                .contains(".qc-search-wrap:focus-within {\n  border-color: var(--accent);\n  box-shadow: 0 0 0 2px var(--accent-light);"),
+            {
+                let css = include_str!("../../src/styles/main-pages.css");
+                // F1c-L08（2026-11-01）：焦点环由 `--accent-light` 改实心 `--accent`
+                //（前者 alpha 极低，合成后与底几乎同色）。断言只钉「有可见的 2px 环」，
+                // 不钉具体颜色 token —— 否则颜色迭代会把机制完好的改版判红。
+                css.contains(".qc-search-wrap:focus-within {")
+                    && css.contains("box-shadow: 0 0 0 2px var(--accent")
+            },
             "A3-L03：搜索框 outline:none 后必须有可见的 2px 替代环"
         );
         assert!(

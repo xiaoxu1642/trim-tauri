@@ -108,7 +108,6 @@
     const text = el.querySelector('.ds-ring-text');
     fill.style.strokeDasharray = `${c} ${c}`;
     fill.style.strokeDashoffset = String(c);
-    if (reducedMotion()) fill.style.transition = 'none';
 
     let value = null;
     return {
@@ -265,10 +264,10 @@
       pop = document.createElement('div');
       pop.className = 'ds-menu';
       pop.setAttribute('role', 'menu');
-      pop.innerHTML = current.map(it => `
+      pop.innerHTML = current.map((it, i) => `
         <button type="button" class="ds-menu-item${it.danger ? ' danger' : ''}"
           role="menuitem" ${it.disabled ? 'aria-disabled="true"' : ''}
-          data-menu-value="${esc(String(it.value == null ? '' : it.value))}">${esc(it.label)}</button>`).join('');
+          data-menu-index="${i}">${esc(it.label)}</button>`).join('');
       document.body.appendChild(pop);
       const r = trigger.getBoundingClientRect();
       const vw = document.documentElement.clientWidth;
@@ -285,7 +284,9 @@
       pop.addEventListener('click', e => {
         const btn = e.target.closest('.ds-menu-item');
         if (!btn || btn.getAttribute('aria-disabled') === 'true') return;
-        const it = current.find(x => String(x.value == null ? '' : x.value) === btn.dataset.menuValue);
+        /* 审查 F1b-L02：按 DOM 生成时的下标回填，而不是按 value 反查——
+           调用方允许省略 value，反查时缺省值/重复值都会选错第一项。 */
+        const it = current[Number(btn.dataset.menuIndex)];
         if (it) choose(it);
       });
       document.addEventListener('pointerdown', onDocDown, true);

@@ -196,8 +196,10 @@
   };
   // 需要显式调用 init() 的模块：这些文件加载时不会自执行 init。
   // 未列入的是自初始化件（DOMContentLoaded 自执行或纯数据/工具）——再调一次会重复绑定监听器。
+  // F3-L02：fontmanager / intro 不在本集合——两者都没有 init 导出（入口分别是
+  // fontmanager.restore() 与按需懒加载的面板），留在集合里只是记一笔空账。
   const MODULES_NEEDING_INIT = new Set([
-    'cleanup', 'contextmenu', 'deviceinfo', 'diskbench', 'fontmanager', 'intro',
+    'cleanup', 'contextmenu', 'deviceinfo', 'diskbench',
     'maintenance', 'memoryclean', 'netcheck', 'netspeed', 'optimizer', 'overview',
     'pathbinding', 'quickcmds', 'realtime', 'runtimes', 'startup', 'syspanel', 'sysrestore'
   ]);
@@ -239,6 +241,9 @@
       s.onerror = () => {
         _scriptLoading.delete(src);
         console.warn('[Trim] 脚本加载失败（不记账，下次进页重试）: ' + src);
+        // F3-L03：页面脚本注入失败也要落盘留痕 —— 空闲预取路径已走 log，本路径只有 console，
+        // 表现是「整页功能消失而日志干净」。失败仍 resolve(false) 放行，由页面自己降级。
+        window.app?.log?.('warn', '页面脚本加载失败（不记账，下次进页重试）: ' + src);
         resolve(false);
       };
       document.body.appendChild(s);
@@ -765,8 +770,9 @@
   // 加载应用信息
   async function loadAppInfo() {
     if (!window.api?.app) {
-      // 浏览器预览模式
-      setInfo('infoVersion', '2.8.0');
+      // 浏览器预览模式（F3-L05：这里不写版本号——预览态没有权威来源，手写字面量会变成
+      // 版本同步四处口径之外的又一个源，与 check-version-sync 逐渐分叉）
+      setInfo('infoVersion', '预览模式 · 版本未知');
       setInfo('infoPortable', '标准安装');
       setInfo('infoRuntime', 'N/A');
       setInfo('infoNode', 'N/A');
@@ -1069,7 +1075,7 @@
     // 表现为清理页按钮全部没绑事件、IPC 订阅缺失；cleanup 的 init 唯一入口是加载完成后那次。
     initModuleByName('overview');
     initModuleByName('deviceinfo');
-    initModuleByName('fontmanager');
+    // F3-L02：fontmanager 的入口是下面的 fontmanager.restore()，本清单已不再收录它。
 
     // 磁盘清理分段视图：分段栏点击切换（液态滑块由 liquid-glass.js 统一监听跟随）
     document.getElementById('cleanupTabs')?.addEventListener('click', async (e) => {

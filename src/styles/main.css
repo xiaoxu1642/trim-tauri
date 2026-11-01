@@ -255,10 +255,10 @@ body.theme-light[data-skin="glass"] {
   --glass-sheen: linear-gradient(135deg, rgba(255, 255, 255, 0.48) 0%, rgba(255, 255, 255, 0.10) 40%, rgba(255, 255, 255, 0) 58%);
 }
 
-/* 玻璃磨砂面：作用于侧边栏 / 内容区 / 卡片 / 空态 / 弹窗等主要面板层。
+/* 玻璃装饰面：作用于侧边栏 / 内容区 / 卡片 / 空态 / 弹窗等主要面板层。
    液态玻璃质感 = 更强增艳 + 顶部内嵌高光 + 玻璃描边 + 左上斜向光泽渐变
-   注意：玻璃只作用于内容内的卡片级面板与透明内容区（.main-content 仅
-   在玻璃皮肤下做磨砂透底）；其余容器层不做磨砂以免白色亮层割裂感。 */
+   注意：v3.0 起容器不持有 backdrop-filter，本块只给装饰层；磨砂只剩
+   .ds-menu / .ds-tooltip 两处消费方，其余容器层不做磨砂以免白色亮层割裂感。 */
 body[data-skin="glass"] .sidebar,
 body[data-skin="glass"] .topbar,
 body[data-skin="glass"] .main-content,
@@ -397,7 +397,8 @@ body {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  background: #F3F3F3;
+  /* 审查 F1a-L06：底色不在此写死——四窗 <body> 静态挂 theme-light，
+     `body.theme-light .titlebar` 的 var(--bg-app) 恒生效；材质/壁纸分支另行放行透明。 */
   /* 原生 Mica 已负责窗口材质；避免 drag 区域与 CSS blur 形成错误命中层。 */
   -webkit-app-region: drag;
   position: relative;
@@ -463,9 +464,10 @@ body {
 /* ---------- 侧边栏（批次：悬浮岛侧边栏 —— 独立悬浮圆角导航卡） ---------- */
 .sidebar {
   width: 232px;
-  /* v3.0 统一白容器参数（本机资料区·系统维护任务卡参数，不入库）：46% 白玻璃 + 10px 圆角，
-     磨砂由文件末尾「全局白容器统一参数」规则无条件供给；
-     材质激活时不再有 72%/78% 岛底浓度差异（旧方案已删，全局只保留这一套） */
+  /* v3.0 统一白容器参数（本机资料区·系统维护任务卡参数，不入库）：
+     v3.0 起容器为 --surface-alpha-card: 0（即 --bg-card 全透明）+ 无 backdrop-filter，
+     底色透出窗口材质/壁纸；磨砂只剩 .ds-menu / .ds-tooltip 两处消费 --glass-blur-mid。
+     材质激活时不再有 72%/78% 岛底浓度差异（旧方案已删，全局只保留这一套）。 */
   background: var(--bg-card);
   /* 原 border-right 改整圈发丝边 */
   border: 1px solid var(--border-default);
@@ -926,15 +928,18 @@ body {
    对应的反差前景，所以这里不需要再分主题覆写。方向（现算 WCAG，勿凭印象改写）：
    暗色系 --warning 是**亮琥珀 #F5A524** → --accent-text 深墨 #171832 = 8.48:1；
    亮色系 --warning 是**深褐黄 #875708** → --accent-text 白 #FFFFFF = 6.18:1；
-   hover 各向黑混 18% 后仍 5.74 / 8.14。应用恒挂 theme-light，实际走亮色那一组。 */
+   hover 混色走 --danger-hover-tint（与 .btn-danger 同源）；应用恒挂 theme-light，
+   实际走亮色那一组。 */
 .btn-warning {
   background: var(--warning);
   color: var(--accent-text);
   border-color: var(--warning);
 }
 .btn-warning:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--warning) 82%, #000);
-  border-color: color-mix(in srgb, var(--warning) 82%, #000);
+  /* 审查 F1a-L06：混色方向与 .btn-danger 同源（--danger-hover-tint 在恒浅色档为向黑混，
+     观感与旧字面值一致），不再就地写死颜色。 */
+  background: color-mix(in srgb, var(--warning) 82%, var(--danger-hover-tint));
+  border-color: color-mix(in srgb, var(--warning) 82%, var(--danger-hover-tint));
 }
 
 /* 确认弹窗正文与红色警示块（confirm dangerHint / warningHint）
@@ -2169,13 +2174,12 @@ body.electron-mica .layout {
   background: color-mix(in srgb, var(--bg-base) 88%, transparent);
 }
 
-/* 批次：悬浮岛侧边栏 —— 贴边时代的近全透明着色（rgba(128,128,128,.04)）会让岛在
-   材质上直接消失，非最大化时岛改「半实体亚克力」（78% 实体卡 + 20px 磨砂）。
-   注意不能用 --bg-card 调配：材质 2.0 段已把它重定义为半透明（rgba(255,255,255,.055)），
-   会再次近全透明；必须用未被动过的不透明表面 token --surface-solid。 */
+/* 批次：悬浮岛侧边栏 —— 贴边时代的近全透明着色会让岛在材质上直接消失。
+   现行口径（v3.0）：岛底与所有容器同走 --bg-card（alpha 0，透出材质），
+   容器自身不持有 backdrop-filter，磨砂只剩菜单/浮层两处消费方。
+   材质不可用或最大化时改走不透明表面 token --surface-solid，见下方分支。 */
 body.electron-mica:not(.win-maximized) .sidebar {
-  /* v3.0 统一白容器参数：岛底一律 46% 白玻璃（--bg-card），删除 78%/72% 浓度差旧方案；
-     磨砂由文件末尾统一规则供给 */
+  /* v3.0 统一白容器参数：岛底与全局容器同一套 --bg-card，删除 78%/72% 浓度差旧方案 */
   background: var(--bg-card);
   border-color: var(--border-default);
 }
@@ -4736,8 +4740,9 @@ body.theme-light .nav-section-title { color: var(--fg-tertiary); }
 .settings-section,
 .appearance-card,
 .empty-state {
+  /* 审查 F1a-L05：描边不再在此写第二份字面值——各卡片类自身的
+     border: 1px solid var(--border-default) 是唯一来源，改 token 才传导得到卡片。 */
   box-shadow: none;
-  border-color: rgba(255, 255, 255, 0.09);
 }
 .summary-card:hover { transform: translateY(-1px); background: var(--bg-card-hover); }
 .page-title { letter-spacing: 0; }
@@ -4762,7 +4767,7 @@ body.theme-light .card,
 body.theme-light .table-card,
 body.theme-light .settings-section,
 body.theme-light .appearance-card,
-body.theme-light .empty-state { background: var(--bg-card); border-color: rgba(20, 24, 40, 0.12); color: var(--fg-primary); }
+body.theme-light .empty-state { background: var(--bg-card); color: var(--fg-primary); }
 body.theme-light .summary-card:hover { background: var(--bg-card-hover); }
 body.theme-light .page-title,
 body.theme-light .health-title,
@@ -5370,11 +5375,9 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
 .netcheck-item:has(.netcheck-badge.fail) .netcheck-detail { color: var(--danger); }
 
 /* 全局白容器统一参数（v3.0，本机资料区·系统维护任务卡参数，不入库）：
-   46% 白玻璃底（--bg-card，各类既有定义）+ --border-default 描边（既有）+
-   --radius-medium(10px) 圆角 + 20px 档磨砂，全部无条件生效（不再依赖壁纸/材质激活），
-   磨砂随「背景模糊度」滑块联动；系统关透明度时由降级块统一停用。
-   本规则位于文件末尾，与各类原有 (0,1,0) 定义同级、按顺序胜出；
-   此处不声明 border/background——ctx-col 的 3px 彩色顶边等特殊描边不受影响。 */
+   本块只统一圆角（--radius-medium），底色/描边由各类既有定义承担。
+   注意 v3.0 起容器为 --surface-alpha-card: 0、且不持有 backdrop-filter，
+   磨砂只剩 .ds-menu / .ds-tooltip 消费 --glass-blur-mid；此处不声明 border/background。 */
 .card,
 .table-card,
 .summary-card,
@@ -5712,7 +5715,7 @@ body.bg-image-on .titlebar {
 /* 材质态标题栏贯通（2026-10-11 用户实测裁定）
    「背景没有覆盖到标题栏」的根因：材质（electron-mica）非最大化时，body 顶 `--mat-veil`
    半透明纱、.layout/.main-content 全透明 —— 桌面经原生 Mica 透出的"背景"在内容区可见，
-   唯独标题栏还自绘不透明底（#F3F3F3 / theme-light 的 --bg-app），顶部 36px 成为一条
+   唯独标题栏还由 theme-light 分支自绘不透明底（--bg-app），顶部 36px 成为一条
    材质断层。修法：标题栏同样放行 —— 不铺自己的底色，让 body 的 veil 与内容区一样透出。
    红线不受影响：win-maximized 被 :not() 排除（最大化仍走上方实色规则）；data-material="none"
    时 --mat-veil 本身就是不透明 --bg-base。特异性 (0,3,1) 高于 electron-mica / theme-light

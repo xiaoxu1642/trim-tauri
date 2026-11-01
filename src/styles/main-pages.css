@@ -790,7 +790,8 @@
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-small);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  /* 审查 F1c-L05：浮层投影走 token，不再就地写黑阴影（离表色收敛） */
+  box-shadow: var(--shadow-flyout);
   pointer-events: none;
   font-size: var(--fs-meta);
   color: var(--fg-primary);
@@ -1573,6 +1574,12 @@
 }
 .bg-list-body { max-height: 150px; overflow-y: auto; }
 .bg-list-name { flex: 1; min-width: 0; word-break: break-all; }
+/* 审查 F1c-L06：折叠箭头此前无任何样式（index.html 静态产出该 span）。
+   与 .settings-collapse-chevron 同字号/同色；箭头字符由脚本在展开/收起间切换，不接 transition。 */
+.bg-list-chevron {
+  font-size: var(--fs-secondary);
+  color: var(--fg-tertiary);
+}
 .settings-collapse-chevron {
   font-size: var(--fs-secondary);
   color: var(--fg-tertiary);
@@ -1671,7 +1678,8 @@
   line-height: 1.5;
   padding: 0 7px;
   border-radius: var(--radius-btn);
-  color: color-mix(in srgb, var(--warning) 80%, #000);
+  /* 审查 F1c-L05：语义色直接走 token，不再就地混黑（对比度已算过，两主题均达 AA） */
+  color: var(--warning);
   background: rgba(var(--warning-rgb), 0.14);
 }
 .maint-status {
@@ -1749,7 +1757,9 @@
 }
 .qc-search-wrap:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-light);
+  /* 审查 F1c-L08：--accent-light 是极低 alpha，合成后与底几乎同色，等于没有指示；
+     改实心 accent 环（对底可辨），保住「输入框自身 outline:none」的前提。 */
+  box-shadow: 0 0 0 2px var(--accent);
 }
 .qc-search-wrap input {
   flex: 1 1 auto;
@@ -2160,6 +2170,14 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   font-size: var(--fs-secondary);
   line-height: 1.7;
   overflow-wrap: anywhere;
+}
+/* 审查 F1c-L06：签名失败说明此前无样式（updater-ui.js 产出该 p，hidden 切换显隐）。
+   内容为中长句，折行口径与相邻 .upd-error-msg 一致。 */
+.upd-error-sig {
+  margin: 6px 0 0;
+  font-size: var(--fs-meta);
+  color: var(--fg-tertiary);
+  overflow-wrap: anywhere;
 }@media (prefers-reduced-motion: reduce) {
 
   .upd-spinner { animation: none; border-top-color: var(--border-default); }
@@ -2204,9 +2222,10 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   font-variant-numeric: tabular-nums;
 }
 
-/* v3.0 批次：隐藏「窗口材质与背景模糊度」设置卡（磨砂已删除、材质已设默认，该卡不再需要） */
+/* v3.0 批次：隐藏「窗口材质与背景模糊度」设置卡（磨砂已删除、材质已设默认，该卡不再需要）
+   审查 F1c-L07：ID 选择器已压过普通类规则，无需 !important（去掉后将来要恢复只需删本块） */
 #materialBlurCard {
-  display: none !important;
+  display: none;
 }
 .bbr-track {
   position: relative;

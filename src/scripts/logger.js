@@ -27,7 +27,11 @@
   // 超出的按 error / 其余两档计数，在窗口边界与打开日志页时各补一条汇总，原文仍进 console —— 折叠不等于
   // 静默丢审计。
   const WIN_MS = 1000, QUOTA = 60;
+  // F3-L04：折叠汇总的补写窗口。窗口轮转只在「还有下一次写入」时才触发，突发拒绝后若再无写入，
+  // 汇总行永不落盘——折叠的承诺是「不丢审计」，不能靠巧合兑现。空闲定时器兜住这个尾巴。
+  const FOLD_FLUSH_IDLE_MS = 5000;
   let winStart = 0, winUsed = 0, foldErr = 0, foldOther = 0;
+  let foldTimer = 0;
 
   async function sendToMain(level, message) {
     if (!window.api?.log) return;
@@ -35,9 +39,15 @@
   }
 
   function flushFolded() {
+    if (foldTimer) { clearTimeout(foldTimer); foldTimer = 0; }
     const t = '条被限流折叠的渲染层日志未逐条落盘（原文见控制台）';
     if (foldErr) { const n = foldErr; foldErr = 0; sendToMain('error', `${n} ${t}`); }
     if (foldOther) { const n = foldOther; foldOther = 0; sendToMain('warn', `${n} ${t}`); }
+  }
+
+  function scheduleFoldFlush() {
+    if (foldTimer) return; // 一个窗口只排一次：期间再多折叠也只补写一条汇总
+    foldTimer = setTimeout(() => { foldTimer = 0; flushFolded(); }, FOLD_FLUSH_IDLE_MS);
   }
 
   async function write(level, message) {
@@ -45,6 +55,7 @@
     if (now - winStart >= WIN_MS) { flushFolded(); winStart = now; winUsed = 0; }
     if (++winUsed > QUOTA) {
       if (level === 'error') foldErr++; else foldOther++;
+      scheduleFoldFlush();
     } else {
       await sendToMain(level, message);
     }
