@@ -285,13 +285,15 @@
   // true 强制重新扫描并覆盖缓存。启停/删除/添加后走 true 保证拿到最新状态。
   // CACHE_STALE_MS：缓存被视为"陈旧"的阈值。低于此值不打扰用户（也不触发后台重扫），
   // 高于此值展示年龄横幅并静默后台重扫。
-  const CACHE_STALE_MS = 60 * 1000;
+  // 2026-11-02 用户裁定：24 小时内的数据视为可用，不弹横幅。
+  const CACHE_STALE_MS = 24 * 60 * 60 * 1000;
 
   // 2026-09-28 六轮拍板：进页不再自动扫描——
   //   · 首次（localStorage 无扫描时间戳）：不扫，等用户点「扫描启动项」；
-  //   · 之后：距上次扫描 < 12h 进页只读缓存（瞬时），≥ 12h 静默后台重扫；
+  //   · 之后：距上次扫描 < 24h 进页只读缓存（瞬时、不弹横幅），≥ 24h 静默后台重扫；
   //   · 手动点扫描/刷新不受间隔限制，成功后刷新时间戳。
-  const SCAN_INTERVAL_MS = 12 * 60 * 60 * 1000;
+  // 2026-11-02 用户裁定：自动重扫与横幅统一到 24h 阈值（原 12h 自动重扫 / 60s 横幅）。
+  const SCAN_INTERVAL_MS = 24 * 60 * 60 * 1000;
   const SCAN_TS_KEY = 'startup-lastScanAt';
 
   function formatAge(ms) {
@@ -371,8 +373,12 @@
       }
       items = next;
       cacheInfo = { cached: !!resp.cached, cachedAt: resp.cachedAt || (resp.cached ? Date.now() : 0) };
-      // 扫描时间戳落 localStorage（12h 自动刷新间隔的判定依据；静默重扫同样刷新）
-      try { localStorage.setItem(SCAN_TS_KEY, String(Date.now())); } catch (e) { /* 隐私模式等场景静默 */ }
+      // 扫描时间戳落 localStorage（24h 自动刷新间隔的判定依据；静默重扫同样刷新）。
+      // 只在**真实扫描**时写：缓存命中若也刷新，时间戳会变成「上次查看时间」，
+      // 24h 自动重扫与陈旧横幅就永远等不到。
+      if (!resp.cached) {
+        try { localStorage.setItem(SCAN_TS_KEY, String(Date.now())); } catch (e) { /* 隐私模式等场景静默 */ }
+      }
       // 防恢复机制：黑名单拦截 + 顽固恢复计数（可能自动删除并刷新列表）
       await enforceStartupDefend();
       render();
