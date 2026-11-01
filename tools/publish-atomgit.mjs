@@ -116,7 +116,9 @@ function preflight() {
   if (!md[start].startsWith(`## 版本 ${ver}`)) {
     die(`update.md 顶部条目是「${md[start]}」，与版本 ${ver} 不符 —— 先把本版更新日志写到最上面`);
   }
-  let end = md.findIndex((l, i) => i > start && l.startsWith('## 版本 '));
+  // 条目边界是**任意二级标题**，不是「下一个 ## 版本」：0.8.9 上面新增的
+  // 「## 文档整理」不是版本条目，旧边界会把它整段吞进更新说明（2026-11-02 实测）。
+  let end = md.findIndex((l, i) => i > start && l.startsWith('## '));
   if (end < 0) end = md.length;
   const notes = md.slice(start, end).join('\n').trim();
   ok(`notes 取自 update.md 顶部条目（${notes.length} 字符）`);
