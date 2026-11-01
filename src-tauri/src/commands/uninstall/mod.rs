@@ -14,19 +14,17 @@
 //! 文件划分（v3 D2：一个命令契约一文件，`#[tauri::command]` 留在定义处，本 mod.rs 只
 //! re-export —— 所以 lib.rs 的 generate_handler!、CHANNEL_MAP 与 guard 档位都不因物理
 //! 移动改变）：helpers（注册表读取助手 + 快照台账）/ appx / list_run / residue /
-//! residue_update / pending_delete；`dead` / `ownership` / 七个深扫器模块在机-wide 扫描
+//! residue_update；`dead` / `ownership` / 七个深扫器模块在机-wide 扫描
 //! 整条退役后**保留为内部代码**（只由 residue 的四类扫描复用），不再暴露命令。
 //! 跨契约面的回归网单独放 residue_trace_tests（cfg(test)）。
 //!
 //! 注册（lib.rs generate_handler + CHANNEL_MAP + check-guard-tiers 的档位表同步落；
-//! 档位不止 `MUST_MAIN`，窄窗口集 `RESIDUE_WINDOWS` / `PENDING_DELETE_WINDOWS` 同在这一张表。
+//! 档位不止 `MUST_MAIN`，窄窗口集 `RESIDUE_WINDOWS` 同在这一张表。
 //! 条目数以 lib.rs 注册为准，现算：`rg -c "commands::uninstall::" src-tauri/src/lib.rs`）：
 //! ```text
 //! commands::uninstall::uninstall_list,
 //! commands::uninstall::uninstall_run,
 //! commands::uninstall::uninstall_modify,
-//! commands::uninstall::uninstall_pending_list,
-//! commands::uninstall::uninstall_pending_revoke,
 //! commands::uninstall::uninstall_residue_scan,
 //! commands::uninstall::uninstall_residue_execute,
 //! commands::uninstall::uninstall_dir_size,
@@ -72,8 +70,6 @@ pub use list_run::{uninstall_dir_size, __cmd__uninstall_dir_size, __tauri_comman
 #[allow(dead_code)]
 mod minifilter_orphan;
 mod ownership;
-mod pending_delete;
-pub use pending_delete::{uninstall_pending_list, __cmd__uninstall_pending_list, __tauri_command_name_uninstall_pending_list, uninstall_pending_revoke, __cmd__uninstall_pending_revoke, __tauri_command_name_uninstall_pending_revoke};
 mod residue;
 pub use residue::{uninstall_residue_scan, __cmd__uninstall_residue_scan, __tauri_command_name_uninstall_residue_scan, uninstall_residue_execute, __cmd__uninstall_residue_execute, __tauri_command_name_uninstall_residue_execute};
 // v0.7.0：`commands::residue`（副窗建窗侧）要复用执行侧那对取值闸，AGENTS §5.16/N6 禁止

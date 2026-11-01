@@ -27,8 +27,7 @@ pub(super) use crate::engine::native::to_wide;
 /// 正常 REG_SZ / REG_MULTI_SZ 远小于此（注册表值本身有 1MB 量级上限），超限一律按
 /// 「读不到」处理（fail-closed），绝不按报告的长度去分配。
 ///
-/// R2a-L11（§5.16/N6）：本单元「按回报长度分配」只许有这一份上限，`pending_delete::read_pfro`
-/// 同样复用常量 —— 原先那份是 PFRO 独有的「无上限分配」，两份实现只有一处 fail-closed。
+/// R2a-L11（§5.16/N6）：本单元「按回报长度分配」只许有这一份上限（fail-closed）。
 pub(super) const MAX_REG_STR_BYTES: u32 = 4 * 1024 * 1024;
 
 pub(super) unsafe fn reg_sz(hk: windows::Win32::System::Registry::HKEY, name: &str) -> Option<String> {

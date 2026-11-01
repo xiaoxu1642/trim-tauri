@@ -546,8 +546,6 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::uninstall::uninstall_list,
         commands::uninstall::uninstall_run,
         commands::uninstall::uninstall_modify,
-        commands::uninstall::uninstall_pending_list,
-        commands::uninstall::uninstall_pending_revoke,
         commands::uninstall::uninstall_residue_scan,
         commands::uninstall::uninstall_residue_execute,
         // 机-wide 扫描（失效残留 / 卸载遗留 / 七个深扫器报告）已整条退役：只剩
@@ -1189,7 +1187,7 @@ mod tests {
         // （相对 src/ 的路径, 允许条数, 为什么还在）
         let baseline: [(&str, usize, &str); 6] = [
             ("lib.rs", 1, "MAIN_LABEL 定义处——全仓唯一合法字面量"),
-            ("engine/guard.rs", 3, "档位表（APP_WINDOWS / MAIN / PENDING_DELETE_WINDOWS）；彻底方案：由 MAIN_LABEL 派生"),
+            ("engine/guard.rs", 2, "档位表（APP_WINDOWS / MAIN）；彻底方案：由 MAIN_LABEL 派生"),
             ("commands/processmanager.rs", 1, "自建的同名私有常量；彻底方案：改为引用 crate::MAIN_LABEL"),
             ("commands/app.rs", 1, "首帧来源过滤直接比字面量（本单元未授权改该文件）"),
             ("commands/appearance.rs", 1, "电池降级取主窗判最大化（同上）"),

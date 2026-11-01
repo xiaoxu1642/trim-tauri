@@ -1880,8 +1880,6 @@
         hideProgress();
         renderCategoryList();
         updateUI();
-        // K13：清理后刷新「重启后删除」入口——本批可能刚登记了失败项
-        refreshPendingBadge();
         const freed = freedNow;
         // F4a1-L05：原「审查 M-3」分支读 result.recycledBytes/recycledCount——两字段
         // 在本文件只有读点、后端回执链零写点（v3.3.0 已固定 toRecycle=false），属死分支。
@@ -2498,160 +2496,6 @@
     });
   }
 
-  // ==================== K13：重启后删除清单（主窗查看/撤回入口） ====================
-  // 背景：已登记项（PFRO + 待删台账）此前只在残留副窗可见可撤回——没有清单入口就等于
-  // 撤不回（K13 缺口本体：看得见才算「可撤回」）。档位侧 uninstall:pending-list/revoke
-  // 在 PENDING_DELETE_WINDOWS（main+residue），这里补主窗侧的按钮 + 清单弹窗。
-  // 2026-11-02 用户裁定：登记入口退役，本段（查看/撤回）是唯一保留的消费面。
-  // R2a-L05：本表是后端待删状态的**唯一**中文消费点，未登记的英文值不许原样漏到界面。
-  // 后端已提出把「条目已被处理但文件仍在」从 consumed 拆出（拟名 present / consumed-present）——
-  // 它表示删除没有生效，不能念成「已消费」；后端改名前先把这几档文案钉在这里。
-  const PENDING_STATUS_LABELS = {
-    pending: '待重启删除',
-    consumed: '已被重启消费',
-    missing: '文件已不在',
-    present: '重启已处理，但文件仍在',
-    'consumed-present': '重启已处理，但文件仍在',
-    'consumed-gone': '已被重启消费，文件已不在'
-  };
-
-  /// 登记时间（X0-6 S1）：回执带秒级 addedAt；格式化失败不显示，不编造时间。
-  function fmtPendingAddedAt(v) {
-    const secs = Number(v);
-    if (!Number.isFinite(secs) || secs <= 0) return '';
-    const d = new Date(secs * 1000);
-    const p2 = (n) => String(n).padStart(2, '0');
-    return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
-  }
-
-  /// 刷新「重启后删除」入口按钮：有待删条目才显示；台账损坏时置灰并明示（M-6 同口径）。
-  function refreshPendingBadge() {
-    const btn = document.getElementById('btnPendingList');
-    if (!btn || !window.api?.uninstall?.pendingList) return;
-    window.api.uninstall.pendingList().then(function (resp) {
-      const text = document.getElementById('btnPendingListText');
-      // F4a1-M13：success:false 与 reject 是「读取失败」，不是「没有待删项」——
-      // 与 degraded 同姿势（不隐藏 + 置灰 + 明示原因），把失败态折成隐藏等于收回
-      // 「待删清单可见且重启前可撤回」的唯一载体。
-      if (resp && resp.success === false) {
-        btn.hidden = false;
-        btn.disabled = true;
-        if (text) text.textContent = '重启后删除（读取失败）';
-        btn.setAttribute('data-tip', '待删清单读取失败，无法确认哪些条目仍挂起；PFRO 里的登记可能仍会在下次重启时执行。');
-        return;
-      }
-      const data = (resp && resp.success && resp.data) || {};
-      const entries = data.entries || [];
-      const n = entries.filter(e => e.status === 'pending').length;
-      if (data.degraded) {
-        // 台账损坏 = 撤回凭据不可信：不隐藏按钮（用户该知道 PFRO 里可能还挂着），
-        // 置灰 + data-tip 说明，与「真的没有待删项」区分开（残留副窗同口径）。
-        btn.hidden = false;
-        btn.disabled = true;
-        if (text) text.textContent = '重启后删除（台账损坏）';
-        btn.setAttribute('data-tip', '待删清单文件损坏，无法确认哪些条目仍挂起；PFRO 里的登记可能仍会在下次重启时执行。');
-        return;
-      }
-      btn.disabled = false;
-      btn.hidden = entries.length === 0;
-      if (text) text.textContent = n > 0 ? `重启后删除（${n}）` : '重启后删除';
-    }).catch(function () {
-      // F4a1-M13：reject 同样是读取失败——与 degraded 同姿势，不隐藏（原形状折成隐藏）。
-      btn.hidden = false;
-      btn.disabled = true;
-      const textEl = document.getElementById('btnPendingListText');
-      if (textEl) textEl.textContent = '重启后删除（读取失败）';
-      btn.setAttribute('data-tip', '待删清单读取失败，无法确认哪些条目仍挂起；PFRO 里的登记可能仍会在下次重启时执行。');
-    });
-  }
-
-  /// 打开待删清单弹窗：三态分明（pending/consumed/missing）+ 撤回全部。
-  async function openPendingListModal() {
-    let resp;
-    try {
-      resp = await window.api.uninstall.pendingList();
-    } catch (e) {
-      window.app?.toast('error', '待删清单读取失败：' + ((e && e.message) || e));
-      return;
-    }
-    // F4a1-M13：success:false 是读取失败，不许折成「当前没有登记」（撤回凭据不可见的假象）。
-    if (resp && resp.success === false) {
-      window.app?.toast('error', '待删清单读取失败：' + (resp.error || '后端返回失败'));
-      return;
-    }
-    const data = (resp && resp.success && resp.data) || {};
-    if (data.degraded) {
-      window.app?.toast('warning', '待删清单文件已损坏，无法确认哪些条目仍挂起；PFRO 里的登记可能仍会在下次重启时执行。');
-      return;
-    }
-    const entries = data.entries || [];
-    if (!entries.length) {
-      window.app?.toast('info', '当前没有登记「重启后删除」的文件');
-      refreshPendingBadge();
-      return;
-    }
-    const rows = entries.map(e => {
-      // R2a-U01（B 方案）：orphanSource = PFRO 挂着但台账无凭据的对补行（可能来自
-      // 更早批次或第三方软件，归属不可信）——「撤回全部」摘不到它，标签必须明示。
-      const added = fmtPendingAddedAt(e.addedAt);
-      const base = e.orphanSource
-        ? '挂起删除（来源不明·不可撤回）'
-        : (PENDING_STATUS_LABELS[e.status] || '状态未知');
-      const label = base + (added ? ` · 登记于 ${added}` : '');
-      const tip = e.orphanSource
-        ? `${e.target || ''}\n系统重启队列仍挂着这条删除，但 Trim 没有它的登记凭据（可能来自更早批次或其它软件）；「撤回全部」只摘除 Trim 登记的条目。`
-        : (e.target || '');
-      return `<div class="lock-app-row"><span class="lock-app-name" data-tip="${escapeHtml(tip)}">${escapeHtml(tip.split('\n')[0] || '')}</span><span class="lock-app-count">${escapeHtml(label)}</span></div>`;
-    }).join('');
-    // R2a-U01（B 方案）：「撤回全部」只摘台账登记项——计数必须排除 orphanSource
-    // 对补行，否则按钮文案承诺的条数与实际摘除数不符。
-    const pendingN = entries.filter(e => e.status === 'pending' && !e.orphanSource).length;
-    // F4a1-L06：弹窗工厂缺件时不能裸调 create——本函数是 async，抛出的 TypeError 会变成
-    // 无人接的 rejection（界面零提示）。与同文件另两处 create 调用同姿势，缺件即明示并早退。
-    if (!window.modal?.create) {
-      window.app?.toast?.('error', '弹窗组件未加载，无法打开待删清单');
-      return;
-    }
-    const ctrl = window.modal.create({
-      id: 'pendingListModal-' + Date.now(),
-      title: `重启后删除（${entries.length} 项登记）`,
-      bodyHtml: `
-        <div class="confirm-message">以下文件已登记为「下次重启时删除」。这是永久删除：不进回收站；<strong>重启前</strong>可撤回，撤回后文件保持原样。</div>
-        <div class="lock-app-list">${rows}</div>`,
-      footerHtml: `
-        <span class="model-picker-spacer"></span>
-        <button class="btn btn-secondary" data-role="close" type="button">关闭</button>
-        <button class="btn btn-primary" data-role="revoke" type="button"${pendingN ? '' : ' disabled'}>撤回全部（${pendingN}）</button>`,
-      onClose() { /* 面板可随时关，不做强制 */ }
-    });
-    ctrl.footer.querySelector('[data-role="close"]').addEventListener('click', () => ctrl.close());
-    ctrl.footer.querySelector('[data-role="revoke"]').addEventListener('click', async () => {
-      // P1-7（F4a1 同族）：旧写法只有 IPC 那一步在 try 里，**第一个 await（确认件）在外面** ——
-      // `window.app` 在但 `confirmWarning` 缺失时 `window.app?.confirmWarning(...)` 是直接
-      // 调用 undefined，抛 TypeError 变成 unhandled rejection；用户看到的是「点撤回没反应」，
-      // 而这正是 AGENTS 例外 B「重启前可撤回」的唯一前端出口。整段收进一个 try 才有出口。
-      try {
-        // 撤回是**安全方向**（阻止删除、文件保留），走黄色确认即可（2026-11-02 起
-        // 本域已无登记入口，红色档不再有对应动作）。
-        const ok = await window.app?.confirmWarning(
-          '撤回重启后删除',
-          `将把 ${pendingN} 个仍挂起的登记从系统中摘除：这些文件不会被删除，保持原样。已被重启消费或文件已不在的条目会一并从清单清除。`,
-          '撤回全部',
-          '取消',
-          '撤回需要管理员权限（系统重启队列只允许管理员修改）；未提权时会失败且不动清单。'
-        );
-        if (!ok) return;
-        const rr = await window.api.uninstall.pendingRevoke();
-        if (!rr || !rr.success) throw new Error((rr && rr.message) || '撤回失败');
-        window.app?.toast('success', `已撤回 ${(rr.data && rr.data.revoked) || 0} 项登记，相关文件不会被删除`);
-        ctrl.close();
-        refreshPendingBadge();
-      } catch (e) {
-        window.app?.toast('error', '撤回未完成：' + ((e && e.message) || e));
-      }
-    });
-  }
-
   // ==================== P3 条目明细弹窗 ====================
   // 枚举单个条目将删除的具体文件清单（只读，最多展示 600 条），支持复制完整清单。
   // v3.2.0 弹窗统一批次：骨架改由 modal.js 工厂生成（Esc/遮罩/× 关闭统一）
@@ -2891,7 +2735,7 @@
   }
 
   function openItemDetail(id) {
-    // F4a1-L06：同 openPendingListModal —— 缺件时明示后早退，不让同步 TypeError 只剩控制台。
+    // F4a1-L06：缺件时明示后早退，不让同步 TypeError 只剩控制台。
     if (!window.modal?.create) {
       window.app?.toast?.('error', '弹窗组件未加载，无法查看明细');
       return;
@@ -2970,9 +2814,6 @@
     });
     document.getElementById('btnClean')?.addEventListener('click', clean);
     document.getElementById('btnSelectAll')?.addEventListener('click', toggleSelectAll);
-    // K13：重启后删除清单入口（有待删条目才显示；登记/撤回后刷新）
-    document.getElementById('btnPendingList')?.addEventListener('click', openPendingListModal);
-    refreshPendingBadge();
     document.getElementById('btnRefreshBackups')?.addEventListener('click', renderBackupsPage);
     // C1-1 占用查询：查询 / 回车提交 / 结束进程（结束为不可逆操作，内部走 confirmDanger）
     document.getElementById('lockQueryBtn')?.addEventListener('click', () => runLockQuery());

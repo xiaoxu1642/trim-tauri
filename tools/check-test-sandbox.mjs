@@ -48,7 +48,6 @@ const CEILING = {
   'src-tauri/src/commands/fileclean.rs': 7,
   'src-tauri/src/engine/native/startup.rs': 8,
   'src-tauri/src/commands/uninstall/residue_trace_tests.rs': 5,
-  'src-tauri/src/commands/uninstall/pending_delete.rs': 4,
   'src-tauri/src/security/mod.rs': 3,
   'src-tauri/src/engine/shellicon.rs': 3,
   'src-tauri/src/engine/reg_backup.rs': 3,

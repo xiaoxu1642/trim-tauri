@@ -159,8 +159,8 @@ pub(super) fn collect_peripheral_backup_files(dirs: &[std::path::PathBuf]) -> (V
 /// 删除失败原因分档（R4，2026-10-15）——把 io::Error 折成四档，供清理执行链与网速报告
 /// 清空链共用（§5.16/N6：判据只此一份，调用点各写一遍 match 就是第二份实现）。
 ///
-/// 分码口径与 `pending_delete.rs::classify_pending_delete_error` 同源（那边的注释写明
-/// 「ACCESS_DENIED 与 SHARING_VIOLATION 必须分开说：前者提权重试有意义，后者提权没用」）。
+/// 分码口径沿用同一条判据：ACCESS_DENIED 与 SHARING_VIOLATION 必须分开说——前者提权重试
+/// 有意义，后者提权没用（该判据原由重启后删登记链提出，登记/查看/撤回整条退役后只此一处）。
 /// 注意**不能只看 `ErrorKind`**（1.99 实测）：ACCESS_DENIED(5) 的 kind 是
 /// `PermissionDenied`，而 SHARING_VIOLATION(32) 的 kind 是 `Uncategorized`——
 /// 只看 kind 的实现在这条链上会漏掉占用族，必须读 raw code。

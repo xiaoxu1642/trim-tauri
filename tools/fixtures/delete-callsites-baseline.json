@@ -27,7 +27,6 @@
     "src-tauri/src/commands/realtime.rs": 2,
     "src-tauri/src/commands/uninstall/backup_report.rs": 5,
     "src-tauri/src/commands/uninstall/drivers_orphan.rs": 3,
-    "src-tauri/src/commands/uninstall/pending_delete.rs": 4,
     "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 9,
     "src-tauri/src/commands/updater.rs": 4,
     "src-tauri/src/engine/hash.rs": 2,
@@ -54,7 +53,6 @@
     "src-tauri/src/commands/realtime.rs": 3,
     "src-tauri/src/commands/runtimes.rs": 10,
     "src-tauri/src/commands/uninstall/list_run.rs": 3,
-    "src-tauri/src/commands/uninstall/pending_delete.rs": 1,
     "src-tauri/src/commands/updater.rs": 3,
     "src-tauri/src/engine/backup_write.rs": 2,
     "src-tauri/src/engine/log.rs": 1,
@@ -94,9 +92,6 @@
   "startup_delete": {
     "src-tauri/src/commands/startup.rs": 1,
     "src-tauri/src/engine/native/startup.rs": 3
-  },
-  "MoveFileExW": {
-    "src-tauri/src/commands/uninstall/pending_delete.rs": 1
   },
   "remove_dir": {
     "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 1,

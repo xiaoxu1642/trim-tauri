@@ -27,7 +27,7 @@ pub const APP_WINDOWS: &[&str] = &["main", "models", "processManager", "residue"
 /// 主窗口 label（多数高危及「主窗专属」通道只允许它调用）
 pub const MAIN: &[&str] = &["main"];
 
-/// 残留链（该应用四类残留扫描 + 执行 + 重启后删除登记）专属窗口集。
+/// 残留链（该应用四类残留扫描 + 执行）专属窗口集。
 ///
 /// v0.7.0 把主窗内联的残留面板整体搬进 `residue` 副窗，这几条命令的**唯一**渲染层调用方
 /// 就变成了那扇窗。**成员以窗口 label 计、现算口径 = `node tools/check-guard-tiers.mjs`
@@ -43,11 +43,6 @@ pub const MAIN: &[&str] = &["main"];
 /// 新增成员必须同步 `tools/check-guard-tiers.mjs` 的 E 组（双向棘轮）与
 /// `capabilities/subwindows.json`，否则窗口建得出来、IPC 判越权。
 pub const RESIDUE_WINDOWS: &[&str] = &["residue"];
-
-/// 「重启后删除」清单的查看 / 撤回调用窗集（2026-11-02 用户裁定：登记入口全应用退役，
-/// 只保留既有登记项的可见与撤回）。两个消费方：残留副窗 + 主窗清理页的待删清单入口。
-/// 刻意不给 APP_WINDOWS 全集——撤回会改写系统 PFRO，models/processManager 没有调用场景。
-pub const PENDING_DELETE_WINDOWS: &[&str] = &["main", "residue"];
 
 /// 校验调用来源窗口；返回 label 或错误消息（错误消息直接回给渲染层）。
 /// 校验失败同时写日志——静默拒绝会掩盖注入尝试。

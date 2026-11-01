@@ -40,7 +40,7 @@ const BUSY = /\b([A-Za-z0-9_]*(?:busy|Busy|cleaning|Cleaning|running|Running|loc
 const MIN_BUSY = 6; // busy 赋值对象地板（单腿）：低于此数说明 BUSY 正则失效
 const MIN_INLINE = 6; // 内联 async 事件处理器对象地板
 const MIN_NAMED = 12; // 具名 async handler（addEventListener(…, IDENT)）对象地板
-const MIN_ON = 3; // on(id,type,IDENT) 具名 async 回调对象地板
+const MIN_ON = 2; // on(id,type,IDENT) 具名 async 回调对象地板（撤回重启后删绑定退役后的现盘值；取数命令：node tools/check-async-exits.mjs）
 // T1e-L08：旧实现把两条腿合并成一个地板（18 + 33 = 51），任一腿归零另一腿仍能过线。
 // 现在三桶各自计对象、各自判地板 —— 单腿失明必须能被看见。
 // 收紧后的具名/on 两桶各留约三成余量：正则整体失效（归零）或半失效都会低于地板。

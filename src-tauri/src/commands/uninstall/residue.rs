@@ -303,7 +303,7 @@ pub(super) unsafe fn reg_enum_sz_values(
             continue;
         }
         // 再取数据（data_len 为字节数，含终止 NUL）
-        // R2a-L02（2026-11-01 重审）：按注册表回报长度分配前必须过与 `reg_sz` / `read_pfro`
+        // R2a-L02（2026-11-01 重审）：按注册表回报长度分配前必须过与 `reg_sz` / `reg_multi_sz`
         // 同一份 `MAX_REG_STR_BYTES` 上限 —— 此前本单元四处分配只有三处有闸，
         // 这里就是漏的那一处（超限一律按读不到处理，绝不按报告长度分配）。
         if data_len > MAX_REG_STR_BYTES {

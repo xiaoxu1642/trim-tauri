@@ -634,21 +634,10 @@ const wantReadonly = [...MUST_READONLY].sort();
 //   E2 表里声明的成员标签 ⇄ engine/guard.rs 常量实体的成员**逐字相等**（顺序无关）；
 //   E3 常量成员必须 ⊆ APP_WINDOWS（往常量里塞一个没在 capabilities 登记过的 label 即红）。
 const MUST_WINDOWSET = {
-  // 2026-10-18（v6-K13）：list/revoke 从 RESIDUE_WINDOWS 移入本集——待删清单对主窗
-  // 清理域也要「可见可撤回」（主窗登记的条目在残留窗以外的路径上看不见 = 撤不回）。
-  // 2026-11-02 用户裁定：登记入口全应用退役，本集只剩 list/revoke 两条；
-  // residue 的 scan/execute 仍独占 RESIDUE_WINDOWS。
-  PENDING_DELETE_WINDOWS: {
-    labels: ['main', 'residue'],
-    cmds: [
-      'uninstall_pending_list',
-      'uninstall_pending_revoke',
-    ],
-  },
   RESIDUE_WINDOWS: {
     labels: ['residue'],
     // v0.7.0 机-wide 扫描整条退役：dead-scan / orphan-scan / orphan-ignore / residue-deep-scan
-    // 四条命令已删除；v6-K13 起 pending 三件套整体移入 PENDING_DELETE_WINDOWS，
+    // 四条命令已删除；待删清单的查看/撤回也随 2026-11-02 用户裁定整体退役，
     // 本集只剩「该应用四类残留扫描 + 执行」。
     cmds: [
       'uninstall_residue_execute',

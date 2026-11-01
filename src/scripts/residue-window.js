@@ -383,8 +383,6 @@
       const done = new Set((d.details || []).filter(function (x) { return x.status === 'ok'; }).map(function (x) { return x.kind + '|' + x.target; }));
       state.rows = state.rows.filter(function (f) { return !done.has(f.kind + '|' + f.target); });
       renderChains();
-      // 2026-11-02 用户裁定：登记重启后删除的入口退役，本窗只剩撤回按钮的显隐刷新
-      updatePendingButtons();
     } catch (e) {
       toast('error', '残留清理失败: ' + (e && e.message ? e.message : e));
     } finally {
@@ -392,80 +390,6 @@
       updateActionButtons();
       const hint = el('rsFootHint');
       if (hint) hint.textContent = '勾选后删除一律回收站优先、逐项确认；能勾的只有后端放进执行快照的四类候选。';
-    }
-  }
-
-  // ==================== 重启后删除（PFRO） ====================
-
-  // 撤回按钮的基线 data-tip 快照（见 updatePendingButtons 的说明）；null = 尚未取过
-  let revBtnBaselineTip = null;
-
-  /// 按待删清单回执刷「撤回重启后删」按钮的显隐与计数（2026-11-02 起本域只保留
-  /// 查看/撤回；登记入口已退役，故本函数不再接手任何待登记集合）。
-  function updatePendingButtons() {
-    const revBtn = el('rsBtnPendingRevoke');
-    // 撤回按钮的基线提示以 HTML 为真源，只在首次（任何降级态覆盖之前）取一次：
-    // 下面 degraded / 读取失败两支会改写 data-tip，恢复正常时必须还原，否则用户看到的是过期原因。
-    if (revBtnBaselineTip === null && revBtn) revBtnBaselineTip = revBtn.getAttribute('data-tip') || '';
-    if (revBtn && window.api?.uninstall?.pendingList) {
-      window.api.uninstall.pendingList().then(function (r) {
-        const entries = (r && r.success && r.data && r.data.entries) || [];
-        const degraded = !!(r && r.success && r.data && r.data.degraded);
-        // R2a-U01（B 方案）：orphanSource 对补行（PFRO 挂着但台账无凭据）不在
-        // 「撤回全部」的摘除集合里——按钮计数与显隐只数可撤的登记项。
-        const n = entries.filter(function (e) { return e.status === 'pending' && !e.orphanSource; }).length;
-        if (degraded) {
-          // M-6：台账损坏 = 撤回凭据不可信。不能隐藏按钮（那样用户不知道 PFRO 里还挂着），
-          // 置灰 + data-tip 说明，与「真的没有待删项」区分开。
-          revBtn.style.display = '';
-          revBtn.disabled = true;
-          revBtn.textContent = '重启后删台账已损坏';
-          revBtn.setAttribute('data-tip', '待删清单文件损坏，无法确认哪些条目仍挂起；PFRO 里的登记可能仍会在下次重启时执行。');
-        } else {
-          revBtn.style.display = n ? '' : 'none';
-          revBtn.disabled = !n;
-          revBtn.textContent = `撤回重启后删 ${n} 项`;
-          if (revBtnBaselineTip) revBtn.setAttribute('data-tip', revBtnBaselineTip);
-          else revBtn.removeAttribute('data-tip');
-        }
-      }).catch(function (e) {
-        // F4a1-M04：待删清单读不到就不能装成「没有待删项」（旧写法空 catch，按钮停在上一轮的
-        // 显隐）。与上面 degraded 支同姿势：不隐藏（PFRO 里可能仍挂着登记）、置灰、data-tip 说明。
-        revBtn.style.display = '';
-        revBtn.disabled = true;
-        revBtn.textContent = '重启后删状态未知';
-        revBtn.setAttribute('data-tip', '待删清单读取失败（' + ((e && e.message) || e) + '），无法确认哪些条目仍挂起；PFRO 里的登记可能仍会在下次重启时执行。');
-      });
-    }
-  }
-
-  async function revokePendingDeletes() {
-    // F4a1-M09：撤回是**安全方向**（把登记摘掉、文件保持原样），走黄档 warning；
-    // 与主窗同一动作同档（cleanup.js 的 openPendingListModal）——两窗档位相反会训练用户
-    // 「红色也可以直接点」，稀释真正不可逆操作的警示强度。
-    // F4a1-M04：与另两处确认同姿势——撤回是本窗「重启前可撤回」的唯一前端出口，
-    // 确认件异常时必须明示且不动作，不能静默成「点了没反应」。
-    let ok = false;
-    try {
-      ok = await confirmViaModal({
-        title: '撤回重启后删除',
-        message: '将把已登记的「重启后删除」条目从系统中摘除：相关文件不会被删除，保持原样。',
-        confirmText: '撤回全部',
-        cancelText: '取消',
-        warning: true
-      });
-    } catch (e) {
-      toast('error', '确认组件异常，本次不撤回任何登记');
-      return;
-    }
-    if (!ok) return;
-    try {
-      const resp = await window.api.uninstall.pendingRevoke();
-      if (!resp.success) throw new Error(resp.message || '撤回失败');
-      toast('success', `已撤回 ${(resp.data && resp.data.revoked) || 0} 项登记，相关文件不会被删除`);
-      updatePendingButtons();
-    } catch (e) {
-      toast('error', '撤回失败: ' + (e && e.message ? e.message : e));
     }
   }
 
@@ -522,7 +446,6 @@
     window.ds?.bindCheckboxKeys?.(el('rsChainBody'), '[data-rcheck]');
     on('rsRescanBtn', 'click', scanAll);
     on('rsBtnClean', 'click', cleanSelected);
-    on('rsBtnPendingRevoke', 'click', revokePendingDeletes);
     on('rsCloseBtn', 'click', function () {
       window.api.residueWindow.closeWindow().catch(function () { toast('warning', '关闭窗口失败，请手动关闭'); });
     });
@@ -546,10 +469,6 @@
         scanAll();
       });
     }
-    // F4a1-M10：开窗即刷一次「撤回重启后删」入口——本窗正是卸载后被自动弹出的那扇窗，
-    // 遗留的永久删登记项若不在此现，界面上就没有任何「还挂着待删项」的痕迹，等于违背
-    // 「待删清单可见且重启前可撤回」这条受控例外约束。只按 pendingList 回执刷 revBtn 显隐。
-    updatePendingButtons();
     scanAll();
   });
 })();

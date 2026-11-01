@@ -57,7 +57,6 @@
   "src-tauri/src/commands/uninstall/minifilter_orphan.rs": 1,
   "src-tauri/src/commands/uninstall/mod.rs": 1,
   "src-tauri/src/commands/uninstall/ownership.rs": 1,
-  "src-tauri/src/commands/uninstall/pending_delete.rs": 2,
   "src-tauri/src/commands/uninstall/residue.rs": 10,
   "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 12,
   "src-tauri/src/commands/uninstall/residue_update.rs": 2,

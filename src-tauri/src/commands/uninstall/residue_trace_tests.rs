@@ -1250,8 +1250,8 @@ use super::residue_update::*;
     /// 只许共用同一份上限。旧锚点只数 `size as usize` 这一种写法，把
     /// `reg_enum_sz_values` 的 `data_len.max(2)` 分配漏在判定面外（旧断言只认其中一种写法，
     /// 真绿但漏点）。
-    /// 现在按分配前缀点数，四个分配点（helpers 两处 + pending_delete 的 read_pfro +
-    /// residue 的 reg_enum_sz_values）各配一道上限。
+    /// 现在按分配前缀点数，三个分配点（helpers 两处 + residue 的 reg_enum_sz_values）
+    /// 各配一道上限。
     /// 判红自证：给任一文件再加一处 `let mut buf = vec![0u8;` 分配而不配 `> MAX_REG_STR_BYTES`
     /// ⇒ 两个计数当场不等。
     #[test]
@@ -1264,17 +1264,14 @@ use super::residue_update::*;
             src.split("#[cfg(test)]").next().unwrap_or(src)
         }
         let helpers = prod(include_str!("helpers.rs"));
-        let pending = prod(include_str!("pending_delete.rs"));
         let residue = prod(include_str!("residue.rs"));
         let allocs = helpers.matches(ALLOC).count()
-            + pending.matches(ALLOC).count()
             + residue.matches(ALLOC).count();
         let ceilings = helpers.matches(CEILING).count()
-            + pending.matches(CEILING).count()
             + residue.matches(CEILING).count();
-        // 正向特征：现算的分配点集合必须是「四处」，少一处说明锚点被改写、用例本身已失效，
+        // 正向特征：现算的分配点集合必须是「三处」，少一处说明锚点被改写、用例本身已失效，
         // 不许悄悄退化成恒等式。
-        assert_eq!(allocs, 4, "分配点锚点失配（helpers reg_sz/reg_multi_sz + pending_delete read_pfro + residue reg_enum_sz_values）: {allocs}");
+        assert_eq!(allocs, 3, "分配点锚点失配（helpers reg_sz/reg_multi_sz + residue reg_enum_sz_values）: {allocs}");
         assert_eq!(allocs, ceilings, "每处按回报长度分配都必须有一道 MAX_REG_STR_BYTES 上限: 分配 {allocs} / 上限 {ceilings}");
     }
 

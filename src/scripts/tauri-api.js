@@ -85,13 +85,10 @@
     // MAIN / MUST_READONLY 做双向棘轮，窄窗口集另登记在 MUST_WINDOWSET，改档必须两边同步）。
     // 2026-11-01 按后端逐条订正：此前注释把 report-*/appx-logo 说成只读、把 pending-*/residue-* 说成 MAIN。
     //   MAIN = list/run/modify/dir-size/reg-backup-*/batch-*/report-*/appx-logo
-    //   main+residue = pending-list|pending-revoke（PENDING_DELETE_WINDOWS；2026-11-02 登记入口退役）
     //   residue 副窗独占 = residue-scan|residue-execute（RESIDUE_WINDOWS）
     'uninstall:list': 'uninstall_list',
     'uninstall:run': 'uninstall_run',
     'uninstall:modify': 'uninstall_modify',
-    'uninstall:pending-list': 'uninstall_pending_list',
-    'uninstall:pending-revoke': 'uninstall_pending_revoke',
     'uninstall:residue-scan': 'uninstall_residue_scan',
     'uninstall:residue-execute': 'uninstall_residue_execute',
     'uninstall:dir-size': 'uninstall_dir_size',
@@ -493,8 +490,6 @@
       list: function (scope) { return invokeChannel('uninstall:list', { scope: scope }); },
       run: function (appId) { return invokeChannel('uninstall:run', { appId: appId }); },
       modify: function (appId, mode) { return invokeChannel('uninstall:modify', { appId: appId, mode: mode }); },
-      pendingList: function () { return invokeChannel('uninstall:pending-list'); },
-      pendingRevoke: function () { return invokeChannel('uninstall:pending-revoke'); },
       residueScan: function (appId) { return invokeChannel('uninstall:residue-scan', { appId: appId }); },
       residueExecute: function (appId, targets, backup) { return invokeChannel('uninstall:residue-execute', { appId: appId, targets: targets, backup: !!backup }); },
       dirSize: function (path) { return invokeChannel('uninstall:dir-size', { path: path }); },

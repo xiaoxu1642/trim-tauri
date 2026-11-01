@@ -30,7 +30,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC_RS = join(ROOT, 'src-tauri', 'src');
 const SRC_JS = join(ROOT, 'src', 'scripts');
 const MIN_COMMANDS = 8; // 命令地板：低于此数说明命令解析失效，不是「大家都接好了」
-const MIN_HELPERS = 2; // helper 地板：现盘 pending_load / power_plan_state 两处，归零即判据失明
+const MIN_HELPERS = 1; // helper 地板：现盘只剩 power_plan_state 一处，归零即判据失明
 const MIN_JS_CONSUMERS = 5; // 前端消费函数地板：低于此数说明 JS 扫描面塌了
 
 const relOf = (abs) => relative(ROOT, abs).split('\\').join('/');
@@ -53,16 +53,12 @@ const TABLE = [
     anchor: { file: 'src/scripts/models-window.js', fn: 'load', text: 'resp.degraded === true' } },
   { file: 'src-tauri/src/commands/appearance.rs', fn: 'appearance_get_prefs', status: 'consumed',
     anchor: { file: 'src/scripts/pathbinding-appearance.js', fn: 'syncAppearanceFromBackend', text: 'resp.degraded === true' } },
-  { file: 'src-tauri/src/commands/fileclean.rs', fn: 'fileclean_scan', status: 'consumed',
-    anchor: { file: 'src/scripts/cleanup.js', fn: 'refreshPendingBadge', text: 'data.degraded' } },
+  { file: 'src-tauri/src/commands/fileclean.rs', fn: 'fileclean_scan', status: 'pending',
+    batch: '2026-11-02 退役批',
+    reason: '原 consumed 锚点挂在 K13 的待删清单消费函数上（读的是 pending-list 回执，并非 fileclean 回执）；该段随查看/撤回整体退役后，cleanup.js 对 fcResp.data.degraded 实际零消费，如实降为 pending',
+    anchor: { file: 'src/scripts/cleanup.js', text: 'fcResp.data.degraded' } },
   { file: 'src-tauri/src/commands/startup.rs', fn: 'startup_scan', status: 'consumed',
     anchor: { file: 'src/scripts/startup.js', fn: 'scan', text: 'resp.degraded === true' } },
-  { file: 'src-tauri/src/commands/uninstall/pending_delete.rs', fn: 'uninstall_pending_list', status: 'consumed',
-    anchor: { file: 'src/scripts/residue-window.js', fn: 'updatePendingButtons', text: 'data.degraded' } },
-  // pending_load 是台账读侧 helper，损坏分支发 degraded，经 uninstall_pending_list 回传前端。
-  { file: 'src-tauri/src/commands/uninstall/pending_delete.rs', fn: 'pending_load', status: 'consumed',
-    via: 'uninstall_pending_list',
-    anchor: { file: 'src/scripts/residue-window.js', fn: 'updatePendingButtons', text: 'data.degraded' } },
   // ---- pending：收紧后现存违例，逐条带理由与归属，只减不增 ----
   { file: 'src-tauri/src/commands/appearance.rs', fn: 'appearance_get_material', status: 'pending',
     batch: 'B3/P1-6',

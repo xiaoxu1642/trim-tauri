@@ -51,7 +51,7 @@ const PAGES = [
     script: 'scripts/residue-window.js',
     // 断言 3b：本页初始化期间**全部**可观测调用（顺序无关、多重集精确相等）。
     // 这不是「文本里有什么」，而是桩上真的被调到的集合——少一条、多一条都判红。
-    initCalls: ['ds.bindCheckboxKeys', 'residueWindow.onTarget', 'settings.getPrefs', 'settings.setPref', 'uninstall.pendingList', 'uninstall.residueScan'],
+    initCalls: ['ds.bindCheckboxKeys', 'residueWindow.onTarget', 'settings.getPrefs', 'settings.setPref', 'uninstall.residueScan'],
     // 断言 7：`?.` 元素绑定台账（脚本扫描 ⇄ 本页 HTML id ⇄ 本表 三向相等）。
     // 空 = 本页绑定全走 on() 降级 warn，缺件由断言 2/6 看得见。
     optionalBindings: [],
@@ -73,8 +73,6 @@ const PAGES = [
     api: () => ({
       'uninstall.residueScan': async (a) => ({ success: true, data: { appName: '示例程序', findings: [], notes: [] }, _echo: a }),
       'uninstall.residueExecute': async () => ({ success: true, data: { details: [], okCount: 0, failCount: 0 } }),
-      'uninstall.pendingRevoke': async () => ({ success: true, data: { revoked: 0 } }),
-      'uninstall.pendingList': async () => ({ success: true, data: { entries: [] } }),
       'residueWindow.closeWindow': async () => ({ success: true }),
       'residueWindow.onTarget': () => undefined,
       // 假绿 #9：这三条是脚本里的 `?.` 可选链调用。桩里不给 = 真机缺通道时静默 no-op，
@@ -985,7 +983,7 @@ check(
       label: 'C4 首屏少发调用：residue 的 init 不再 scanAll() ⇒ 断言 3b 必须判红',
       red: true,
       run: async () => {
-        const script2 = rt.script.replace('    updatePendingButtons();\n    scanAll();\n  });', '    updatePendingButtons();\n  });');
+        const script2 = rt.script.replace('    scanAll();\n  });', '  });');
         const r2 = await runInit(residue, { htmlText: rt.html, scriptText: script2 });
         return judgeInit(residue, r2).missing;
       },

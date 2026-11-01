@@ -448,9 +448,9 @@ const QUARANTINE_KEEP: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// 执行体（不写日志，便于在一次性沙箱里断言真实删除行为而不污染应用日志目录）
 ///
-/// R7-M03（v7.2 C11）：改**递归**扫描——4 个隔离产出点里 3 个落在子目录
-/// （`cleanup/rules.json`、`uninstall/residue-rules.json`、`uninstall/residue-learned.json`，
-/// 只有 `pending_delete` 的在根），单层 `read_dir` 看不见它们的 `<file>.corrupt-<ts>`，
+/// R7-M03（v7.2 C11）：改**递归**扫描——隔离产出点多数落在子目录
+/// （`cleanup/rules.json`、`uninstall/residue-rules.json`、`uninstall/residue-learned.json`），
+/// 单层 `read_dir` 看不见它们的 `<file>.corrupt-<ts>`，
 /// 正是上文自述要消灭的「堆一排没人读的坏件」。机制照 pwsh 层 v2-L13 的先例
 /// （递归 + 限深 + reparse 拒）；**裁根仍只传 `app_data_dir()`**（AGENTS §6 老根不裁）。
 fn prune_quarantined_in(dir: &Path, now: SystemTime) -> usize {

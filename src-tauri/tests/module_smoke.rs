@@ -582,11 +582,9 @@ const GHOST_APP_ID: &str = r"HKLM|SOFTWARE\Microsoft\Windows\CurrentVersion\Unin
 // - 允许集外的窗口（含主窗）**全部**必须被拒杀。
 // - `reached` 集合显式断言「越过的窗口恰好等于允许集」，不是「至少一个」。
 //
-// 允许集是**参数**而不是写死的 `residue`：2026-10-18（v6-K13）把待删清单的
-// list/revoke 从「residue 独占」放宽到 `guard::PENDING_DELETE_WINDOWS`（= 主窗 + 残留
-// 副窗两个消费方），当时这条断言还按「residue 独占」写，于是提交里就留了一条恒红用例。
-// 2026-11-02 用户裁定登记入口退役后，本集只剩 list/revoke 两条（主窗查看/撤回）。
-// 档位以「谁真的需要调它」为准（AGENTS §3），测试必须跟着允许集走，而不是反过来。
+// 允许集是**参数**而不是写死的 `residue`：档位以「谁真的需要调它」为准（AGENTS §3），
+// 测试必须跟着允许集走，而不是反过来；残留链当前是 `RESIDUE_WINDOWS`（只有 residue），
+// 主窗与其余子窗必须全部被拒杀。
 const RESIDUE_LABEL: &str = "residue";
 
 fn assert_window_tier(cmd: &str, args: serde_json::Value, needle: &str, allowed: &[&str]) {
@@ -718,31 +716,6 @@ fn uninstall_modify_is_main_only_and_passes_guard_from_main() {
         "主窗应越过档位进入「现读注册表」这一步，回执 {res}"
     );
 }
-
-/// 重启后删两条命令的档位（2026-10-13 裁定 split；2026-10-18 v6-K13 起同集；
-/// 2026-11-02 用户裁定登记入口 `add` 退役，本集只剩 list/revoke）：
-/// - `list` / `revoke` 都走 `PENDING_DELETE_WINDOWS`（= 主窗清理域 + 残留副窗两个
-///   消费方），主窗必须**越过**档位；models/processManager 拒杀。
-///   list 用数据形状里的键名 `entries` 做正向特征（档位拒杀只回 {success:false,message}）；
-///   revoke 会写 PFRO ⇒ 正例只用「不存在的 batchId」——命令体在写任何东西之前因
-///   scoped 为空早退（零副作用），正向特征取回执里的 `revoked`；提权态下的真机正例
-///   留给发布前 #[ignore] 组（§4.2 ②）。
-/// - residue 的 scan/execute 仍只给 `residue`（见上面的 assert_residue_window_only）。
-#[test]
-fn pending_delete_channels_window_tier() {
-    // list：主窗 + residue 都越过（K13：待删清单对主窗可见）
-    assert_window_tier("uninstall_pending_list", json!({}), "entries", &["main", RESIDUE_LABEL]);
-    // revoke：主窗 + residue 都越过；不存在的 batchId ⇒ scoped 空 ⇒ 早退零写
-    assert_window_tier(
-        "uninstall_pending_revoke",
-        json!({ "batchId": "no-such-batch" }),
-        "revoked",
-        &["main", RESIDUE_LABEL],
-    );
-}
-
-// 2026-11-02 用户裁定：「登记到重启后删除」注册入口全应用退役（清单查看/撤回保留），
-// 原 pending-add 的两条快速组用例随命令与失败台账一并删除。
 
 /// v6-K11：外设备份还原必须带**显式高危确认字段** `confirmedHighRisk=true`。
 ///
@@ -1744,7 +1717,7 @@ fn syspanel_power_edit_command_is_main_only() {
 
 /// 2026-10-03 根治：「未完成还原」横幅的 per-id 忽略是写操作（记账 prefs 段），
 /// 优化页只在主窗 ⇒ 档位必须 MAIN，子窗被拒。正向特征（主窗能通过来源校验）
-/// 由 pending 侧同名模板核对过的同族形态覆盖；这里按模板纪律只点子窗拒绝侧。
+/// 由同域 uninstall_modify 的同族形态覆盖；这里按模板纪律只点子窗拒绝侧。
 #[test]
 fn optimizer_stale_dismiss_is_main_only() {    let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {

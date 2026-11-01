@@ -417,9 +417,9 @@ if (missing.length > missingCmds.length) {
     check(issues.length === 0, 'C01-a. 组合闸四闸俱全且只判定不执行（受保护面→别名面→系统面→reparse，无删除原语）',
       issues.length ? issues.join('；') : '在位');
   }
-  // C01-c：成对棘轮（R2a 彻底方案）——residue* 与 pending_delete 的文件面产源/出口，
+  // C01-c：成对棘轮（R2a 彻底方案）——residue* 的文件面产源/出口，
   // is_path_protected 与 is_system_namespace 必须共现，出现孤立即红。
-  const pairFiles = srcFiles.filter((f) => /uninstall[/\\](residue|pending_delete)/.test(path.relative(ROOT, f)));
+  const pairFiles = srcFiles.filter((f) => /uninstall[/\\]residue/.test(path.relative(ROOT, f)));
   const pairIssues = [];
   for (const f of pairFiles) {
     for (const issue of judgeProtectPair(blankNonCode(fs.readFileSync(f, 'utf8')))) {
@@ -428,12 +428,12 @@ if (missing.length > missingCmds.length) {
   }
   check(pairIssues.length === 0, `C01-c. 删除产源/出口两闸成对（is_path_protected ⇄ is_system_namespace，扫 ${pairFiles.length} 个文件）`,
     pairIssues.length ? pairIssues.join('；') : '全部成对');
-  // T1a-M27：扫描对象按目录名派生且此前无地板 —— residue/pending_delete 改名或搬走
+  // T1a-M27：扫描对象按目录名派生且此前无地板 —— residue 改名或搬走
   // 时「扫不到任何文件，全部成对」照样打 ✓。地板取现算值（与 check-layering 同纪律）。
   check(
-    pairFiles.length >= 4,
-    `C01-c 扫描面对象地板（residue/pending_delete 现算 ${pairFiles.length} 个 ≥ 4）`,
-    pairFiles.length < 4 ? '目录改名或搬走 ⇒ 成对断言不再对任何文件生效（0 文件也打 ✓ 的假绿）' : '',
+    pairFiles.length >= 3,
+    `C01-c 扫描面对象地板（residue 现算 ${pairFiles.length} 个 ≥ 3）`,
+    pairFiles.length < 3 ? '目录改名或搬走 ⇒ 成对断言不再对任何文件生效（0 文件也打 ✓ 的假绿）' : '',
   );
 }
 
