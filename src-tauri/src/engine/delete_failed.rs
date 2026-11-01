@@ -79,25 +79,6 @@ pub fn record(label: &str, domain: &str, targets: Vec<String>, recyclable: bool)
     }
 }
 
-/// 该目标是否命中**指定槽**（某窗口某域）记录的失败回执。
-///
-/// 路径比较大小写不敏感（Windows 路径语义）：回执里的路径与登记时送来的路径
-/// 同一来源本应逐字相同，但渲染层序列化/JSON 往返不保证大小写，两侧判据必须同口径。
-///
-/// 本查询**不看** `recyclable`：它回答的是「这个槽里有没有这条失败记录」（UI 用来
-/// 解释「为什么这条能点登记」），登记闸的判据是 [`is_failed_in_session`]。
-pub fn is_failed(label: &str, domain: &str, target: &str) -> bool {
-    if target.is_empty() {
-        return false;
-    }
-    let g = FAILED.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(m) = g.as_ref() else { return false };
-    let Some(list) = m.get(&slot_key(label, domain)) else {
-        return false;
-    };
-    list.iter().any(|(t, _)| t.eq_ignore_ascii_case(target))
-}
-
 /// 该目标是否命中**本会话任一删除域**的、**可回收链**的失败回执（登记闸用）。
 ///
 /// 为什么按会话查而不按「当前窗口的槽」查：失败回执是**会话级事实**，窗口 label
@@ -132,6 +113,24 @@ pub fn clear(label: &str, domain: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 该目标是否命中**指定槽**（某窗口某域）记录的失败回执。
+    ///
+    /// R6b-L18：生产侧零调用方（唯一登记闸是 [`is_failed_in_session`]），旧的 pub 版本
+    /// 还宣称「UI 用它解释为什么这条能点登记」—— 那条注释没有任何消费方对应。槽级读法
+    /// 只有测试需要（「两域互不顶账」「失败事实本身仍看得见」都是按槽断言），故收进测试，
+    /// 判据与生产同一份（`slot_key` + 大小写不敏感比较）。
+    fn is_failed(label: &str, domain: &str, target: &str) -> bool {
+        if target.is_empty() {
+            return false;
+        }
+        let g = FAILED.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(m) = g.as_ref() else { return false };
+        let Some(list) = m.get(&slot_key(label, domain)) else {
+            return false;
+        };
+        list.iter().any(|(t, _)| t.eq_ignore_ascii_case(target))
+    }
 
     /// 槽键必须带域：两个域在同一窗口下互不顶账（AGENTS §5.25）。
     #[test]

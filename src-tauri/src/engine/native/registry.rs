@@ -13,10 +13,6 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::ERROR_NO_MORE_ITEMS;
 use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, REG_BINARY, REG_DWORD, REG_EXPAND_SZ, REG_OPTION_NON_VOLATILE, REG_QWORD, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegEnumKeyExW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW};
 use super::common::*;
-/// 读注册表 DWORD，失败返回 -1（保持 unsafe 签名，调用方维持既有 unsafe 块）
-pub(super) unsafe fn read_reg_dword(hkey: HKEY, subkey: &str, value: &str) -> i32 {
-    read_reg_dword_opt(hkey, subkey, value).map(|v| v as i32).unwrap_or(-1)
-}
 
 /// 读注册表 DWORD 的可判空版本（B11：原 PS 实现靠 `Get-ItemProperty` + `$null` 判缺，
 /// 这里用 `Option` 表达同一语义 —— 值不存在 / 类型不对 / 打不开键都算 `None`）。
@@ -237,7 +233,9 @@ pub(super) unsafe fn reg_read_dword_val(hk: HKEY, name: &str) -> Option<u32> {
     if RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut size)).is_err() {
         return None;
     }
-    if ty != REG_DWORD { return None; }
+    // R5c-L02：长度闸必须严格等于 DWORD 宽度。短一截的畸形 DWORD 会让缓冲区尾部保持 0，
+    // 读出一个假数值而不是「读不出」。
+    if ty != REG_DWORD || size != 4 { return None; }
     Some(u32::from_le_bytes(buf))
 }
 
@@ -328,8 +326,16 @@ pub fn reg_key_remove_checked(hive: HKEY, subkey: &str, recurse: bool) -> Result
             let e = RegDeleteKeyW(hive, PCWSTR(sk.as_ptr()));
             return if e.is_ok() { Ok(()) } else { Err(e.0) };
         };
+        if last.is_empty() {
+            // R5c-L07：尾分隔符会让 `last` 为空段，而 `RegDeleteKeyW(h, L"")` 的语义
+            // 本仓未真机核验（Wine/ReactOS 按「删句柄自身的键」实现）——两种口径都会把
+            // 删除对象悄悄换成父键。按畸形 fail-closed 拒绝，不让多一个反斜杠改变目标。
+            return Err(87);
+        }
         let mut hk = HKEY::default();
-        let open = RegOpenKeyExW(hive, PCWSTR(to_wide_checked(parent)?.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk);
+        // 父键句柄只作路径锚点：文档明确 RegDeleteKeyW 的 hKey 访问权限不影响删除操作，
+        // 旧实现用 KEY_SET_VALUE（删值面的掩码）属于误导，最小权限取 KEY_READ。
+        let open = RegOpenKeyExW(hive, PCWSTR(to_wide_checked(parent)?.as_ptr()), Some(0), KEY_READ, &mut hk);
         if open.is_err() {
             return Err(open.0);
         }
@@ -386,30 +392,40 @@ pub fn reg_enum_subkeys_pub_scan(hive: HKEY, subkey: &str) -> (Vec<String>, bool
 /// 即「USB」类；数据层再以 `PNPDeviceID -like "PCI*"` 过滤到 PCI 总线 —— 与本函数
 /// 在两级子键上按 Class 过滤的成员集一致，且不依赖 WMI 服务在运行。
 /// 返回 PNPDeviceID（`PCI\VEN_x…\实例串` 形式）。
-pub fn reg_enum_dev_ids(class: &str) -> Vec<String> {
+///
+/// R5c-L10：返回 `(ids, incomplete)` —— 开键失败与枚举中途报错都不是「没有设备」，
+/// 调用方必须能把「读不动」与「空集」分开回执。
+pub fn reg_enum_dev_ids(class: &str) -> (Vec<String>, bool) {
     const BASE: &str = r"SYSTEM\CurrentControlSet\Enum\PCI";
     let mut out = Vec::new();
+    let mut incomplete = false;
     let mut root = HKEY::default();
     unsafe {
         if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(to_wide(BASE).as_ptr()), Some(0), KEY_READ, &mut root)
             .is_err()
         {
-            return out;
+            return (out, true);
         }
-        for dev in reg_enum_subkeys(root) {
+        let (devs, root_incomplete) = reg_enum_subkeys_scan(root);
+        incomplete |= root_incomplete;
+        for dev in devs {
             let dev_path = format!("{BASE}\\{dev}");
             let mut dev_hk = HKEY::default();
             if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(to_wide(&dev_path).as_ptr()), Some(0), KEY_READ, &mut dev_hk)
                 .is_err()
             {
+                incomplete = true;
                 continue;
             }
-            for inst in reg_enum_subkeys(dev_hk) {
+            let (insts, dev_incomplete) = reg_enum_subkeys_scan(dev_hk);
+            incomplete |= dev_incomplete;
+            for inst in insts {
                 let inst_path = format!("{dev_path}\\{inst}");
                 let mut inst_hk = HKEY::default();
                 if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(to_wide(&inst_path).as_ptr()), Some(0), KEY_READ, &mut inst_hk)
                     .is_err()
                 {
+                    incomplete = true;
                     continue;
                 }
                 let hit = reg_read_string(inst_hk, "Class")
@@ -424,7 +440,7 @@ pub fn reg_enum_dev_ids(class: &str) -> Vec<String> {
         }
         let _ = RegCloseKey(root);
     }
-    out
+    (out, incomplete)
 }
 
 /// 键的最后写入时间（Unix 毫秒）—— 失效残留扫描的「沉睡多久」展示用。
@@ -478,9 +494,15 @@ pub fn read_reg_string(hive: HKEY, subkey: &str, value: &str) -> Option<String> 
             let _ = RegCloseKey(hk);
             return None;
         }
-        if ty != REG_SZ || size == 0 {
+        if ty != REG_SZ {
             let _ = RegCloseKey(hk);
             return None;
+        }
+        if size == 0 {
+            // R5c-L03：存在但为空 ⇒ `Some("")`，与 `read_reg_binary_opt` 同口径。
+            // 旧实现把 `size == 0` 判成「不存在」，同一个空值在两读器上结论相反。
+            let _ = RegCloseKey(hk);
+            return Some(String::new());
         }
         // size 含结尾 NUL 的字节数
         let mut buf = vec![0u8; size as usize];
@@ -733,12 +755,13 @@ pub fn decode_reg_value_bytes(
     use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
 
     let units = |b: &[u8]| -> Vec<u16> {
+        // R5c-L05：奇数字节只对 UTF-16 字符串类型是畸形；REG_BINARY 奇数长度完全合法。
+        // 告警放在真正做 `chunks_exact(2)` 的闭包里，不再对所有类型无差别告警。
+        if b.len() % 2 != 0 {
+            crate::engine::log::write_log("warn", &format!("注册表字符串值字节长度为奇数（{} 字节），末字节不参与 UTF-16 解码", b.len()));
+        }
         b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
     };
-    // 奇数字节的畸形值：`chunks_exact(2)` 会静默丢掉末字节 ⇒ 先计数告警再解码
-    if buf.len() % 2 != 0 {
-        crate::engine::log::write_log("warn", &format!("注册表值字节长度为奇数（{} 字节），末字节不参与 UTF-16 解码", buf.len()));
-    }
     match ty {
         // 长度闸是**严格相等**：短的一侧判 decode_failed 是 P0-3 立的那道闸，
         // 长的一侧同样判失败 —— 放行长值会让还原按短字节写回，原值的高位永久消失，
@@ -842,7 +865,11 @@ pub fn file_ads_bytes(path: &std::path::Path) -> (u64, usize) {
     };
 
     let mut buf = WIN32_FIND_STREAM_DATA::default();
-    let wide = to_wide(&path.to_string_lossy());
+    // R5c-L08：`to_string_lossy()` 会把非 Unicode 文件名替换成 U+FFFD ⇒ 枚举到别的路径
+    // 或直接 (0,0)。按 OS 字符串逐字转宽，探测的就是调用方给的那条路径。
+    use std::os::windows::ffi::OsStrExt;
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
     let mut bytes = 0u64;
     let mut count = 0usize;
     unsafe {
@@ -956,7 +983,13 @@ pub unsafe fn reg_read_value_typed(hive: HKEY, subkey: &str, value_name: &str) -
     let mut buf = vec![0u8; size as usize];
     let r = RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut size));
     let _ = RegCloseKey(hk);
-    if r.is_err() { None } else { Some((ty, buf)) }
+    if r.is_err() {
+        return None;
+    }
+    // R5c-L06：按第二次查询回报的实际长度截断。值在两次查询之间缩小时，
+    // 多出来的补零会参与逐字节比对（同文件另三处同构读器都已截断）。
+    buf.truncate(size as usize);
+    Some((ty, buf))
 }
 
 /// 删除注册表值
@@ -1017,7 +1050,19 @@ pub(super) unsafe fn reg_count_values(hk: HKEY) -> usize {
     loop {
         let mut name_buf = [0u16; 260];
         let mut name_len = 260u32;
-        if RegEnumValueW(hk, index, Some(windows::core::PWSTR(name_buf.as_mut_ptr())), &mut name_len, None, None, None, None).is_err() { break; }
+        let r = RegEnumValueW(hk, index, Some(windows::core::PWSTR(name_buf.as_mut_ptr())), &mut name_len, None, None, None, None);
+        if r == ERROR_NO_MORE_ITEMS {
+            break; // 正常结束
+        }
+        if r.is_err() {
+            // R5c-L01：任何非正常结束（含超 260 的值名回 ERROR_MORE_DATA）都必须留痕，
+            // 否则计数少算而调用方无痕。此处只作显示计数，不重试增长缓冲（scan 版本负责）。
+            crate::engine::log::write_log(
+                "warn",
+                &format!("注册表值计数非正常结束（index={index}, err={}），本次计数不完整", r.0),
+            );
+            break;
+        }
         count += 1;
         index += 1;
     }
@@ -1279,6 +1324,24 @@ mod tests {
                 && del_value.contains("to_wide_checked(value_name)"),
             "删值面（reg_delete_value）必须对键路径与值名都吃 to_wide_checked"
         );
+
+        // R5c-L09：只断言「出现过」不够——`to_wide_checked(x).unwrap_or_else(|_| to_wide(x))?`
+        // 这种「过闸又吞闸」的写法同样能让上面四处全绿。闸调用所在的同一表达式行内
+        // 不得出现 unwrap_or 系列或 `.ok()`（它们会把 Err 折成默认值/Option）。
+        for (label, body) in [
+            ("删树原语", &remove_fn),
+            ("建面原语", &ensure_fn),
+            ("写值面", &write_fn),
+            ("删值面-restore", &restore_del),
+            ("删值面-delete", &del_value),
+        ] {
+            for line in body.lines().filter(|l| l.contains("to_wide_checked(")) {
+                assert!(
+                    !line.contains("unwrap_or") && !line.contains(".ok()"),
+                    "{label}：to_wide_checked 不得被 unwrap_or 系列/.ok() 吞掉（{line}）"
+                );
+            }
+        }
     }
 
     /// R5b-M01：删值入口的「键不存在」判定必须只认 2/3，其余失败码一律判失败。

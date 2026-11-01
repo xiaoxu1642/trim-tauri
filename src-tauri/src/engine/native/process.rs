@@ -14,6 +14,7 @@ use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, PR
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess};
 use windows::Win32::Storage::FileSystem::GetLogicalDrives;
 use super::common::*;
+use super::registry::reg_read_string;
 use super::services::*;
 // ==================== B2：进程控制 ====================
 
@@ -282,7 +283,18 @@ pub fn stubborn_kill() -> Result<Value, String> {
     }
     let mut rows: Vec<ResidualRow> = Vec::new();
     unsafe {
-        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).map_err(|_| "无法枚举进程".to_string())?;
+        // R5b-L02：第二趟只用于「确认残留」，失败时第一趟的战果已经发生；整体 Err 会把
+        // 已击杀/失败/跳过数一并吞掉。改为把三项计数写进错误文案并明确「残留未知」，
+        // 渲染层按失败展示时仍能看到实际完成了多少。
+        let snap = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(format!(
+                    "清理后无法枚举进程以确认残留（本次已结束 {killed} 个 / 失败 {failed} 个 / 跳过 {} 个；残留情况未知）: {e}",
+                    skipped.len()
+                ));
+            }
+        };
         let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..std::mem::zeroed() };
         let mut first = true;
         while (if first { first = false; Process32FirstW(snap, &mut entry) } else { Process32NextW(snap, &mut entry) }).is_ok() {
@@ -599,8 +611,14 @@ pub fn stubborn_block() -> Result<Value, String> {
     // 任务清单从 Tasks 目录现算（见 stubborn_enum_tasks）：历史实现把任务名写死成
     // `WpsUpdateTask_CHENG`（开发机用户名），在别的机器上恒不命中、任务永远删不掉。
     let backup_dir = crate::engine::paths::backup_write_dir("backup").join("tasks");
-    if !backup_dir.as_os_str().is_empty() {
-        let _ = std::fs::create_dir_all(&backup_dir);
+    // R5b-L10：`backup_write_dir` 恒返回非空路径，旧的 `as_os_str().is_empty()` 是死守卫；
+    // 真正的失败点是建目录。建不出来时该批任务一律不删，并逐个记进 fail_tasks。
+    let backup_dir_ok = std::fs::create_dir_all(&backup_dir).is_ok();
+    if !backup_dir_ok {
+        crate::engine::log::write_log(
+            "warn",
+            &format!("顽固软件治理：任务备份目录创建失败（{}），相关任务将不删除", backup_dir.display()),
+        );
     }
     let block_tasks = stubborn_enum_tasks();
     for task in &block_tasks {
@@ -623,7 +641,7 @@ pub fn stubborn_block() -> Result<Value, String> {
         // 写盘失败，一律**不删任务**（v5 M-1：此前 `let _ = …status()` 把成败全丢，兜底
         // `File::open("NUL")` 又是只读句柄当 stdout、还带可 panic 的 unwrap，于是
         // 「备份没做成」与「备份做成了」在回执里长得一模一样）。
-        if backup_dir.as_os_str().is_empty() {
+        if !backup_dir_ok {
             fail_tasks.push(format!("{task}（备份目录不可用，未删除）"));
             failed += 1;
             continue;
@@ -708,30 +726,23 @@ pub fn stubborn_block() -> Result<Value, String> {
     // 4. 设置 WPS 更新注册表
     {
         use windows::Win32::System::Registry::{
-            RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY_CURRENT_USER,
-            KEY_WRITE, REG_SZ, REG_VALUE_TYPE,
+            RegCloseKey, RegOpenKeyExW, RegSetValueExW, HKEY_CURRENT_USER,
+            KEY_READ, KEY_WRITE, REG_SZ,
         };
         let key_path = to_wide(r"Software\Kingsoft\Office\6.0\Common\updateinfo");
         let value_name = to_wide("UpdateMode");
         let mut hkey = HKEY_CURRENT_USER;
         let mut wrote = false;
         unsafe {
-            if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(key_path.as_ptr()), Some(0), KEY_WRITE, &mut hkey).is_ok() {
+            // R5b-L01：回读要查询值内容，句柄必须带 KEY_READ（KEY_WRITE 不含 KEY_QUERY_VALUE）。
+            if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(key_path.as_ptr()), Some(0), KEY_READ | KEY_WRITE, &mut hkey).is_ok() {
                 let val = to_wide("close");
                 let bytes: Vec<u8> = val.iter().flat_map(|&w| w.to_le_bytes()).collect();
                 // U-A5-L01：写值结果不再 `let _ =` 吞掉，且写完回读确认（同函数第 3/5 步口径）。
                 if RegSetValueExW(hkey, PCWSTR(value_name.as_ptr()), Some(0), REG_SZ, Some(&bytes)).is_ok() {
-                    let mut ty = REG_VALUE_TYPE::default();
-                    let mut size = 0u32;
-                    wrote = RegQueryValueExW(
-                        hkey,
-                        PCWSTR(value_name.as_ptr()),
-                        None,
-                        Some(&mut ty),
-                        None,
-                        Some(&mut size),
-                    )
-                    .is_ok();
+                    // R5b-L01：回读必须比对**内容**——旧实现只证明「值可查询」，
+                    // 写入被策略/安全软件改回或写成别的值同样能过，回执却报成功。
+                    wrote = matches!(reg_read_string(hkey, "UpdateMode"), Some(v) if v == "close");
                 }
                 let _ = RegCloseKey(hkey);
             }

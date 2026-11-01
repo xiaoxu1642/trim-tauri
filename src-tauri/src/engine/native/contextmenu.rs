@@ -169,8 +169,27 @@ pub fn cm_restart_explorer() -> Result<Value, String> {
         // U-A5-L04：explorer 是长命 GUI，不能等它退出（这也是本条不走 timeout 底座的原因）；
         // 但不再用 `is_ok()` 把错误折成「没重启」——留 PID 与失败原因。
         let mut started = 0;
-        if let Ok(exe) = crate::engine::systembin::system_tool("explorer.exe") {
-            if exe.is_file() {
+        // R5a-L08：解析失败与「解析到但不是文件」两条早退路径也必须留日志——
+        // 只记录 spawn 分支时，事后无法判断「为什么没拉起」。
+        // 解析结果落成 Option 后再分两段判：Err 臂必须能拿到错误文本写日志，
+        // 同时保留 `let exe = …system_tool(…)` 形态供 check-system-bin 的两跳别名识别。
+        let exe = match crate::engine::systembin::system_tool("explorer.exe") {
+            Ok(p) => Some(p),
+            Err(e) => {
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("资源管理器重启：无法解析系统 explorer.exe: {e}"),
+                );
+                None
+            }
+        };
+        if let Some(exe) = exe {
+            if !exe.is_file() {
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("资源管理器重启：解析到的 explorer.exe 不是文件（{}），未拉起", exe.display()),
+                );
+            } else {
                 match crate::engine::systembin::quiet_cmd(&exe).spawn() {
                     Ok(child) => {
                         started = 1;
@@ -848,7 +867,9 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
             if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { continue; }
             for vn in reg_enum_values(hk) {
                 if is_guid(&vn) {
-                    blocked.insert(vn.to_uppercase(), scope.to_string());
+                    // R5a-L10：两档同时屏蔽时保留先到的 machine，不能被后到的 user 覆盖——
+                    // 覆盖后 `write_needs_admin` 会判成不需要提权，而机器档仍在生效。
+                    blocked.entry(vn.to_uppercase()).or_insert_with(|| scope.to_string());
                 }
             }
             let _ = RegCloseKey(hk);
@@ -1553,7 +1574,12 @@ pub fn cm_toggle(items: &[Value]) -> Result<Value, String> {
             let result = toggle_cm_item(item, &source, &target, &display_path, want_enabled, &id, &name);
             match result {
                 Ok(mut res) => {
-                    success += 1;
+                    // 切换臂可以如实回 skip（如外部改名禁用项）；聚合计数不得把它记成功。
+                    if res.get("status").and_then(|v| v.as_str()) == Some("skip") {
+                        skipped += 1;
+                    } else {
+                        success += 1;
+                    }
                     res["id"] = json!(id);
                     res["name"] = json!(name);
                     res["regPath"] = json!(display_path);
@@ -1586,39 +1612,51 @@ unsafe fn toggle_cm_item(
             return Err("系统内置扩展不允许加入屏蔽表（可能导致整个新式右键菜单失效）".into());
         }
         let scope = if blocked_by == "machine" { "machine" } else { "user" };
+        let machine_key = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked";
+        let user_key = r"Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked";
         let (hive, key) = if scope == "machine" {
-            (HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked")
+            (HKEY_LOCAL_MACHINE, machine_key)
         } else {
-            (HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked")
+            (HKEY_CURRENT_USER, user_key)
         };
-        let sk = to_wide(key);
-        let mut hk = HKEY::default();
-        let mut disp = REG_CREATED_NEW_KEY;
-        if RegCreateKeyExW(hive, PCWSTR(sk.as_ptr()), None, PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disp)).is_err() {
-            return Err("无法打开屏蔽表键".into());
-        }
-        if want_enabled {
-            let nm = to_wide(&clsid);
-            let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
+        // R5a-L10：机器档与用户档同时屏蔽时（扫描侧已按 machine 优先记录），解除必须
+        // 两档都清——只清记录档会回「已解除屏蔽」而另一档仍生效。屏蔽仍只写记录档，
+        // 不额外扩大写入面。
+        let targets: &[(HKEY, &str)] = if want_enabled && scope == "machine" {
+            &[(HKEY_LOCAL_MACHINE, machine_key), (HKEY_CURRENT_USER, user_key)]
         } else {
-            let nm = to_wide(&clsid);
-            let _ = RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_SZ, Some(&[0u8, 0]));
+            &[(hive, key)]
+        };
+        for (th, tk) in targets {
+            let sk = to_wide(tk);
+            let mut hk = HKEY::default();
+            let mut disp = REG_CREATED_NEW_KEY;
+            if RegCreateKeyExW(*th, PCWSTR(sk.as_ptr()), None, PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disp)).is_err() {
+                return Err("无法打开屏蔽表键".into());
+            }
+            if want_enabled {
+                let nm = to_wide(&clsid);
+                let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
+            } else {
+                let nm = to_wide(&clsid);
+                let _ = RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_SZ, Some(&[0u8, 0]));
+            }
+            let _ = RegCloseKey(hk);
         }
-        let _ = RegCloseKey(hk);
-        // 回读
-        let still_blocked = {
-            let sk2 = to_wide(key);
+        // 回读：解除时目标档（机器档双档）必须全部为空；屏蔽时记录档必须有值。
+        let mut still_blocked = false;
+        for (vh, vk) in targets {
+            let sk2 = to_wide(vk);
             let mut hk2 = HKEY::default();
-            if RegOpenKeyExW(hive, PCWSTR(sk2.as_ptr()), Some(0), KEY_READ, &mut hk2).is_err() { false }
-            else {
+            if RegOpenKeyExW(*vh, PCWSTR(sk2.as_ptr()), Some(0), KEY_READ, &mut hk2).is_ok() {
                 let nm = to_wide(&clsid);
                 let mut ty = REG_VALUE_TYPE::default();
                 let mut size = 0u32;
                 let exists = RegQueryValueExW(hk2, PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_ok();
                 let _ = RegCloseKey(hk2);
-                exists
+                if exists { still_blocked = true; }
             }
-        };
+        }
         if still_blocked == !want_enabled {
             let new_blocked = if want_enabled { "" } else { scope };
             let msg = if want_enabled { "已解除屏蔽" } else { "已屏蔽（不加载该扩展）" };
@@ -1945,6 +1983,12 @@ unsafe fn toggle_cm_item(
                 "newNativeRegPath": json!(segs_fix(target)),
                 "message": "已启用（整组还原 ContextMenuHandlers）"
             }));
+        }
+        // R5a-L09：`AutorunsDisabled*` 外部改名禁用项（扫描侧 `unknownConvention`，
+        // clsid 为空）本臂无法反转——旧实现按「叶子无 '-'」直接回 `ok / 已处于启用状态`，
+        // 前端据此翻勾并弹「已启用」，键名却没变。如实回 skip，文案与 UI tooltip 对齐。
+        if clsid.is_empty() && leaf.to_lowercase().starts_with("autorunsdisabled") {
+            return Ok(json!({"status": "skip", "message": "该项由外部工具以改名方式禁用，Trim 不改动"}));
         }
         if want_enabled && !leaf.starts_with('-') {
             return Ok(json!({"status": "ok", "message": "已处于启用状态"}));

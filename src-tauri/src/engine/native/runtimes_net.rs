@@ -674,7 +674,9 @@ pub fn netcheck_status() -> Result<Value, String> {
         if winhttp_proxy.is_none() {
             proxy_evidence.push("系统代理（WinHTTP）：读取失败，未判定".to_string());
         }
-        if winhttp_has_proxy {
+        // R5b-L07：组策略下发时代理由组织管理，重置入口会被策略写回（假修复），
+        // 也不能用 WinHTTP 文案覆盖「由组织管理」的说明。层信息仍在 evidence 里。
+        if winhttp_has_proxy && !p_gpo {
             if proxy_status == "ok" { proxy_status = "warn"; }
             proxy_detail = "WinHTTP 层配置了代理，可能影响系统服务联网".to_string();
             proxy_repair = json!({"id": "reset-winhttp"});

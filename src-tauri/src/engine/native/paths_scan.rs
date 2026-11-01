@@ -205,7 +205,18 @@ fn glob_first_dir(pattern: &str) -> String {
         if part.contains('*') {
             // 当前 current 是目录，枚举子目录匹配
             let dir = if current.is_empty() { "\\".to_string() } else { current.clone() };
-            let Ok(entries) = std::fs::read_dir(&dir) else { return String::new(); };
+            // R5b-L04：读不动 ≠ 没找到。glob 只是候选发现，仍返回空串（回执三态需要
+            // 命令层/持久化契约变更，不在本单元范围），但失败必须在日志里留痕。
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(e) => {
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!("路径扫描：glob 目录枚举失败（{dir}）: {e}"),
+                    );
+                    return String::new();
+                }
+            };
             let mut matched: Vec<std::path::PathBuf> = Vec::new();
             for entry in entries.flatten() {
                 if !entry.path().is_dir() { continue; }

@@ -811,24 +811,20 @@ fn persist_power_sessions(sessions: &HashMap<String, PowerSettingsSession>, now_
 /// 取会话：内存优先；进程重启后内存表为空，再从盘上恢复（同时裁掉 TTL 过期项）。
 fn power_session_get(session_id: &str) -> Option<PowerSettingsSession> {
     let now_ms = crate::engine::now_ms();
-    // 先取再判：`if let` 的临时锁守卫会活到整个分支体，分支里再取锁会自锁。
-    let in_memory = {
-        let map = power_sessions().lock().unwrap_or_else(|e| e.into_inner());
-        map.get(session_id).cloned()
-    };
-    if let Some(found) = in_memory {
+    // R5b-L06：内存锁必须罩住「判空 → 读盘 → 合并」整段。旧实现在锁外读盘，并发消费
+    // （drop 先删内存再落盘）时会把已消费的会话从旧盘面写回内存。锁序与 insert/drop
+    // 一致：内存锁 → 落盘锁（load 只读盘，不取锁）。
+    let mut map = power_sessions().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(found) = map.get(session_id).cloned() {
         if now_ms.saturating_sub(found.created_ms) <= POWER_SESSION_TTL_MS {
             return Some(found);
         }
         // 内存里也按 TTL 判：长时间不关窗口的进程同样不能让过期快照可回写
-        let _ = drop_power_session(session_id, now_ms);
+        map.remove(session_id);
+        persist_power_sessions(&map, now_ms);
         return None;
     }
     let disk = load_power_sessions_from_disk(now_ms);
-    if disk.is_empty() {
-        return None;
-    }
-    let mut map = power_sessions().lock().unwrap_or_else(|e| e.into_inner());
     for (id, session) in disk {
         map.entry(id).or_insert(session);
     }
@@ -2095,7 +2091,9 @@ pub fn pagefile_apply(managed: bool, entries: &[PagefileEntry]) -> Result<Value,
 
     // AutomaticManagedPagefile = REG_SZ "TRUE"/"FALSE"（对齐 WMI 也读同一位置的形态）
     let am_value = if managed { "TRUE" } else { "FALSE" };
-    let am_bytes: Vec<u8> = am_value.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let mut am_bytes: Vec<u8> = am_value.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    // R5b-L08：REG_SZ 必须以 NUL 结尾；缺少 UTF-16 终止符的串会被部分读方按畸形处理。
+    am_bytes.extend_from_slice(&0u16.to_le_bytes());
     reg_restore_write_checked(hive_hklm(), sub, "AutomaticManagedPagefile", REG_SZ, &am_bytes)
         .map_err(|e| format!("写 AutomaticManagedPagefile 失败：{e}"))?;
 

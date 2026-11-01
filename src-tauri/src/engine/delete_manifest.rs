@@ -44,8 +44,20 @@ pub fn new_batch_id() -> String {
 
 /// 写删除清单：`{batchId, deletedAt, count, items[]}`，原子写 + 只留最近 50 个批次。
 /// 失败/无条目返回 None（对照 saveDeleteManifest）。
+///
+/// R6b-L15：批次号先过形态判据（与还原包 `Pack::begin` / `restore` 同一实现，N6）。
+/// 现算五个调用点传的都是内部生成器（`new_batch_id()` / `startup-<毫秒>`），今天不可达；
+/// 但 `dir.join("deleted-..\\..\\x.json")` 里 `deleted-` 前缀只挡得住第一段 —— 一旦有
+/// 调用方把渲染层给的串直接传进来，就是「按任意名字写到 `fileclean-backup` 之外」的入口。
 pub fn save_delete_manifest(batch_id: &str, entries: &[Value]) -> Option<PathBuf> {
     if entries.is_empty() {
+        return None;
+    }
+    if let Some(reason) = crate::engine::restore_pack::batch_id_reject_reason(batch_id) {
+        log::write_log(
+            "warn",
+            &format!("删除清单批次号形态不合法（{reason}），本次未写清单"),
+        );
         return None;
     }
     let dir = backup_dir();

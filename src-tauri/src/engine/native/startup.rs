@@ -201,14 +201,6 @@ unsafe fn read_startup_approved(hive: HKEY, subkey: &str, value_name: &str) -> O
     result
 }
 
-/// 取文件发布者（CompanyName）
-fn get_publisher(path: &str) -> String {
-    if path.is_empty() { return String::new(); }
-    // 简化实现：不实现 GetFileVersionInfoW，留空
-    // 后续 S2 用 VerQueryValueW 实现
-    String::new()
-}
-
 /// 任务 XML 文本解码：Windows 任务文件是 UTF-16LE(带 BOM)，少数导出件是 UTF-8
 fn decode_task_xml(bytes: &[u8]) -> String {
     if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
@@ -635,6 +627,14 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                 }
 
                 if value_data.trim().is_empty() && value_data_b64.is_empty() && value_data_arr.is_empty() {
+                    // R5d-L02：非字符串值（Run 下的 REG_DWORD/REG_QWORD、以及未知类型）不会
+                    // 被赋给上面三个数据字段，于是整行在这里被丢掉 —— 而「丢掉」在界面上与
+                    // 「没有这一项」无法区分。不猜显示值（把数字串当 command 会误导定位），
+                    // 但必须留痕：畸形行可以不出现在列表里，不能静默消失。
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!("启动项扫描跳过非字符串值：{hive_tag} {subkey}\\{vp}（类型 {value_type}）"),
+                    );
                     continue;
                 }
 
@@ -678,7 +678,10 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                     "location": label,
                     "scope": scope,
                     "disabledBy": disabled_by,
-                    "publisher": get_publisher(&cmd_path),
+                    // R5d-L07：发布者字段恒空 —— 占位实现（旧 `get_publisher` 只有
+                    // `String::new()`）已删，前端按空值不显示该标签。真要做时在扫描里
+                    // 按 VerQueryValueW 取 CompanyName，字段名不用改。
+                    "publisher": "",
                     "resolvedPath": cmd_path,
                     // 目标已消失：只报事实（写在哪、找不着），不推断「是病毒」——见 missing_target_of
                     "missingTarget": missing,
@@ -699,6 +702,10 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
             for entry in entries.flatten() {
                 let fname = entry.file_name().to_string_lossy().to_string();
                 if fname.eq_ignore_ascii_case("desktop.ini") { continue; }
+                // R5d-L05：启动文件夹只执行**文件**，子目录是假项（Windows 不执行目录）；
+                // 「禁用」会把整个目录 rename 进备份区，把里面的东西一起搬走。
+                // 只跳过读得到「确实是目录」的条目：属性读失败时保留旧行为（不丢行）。
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) { continue; }
                 let full_path = entry.path().to_string_lossy().to_string();
                 let name_stem = entry.path().file_stem().and_then(|s| s.to_str()).unwrap_or(&fname).to_string();
                 // .lnk 目标解析：显示与发布者判定都用真实目标；解析失败保留原路径。
@@ -730,7 +737,7 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                     "location": label,
                     "scope": scope,
                     "disabledBy": disabled_by,
-                    "publisher": get_publisher(&resolved),
+                    "publisher": "",
                     "resolvedPath": resolved,
                     "command": command,
                     // 启动文件夹的项是 read_dir 当场枚举出来的，文件必然在 —— 恒空，但三个来源同形状
@@ -792,6 +799,11 @@ fn merge_disabled_ledger(results: &mut Vec<Value>, records: &[Value]) {
             // 来源标记覆盖台账行自带的任何值（台账行里的 `origin` 不可信）。
             o.insert("origin".into(), json!("disabled-ledger"));
         }
+        // R5d-L06：扫描三臂（registry/folder/task）都调 `apply_startup_guard`，合并段此前
+        // 漏了 ⇒ 台账并入的行没有 `protected` 标记，前端不显示「系统组件」徽章、复选框也不
+        // 禁用。native 两臂仍会按 valueName/command 重算并拦（不是安全洞），但「三臂打标」
+        // 这条不变量必须在合并段也成立，否则护栏名单一扩容，历史台账行就显示成可操作。
+        apply_startup_guard(&mut item);
         results.push(item);
     }
 }
@@ -1454,6 +1466,12 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
         if reg_read_value_typed(hive, &subkey, value_name).is_none() {
             return Err("注册表值不存在".into());
         }
+        // R5d-L01：批准位已经是「禁用」时，这次禁用是**无操作**。旧链路照样把同一个位重写
+        // 一遍再回执「已禁用」，用户以为改动过什么。先读实况，避免白写一次并如实说清。
+        // （批量入口会把选中的行原样送来，disabled 行也会进来，所以这条可达。）
+        if !is_run_once && read_startup_approved(hive, approved_subkey, value_name) == Some(true) {
+            return Ok("本来就是禁用状态（未改动）".into());
+        }
         let approve_fail: Option<String> = if is_run_once {
             Some("RunOnce 项无系统批准位".to_string())
         } else {
@@ -1541,6 +1559,12 @@ unsafe fn toggle_folder_item(item: &Value, enable: bool, records: &mut Vec<Value
         // v5-K09 批次 5：台账坐标过准入（containment + 保护面），在 rename 之前拦——
         // 同用户篡改 disabled.json（%APPDATA% 可写）注入任意 move 坐标时，这里 fail-closed。
         folder_restore_verdict(backup_path, orig_path)?;
+        // R5d-L04：启用方向的 rename 没有「目标已存在」保护，而 Windows 的 rename 语义是
+        // 覆盖 —— 用户在这段时间里重建了同名 .lnk，会被静默顶掉。禁用方向早有
+        // `while dest.exists()` 防覆盖（见下方），这里必须对称拒绝而不是覆盖。
+        if std::path::Path::new(orig_path).exists() {
+            return Err("原位已有同名文件，请先移除后再启用".into());
+        }
         if let Some(parent) = std::path::Path::new(orig_path).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -1781,6 +1805,8 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                     Some(v) => v,
                     None => { failed += 1; results.push(json!({"id": id, "name": name, "status": "error", "message": "注册表路径格式错误"})); continue; }
                 };
+                // 与写侧同一判据（WOW6432Node 的批准位在 Run32，不是 Run）
+                let approved_subkey = if subkey.to_ascii_uppercase().contains("WOW6432NODE") { "Run32" } else { "Run" };
                 // K04：删除臂同样过容器准入（此前只有启用臂有）——快照/台账行可指向
                 // 任意 Run 容器外的值，export 备份 + RegDeleteValueW 即「任意注册表
                 // 值删除」。真实 hive/scope 以 regPath 解析结果为准。
@@ -1854,6 +1880,25 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                         failed += 1;
                         results.push(json!({"id": id, "name": name, "status": "error", "message": "删除未生效（可能需要管理员权限）"}));
                     } else {
+                        // R5d-L03：批准位是**按键名常驻**的 —— 值删了位还在，之后同名值（应用
+                        // 重装、或本工具 startup_add 新加）一写回来就被系统当成「已禁用」。
+                        // 只清**已存在**的批准记录（不新建键、不给无关值留死数据），
+                        // RunOnce 不碰（理由与 toggle_registry_item 的 is_run_once 同源）。
+                        let run_once = subkey
+                            .rsplit('\\')
+                            .next()
+                            .map(|s| s.to_ascii_lowercase().starts_with("runonce"))
+                            .unwrap_or(false);
+                        if !run_once && read_approved_blob(hive, approved_subkey, value_name).is_some() {
+                            if let Err(why) = set_approved_bit(hive, approved_subkey, value_name, false) {
+                                // 收尾失败**不改变删除结果**（值确实已删），但必须留痕：
+                                // 残留的批准位会让同名新值开局即禁用。
+                                crate::engine::log::write_log(
+                                    "warn",
+                                    &format!("启动项删除后清理批准位失败（{value_name}）: {why}"),
+                                );
+                            }
+                        }
                         // 从 disabled.json 移除记录
                         records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
                         success += 1;

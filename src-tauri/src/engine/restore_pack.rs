@@ -80,15 +80,17 @@ pub fn zip_key_of(path: &str) -> String {
     hex[..16].to_string()
 }
 
-/// 批次号形态判据的**唯一实现**（R6b-L10）：`begin` 与 `restore` 同一条闸门。
+/// 批次号形态判据的**唯一实现**（R6b-L10，R6b-L15 扩到删除清单）：`begin`、`restore`
+/// 与 `delete_manifest::save_delete_manifest` 共用同一条闸门。
 ///
 /// 此前只有 `restore` 校验（5 项形态判据），`begin` 拿到什么串就 `create_dir_all` +
 /// `File::create` 什么目录 —— 现算唯一调用点传的是内部 `new_batch_id()`，今天不可达，
 /// 但那是纵深缺口：一旦有调用方把渲染层给的串直接传进来，`begin` 就是「按任意名字建目录
 /// 并写 payload.zip」的入口。两侧共用本函数，判据不会各写各的再漂移。
+/// 删除清单那条入口（`deleted-{batch_id}.json`）是同族风险，一并吃这条判据。
 ///
 /// 长度闸按**字符数**（`paths::exceeds_char_len` 是唯一口径，不用 UTF-8 字节数）。
-fn batch_id_reject_reason(id: &str) -> Option<&'static str> {
+pub(crate) fn batch_id_reject_reason(id: &str) -> Option<&'static str> {
     if id.is_empty() {
         return Some("批次号为空");
     }
@@ -205,6 +207,13 @@ impl Pack {
                 .map_err(|e| format!("写入 zip 内容失败: {e}"))?;
         }
         self.total += written;
+        // R6b-L17：整批累计按**实际读到的字节**回判。上面那条只按声明尺寸预判一次，
+        // 备份期间源文件被别的进程追加时，整批可以越过 `MAX_BATCH_BYTES` —— 单文件
+        // 这条上限有实测回判，整批没有，两条上限的口径必须对称。
+        // 此处 Err ⇒ 调用方不删该目标（「超限拒绝备份」的 fail-closed 语义不变）。
+        if self.total > MAX_BATCH_BYTES {
+            return Err(format!("本批实际内容超过 {MAX_BATCH_BYTES} 字节上限，未备份"));
+        }
         Ok(Entry {
             zip_key: key,
             kind: "file".into(),
@@ -446,6 +455,23 @@ pub fn restore_path_verdict(path: &str) -> Option<String> {
     None
 }
 
+/// 还原落盘临时名的进程内单调序号（R6b-L19）。只服务「同一目标被并发还原时不撞名」：
+/// 目标路径 + pid + 序号三者合一才唯一，`target.with_extension` 那条旧写法会把不同
+/// 扩展名解析成同一落点。与 `native/startup.rs` 的备份序号同形（`AtomicU32` + fetch_add）。
+static RESTORE_TMP_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// 批次目录本身是否可信（R6b-L16）：根与 manifest 都判了 reparse，唯独中间这一层没判。
+///
+/// 危害面有限但口径已错：`<root>/<batch>` 被换成 junction 时，`list()` 会把链接另一头
+/// 的目录列成本机还原包，`restore()` 会顺着链接读别处的 `manifest.tsv` + `payload.zip`
+/// （写入仍受 `restore_path_verdict` 全量约束，不会越权写盘）。判据与 `prune` 同源
+/// （`protect::is_reparse`，N6 不另造一套）。
+fn batch_dir_trusted(root: &Path, batch_id: &str) -> bool {
+    std::fs::symlink_metadata(root.join(batch_id))
+        .map(|m| m.is_dir() && !protect::is_reparse(&m))
+        .unwrap_or(false)
+}
+
 /// 列出本机还原包（按 batch_id 倒序，最多 limit 个）。老根只读兜底。
 pub fn list(limit: usize) -> Vec<Value> {
     let mut rows: Vec<Value> = Vec::new();
@@ -461,6 +487,10 @@ pub fn list(limit: usize) -> Vec<Value> {
         for de in rd.flatten() {
             let name = de.file_name().to_string_lossy().to_string();
             if !de.path().is_dir() || name.starts_with('.') {
+                continue;
+            }
+            // R6b-L16：`is_dir()` 跟随链接，批次目录是 junction 时这里会列出链接另一头的包
+            if !batch_dir_trusted(&root, &name) {
                 continue;
             }
             let manifest = de.path().join(MANIFEST_NAME);
@@ -496,8 +526,10 @@ pub fn list(limit: usize) -> Vec<Value> {
 /// ok/failed/conflict/skipped 四档」，那是一条与实现不符的承诺（R6b-M06 复核），
 /// 而「有条目被跳过」这件事本身已经由 `parse_manifest` 的 kind 白名单堵死——
 /// 形态不对的 manifest 整包拒绝，不会挑一条丢掉。
-/// `conflicts`（目标已存在）同时也计入 `failed`：渲染层只读 `failed.length` 与 `restored`，
-/// 冲突必须是用户看得见的东西，不能只藏在一个没有消费者的计数里。
+/// `conflicts` 只由**文件档**产出（目标已存在且内容不同），且同时 `push` 进 `failed`：
+/// 渲染层只读 `failed.length` 与 `restored`，冲突必须是用户看得见的东西，不能只藏在
+/// 一个没有消费者的计数里。目录档「已存在」按幂等成功计（见循环里的 R6b-L13），
+/// 因此 `restored + failed.len()` 恒等于清单条目数。
 pub fn restore(batch_id: &str) -> Result<Value, String> {
     // batch_id 来自渲染层，先当「不可信文件名」处理：判据与 `Pack::begin` 同一条（R6b-L10）
     if let Some(reason) = batch_id_reject_reason(batch_id) {
@@ -516,6 +548,11 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
             if matches!(verdict, protect::RootVerdict::Rejected(_)) {
                 skipped.push(format!("{}（{}）", root.display(), verdict.reason()));
             }
+            continue;
+        }
+        // R6b-L16：批次目录本身也要过 reparse 判据 —— 否则「命中」只是链接另一头
+        // 恰好有同名 manifest，读的是别处的包
+        if !batch_dir_trusted(&root, batch_id) {
             continue;
         }
         let mf = root.join(batch_id).join(MANIFEST_NAME);
@@ -558,7 +595,11 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
             let target = Path::new(&e.orig_path);
             if e.kind == "dir" {
                 if target.is_dir() {
-                    conflicts += 1;
+                    // R6b-L13：目录已存在 = **目标已达成**，按幂等成功计（与文件分支
+                    // 「内容一致即 ok」同一口径）。旧写法把它计进 `conflicts`，而渲染层
+                    // 只读 `restored`/`failed` ⇒ 那个数没有消费者，用户与回执都看不见；
+                    // 而「重装后再还原」时目录本来就在，把它当冲突还会让 conflicts 失去意义。
+                    ok += 1;
                     continue;
                 }
                 // P0-4（R4-M09）：create_dir_all 沿字符串路径逐级建——最近的现存祖先
@@ -607,7 +648,23 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
                 let _ = std::fs::create_dir_all(parent);
             }
             // 先落到目标同目录的临时名，校验哈希后再改名就位：半途失败不留「半个文件」
-            let tmp = target.with_extension(format!("trim-restore-{}", std::process::id()));
+            //
+            // R6b-L19：临时名必须**跨目标唯一**。旧写法 `with_extension("trim-restore-<pid>")`
+            // 会替换扩展名 ⇒ 同目录的 `a.txt` 与 `a.doc` 解析出同一个临时名；并发还原
+            // （两个批次，或同一批次被点两次 —— `uninstall_batch_restore` 是 async +
+            // spawn_blocking，两条 IPC 可以重叠）会交错写同一条临时文件，而下面那条
+            // 哈希只覆盖**本次读到的字节** ⇒ 混进来的另一半字节查不出来，rename 可能把
+            // 混合内容发布到目标路径。这里保留原文件名并追加进程内单调序号 + pid：
+            // 仍在目标同目录，rename 仍是同卷单步替换。
+            let file_name = target
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "item".to_string());
+            let seq = RESTORE_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp = target.with_file_name(format!(
+                "{file_name}.trim-restore-{}-{seq}",
+                std::process::id()
+            ));
             // P0-4（R4-M09）：临时名的 pid 形态可被猜到，可能已被人预建为联接——
             // File::create 前对 tmp 自身再观测一次（symlink_metadata 不跟随链接，判据复用
             // protect::is_reparse）；带 reparse 属性即拒且不碰它——那是别人预建的件，

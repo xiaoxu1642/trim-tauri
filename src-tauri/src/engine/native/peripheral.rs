@@ -18,16 +18,16 @@ use super::registry::*;
 /// 只读两组：Win32PrioritySeparation 与 MouseDataQueueSize。键盘队列深度与端口路由
 /// 已于 0.6.6 从本窗下线（收编进优化中心 tf_keyboard），不再读取。
 pub fn peripheral_query() -> Result<Value, String> {
-    unsafe {
-        let win32 = read_reg_dword(HKEY_LOCAL_MACHINE,
-            r"SYSTEM\CurrentControlSet\Control\PriorityControl", "Win32PrioritySeparation");
-        let mouse = read_reg_dword(HKEY_LOCAL_MACHINE,
-            r"SYSTEM\CurrentControlSet\Services\mouclass\Parameters", "MouseDataQueueSize");
-        Ok(json!({
-            "win32": win32,
-            "mouse": mouse,
-        }))
-    }
+    // R5c-L04：旧入口用 -1 表示失败，而 0xFFFFFFFF 转 i32 也是 -1（哨兵与合法值撞车）。
+    // 改用 Option 口径：读不到 ⇒ null，前端按「未知」显示，不再把假值当数据。
+    let win32 = read_reg_dword_opt(HKEY_LOCAL_MACHINE,
+        r"SYSTEM\CurrentControlSet\Control\PriorityControl", "Win32PrioritySeparation");
+    let mouse = read_reg_dword_opt(HKEY_LOCAL_MACHINE,
+        r"SYSTEM\CurrentControlSet\Services\mouclass\Parameters", "MouseDataQueueSize");
+    Ok(json!({
+        "win32": win32,
+        "mouse": mouse,
+    }))
 }
 
 // ==================== B9 peripheral_apply：外设优化应用 ====================
@@ -112,7 +112,10 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
                 return Err(format!("无法打开注册表键: {subkey}"));
             }
             let nm = to_wide(name);
-            let val = *value as u32;
+            // R5b-L09：`as u32` 会把超出 32 位的值静默截断成一个不同的数值。
+            // 引擎层再做一次范围闸，不把合法性全押在命令层白名单上。
+            let val = u32::try_from(*value)
+                .map_err(|_| format!("外设优化值超出 DWORD 范围: {name}={value}"))?;
             if RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_DWORD, Some(&val.to_le_bytes())).is_err() {
                 let _ = RegCloseKey(hk);
                 return Err(format!("写入注册表失败: {name}"));

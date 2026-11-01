@@ -13,6 +13,13 @@
 //! 半懂不懂的执行 = 静默没执行却报成功，是本项目最忌讳的「假绿」。原生面的失败
 //! 模式只有一种：编译期 Err；执行面的失败只有一种：某步操作真实失败并如实记账。
 //!
+//! ## 静默语义只在任务分支建模（R6c-L07）
+//! `-ErrorAction SilentlyContinue|Ignore` 与 `Stop-Service -Force` 的形态会被参数契约
+//! 接受，但只有 `TaskChange` 带 `silent` 位（`task_op_result` 据此把「命令确实跑起来
+//! 并返回非零」降级为警告）。服务/注册表算子没有这一位：源脚本写着「失败不要紧」的
+//! 步骤，原生臂照样按失败上报 —— 方向偏严，不产生假绿。补 `silent` 位等于改写
+//! 执行面的失败口径（哪些失败可以咽掉），要先有用户裁定，编译器不单方面收窄。
+//!
 //! ## v3-K1 新增的原生构造（全部来自数据层实测清单）
 //! - `foreach ($n in $var)`（字面量列表变量）／`foreach ($n in $map.Keys)`（哈希表键）
 //! - 双引号插值 `"$var"`／`"$env:NAME"`；拼接 `"a" + $b + "c"`（赋值与命令实参两处）
@@ -140,8 +147,13 @@ fn parse_ps_reg_path(p: &str) -> Option<(Hive, String)> {
 /// 本轮不碰。**在 pssteps 侧 fail-closed** 是本轮的处置：判不出来的目标一律拒绝，
 /// 与 `dir_delete_blocked` 的「读不到属性即拒」同口径。
 ///
-/// 判据只此一份（AGENTS §5.16/N6）：本函数是 pssteps 侧 hive 准入的唯一实现，
-/// 读、写、删三个方向都吃它。
+/// 判据只此一份（AGENTS §5.16/N6）：本函数是 pssteps 侧 hive 准入的唯一实现。
+/// 覆盖面要说清（R6c-L03，旧注释写成「读、写、删三个方向都吃它」与实现不符）：
+/// - 建键 / 写值 / 删值三个**写出口**在调原生之前都过它；
+/// - 删键出口走的是 [`crate::engine::protect::reg_target_block_reason`]（禁删面的判据
+///   比这里更宽：对非 HKLM/HKCU 一律拒），两处不重复判定；
+/// - 读面（`reg_key_exists` / 子键枚举 / 读值回执）不过闸：它们的出口是本机只读 API，
+///   不产生任何写入效果，拒绝它们只会让「键是否存在」这种守卫误判。
 fn hive_admitted(h: Hive) -> bool {
     matches!(h, Hive::Lm | Hive::Cu)
 }
@@ -383,6 +395,22 @@ fn error_action_of(cmd: &Cmd) -> Option<ErrorAction> {
             }
         }
     }
+}
+
+/// 命名参数分支的「位置实参必须为空」闸（R6c-L04）。
+///
+/// 为什么要有：`param()` 只认 `-Name X` 形态，源语句里多出来的位置 token 会被
+/// **静默丢掉**。PS 侧 `Stop-Service -Name X Y` 会把 `Y` 绑到下一个位置参数并报错，
+/// 原生接管却只停 `X` 还回执成功 —— 那是「少做一半还说做完了」。八个只收命名参数的
+/// 分支统一走本函数；`sc.exe` / `schtasks` / PnP 自己就用位置实参，另行逐条校验。
+fn reject_positional(cmd: &Cmd) -> Result<(), String> {
+    if cmd.positional.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "本分支只接受命名参数，多出位置实参: {}",
+        cmd.positional.join(" ")
+    ))
 }
 
 /// 分支参数契约：**分支允许参数 + 公共参数**。
@@ -1101,13 +1129,17 @@ fn resolve_concat(line: &str, vars: &VarMap) -> String {
 /// 新增任何构造，必须在这里有意识地放行，否则 `data_layer_coverage_report` 红。
 /// 注意：表内含原生面已支持的 cmdlet，让「原生解析失败但语义无害」的体也能走
 /// 逐字通道（例如依赖 $env 展开的路径），不会出现静默错执行。
+/// R6c-L02：输出/管道/WMI 那批**零引用**头已按「退役即收紧」删除（留下它们等于给未来
+/// 步骤预先放行，登记时刻就被抹掉了）。两个**原生面已支持**的写 cmdlet 刻意留着：
+/// 它们不是「给新构造留门」，而是上面那条回退阀本体 —— 参数契约不认识（`-WhatIf`、
+/// 未知开关）时交回 PS 解释，`whatif与未知参数不得产出写操作` 用例直接钉住
+/// `Remove-Item` 这一形态；删掉它们会把「交给 PS 逐字跑（只预演）」变成「编译失败」。
 const PS_INLINE_ALLOW: &[&str] = &[
     // WMI / 计划任务对象 —— 原生不表达的 Windows 面
     // （Disable/Enable-MMAgent 2026-10-11 随 tf_mmagent 退役移除；
     //  Get/Disable/Enable-PnpDevice 同日随 tf_dev_disable 原生化为 PnpSetState 移除——
     //  PnP 脚本编译失败现在直接 Err，不再静默退回 powershell.exe）
     "Get-CimInstance",
-    "Invoke-CimMethod",
     "Get-AppxPackage",
     "Remove-AppxPackage",
     "Get-ScheduledTask",
@@ -1115,33 +1147,22 @@ const PS_INLINE_ALLOW: &[&str] = &[
     "Enable-ScheduledTask",
     // 注册表层命令（逐字执行时不重解释）
     "Get-ChildItem",
-    "Get-ItemProperty",
     "Remove-ItemProperty",
-    "Remove-Item",
     "Test-Path",
     "Join-Path",
     "New-Item",
     "New-ItemProperty",
+    // 回退阀（原生面已支持，见上方 R6c-L02）：参数契约不认识时交回 PS 逐字解释
     "Set-ItemProperty",
+    "Remove-Item",
     // A6-M06：管道消音段头 —— 现算步骤体里未登记的管道段头全部是它
     // （tf_svc_bulk / tf_defender / tf_privacy / tf_usb_power / mouse_optimize /
     //  audio_disable_comm_ducking / audio_disable_narrator_ducking / peripheral_winkey_off），
     // 白名单判据改为逐段头后必须显式登记
     "Out-Null",
-    // 启动外部进程（tf_onedrive 的服务操作）；tf_oosu 退役后
-    // Invoke-WebRequest / Get-FileHash / Get-AuthenticodeSignature 已无使用者，同步收紧
-    "Start-Process",
-    // 输出
-    "Write-Output",
-    "Write-Error",
-    "Write-Host",
     // 管道段
     "Where-Object",
     "ForEach-Object",
-    "Sort-Object",
-    "Select-Object",
-    "Measure-Object",
-    "ConvertTo-Json",
 ];
 
 /// 顶层关键字定位：只认**花括号深度 0** 处的命中（引号内不算）。
@@ -1285,14 +1306,18 @@ fn eligible_stmt(st: &str) -> bool {
     }
     // 表达式形态：.NET 类型调用 / 数组与哈希字面量 / 变量 / 子表达式 /
     // 字符串或数字字面量（含大体积 base64 赋值的 RHS）
-    if s.starts_with('[')
+    let expr_form = s.starts_with('[')
         || s.starts_with('@')
         || s.starts_with('(')
         || s.starts_with('$')
         || s.starts_with('"')
         || s.starts_with('\'')
-        || s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
-    {
+        || s.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+    // R6c-L01：表达式前缀不是**免检**。`$x | Invoke-Expression` 的实际执行者是管道
+    // 下游那一段，整条语句以 `$`/`(` 开头就把下游段一起放行，等于「换个前缀即可绕过
+    // 逐段登记」。带顶层管道（引号/括号外）时照样走下面的段头判据。
+    let piped_at_top = split_pipeline_tops(s).len() > 1;
+    if expr_form && !piped_at_top {
         return true;
     }
     let head = s.split_whitespace().next().unwrap_or("");
@@ -1377,6 +1402,10 @@ fn pnp_standard_shape(body: &str) -> Option<bool> {
         .filter(|s| !s.is_empty() && !s.starts_with('#'))
         .collect();
     let mut foreach_stmt: Option<&str> = None;
+    // R6c-L09：赋值必须过 `parse_assign`（能求值成字面量/列表/字节串的才算赋值）。
+    // 旧判据是「以 `$` 开头且含 `=`」，于是 `$x = Stop-Service Y` 这种**带副作用的赋值**
+    // 会被当成无害赋值 —— 整段体随即被单条 `PnpSetState` 接管，那条命令静默消失。
+    let mut shape_vars = VarMap::new();
     for st in &stmts {
         if st.starts_with("foreach (") {
             if foreach_stmt.is_some() {
@@ -1384,8 +1413,11 @@ fn pnp_standard_shape(body: &str) -> Option<bool> {
                 return None;
             }
             foreach_stmt = Some(st);
-        } else if !(st.starts_with('$') && st.contains('=')) {
-            // 其余语句只允许是赋值；夹带别的操作即形态不认识
+        } else if let Some((name, expr)) = parse_assign(st, &shape_vars) {
+            // 按语句顺序累积：后面的赋值允许引用前面的变量（与 parse_block 同语义）
+            shape_vars.insert(name, expr);
+        } else {
+            // 其余语句只允许是**可求值的**赋值；夹带别的操作即形态不认识
             return None;
         }
     }
@@ -1481,6 +1513,25 @@ fn pnp_token_eq(got: &str, want: &str) -> bool {
     strip(got).eq_ignore_ascii_case(strip(want))
 }
 
+/// 错误回执里原语句的最大字符数：够看清「哪条命令、哪个实参」，又不至于把一条回执
+/// 撑成整段脚本（数据层里最长的语句是超长赋值列表，本就不产生 Err）。
+const ERR_STMT_CLIP: usize = 160;
+
+/// 语句级错误包装（R6c-L05）：Err 带上**原语句**（截断到 [`ERR_STMT_CLIP`] 字符）。
+///
+/// 回执形态是 `pwsh 步骤「{label}」: {reason}`（见 `commands/optimizer/apply.rs`），
+/// 而一个步骤里常有十来条语句 —— 只到步骤级定位等于让维护者自己数语句，还得赌
+/// 数法与编译器一致。包装放在 `parse_block` 的两处调用点而不是每个分支里：分支里
+/// 既有 `?` 也有 `return Err`，逐个加必然漏，以后新增分支也不必记得。
+fn with_stmt_context(raw: &str, err: String) -> String {
+    let stmt = raw.trim();
+    if stmt.is_empty() || err.contains(stmt) {
+        return err;
+    }
+    let clipped: String = stmt.chars().take(ERR_STMT_CLIP).collect();
+    format!("{err}（语句: {clipped}）")
+}
+
 /// 解析一段语句序列（可含 if/foreach 块）；`vars` 会被语句内的赋值**就地更新**
 fn parse_block(
     src: &str,
@@ -1502,14 +1553,14 @@ fn parse_block(
         );
         let Some(pos) = next_block else {
             for st in split_statements(trimmed) {
-                ops.extend(parse_statement(st, vars)?);
+                ops.extend(parse_statement(st, vars).map_err(|e| with_stmt_context(st, e))?);
             }
             return Ok(ops);
         };
 
         let head = &trimmed[..pos];
         for st in split_statements(head) {
-            ops.extend(parse_statement(st, vars)?);
+            ops.extend(parse_statement(st, vars).map_err(|e| with_stmt_context(st, e))?);
         }
         let tail = &trimmed[pos..];
 
@@ -1783,6 +1834,7 @@ fn parse_statement(
     match cmd.name.as_str() {
         "New-ItemProperty" | "Set-ItemProperty" => {
             validate_branch_params(&cmd, &["Path", "Name", "Value", "PropertyType", "Force"])?;
+            reject_positional(&cmd)?;
             let path = path_arg(param(&cmd, "Path").ok_or("缺 -Path")?)?;
             let name = lit(param(&cmd, "Name").ok_or("缺 -Name")?, "-Name")?;
             let value = param(&cmd, "Value").unwrap_or_default().to_string();
@@ -1791,11 +1843,19 @@ fn parse_statement(
                 return Err("New/Set-ItemProperty 必须带 -Force（键已存在时语义不同）".into());
             }
             let (hive, subkey) = parse_ps_reg_path(&path).ok_or_else(|| format!("路径不可识别: {path}"))?;
+            // R6c-L06：`HKLM:\` 这类「只有 hive 没有子键」的路径不接建/写 —— 它会一路走到
+            // `RegCreateKeyExW(HKLM, "")`，判定字节与实际目标是否同一件事取决于该 API 对
+            // 空串的口径（本次未做真机写探测）。删面的空子键已被 `reg_key_remove_checked`
+            // 的形态闸拒掉，这里与之对齐。
+            if subkey.is_empty() {
+                return Err(format!("空子键不接受写值（{path}）"));
+            }
             let (kind, data) = encode_value(&ptype, &value, vars)?;
             Ok(vec![PsOp::ValueWrite { hive, subkey, name, kind, data }])
         }
         "Remove-ItemProperty" => {
             validate_branch_params(&cmd, &["Path", "Name", "Force"])?;
+            reject_positional(&cmd)?;
             let path = path_arg(param(&cmd, "Path").ok_or("缺 -Path")?)?;
             let name = lit(param(&cmd, "Name").ok_or("缺 -Name")?, "-Name")?;
             let (hive, subkey) = parse_ps_reg_path(&path).ok_or_else(|| format!("路径不可识别: {path}"))?;
@@ -1803,15 +1863,21 @@ fn parse_statement(
         }
         "New-Item" => {
             validate_branch_params(&cmd, &["Path", "Force"])?;
+            reject_positional(&cmd)?;
             let path = path_arg(param(&cmd, "Path").ok_or("缺 -Path")?)?;
             if !has_flag(&cmd, "Force") {
                 return Err("New-Item 必须带 -Force".into());
             }
             let (hive, subkey) = parse_ps_reg_path(&path).ok_or_else(|| format!("路径不可识别: {path}"))?;
+            // R6c-L06：同 New/Set-ItemProperty —— 空子键只会落到 hive 根，不接建键。
+            if subkey.is_empty() {
+                return Err(format!("空子键不接受建键（{path}）"));
+            }
             Ok(vec![PsOp::KeyCreate { hive, subkey }])
         }
         "Remove-Item" => {
             validate_branch_params(&cmd, &["Path", "Recurse", "Force"])?;
+            reject_positional(&cmd)?;
             let path = path_arg(param(&cmd, "Path").ok_or("缺 -Path")?)?;
             let recurse = has_flag(&cmd, "Recurse");
             if !has_flag(&cmd, "Force") {
@@ -1822,11 +1888,13 @@ fn parse_statement(
         }
         "Stop-Service" => {
             validate_branch_params(&cmd, &["Name", "Force"])?;
+            reject_positional(&cmd)?;
             let name = lit(param(&cmd, "Name").ok_or("缺 -Name")?, "-Name")?;
             Ok(vec![PsOp::SvcStop { name }])
         }
         "Set-Service" => {
             validate_branch_params(&cmd, &["Name", "StartupType"])?;
+            reject_positional(&cmd)?;
             // v0.4.9 D 批 3（RAINZ 对标 §3.5）：优化项「服务改 Manual 而非 Disabled」走这条。
             // JS 模板 `vendor/upstream-js/src/scripts-powershell/optimizer-scripts.js:2124` 起会生成
             //   `Set-Service -Name '<svc>' -StartupType <Manual|Automatic|Disabled> ...`
@@ -1846,6 +1914,7 @@ fn parse_statement(
         }
         "Disable-ScheduledTask" | "Enable-ScheduledTask" => {
             validate_branch_params(&cmd, &["TaskName", "TaskPath"])?;
+            reject_positional(&cmd)?;
             let name = lit(param(&cmd, "TaskName").ok_or("缺 -TaskName")?, "-TaskName")?;
             let path = match param(&cmd, "TaskPath") {
                 Some(p) => Some(lit(p, "-TaskPath")?),
@@ -1919,10 +1988,15 @@ fn encode_value(
             _ => Err(format!("变量 ${name} 不能作 -Value")),
         };
     }
-    if let Some(n) = value
-        .trim()
-        .strip_prefix("__BYTES_")
-        .and_then(|s| s.strip_suffix("__"))
+    // R6c-L08：哨兵只认**裸 token**。被引号包着的值是数据层写的真实字符串，它不可能是
+    // `resolve_vars` 过墙的产物 —— 旧写法把 `-Value "__BYTES_40__" -PropertyType Binary`
+    // 当成一条定长零字节串写进注册表，而 PS 里那只是一个普通字符串（按 Binary 还会报畸形 hex）。
+    let bare = {
+        let t = value.trim();
+        if t.starts_with('"') || t.starts_with('\'') { None } else { Some(t) }
+    };
+    if let Some(n) = bare
+        .and_then(|t| t.strip_prefix("__BYTES_")?.strip_suffix("__"))
         .and_then(|s| s.parse::<usize>().ok())
     {
         if n > MAX_BYTE_ALLOC {
@@ -1931,11 +2005,7 @@ fn encode_value(
         return Ok((KIND_BINARY, vec![0u8; n]));
     }
     // 字节串 hex 哨兵（BytesData 变量经 resolve_vars 过墙的形态，v3-K1）
-    if let Some(hex) = value
-        .trim()
-        .strip_prefix("__BYTESHEX_")
-        .and_then(|s| s.strip_suffix("__"))
-    {
+    if let Some(hex) = bare.and_then(|t| t.strip_prefix("__BYTESHEX_")?.strip_suffix("__")) {
         if hex.is_empty() || hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(format!("字节哨兵畸形: {value}"));
         }
@@ -2284,7 +2354,12 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
         PsOp::ForDevKey { class, body, vars } => {
             let mut out = String::new();
             let mut errs: Vec<String> = Vec::new();
-            for id in native::reg_enum_dev_ids(class) {
+            // R5c-L10：设备清单读不动 ≠ 没有设备——与 ForSubKey 同口径，不完整必须回执。
+            let (ids, incomplete) = native::reg_enum_dev_ids(class);
+            if incomplete {
+                errs.push(format!("PCI 设备清单不完整（类 {class}），本组未覆盖全部设备"));
+            }
+            for id in ids {
                 let mut v = vars.clone();
                 v.insert("_".into(), Expr::Str(id));
                 let body_ops = parse_block(body, &mut v)?;

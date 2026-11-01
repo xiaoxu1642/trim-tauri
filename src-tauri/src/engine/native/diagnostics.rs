@@ -338,6 +338,9 @@ fn smbios_baseboard() -> Option<(String, String)> {
                 str_end += 1;
             }
             if ty == 2 {
+                // R5b-L03：Type 2 的厂商/产品名索引固定在结构头之后的两个固定偏移；格式化区
+                // 不足结构头长度时直接读会越过本结构（表尾即 panic）。畸形表按解析失败收手。
+                if len < 6 { break; }
                 let strings: Vec<&[u8]> = table[pos + len..str_end].split(|&b| b == 0).collect();
                 let get = |idx: u8| -> String {
                     if idx == 0 {
