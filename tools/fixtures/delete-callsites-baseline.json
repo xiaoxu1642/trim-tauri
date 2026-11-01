@@ -30,7 +30,7 @@
     "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 10,
     "src-tauri/src/commands/updater.rs": 4,
     "src-tauri/src/engine/hash.rs": 2,
-    "src-tauri/src/engine/native/cleanup.rs": 49,
+    "src-tauri/src/engine/native/cleanup.rs": 50,
     "src-tauri/src/engine/native/contextmenu.rs": 2,
     "src-tauri/src/engine/native/peripheral.rs": 2,
     "src-tauri/src/engine/native/startup.rs": 11,
@@ -49,7 +49,7 @@
   "remove_file": {
     "src-tauri/src/commands/elevate.rs": 5,
     "src-tauri/src/commands/fonts.rs": 3,
-    "src-tauri/src/commands/optimizer/apply.rs": 1,
+    "src-tauri/src/commands/optimizer/apply.rs": 3,
     "src-tauri/src/commands/realtime.rs": 3,
     "src-tauri/src/commands/runtimes.rs": 10,
     "src-tauri/src/commands/uninstall/list_run.rs": 3,
