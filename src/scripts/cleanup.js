@@ -2695,11 +2695,13 @@
          return `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(b.target || b.file)}">${fmtBackupTime(b.mtimeMs)} · ${escapeHtml(b.keyLeaf || b.file)} · ${formatSize(b.sizeBytes)} · ${escapeHtml(SEAL_TEXT[b.seal] || b.seal)} ${legacyBadge(b)}</span>${restoreBtn}</div>`;
        }).join('')}</div>`;
     // 还原包：zip 不在了就**不给还原按钮**（内容缺失时点下去只会逐条失败，不如这里说清）
+    // R6b-L14：行内大小读 `zipBytes`（payload.zip 落盘体积），与表头 `totalBytes` 同一口径；
+    // `bytes` 是解压后的原始体积，只在下面「整批还原」的确认文案里用（那是写回量）。
     const packSection = !packs.length ? '' :
       `<div class="finder-group-header"><span>卸载还原包 · ${packs.length} 批（合计 ${formatSize(Number(packData.totalBytes) || 0)}）</span></div>
        <div class="detail-file-list">${packs.map((p, i) => {
          const canRestore = p.hasZip && !p.broken;
-         const label = `${escapeHtml(p.id)} · ${p.files || 0} 个文件 · ${p.dirs || 0} 个目录 · ${formatSize(Number(p.bytes) || 0)}`;
+         const label = `${escapeHtml(p.id)} · ${p.files || 0} 个文件 · ${p.dirs || 0} 个目录 · ${formatSize(Number(p.zipBytes) || 0)}`;
          const btn = canRestore
            ? `<button class="fileclean-preview-btn" data-pack-restore="${i}" type="button">整批还原</button>`
            : `<span class="finder-name-text" style="opacity:.6" data-tip="${escapeHtml(p.broken || 'payload.zip 缺失')}">不可还原</span>`;

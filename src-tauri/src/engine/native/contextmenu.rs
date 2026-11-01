@@ -441,7 +441,18 @@ fn is_third_party(name: &str, company: &str, source: &str, file_path: &str) -> b
 }
 
 /// CLSID 信息（名称/厂商/文件路径）
-struct ClsidInfo { name: String, company: String, file_path: String }
+///
+/// R5a-L11：`file_path` 仍只放**存在**的处理程序（归属/PE 读取都依赖它）；
+/// `file_missing` 单独记录「登记了但文件已不在」的处理器路径——「残留」判据
+/// 不能从 `file_path` 是否为空反推（那样恒假，见 `cm_component_missing`）。
+struct ClsidInfo { name: String, company: String, file_path: String, file_missing: String }
+
+/// R5a-L11：CLSID 条目的「残留」判据——扫描侧记录了「登记了但不存在的处理器路径」
+/// 才算残留。旧写法从 `file_path` 是否为空反推，而 `file_path` 只在文件存在时赋值
+/// ⇒ 判据恒假，「残留」徽章在处理器已被卸载的条目上永远不出现。
+fn cm_component_missing(clsid: &str, file_path: &str, handler_missing: &str) -> bool {
+    is_guid(clsid) && file_path.is_empty() && !handler_missing.is_empty()
+}
 
 // ==================== 软件归属（右键管理「按软件分组」的地基） ====================
 //
@@ -780,7 +791,12 @@ fn pe_info_cached(path: &str, cache: &mut std::collections::HashMap<String, PeIn
 
 /// 解析 CLSID 信息（简化版：只读注册表，不做文件版本信息）
 unsafe fn get_clsid_info(guid: &str, clsid_views: &[(HKEY, &str)]) -> ClsidInfo {
-    let mut info = ClsidInfo { name: String::new(), company: String::new(), file_path: String::new() };
+    let mut info = ClsidInfo {
+        name: String::new(),
+        company: String::new(),
+        file_path: String::new(),
+        file_missing: String::new(),
+    };
     if !is_guid(guid) { return info; }
     for (hive, base) in clsid_views {
         let sub = format!("{base}\\{guid}");
@@ -814,9 +830,17 @@ unsafe fn get_clsid_info(guid: &str, clsid_views: &[(HKEY, &str)]) -> ClsidInfo 
                 }
             }
             let _ = RegCloseKey(hk2);
-            if !candidate.is_empty() && std::path::Path::new(&candidate).exists() {
-                info.file_path = candidate;
-                break;
+            if !candidate.is_empty() {
+                if std::path::Path::new(&candidate).exists() {
+                    info.file_path = candidate;
+                    break;
+                }
+                // R5a-L11：处理器文件已不在也要留档，否则「残留」永远判不出来。
+                // 只对 InprocServer32 留：它是纯 DLL 路径；LocalServer32 的默认值
+                // 可能是带参数的命令行，把参数段当路径展示会给用户错误坐标。
+                if sub2 == "InprocServer32" && info.file_missing.is_empty() {
+                    info.file_missing = candidate;
+                }
             }
         }
         let _ = RegCloseKey(hk);
@@ -829,7 +853,7 @@ unsafe fn get_clsid_info(guid: &str, clsid_views: &[(HKEY, &str)]) -> ClsidInfo 
 struct CmItem {
     name: String, clsid: String, reg_path: String, native_reg_path: String,
     company: String, location: String, category: String, source: String,
-    file_path: String, command: String, enabled: bool,
+    file_path: String, handler_missing: String, command: String, enabled: bool,
     confirm_required: bool, confirm_reason: String, unknown_convention: bool,
     blocked_by: String, target: String, orphan: bool, orphan_reason: String,
 }
@@ -948,6 +972,7 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
                     name, clsid: String::new(), reg_path: full.clone(), native_reg_path: full.clone(),
                     company, location: sendto_dir.clone(), category: "发送到".to_string(),
                     source: "filesystem".to_string(), file_path: String::new(), command: String::new(),
+                    handler_missing: String::new(),
                     enabled: !hidden, confirm_required: false, confirm_reason: String::new(),
                     unknown_convention: false, blocked_by: String::new(), target: String::new(),
                     orphan: false, orphan_reason: String::new(),
@@ -975,6 +1000,7 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
                     company: "Microsoft Corporation".to_string(), location: gdir.clone(),
                     category: "Win+X".to_string(), source: "winx".to_string(),
                     file_path: String::new(), command: String::new(),
+                    handler_missing: String::new(),
                     enabled: !is_off, confirm_required: false, confirm_reason: String::new(),
                     unknown_convention: false, blocked_by: String::new(), target: String::new(),
                     orphan: false, orphan_reason: String::new(),
@@ -1021,6 +1047,7 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
                                     location: std_path.clone(), category: "新建菜单".to_string(),
                                     source: "shellnew".to_string(), file_path: String::new(),
                                     command: String::new(), enabled: true,
+                                    handler_missing: String::new(),
                                     confirm_required: false, confirm_reason: String::new(),
                                     unknown_convention: false, blocked_by: String::new(),
                                     target: cls, orphan,
@@ -1106,6 +1133,7 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
                     // 命令串要么给真实命令行，要么退回 verb 清单（两者给的是不同信息：
                     // 前者能给归属与「执行命令」一行，后者只是 verb 名单）
                     enabled: !no_open, confirm_required: false, confirm_reason: String::new(),
+                    handler_missing: String::new(),
                     unknown_convention: false, blocked_by: String::new(), target: String::new(),
                     orphan: false, orphan_reason: String::new(),
                     command: if cmd_line.is_empty() { verbs.join(", ") } else { cmd_line.clone() },
@@ -1165,11 +1193,11 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
             let path_eff = if item.file_path.is_empty() { owner_file.as_str() } else { &item.file_path };
             let is_tp = is_third_party(&item.name, company_eff, &item.source, path_eff);
             let risk = if is_protected { "protected" } else if is_tp { "high" } else { "low" };
-            let component_missing = is_guid(&item.clsid) && !item.file_path.is_empty()
-                && !std::path::Path::new(&item.file_path).exists();
+            let component_missing =
+                cm_component_missing(&item.clsid, &item.file_path, &item.handler_missing);
             let orphan = item.orphan || component_missing;
             let orphan_reason = if component_missing {
-                format!("登记的处理程序文件已不存在（{}）", item.file_path)
+                format!("登记的处理程序文件已不存在（{}）", item.handler_missing)
             } else { item.orphan_reason };
 
             result.push(json!({
@@ -1289,10 +1317,12 @@ unsafe fn scan_shell_items(
         // CLSID 信息
         let mut company = String::new();
         let mut file_path = String::new();
+        let mut handler_missing = String::new();
         if is_guid(&clsid) {
             let info = get_clsid_info(&clsid, clsid_views);
             company = info.company;
             file_path = info.file_path;
+            handler_missing = info.file_missing;
         }
         // Blocked
         let mut blocked_by = String::new();
@@ -1318,6 +1348,7 @@ format!("HKEY_LOCAL_MACHINE\\{key_path}")
             native_reg_path: resolve_native_reg_path(&std_path),
             company, location: shell_path.clone(), category: category.to_string(),
             source: "shell".to_string(), file_path, command,
+            handler_missing,
             enabled, confirm_required: confirm_req, confirm_reason,
             unknown_convention: unknown_conv, blocked_by, target: String::new(),
             orphan: false, orphan_reason: String::new(),
@@ -1375,6 +1406,7 @@ unsafe fn scan_shellex_handlers(
                     company: String::new(), location: cm_path.clone(),
                     category: category.to_string(), source: "shellex".to_string(),
                     file_path: String::new(), command: String::new(),
+                    handler_missing: String::new(),
                     enabled: false, confirm_required: false, confirm_reason: String::new(),
                     unknown_convention: true, blocked_by: String::new(), target: String::new(),
                     orphan: false, orphan_reason: String::new(),
@@ -1412,7 +1444,7 @@ format!("HKEY_LOCAL_MACHINE\\{key_path}")
             native_reg_path: resolve_native_reg_path(&std_path),
             company: info.company, location: cm_path.clone(),
             category: category.to_string(), source: "shellex".to_string(),
-            file_path: info.file_path, command: String::new(),
+            file_path: info.file_path, handler_missing: info.file_missing, command: String::new(),
             enabled, confirm_required: false, confirm_reason: String::new(),
             unknown_convention: false, blocked_by, target: String::new(),
             orphan: false, orphan_reason: String::new(),
@@ -2040,6 +2072,31 @@ mod resource_dll_tests {
         // 元数据读不到（文件不存在）⇒ 拒（后面还有 exists 闸，早退不损失功能面）
         let ghost = format!("{windir}\\System32\\trim-no-such-dll-9f3a.dll");
         assert!(!resource_dll_allowed(&ghost), "不存在的文件必须拒: {ghost}");
+    }
+}
+
+#[cfg(test)]
+mod cm_orphan_tests {
+    use super::*;
+
+    /// R5a-L11：残留判据读「登记了但不存在的处理器路径」。判红自证：让判据回退到
+    /// 「file_path 非空即可判」的旧形态 ⇒ 第一条断言红（`file_path` 恒为空）。
+    #[test]
+    fn 残留判据认缺失的处理器路径() {
+        let guid = "{B41DB860-8EE4-11D2-9906-E49FADC173CA}";
+        assert!(
+            cm_component_missing(guid, "", r"C:\Apps\gone\x.dll"),
+            "登记了但不存在的处理器必须算残留"
+        );
+        assert!(
+            !cm_component_missing(guid, r"C:\Apps\live\x.dll", r"C:\Apps\gone\x.dll"),
+            "存在处理器文件时不得判残留"
+        );
+        assert!(!cm_component_missing(guid, "", ""), "没有登记路径的条目不判残留");
+        assert!(
+            !cm_component_missing("WinRAR", "", r"C:\Apps\gone\x.dll"),
+            "非 GUID 条目不走此判据"
+        );
     }
 }
 

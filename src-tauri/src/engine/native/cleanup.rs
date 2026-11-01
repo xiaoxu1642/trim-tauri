@@ -270,11 +270,29 @@ pub struct CleanupExecuteResult {
 ///   静默拿回第 2 批的字节，且不报错（N10）。
 /// - **序号段**：少了它 ⇒ 同一批次里两个不同目录下的同名 `.log` 互相覆盖。
 ///
-/// 批次段是纯数字 ms，字符集不比原形状宽 ⇒ 还原侧那道穿越准入（拒 `..` / 绝对 / 盘符）不用动。
+/// 批次段是纯数字的批次 id（见 [`next_backup_batch_id`]），字符集不比原形状宽
+/// ⇒ 还原侧那道穿越准入（拒 `..` / 绝对 / 盘符）不用动。
 /// 读侧天然兼容：还原走的是 manifest 里存的 `rel`，老清单里的老形状照样能还原，
 /// 所以这里不需要版本号、不需要搬迁、不需要双分支解析。
-fn backup_rel_name(rule_id: &str, batch_ts: i64, seq: u32, fname: &str) -> String {
-    format!("{rule_id}\\{batch_ts}_{seq}_{fname}")
+fn backup_rel_name(rule_id: &str, batch_id: &str, seq: u32, fname: &str) -> String {
+    format!("{rule_id}\\{batch_id}_{seq}_{fname}")
+}
+
+/// 批次 id = 毫秒时间戳 + 进程内单调序号（R5a-L13）。只靠时间戳时：同一毫秒起两次批次
+/// 会撞 manifest 名与副本批次段（后写覆盖前写，前一批副本失去还原依据）；时钟回拨时
+/// 新批次名字更小，裁剪会把它当最老批次删掉（本批保护见 `prune_file_backups_with`
+/// 的 `protect_manifest` 形参）。纯数字 + 定长：manifest 名准入只认纯数字，裁剪按
+/// 名字升序定老幼。
+static BACKUP_BATCH_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// 序号回绕上限：批次 id 定长，按名字升序才等于按时间升序。
+/// 有效位宽 = 本值减一，`next_backup_batch_id` 的格式化宽度必须与它一致。
+const BACKUP_BATCH_SEQ_WRAP: u32 = 1000;
+
+fn next_backup_batch_id(ts: i64) -> String {
+    let seq = BACKUP_BATCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        % BACKUP_BATCH_SEQ_WRAP;
+    format!("{ts}{seq:03}")
 }
 
 /// 孤儿副本回收的冷静期（2026-10-04 审计 §4.5③）：清单落盘失败的那批副本要等
@@ -300,12 +318,19 @@ fn backup_victim_within_root(root_canon: &std::path::Path, victim: &std::path::P
     real_low != root_low && real_low.starts_with(&format!("{root_low}\\"))
 }
 
-fn prune_file_backups(root: &std::path::Path, keep: usize) {
-    prune_file_backups_with(root, keep, ORPHAN_GC_MIN_AGE_MS);
+fn prune_file_backups(root: &std::path::Path, keep: usize, protect_manifest: Option<&str>) {
+    prune_file_backups_with(root, keep, ORPHAN_GC_MIN_AGE_MS, protect_manifest);
 }
 
 /// 同上，`min_orphan_age_ms` 可注入（测试传 0；见 ORPHAN_GC_MIN_AGE_MS 注释）。
-fn prune_file_backups_with(root: &std::path::Path, keep: usize, min_orphan_age_ms: i64) {
+/// `protect_manifest` = 本次刚写的清单名：它不参与裁剪，但占用一个保留名额
+/// （时钟回拨时它就是按名字升序的「最老批次」，不保护等于本批副本刚写完就变孤儿）。
+fn prune_file_backups_with(
+    root: &std::path::Path,
+    keep: usize,
+    min_orphan_age_ms: i64,
+    protect_manifest: Option<&str>,
+) {
     // P0-2A：本函数的包含性核验（下方 canonicalize + starts_with）判的是「victim 在根内」，
     // 根自己被换成 junction 时 canonicalize 把两侧一起搬过去，核验照样成立 —— 它防不住
     // 「枚举起点已经在链接另一头」。所以先走 protect 的根判定（不 canonicalize，理由见那里）。
@@ -367,11 +392,20 @@ fn prune_file_backups_with(root: &std::path::Path, keep: usize, min_orphan_age_m
             None
         }
     };
-    if manifests.len() > keep {
+    // R5a-L13：本批清单刚写完就参与裁剪，时钟回拨时它名字最小、会被当最老批次删掉
+    // ——随后本批副本全部成为孤儿。本批排除在裁剪候选之外，但占用一个保留名额
+    // （总量仍受 keep 约束）。
+    let protected_present =
+        protect_manifest.filter(|p| manifests.iter().any(|m| m.as_str() == *p));
+    if let Some(p) = protected_present {
+        manifests.retain(|m| m.as_str() != p);
+    }
+    let effective_keep = if protected_present.is_some() { keep.saturating_sub(1) } else { keep };
+    if manifests.len() > effective_keep {
         manifests.sort(); // 时间戳升序：前面是最老的批次
         // 幸存者 = **最新的 keep 份** ⇒ 切点必须按长度算。写成 `split_off(keep)` 会留下
         // `len - keep` 份（3 份 keep=2 时只活 1 份），实测把我自己的用例当场判红才暴露。
-        let survivors = manifests.split_off(manifests.len() - keep);
+        let survivors = manifests.split_off(manifests.len() - effective_keep);
         // **幸存清单仍引用的 rel 一律不删**。批次段是 N10 才加进 `rel` 的，改名之前写的
         // 存量批次里 `rel` 可以跨批次相同 —— 那份物理文件同时属于两份清单，跟着老批次删掉
         // 就等于把幸存批次的还原凭据一起毁掉（症状与 N10 同源：还原静默拿回别的时间点的内容
@@ -798,6 +832,12 @@ fn cleanup_execute_with_backup_root(
     let mut details = Vec::new();
     let mut total_freed = 0i64;
     let mut total_files = 0i64;
+    // R5a-L12：保护清单是只读快照。逐文件走全局入口会每次都加锁并整表 clone 一份
+    // `ProtectRoots`，一条规则命中上万文件时这笔开销纯属重复；本函数入口取一次，
+    // 循环内复用同一份（判定结果不变）。
+    let protect_roots = crate::engine::protect::roots();
+    let is_path_protected =
+        |p: &str| crate::engine::protect::is_path_protected_with(p, &protect_roots);
     let mut recycle_entries = Vec::new();
 
     // C-4（2026-09-28 拍板）：永久删除链删前备份。批次目录懒创建，仅 to_recycle=false
@@ -815,6 +855,7 @@ fn cleanup_execute_with_backup_root(
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| crate::engine::paths::backup_write_dir("cleanup-files-backup"));
     let backup_batch_ts = crate::engine::now_ms();
+    let backup_batch_id = next_backup_batch_id(backup_batch_ts);
     let mut backup_entries: Vec<Value> = Vec::new();
     let mut backup_total: u64 = 0;
 
@@ -1424,7 +1465,7 @@ let mut freed = 0i64;
                 recycle_entries.push(json!({"id": id, "path": path, "size": size, "isDir": false}));
                 freed += *size as i64;
                 deleted += 1;
-            } else if crate::engine::protect::is_path_protected(path) {
+            } else if is_path_protected(path) {
                 // 审查 v2-F3：常规清理豁免的是「回收站优先」，**没有**豁免保护路径判定。
                 // 这是全仓唯一执行永久删除的链，保护清单在这里不能缺席 —— 回收站/重试
                 // 两条旧支已随 2026-10-12 整链退役，本行就是唯一的文件级闸门。
@@ -1502,7 +1543,7 @@ let mut freed = 0i64;
                         .map(|s| s.to_string_lossy().to_string())
                         .unwrap_or_else(|| seq.to_string());
                     // rel 必须同时带**批次段**和**序号段**（N10），见 `backup_rel_name`
-                    let rel = backup_rel_name(id, backup_batch_ts, seq, &fname);
+                    let rel = backup_rel_name(id, &backup_batch_id, seq, &fname);
                     let dst = files_backup_root.join(&rel);
                     if rule_backup_ready
                         && std::fs::copy(path, &dst).map(|n| n == *size).unwrap_or(false)
@@ -1688,7 +1729,7 @@ let mut freed = 0i64;
     // C-4：批次备份清单落盘（有副本才写；还原通道按清单逐条拷回）
     if !backup_entries.is_empty() {
         let manifest = json!({ "ts": backup_batch_ts, "entries": backup_entries });
-        let mpath = files_backup_root.join(format!("manifest-{}.json", backup_batch_ts));
+        let mpath = files_backup_root.join(format!("manifest-{backup_batch_id}.json"));
         if std::fs::create_dir_all(&files_backup_root).is_ok() {
             match serde_json::to_string_pretty(&manifest) {
                 Ok(text) => {
@@ -1721,7 +1762,11 @@ let mut freed = 0i64;
                 }
             }
             // N3：副本按清单裁最老批次（副本目录是 `规则id\`，不能按批次时间戳找）
-            prune_file_backups(&files_backup_root, crate::engine::paths::BACKUP_KEEP);
+            prune_file_backups(
+                &files_backup_root,
+                crate::engine::paths::BACKUP_KEEP,
+                mpath.file_name().and_then(|n| n.to_str()),
+            );
         }
     }
 
@@ -3123,19 +3168,51 @@ mod file_backup_retention_tests {
     fn 副本名同时带批次段与序号段() {
         // 同规则、同文件名、不同批次 ⇒ 必须不同名
         assert_ne!(
-            backup_rel_name("share_cache", 1_700_000_000_001, 0, "a.log"),
-            backup_rel_name("share_cache", 1_700_000_000_002, 0, "a.log"),
+            backup_rel_name("share_cache", "1700000000001", 0, "a.log"),
+            backup_rel_name("share_cache", "1700000000002", 0, "a.log"),
             "第二次清理不得覆盖第一次的副本"
         );
         // 同批次、同文件名、不同序号 ⇒ 必须不同名（两个目录下的同一个 `a.log`）
         assert_ne!(
-            backup_rel_name("thumb", 1_700_000_000_001, 0, "a.log"),
-            backup_rel_name("thumb", 1_700_000_000_001, 1, "a.log")
+            backup_rel_name("thumb", "1700000000001", 0, "a.log"),
+            backup_rel_name("thumb", "1700000000001", 1, "a.log")
         );
         // 不同规则仍然分目录存放（空目录回收与穿越准入都依赖这个形状）
-        let rel = backup_rel_name("thumb", 1_700_000_000_001, 2, "a.log");
+        let rel = backup_rel_name("thumb", "1700000000001", 2, "a.log");
         assert_eq!(rel, "thumb\\1700000000001_2_a.log");
         assert!(!rel.contains(".."), "生成器不得产出穿越形态");
+    }
+
+    /// R5a-L13：批次 id 必须同毫秒内也唯一，且保持纯数字 + 定长——manifest 名准入
+    /// （`commands/cleanup/backup.rs` 的 `valid_files_manifest_name`）只认纯数字，
+    /// 裁剪按名字升序定老幼。判红自证：让 next_backup_batch_id 退回只拼时间戳 ⇒ 第一条红。
+    #[test]
+    fn 批次id同毫秒内不撞且定长纯数字() {
+        let a = next_backup_batch_id(1_700_000_000_001);
+        let b = next_backup_batch_id(1_700_000_000_001);
+        assert_ne!(a, b, "同一毫秒的两次批次必须拿到不同 id");
+        assert_eq!(a.len(), b.len(), "定长才能让按名字升序等于按时间升序");
+        assert!(a.as_bytes().iter().all(u8::is_ascii_digit), "批次 id 必须是纯数字: {a}");
+        assert!(b.as_bytes().iter().all(u8::is_ascii_digit), "批次 id 必须是纯数字: {b}");
+        assert!(a.len() <= 20, "不得超过 manifest 名准入的长度上限: {a}");
+    }
+
+    /// R5a-L13：本批清单刚写完就参与裁剪——时钟回拨时它名字最小，旧实现会把它当最老
+    /// 批次删掉，随后本批副本全部成为孤儿。判红自证：去掉 protect 形参的排除 ⇒ 本批红。
+    #[test]
+    fn 裁剪不删本批清单() {
+        let root = sandbox("protect-current");
+        make_batch(&root, 1_700_000_000_003, &["keep\\3_c.txt"]);
+        make_batch(&root, 1_700_000_000_004, &["keep\\4_d.txt"]);
+        // 时钟回拨：本批名字最小（按名字升序就是「最老批次」）
+        make_batch(&root, 1_700_000_000_002, &["keep\\2_b.txt"]);
+
+        prune_file_backups(&root, 2, Some("manifest-1700000000002.json"));
+
+        assert!(root.join("manifest-1700000000002.json").is_file(), "本批清单不得被裁");
+        assert!(root.join("manifest-1700000000004.json").is_file(), "最新一份按上限保留");
+        assert!(!root.join("manifest-1700000000003.json").exists(), "其余最老的一份被裁");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// N3 + N10 交界：裁最老批次时，**幸存批次还在引用的副本不得删**。
@@ -3149,7 +3226,7 @@ mod file_backup_retention_tests {
         make_batch(&root, 1_700_000_000_002, &["legacy_rule\\0_a.log"]);
         make_batch(&root, 1_700_000_000_003, &["other_rule\\0_b.log"]);
 
-        prune_file_backups(&root, 2);
+        prune_file_backups(&root, 2, None);
 
         assert!(!root.join("manifest-1700000000001.json").exists(), "最老那份清单要裁掉");
         assert!(
@@ -3167,15 +3244,15 @@ mod file_backup_retention_tests {
     fn 裁最老批次时清单与副本同删并回收空规则目录() {
         let root = sandbox("prune");
         // 用生产形状（含批次段）造三批：第 1 批独占 share_cache，第 2/3 批共用 thumb
-        let a0 = backup_rel_name("share_cache", 1_700_000_000_001, 0, "a.txt");
-        let a1 = backup_rel_name("share_cache", 1_700_000_000_001, 1, "b.txt");
-        let b0 = backup_rel_name("thumb", 1_700_000_000_002, 0, "c.txt");
-        let c0 = backup_rel_name("thumb", 1_700_000_000_003, 0, "d.txt");
+        let a0 = backup_rel_name("share_cache", "1700000000001", 0, "a.txt");
+        let a1 = backup_rel_name("share_cache", "1700000000001", 1, "b.txt");
+        let b0 = backup_rel_name("thumb", "1700000000002", 0, "c.txt");
+        let c0 = backup_rel_name("thumb", "1700000000003", 0, "d.txt");
         make_batch(&root, 1_700_000_000_001, &[a0.as_str(), a1.as_str()]);
         make_batch(&root, 1_700_000_000_002, &[b0.as_str()]);
         make_batch(&root, 1_700_000_000_003, &[c0.as_str()]);
 
-        prune_file_backups(&root, 2);
+        prune_file_backups(&root, 2, None);
 
         let mut left: Vec<String> = std::fs::read_dir(&root)
             .unwrap()
@@ -3228,7 +3305,7 @@ mod file_backup_retention_tests {
             .unwrap();
         }
 
-        prune_file_backups(&root, 2);
+        prune_file_backups(&root, 2, None);
 
         assert!(outside.is_file(), "越界 rel 必须被拒，保留上限裁不到备份根之外");
         assert!(
@@ -3253,7 +3330,7 @@ mod file_backup_retention_tests {
         std::fs::write(orphan_dir.join("0_lost.log"), b"payload").unwrap();
 
         // 冷静期 0：孤儿必须被回收，清单引用的副本必须幸存
-        prune_file_backups_with(&root, 5, 0);
+        prune_file_backups_with(&root, 5, 0, None);
         assert!(
             !orphan_dir.join("0_lost.log").exists(),
             "无人认领的副本必须被孤儿回收清掉（§4.5③）"
@@ -3267,7 +3344,7 @@ mod file_backup_retention_tests {
         // 注：上一轮 GC 后空规则目录已被回收，这里先重建
         std::fs::create_dir_all(&orphan_dir).unwrap();
         std::fs::write(orphan_dir.join("1_fresh.log"), b"payload").unwrap();
-        prune_file_backups_with(&root, 5, 3_600_000); // 1h 冷静期，副本 mtime 是现在
+        prune_file_backups_with(&root, 5, 3_600_000, None); // 1h 冷静期，副本 mtime 是现在
         assert!(
             orphan_dir.join("1_fresh.log").is_file(),
             "冷静期内的副本不得被回收（在途批次保护）"
@@ -3286,7 +3363,7 @@ mod file_backup_retention_tests {
         std::fs::write(orphan_dir.join("0_lost.log"), b"payload").unwrap();
         // 一份清单变成非法 JSON（读/解析失败）
         std::fs::write(root.join("manifest-1700000000021.json"), b"{bad").unwrap();
-        prune_file_backups_with(&root, 5, 0);
+        prune_file_backups_with(&root, 5, 0, None);
         assert!(
             orphan_dir.join("0_lost.log").is_file(),
             "引用集合不完整时不得回收任何孤儿（否则误删仍被引用的副本）"
@@ -3330,7 +3407,7 @@ mod file_backup_retention_tests {
         make_batch(&root, 1_700_000_000_001, &["sub\\f.txt"]);
         make_batch(&root, 1_700_000_000_002, &["safe\\g.txt"]);
 
-        prune_file_backups_with(&root, 1, 0);
+        prune_file_backups_with(&root, 1, 0, None);
 
         assert!(
             target.join("f.txt").is_file(),

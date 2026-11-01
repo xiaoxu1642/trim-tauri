@@ -589,6 +589,7 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
                     REG_BINARY => "Binary",
                     REG_MULTI_SZ => "MultiString",
                     REG_DWORD => "DWord",
+                    REG_QWORD => "QWord",
                     _ => "Unknown",
                 };
                 let mut value_data = String::new();
@@ -1360,9 +1361,13 @@ pub fn startup_toggle(items: &[Value], enable: bool) -> Result<Value, String> {
             };
 
             match result {
-                Ok(msg) => {
+                Ok(ToggleOutcome::Changed(msg)) => {
                     success += 1;
                     results.push(json!({"id": id, "name": name, "status": "ok", "message": msg}));
+                }
+                Ok(ToggleOutcome::Unchanged(msg)) => {
+                    // 没改动不算成功：不计 success，状态给 skip（前端只把 ok 记进防恢复台账）
+                    results.push(json!({"id": id, "name": name, "status": "skip", "message": msg}));
                 }
                 Err(e) => {
                     failed += 1;
@@ -1376,7 +1381,17 @@ pub fn startup_toggle(items: &[Value], enable: bool) -> Result<Value, String> {
     }
 }
 
-unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Value>) -> Result<String, String> {
+/// 单项启用/禁用的结局（R5d-L01）：`Unchanged` = 本次调用**没有改动系统**（例如批准位
+/// 本来就是「已禁用」）。`startup_toggle` 必须把它记成 `status:"skip"` 且不计 `success`：
+/// 前端只把 `status=="ok"` 的禁用项写进防恢复台账（`startup.js` 的 F4a2-M02 口径），
+/// 把「没改」算成成功会让汇总提示多算一项，还给该项留一条假的防恢复指纹。
+#[derive(Debug)]
+enum ToggleOutcome {
+    Changed(String),
+    Unchanged(String),
+}
+
+unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Value>) -> Result<ToggleOutcome, String> {
     let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
     let reg_path = item.get("regPath").and_then(|v| v.as_str()).unwrap_or("");
     let value_name = item.get("valueName").and_then(|v| v.as_str()).unwrap_or("");
@@ -1404,7 +1419,7 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
                 set_approved_bit(hive, approved_subkey, value_name, false)?;
             }
             records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
-            return Ok("已启用".into());
+            return Ok(ToggleOutcome::Changed("已启用".into()));
         }
         // 值已被删除：从 disabled.json 恢复。
         // v5-K09 批次 5：台账凭据只对本域 8 条 Run/RunOnce 容器生效——快照条目的
@@ -1453,7 +1468,7 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
             return Err("回写未生效（可能需要管理员权限）".into());
         }
         records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
-        Ok("已启用".into())
+        Ok(ToggleOutcome::Changed("已启用".into()))
     } else {
         // 禁用：Run/Run32 优先写 StartupApproved blob；RunOnce **一律走备份+删值** ——
         // 批准位对 RunOnce 是死数据（判定见函数头 is_run_once）：界面显示「已禁用」
@@ -1470,7 +1485,7 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
         // 一遍再回执「已禁用」，用户以为改动过什么。先读实况，避免白写一次并如实说清。
         // （批量入口会把选中的行原样送来，disabled 行也会进来，所以这条可达。）
         if !is_run_once && read_startup_approved(hive, approved_subkey, value_name) == Some(true) {
-            return Ok("本来就是禁用状态（未改动）".into());
+            return Ok(ToggleOutcome::Unchanged("本来就是禁用状态（未改动）".into()));
         }
         let approve_fail: Option<String> = if is_run_once {
             Some("RunOnce 项无系统批准位".to_string())
@@ -1478,7 +1493,7 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
             set_approved_bit(hive, approved_subkey, value_name, true).err()
         };
         match approve_fail {
-            None => Ok("已禁用（注册表值保留，可随时还原）".into()),
+            None => Ok(ToggleOutcome::Changed("已禁用（注册表值保留，可随时还原）".into())),
             Some(why) => {
                 // 回退：删值 + 备份（RunOnce 直接走这里）
                 let (kind, data) = reg_read_value_typed(hive, &subkey, value_name)
@@ -1534,17 +1549,17 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
                 });
                 records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
                 records.push(rec);
-                Ok(if is_run_once {
+                Ok(ToggleOutcome::Changed(if is_run_once {
                     "已禁用（RunOnce 项：备份后删除原值，可在列表中随时启用还原）".into()
                 } else {
                     format!("已禁用（回退为删除值方式：{why}）")
-                })
+                }))
             }
         }
     }
 }
 
-unsafe fn toggle_folder_item(item: &Value, enable: bool, records: &mut Vec<Value>) -> Result<String, String> {
+unsafe fn toggle_folder_item(item: &Value, enable: bool, records: &mut Vec<Value>) -> Result<ToggleOutcome, String> {
     let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
     let file_path = item.get("filePath").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -1571,7 +1586,7 @@ unsafe fn toggle_folder_item(item: &Value, enable: bool, records: &mut Vec<Value
         std::fs::rename(backup_path, orig_path).map_err(|e| format!("移回失败: {e}"))?;
         if std::path::Path::new(orig_path).exists() {
             records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
-            Ok("已启用".into())
+            Ok(ToggleOutcome::Changed("已启用".into()))
         } else {
             Err("移回未生效".into())
         }
@@ -1611,11 +1626,11 @@ unsafe fn toggle_folder_item(item: &Value, enable: bool, records: &mut Vec<Value
         });
         records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
         records.push(rec);
-        Ok("已禁用".into())
+        Ok(ToggleOutcome::Changed("已禁用".into()))
     }
 }
 
-unsafe fn toggle_task_item(item: &Value, enable: bool) -> Result<String, String> {
+unsafe fn toggle_task_item(item: &Value, enable: bool) -> Result<ToggleOutcome, String> {
     let task_path = item.get("taskPath").and_then(|v| v.as_str()).unwrap_or("");
     let task_name = item.get("taskName").and_then(|v| v.as_str()).unwrap_or("");
     // R5a-M01 ①：容器准入（形状 + 系统子树排除），在拼 /TN 与调 schtasks **之前**。
@@ -1637,7 +1652,7 @@ unsafe fn toggle_task_item(item: &Value, enable: bool) -> Result<String, String>
         crate::engine::systembin::SCHTASKS_TIMEOUT,
     ).map_err(|e| format!("schtasks 执行失败: {e}"))?;
     if output.status.success() {
-        Ok(if enable { "已启用".into() } else { "已禁用".into() })
+        Ok(ToggleOutcome::Changed(if enable { "已启用".into() } else { "已禁用".into() }))
     } else {
         let stderr = crate::engine::systembin::decode_native_output(&output.stderr);
         Err(if stderr.is_empty() { "操作未生效（可能需要管理员权限）".into() } else { stderr })

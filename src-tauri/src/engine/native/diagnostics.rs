@@ -25,6 +25,10 @@ pub fn sysdisk() -> Result<Value, String> {
     let mut media = String::new();
     let mut bus = String::new();
     let mut detector = String::new();
+    // R5b-L05：型号来自 `Disk\Enum` 的**固定序号**那一块盘，而系统盘未必是它 ——
+    // 没有「卷 → 物理盘」映射之前，这条结论只能算按该键推断。来源随 detector 上报，
+    // 别让推断在回执里看起来像实测（映射要用卷设备的 extent 查询，属后续改造）。
+    let mut model_from_enum = false;
 
     // 从注册表 SCSI 设备映射获取磁盘型号
     unsafe {
@@ -41,6 +45,7 @@ pub fn sysdisk() -> Result<Value, String> {
                 // 从设备实例 ID 解析型号
                 if let Some(m) = extract_model_from_instance(&instance) {
                     model = m;
+                    model_from_enum = true;
                 }
             }
             let _ = RegCloseKey(hk);
@@ -77,14 +82,19 @@ pub fn sysdisk() -> Result<Value, String> {
         }
     }
 
-    // 型号关键字判断 SSD/HDD
+    // 型号关键字判断 SSD/HDD（来源同 detector 一起上报，见 `model_from_enum` 的说明）
     let model_lower = model.to_lowercase();
+    let model_src = if model_from_enum {
+        "按磁盘枚举键固定序号推断"
+    } else {
+        "按 SCSI 设备映射推断"
+    };
     if model_lower.contains("ssd") || model_lower.contains("nvme") || model.contains("固态") {
         media = "SSD".into();
-        detector = "Model 关键字".into();
+        detector = format!("Model 关键字 · {model_src}");
     } else if !model.is_empty() {
         media = "HDD".into();
-        detector = "Model 未见 SSD 关键字（推断）".into();
+        detector = format!("Model 未见 SSD 关键字 · {model_src}");
     }
 
     // NVMe 总线判断

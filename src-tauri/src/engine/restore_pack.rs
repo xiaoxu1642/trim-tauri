@@ -498,18 +498,28 @@ pub fn list(limit: usize) -> Vec<Value> {
             let entries = match parse_manifest(&text) {
                 Ok(e) => e,
                 Err(msg) => {
-                    rows.push(json!({ "id": name, "broken": msg }));
+                    // 坏包的落盘体积照样上报：它在磁盘上确实占地方，表头合计也含它。
+                    let zip_path = de.path().join(ZIP_NAME);
+                    let zip_bytes = std::fs::metadata(&zip_path).map(|m| m.len()).unwrap_or(0);
+                    rows.push(json!({ "id": name, "broken": msg, "zipBytes": zip_bytes }));
                     continue;
                 }
             };
             let bytes: u64 = entries.iter().map(|e| e.size).sum();
+            // R6b-L14：`bytes` 是 manifest 声明的**解压后**原始体积，`total_bytes()` 数的是
+            // `payload.zip` 落盘体积 —— 两个口径同名同屏时，表头「合计」必然不等于逐行之和
+            // （压缩率越高差越大）。落盘体积另给一个键，界面两处都读它；`bytes` 留给
+            // 「还原会写回多少」的确认文案。
+            let zip_path = de.path().join(ZIP_NAME);
+            let zip_bytes = std::fs::metadata(&zip_path).map(|m| m.len()).unwrap_or(0);
             rows.push(json!({
                 "id": name,
                 "dir": de.path().to_string_lossy(),
                 "files": entries.iter().filter(|e| e.kind == "file").count(),
                 "dirs": entries.iter().filter(|e| e.kind == "dir").count(),
                 "bytes": bytes,
-                "hasZip": de.path().join(ZIP_NAME).is_file(),
+                "zipBytes": zip_bytes,
+                "hasZip": zip_path.is_file(),
             }));
         }
     }
@@ -811,6 +821,12 @@ pub fn total_bytes() -> u64 {
         let Ok(rd) = std::fs::read_dir(&root) else { continue };
         for de in rd.flatten() {
             if !de.path().is_dir() {
+                continue;
+            }
+            // R6b-L14：与 `list()` 的条目面同口径（跳过点目录与 reparse 批次目录），
+            // 否则表头合计里会算进列表看不见的包，「合计」与逐行之和仍然对不上。
+            let name = de.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || !batch_dir_trusted(&root, &name) {
                 continue;
             }
             if let Ok(z) = std::fs::metadata(de.path().join(ZIP_NAME)) {
