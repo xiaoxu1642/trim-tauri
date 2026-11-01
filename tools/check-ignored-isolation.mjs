@@ -94,6 +94,33 @@ if (ignored.length < MIN_IGNORED) {
 }
 g.ok(`ignored 探针隔离对账：#[ignore] ${ignored.length} 条 / 未先定根 ${bad} 条（豁免表剩余 ${exempt.size} 条；B3/P1-4 已清零，本表只减不增）`);
 
+// X1-K01 / R3b-K01（2026-11-01）：`#[ignore]` 真机用例会真写注册表。若它对**非
+// `TrimProbe` 前缀**的值名执行写/删，同一函数体内必须有「我建过什么」的守卫
+// （`created` 标志 / `original` 原值恢复）—— 否则跑一次发布前门禁就把用户真实状态
+// 改掉或删掉（X1-K01 删真实 ctfmon 自启值、R3b-K01 覆盖并删除用户的 NoAutoUpdate）。
+const SYS_WRITE_RE = /reg_restore_(?:write|delete)\s*\(|"(?:add|delete)"\s*,\s*RUN_KEY/;
+let unguarded = 0;
+for (const abs of files) {
+  const code = readFileSync(abs, 'utf8');
+  if (!code.includes('#[ignore')) continue;
+  const blanked = blankNonCode(code, 'rs');
+  for (const f of splitFunctions(code, 'rs')) {
+    const head = blanked.slice(Math.max(0, f.start - 400), f.start);
+    if (!/#\[ignore/.test(head)) continue;
+    const body = code.slice(f.bodyStart, f.end - 1);
+    if (!SYS_WRITE_RE.test(body)) continue;
+    if (/"TrimProbe/.test(body)) continue;
+    const guarded = /\bcreated\b/.test(body) || /\boriginal\b/.test(body);
+    if (!guarded) {
+      unguarded++;
+      g.fail(
+        `${relative(ROOT, abs).split('\\').join('/')}:${lineAt(code, f.start)} ${f.name} 对系统注册表值执行写/删，但没有 created/original 守卫（跑一次发布前门禁会改掉用户真实状态）`,
+      );
+    }
+  }
+}
+g.ok(`真机写注册表的 #[ignore] 用例守卫对账：无守卫 ${unguarded} 条`);
+
 // 合成样本正向对照（每次都跑）
 const CONTROLS = [
   {

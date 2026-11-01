@@ -1855,15 +1855,45 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
     /// 造同形态夹具测不到方向：`check_optimized` 走的是侧表那条路，会去读
     /// HKLM 下另外 3 个键，它们不存在 ⇒ `all()` 恒 true，与本键无关）。
     ///
-    /// ⚠️ 所以这条是 `#[ignore]`：它要在 HKLM
-    /// `SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate` 下真的建/删一个
-    /// `Pause*` 键 —— 那是**改系统更新策略**，快速组零副作用纪律不许。
+    /// ⚠️ 所以这条是 `#[ignore]`：它要在 HKLM 的 WindowsUpdate 策略树下真的建/删
+    /// `perf_wu_enable` 声明的那个策略值 —— 那是**改系统更新策略**，快速组零副作用纪律不许。
     /// 发布前门禁组（`cargo test -- --ignored`）跑。
+    ///
+    /// R3b-K01：该值就是「彻底禁用 Windows 更新」的唯一写入值（`AU\NoAutoUpdate`）。
+    /// 旧实现无条件写 1 再删、不读原值、无守卫 —— 在用户原本已禁用更新的机器上跑一次
+    /// 发布前门禁，用户的策略会被覆盖后删掉，而 UI 记账仍显示已应用。
     #[test]
     #[ignore = "要真改 HKLM 下的 WindowsUpdate 策略键，发布前门禁组跑"]
     fn m2_删除语义判据方向正确() {
         use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, REG_DWORD};
         use crate::engine::native::{read_reg_dword_opt, reg_key_ensure, reg_restore_write};
+
+        // R3b-K01：守卫按原值恢复（原本有值 ⇒ 写回原值；原本没有 ⇒ 删掉）。
+        struct RestoreReg {
+            sub: String,
+            value: String,
+            original: Option<i64>,
+        }
+        impl Drop for RestoreReg {
+            fn drop(&mut self) {
+                use crate::engine::native::{reg_restore_delete, reg_restore_write};
+                use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, REG_DWORD};
+                match self.original {
+                    Some(v) => {
+                        let _ = reg_restore_write(
+                            HKEY_LOCAL_MACHINE,
+                            &self.sub,
+                            &self.value,
+                            REG_DWORD,
+                            &(v as u32).to_le_bytes(),
+                        );
+                    }
+                    None => {
+                        let _ = reg_restore_delete(HKEY_LOCAL_MACHINE, &self.sub, &self.value);
+                    }
+                }
+            }
+        }
 
         // 键路径与 hive 从**侧表**现取，不硬编码 —— 硬编码会在侧表改键名后
         // 静默测到另一个键上（症状：这条绿了，但真实判据方向是反的）。
@@ -1872,6 +1902,14 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
         assert!(r.absent, "前提失效：perf_wu_enable 的第一条不是删除语义");
         let sub = r.subkey;
         let value = r.value;
+
+        // 先读原值、再挂守卫 —— 顺序反了会把「用户的真实策略」当成夹具值覆盖掉。
+        let original = read_reg_dword_opt(HKEY_LOCAL_MACHINE, sub, value);
+        let _restore = RestoreReg {
+            sub: sub.to_string(),
+            value: value.to_string(),
+            original,
+        };
 
         // 建出那个键（模拟「用户暂停过更新」的真实状态）
         reg_key_ensure(HKEY_LOCAL_MACHINE, sub);

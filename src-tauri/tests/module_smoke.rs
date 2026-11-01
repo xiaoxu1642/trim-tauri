@@ -3110,15 +3110,22 @@ fn u_ctfmon_startup_chain_guard_live() {
     const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
     let reg = |args: &[&str]| std::process::Command::new("reg").args(args).output();
 
-    struct Cleanup;
+    // X1-K01：守卫必须带「我建过什么」的状态。旧写法在前置检查**之前**就挂上 Drop，
+    // 本机已有真实 ctfmon 值时走 skip 分支 return，Drop 照样执行 reg delete ——
+    // 跑一次发布前门禁就把用户的输入法自启项删掉，且用户看不出是测试做的。
+    struct Cleanup {
+        created: bool,
+    }
     impl Drop for Cleanup {
         fn drop(&mut self) {
+            if !self.created {
+                return;
+            }
             let _ = std::process::Command::new("reg")
                 .args(["delete", RUN_KEY, "/v", "ctfmon", "/f"])
                 .output();
         }
     }
-    let _guard = Cleanup;
 
     // 现场前置：本机已有同名真值时**绝不覆盖**——那是这台机器真实的输入法自启项，
     // 探针去改它等于自己制造一次故障。没有样本就按不可取证跳过。
@@ -3127,10 +3134,13 @@ fn u_ctfmon_startup_chain_guard_live() {
         skip_and_record("HKCU Run 已存在 ctfmon 值（本机真实输入法自启），探针不覆盖 ⇒ 无可用样本");
         return;
     }
+    // 前置通过之后才建守卫；只有 reg add 真的成功才置 created。
+    let mut guard = Cleanup { created: false };
     let add = reg(&[
         "add", RUN_KEY, "/v", NAME, "/t", "REG_SZ", "/d", r"C:\Windows\System32\notepad.exe", "/f",
     ]);
     assert!(add.map(|o| o.status.success()).unwrap_or(false), "建探针 Run 值失败，后续断言无对象");
+    guard.created = true;
 
     let items = startup_scan().expect("启动项扫描失败");
     let hit = items
