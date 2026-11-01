@@ -442,6 +442,59 @@ fn set_result_entry(
     }
 }
 
+/// 「打开位置」入参的本机命名空间闸（纯函数：只做词法判定，**不触盘**）。
+///
+/// 为什么必须排在 [`location_anchor`] 之前：UNC 形态的 `Path::exists()` 自身就会
+/// 发起 SMB 名解析（`commands/paths.rs` 的 `paths_app_icon` 已为同一副作用立过判据
+/// ——「先判存在性等于把这道闸要防的那个副作用做掉了」），等于把本机凭据递到渲染层
+/// 指定的主机上；死共享还会把 async 命令挂到超时、占住 runtime worker。这两条命令
+/// 的 `path` 都是纯 IPC 原文（`startup:openlocation` 还挂在只读档，四个窗口都调得到），
+/// 不能把「要不要触盘」交给它决定。
+///
+/// 口径与 `commands::paths::icon_source_reject_reason` 同源（那一侧是图标链的域内
+/// 白名单）：只放行**本机盘符绝对路径**；`\\?\X:\…` 是 `fs::canonicalize` 的原生形态
+/// （本仓扫描结果就是它，finder 的「定位」复用的正是本通道），必须放行；
+/// `\\?\UNC\` / `\\?\Volume{…}` / `\\?\GLOBALROOT\…` 判不出去向 ⇒ fail-closed。
+/// 刻意**不直接复用**那个函数：它内部会为 8.3 短名做 `GetLongPathName` 触盘展开，
+/// 不满足「任何文件系统调用之前」这道时序；这里只做词法判定（§5.16 要求同一判据
+/// 不留第二份，而本条判据的时序约束让两者不是同一份）。
+fn open_target_reject_reason(target: &str) -> Option<&'static str> {
+    // 与 [`location_anchor`] 吃同一串：它先 trim 再剥一对引号（IPC 侧可能带引号）。
+    // 闸判定的串必须与随后交给锚定 / 外壳的串一致（判定串 ≠ 下发串是 A6 形态）。
+    let t = target.trim().trim_matches('"');
+    if t.is_empty() {
+        return Some("路径为空，无法定位");
+    }
+    // 控制字符（含 NUL）：这一串随后按原样交给 `ShellExecuteW`，闸后不能再有看不见的段
+    if t.chars().any(char::is_control) {
+        return Some("路径含控制字符，已拒绝定位");
+    }
+    // `\\?\` 只放行 verbatim 盘符；其余（UNC / Volume / GLOBALROOT / 截断形态）无法
+    // 证明指向本机树，按 fail-closed 拒（分类口径与 `protect::classify_form` 一致）
+    let t = match t.strip_prefix(r"\\?\") {
+        Some(rest) if drive_rooted(rest) => rest,
+        Some(_) => return Some("不支持的路径命名空间（只认本机盘符路径）"),
+        None => t,
+    };
+    if t.starts_with(r"\\.\") || t.starts_with(r"\??\") {
+        return Some("设备路径不能作为定位目标");
+    }
+    if t.starts_with(r"\\") || t.starts_with("//") {
+        return Some("网络共享路径不能作为定位目标");
+    }
+    if !drive_rooted(t) {
+        return Some("只支持本机盘符绝对路径（相对路径与驱动器相对路径不收）");
+    }
+    None
+}
+
+/// `X:\…` / `X:/…`：盘符根下的绝对形态。纯词法，不看该盘符是否存在 ——
+/// 存在性只能在闸放行之后由 [`location_anchor`] 判。
+fn drive_rooted(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/')
+}
+
 /// 「打开位置」的落点锚（纯函数，可测）。
 ///
 /// ① 目标本身在 → 选它；② 目标不在（卸载残留 / 目标已被换掉）→ 退到**最深的
@@ -474,6 +527,9 @@ fn location_anchor(target: &str) -> Option<(std::path::PathBuf, bool)> {
 /// Documents）。现在三处一起改：① 落点先过 [`location_anchor`]；② 走
 /// `shell_select_in_explorer`（ShellExecuteW 原样传参，无引号坑，也不经 shell）；
 /// ③ 回执带 `opened` / `fellBack`，失败有明确文案，不再「spawn 成功即 success」。
+///
+/// 2026-11-01（R1b-M01）：入参先过 [`open_target_reject_reason`] 的本机命名空间闸，
+/// UNC / 设备路径在碰盘之前就拒——`location_anchor` 的第一句是 `exists()`。
 #[tauri::command]
 pub async fn startup_openlocation<R: Runtime>(
     window: WebviewWindow<R>,
@@ -483,8 +539,9 @@ pub async fn startup_openlocation<R: Runtime>(
         return json!({ "success": false, "message": msg });
     }
     let target = path.unwrap_or_default();
-    if target.is_empty() || target.contains('\0') {
-        return json!({ "success": false, "message": "缺少路径" });
+    if let Some(reason) = open_target_reject_reason(&target) {
+        log::write_log("warn", &format!("拒绝打开所在位置（IPC 路径不受信）: {reason}"));
+        return json!({ "success": false, "message": reason });
     }
     let Some((anchor, fell_back)) = location_anchor(&target) else {
         return json!({
@@ -574,15 +631,23 @@ pub async fn startup_open_source<R: Runtime>(
     let target = path.unwrap_or_default();
 
     // ① 软件所在文件夹（与 startup:openlocation 同一份锚定与拉起逻辑）
-    let folder = match location_anchor(&target) {
-        Some((anchor, fell_back)) => {
-            let opened = anchor.to_string_lossy().replace('/', "\\");
-            match crate::engine::systembin::shell_select_in_explorer(&opened) {
-                Ok(()) => json!({ "success": true, "opened": opened, "fellBack": fell_back }),
-                Err(e) => json!({ "success": false, "message": e }),
-            }
+    // R1b-M01：同一道本机命名空间闸（与 openlocation 共用 `open_target_reject_reason`），
+    // 必须排在 location_anchor 的探盘之前 —— UNC 的 exists() 自身就会发起 SMB 名解析。
+    let folder = match open_target_reject_reason(&target) {
+        Some(reason) => {
+            log::write_log("warn", &format!("拒绝打开启动项所在位置（IPC 路径不受信）: {reason}"));
+            json!({ "success": false, "message": reason })
         }
-        None => json!({ "success": false, "message": "目标路径连同上级目录都不存在" }),
+        None => match location_anchor(&target) {
+            Some((anchor, fell_back)) => {
+                let opened = anchor.to_string_lossy().replace('/', "\\");
+                match crate::engine::systembin::shell_select_in_explorer(&opened) {
+                    Ok(()) => json!({ "success": true, "opened": opened, "fellBack": fell_back }),
+                    Err(e) => json!({ "success": false, "message": e }),
+                }
+            }
+            None => json!({ "success": false, "message": "目标路径连同上级目录都不存在" }),
+        },
     };
 
     // ② 来源位置
@@ -780,6 +845,120 @@ mod tests {
         // ③ 连一层都不在（裸文件名，parent 为空）：不下结论，交调用方报错
         assert!(location_anchor("trim-b6-bare-name.exe").is_none());
         assert!(location_anchor("").is_none());
+    }
+
+    /// R1b-M01：`startup:openlocation` / `startup:open-source` 的 `path` 是纯 IPC 原文，
+    /// 命名空间闸必须排在 `location_anchor`（首句 `exists()`）之前 —— UNC 形态的存在性
+    /// 探测自身就会发起 SMB 名解析。本用例只调纯函数：闸一旦被挪到探盘之后，这条断言
+    /// 就证明不了「拒之前没触盘」，所以口径是「闸本身不碰文件系统」。
+    ///
+    /// 拒因按支路逐一钉死（`is_some()` 不够：UNC 删掉后仍会被「只认盘符」兜底拒掉，
+    /// 断言照样绿 —— 那种绿证明不了 UNC 分支还在）。
+    /// 判红自证：删掉 UNC 分支（`starts_with(r"\\")` / `starts_with("//")`）⇒ 第一条
+    /// 断言拿到的是兜底理由 ⇒ 本用例红（`\\attacker\share\x.exe` 正是验收样本）。
+    #[test]
+    fn 定位目标_非本机命名空间必须拒() {
+        // ① UNC 两种分隔符：会触发远程名解析（拒绝必须发生在任何触盘之前）
+        for bad in [
+            r"\\attacker\share\x.exe",
+            r"\\attacker\share",
+            r"\\attacker\share\a b\c.lnk",
+            "//attacker/share/x.exe",
+        ] {
+            assert_eq!(
+                open_target_reject_reason(bad),
+                Some("网络共享路径不能作为定位目标"),
+                "UNC `{bad}` 必须在触盘前被拒（且理由必须是 UNC 支路）"
+            );
+        }
+        // ② 设备 / 不可折回命名空间（`\\?\` 只放行 verbatim 盘符，见放侧用例）
+        for bad in [
+            r"\\.\C:\Windows\System32\notepad.exe",
+            r"\??\C:\Windows",
+            r"\\.\PhysicalDrive0",
+        ] {
+            assert_eq!(
+                open_target_reject_reason(bad),
+                Some("设备路径不能作为定位目标"),
+                "设备路径 `{bad}` 必须拒"
+            );
+        }
+        for bad in [
+            r"\\?\Volume{00000000-0000-0000-0000-000000000000}\Windows",
+            r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\x",
+            r"\\?\UNC\attacker\share\x.exe",
+            r"\\?\C:",
+            r"\\?\C:foo",
+            r"\\?\",
+        ] {
+            assert_eq!(
+                open_target_reject_reason(bad),
+                Some("不支持的路径命名空间（只认本机盘符路径）"),
+                "不可折回命名空间 `{bad}` 必须拒"
+            );
+        }
+        // ③ 相对 / 驱动器相对 / 根相对：按进程 CWD 解析，落点不可预测
+        for bad in ["", "   "] {
+            assert_eq!(
+                open_target_reject_reason(bad),
+                Some("路径为空，无法定位"),
+                "空路径必须拒"
+            );
+        }
+        for bad in [
+            "C:",
+            r"C:Users\tester\a.exe",
+            r"\Windows\notepad.exe",
+            r"relative\a.exe",
+            "a.exe",
+        ] {
+            assert_eq!(
+                open_target_reject_reason(bad),
+                Some("只支持本机盘符绝对路径（相对路径与驱动器相对路径不收）"),
+                "非绝对路径 `{bad}` 必须拒"
+            );
+        }
+        // ④ 控制字符（含 NUL）：交给 ShellExecuteW 的串必须与判定串一致
+        for bad in ["C:\\Windows\\x\0.exe", "C:\\Windows\\x\n.exe", "C:\\Win\rdows"] {
+            assert_eq!(
+                open_target_reject_reason(bad),
+                Some("路径含控制字符，已拒绝定位"),
+                "含控制字符的 `{bad:?}` 必须拒"
+            );
+        }
+    }
+
+    /// R1b-M01 放侧：本机盘符路径（含验收样本 `C:\Windows\notepad.exe` 与 `%LOCALAPPDATA%`）
+    /// 必须原样进入原有逻辑；闸只判命名空间，不判存在性、扩展名与盘符是否真的存在。
+    ///
+    /// 判红自证：把 `drive_rooted` 收窄成只认大写盘符 ⇒ 小写样本先红；删掉 `\\?\`
+    /// 的 verbatim 盘符放行 ⇒ finder「定位」的 canonicalize 样本红。
+    #[test]
+    fn 定位目标_本机盘符路径放行() {
+        let local_appdata = std::env::var("LOCALAPPDATA")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| r"C:\Users\tester\AppData\Local".to_string());
+        let probes = [
+            r"C:\Windows\notepad.exe".to_string(),
+            r"c:\windows\system32".to_string(),
+            r"C:/Windows/notepad.exe".to_string(),
+            r"D:\Program Files\App\a.exe".to_string(),
+            r"Z:\mapped\tool.exe".to_string(),
+            r"C:\".to_string(),
+            // canonicalize 的原生形态：finder 的「定位」复用本通道，整族拒会把它打死
+            r"\\?\C:\Users\tester\AppData\Local\App\a.exe".to_string(),
+            // IPC 侧带引号的形态：location_anchor 会剥引号，闸必须吃同一串
+            format!("\"{}\"", r"C:\Windows\notepad.exe"),
+            local_appdata.clone(),
+            format!("{local_appdata}\\VendorX\\a.exe"),
+        ];
+        for good in &probes {
+            assert!(
+                open_target_reject_reason(good).is_none(),
+                "合法本机路径 `{good}` 被命名空间闸误拒"
+            );
+        }
     }
 
     /// B-6 的根因：参数串**必须不加引号**，否则 explorer 静默回退到默认目录。

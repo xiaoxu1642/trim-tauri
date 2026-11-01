@@ -133,9 +133,19 @@ export const UNITS = [
     gates: ['check-native-hygiene', 'check-delete-callsites'],
   },
   {
-    id: 'R5b', owner: 'sub', name: 'native 其余（扫描/进程/外设）',
+    // 2026-11-01 P1（R5b-M01/M02 任务 XML 与系统根 + M03 句柄收口）后 R5b 整包越过
+    // U2 的 8000 上限。沿用 R5c / R5d 同一处置：按执行链把「外部进程与外设」切出，
+    // 上限不放宽。必须排在 R5b 之前 —— R5b 是 engine/native 的目录兜底认领位。
+    id: 'R5e', owner: 'sub', name: 'native 外部进程与外设（计划任务备份 / 服务启停）',
+    files: [`${N}/process.rs`, `${N}/peripheral.rs`, `${N}/services.rs`],
+    contract: '顽固软件计划任务 XML 备份与回建 / 外设优化读写 / 服务启停原语',
+    boundary: '外部进程与句柄卫生与 A5 交叉；启动项执行层归 R5d，注册表原语归 R5c',
+    gates: ['check-native-hygiene', 'check-system-bin', 'check-delete-callsites'],
+  },
+  {
+    id: 'R5b', owner: 'sub', name: 'native 其余（扫描/诊断/系统面板）',
     dirs: [{ dir: N, ext: ['.rs'] }],
-    contract: 'process / runtimes_net / diagnostics / syspanel / paths_scan 等（bsod 与体检已于 2026-10-12 退役；注册表读写已于 2026-10-25 切给 R5c）',
+    contract: 'runtimes_net / diagnostics / syspanel / maintenance / paths_scan 等（bsod 与体检已于 2026-10-12 退役；注册表读写已于 2026-10-25 切给 R5c；进程与外设已于 2026-11-01 切给 R5e）',
     boundary: '外部进程与句柄卫生与 A5 交叉，本单元只审域内逻辑',
     gates: ['check-native-hygiene', 'check-system-bin'],
   },

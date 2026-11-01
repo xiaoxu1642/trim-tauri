@@ -186,6 +186,65 @@ pub(super) fn run_cmd_step(cmd: &str) -> std::io::Result<std::process::Output> {
     )
 }
 
+/// `engine::systembin` 到点收树后写进 stderr 的注记前缀 —— 超时的唯一标记。
+///
+/// 引擎把超时折成「status=1 + 这行注记」（`quiet_cmd_timeout_raw` 的终止未确认分支
+/// 只在后半句加字，前缀不变），除此之外与「真实非零退出」不可辨。判据来源是那行注记
+/// 本身；单测 `cmd超时与启动失败得到两条不同原因` 用同一常量拼样本，并以源码文本对拍
+/// 钉住它没被改字（改字即红，提示同步本常量）。
+const CMD_TIMEOUT_STDERR_MARKER: &str = "执行超时（>";
+
+/// 失败原因里 stderr 的截断长度（回执 `message` 与账本共用一行的预算）。
+const CMD_STDERR_MAX_CHARS: usize = 180;
+
+/// 折叠成单行并按**字符**（不是字节）截断 —— 按字节截断会切在 UTF-8 字符中间 panic。
+fn one_line(s: &str, max_chars: usize) -> String {
+    let flat: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max_chars {
+        return flat;
+    }
+    let mut t: String = flat.chars().take(max_chars).collect();
+    t.push('…');
+    t
+}
+
+/// cmd 步骤失败原因的**唯一构造器**（R3-M04，2026-11-01）。`None` = 这一步成功。
+///
+/// 旧实现把三种成因折成一个 bool，回执只有一句「命令返回非零」：spawn 失败
+/// （cmd.exe 起不来）、`CMD_STEP_TIMEOUT` 超时（到点收树后交 status=1 + stderr 注记）、
+/// 真实非零退出 —— 用户与审计者拿到的是同一句话，无从判断该重试、该查权限还是该
+/// 放宽超时。数据层里 `DISM /Online /Set-ReservedStorageState` 单次 10~60s 起，
+/// 是最可能被 60s 砍掉的一步，被砍时也报「返回非零」。
+///
+/// 纯函数（只吃 `io::Result<Output>`），合成样本即可判红；原因文本一律单行，
+/// 与 [`step_reason`] 拼装后不会把回执撕成多行。
+pub(super) fn cmd_step_failure(outcome: std::io::Result<std::process::Output>) -> Option<String> {
+    let out = match outcome {
+        Err(e) => return Some(format!("命令未能启动: {e}")),
+        Ok(o) => o,
+    };
+    if out.status.success() {
+        return None;
+    }
+    // 超时注记是引擎自己写的中文（UTF-8），真实 cmd 的 stderr 是 OEM 代码页 ——
+    // `decode_native_output` 先试 UTF-8 再退 OEM，两种来源都能读出原文。
+    let stderr = crate::engine::systembin::decode_native_output(&out.stderr);
+    let detail = one_line(&stderr, CMD_STDERR_MAX_CHARS);
+    if detail.contains(CMD_TIMEOUT_STDERR_MARKER) {
+        return Some(format!("命令执行超时: {detail}"));
+    }
+    let code = out
+        .status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "未知".to_string());
+    if detail.is_empty() {
+        Some(format!("命令返回非零（退出码 {code}，无错误输出）"))
+    } else {
+        Some(format!("命令返回非零（退出码 {code}）：{detail}"))
+    }
+}
+
 /// 这一步有没有带上四个引擎字段（reg / cmd / service / pwsh）之一。
 ///
 /// 为什么单独成函数而不是只在分发链里各写一遍：R3-L01 之后，链尾有两个**有名字**的
@@ -421,13 +480,12 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
             // "HKLM\SYSTEM\ControlSet001\Control" 解析成键名 Control"（尾随一个引号），
             // 值写进这个当场新建的垃圾键、真键一个字没改，而 reg 返回 0 ⇒ 步骤记成功、
             // 回读必然报「校验不符」。/s 让 cmd 只剥首尾引号、内层逐字透传。
-            let ok = match run_cmd_step(cmd) {
-                Ok(o) => o.status.success(),
-                Err(_) => false,
-            };
-            if !ok {
+            // R3-M04（2026-11-01）：三种成因不再折成一句「命令返回非零」——
+            // 超时 / 启动失败 / 真实非零退出各有各的可用动作（放宽超时 / 查 PATH 与
+            // 权限 / 看 stderr），构造器只此一份（[`cmd_step_failure`]）。
+            if let Some(why) = cmd_step_failure(run_cmd_step(cmd)) {
                 failed += 1;
-                failed_reasons.push(step_reason(i, label, "命令返回非零"));
+                failed_reasons.push(step_reason(i, label, &why));
             }
         } else if let Some(service) = s.get("service").and_then(|v| v.as_str()) {
             // service 类型。三种形态，语义各不相同（R0-a 起）：
@@ -1479,4 +1537,119 @@ pub(super) fn svc_mem_current_kb() -> Option<i64> {
         r"SYSTEM\ControlSet001\Control",
         "SvcHostSplitThresholdInKB",
     )
+}
+
+/// R3-M04（2026-11-01）：cmd 步骤失败原因的判据面。
+///
+/// 判红对照（每条都能被以下改动打红）：
+/// - 把 [`cmd_step_failure`] 的 `Err` 分支与 `Ok` 分支都折成同一句话
+///   ⇒ `cmd超时与启动失败得到两条不同原因` 红（这正是旧实现的形态）；
+/// - 把超时标记判断删掉（超时落进「非零退出」）⇒ 同上红；
+/// - 把 `decode_native_output` 换成 `from_utf8_lossy`（超时注记以外的 stderr 变乱码）
+///   ⇒ `超时注记按引擎口径解码` 红；
+/// - 改掉 `engine/systembin.rs` 的超时注记字面量而不改本常量
+///   ⇒ `超时标记与systembin源码同字` 红；
+/// - 把 `one_line` 改回按字节截断 ⇒ `成功不给原因_超长stderr按字符截断` 红（多字节切片 panic）。
+#[cfg(test)]
+mod r3_m04_cmd_reason_tests {
+    use super::{cmd_step_failure, one_line, step_reason, CMD_STDERR_MAX_CHARS, CMD_TIMEOUT_STDERR_MARKER};
+
+    /// 合成一条子进程结局（不真起进程：本组用例零副作用）。
+    fn out(code: u32, stderr: &str) -> std::process::Output {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(code),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    /// 判红点（R3-M04 主病灶）：超时与「命令起不来」必须是两条可辨原因。
+    ///
+    /// 旧实现把 spawn 失败（`Err`）、60s 超时（status=1 + stderr 注记）、真实非零退出
+    /// 折成同一个 bool，回执只有一句「命令返回非零」—— 用户无从判断该放宽超时、
+    /// 该查 PATH/权限，还是该看命令自己的错误输出。
+    #[test]
+    fn cmd超时与启动失败得到两条不同原因() {
+        // 超时样本按引擎真实产物拼：status=1 + stderr 注记（前缀取同一常量）
+        let timeout = cmd_step_failure(Ok(out(1, &format!("{CMD_TIMEOUT_STDERR_MARKER}60000ms），已终止"))))
+            .expect("超时必须判失败");
+        let spawn = cmd_step_failure(Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "系统找不到 cmd.exe",
+        )))
+        .expect("启动失败必须判失败");
+
+        assert!(timeout.contains("超时"), "超时原因里没有「超时」: {timeout}");
+        assert!(spawn.contains("未能启动"), "启动失败原因里没有「未能启动」: {spawn}");
+        assert_ne!(timeout, spawn, "超时与启动失败必须给出两条可辨原因");
+        for r in [&timeout, &spawn] {
+            assert_ne!(r.as_str(), "命令返回非零", "退回旧文案等于把成因又抹平了: {r}");
+            assert!(!r.contains('\n') && !r.contains('\r'), "原因必须单行（回执用「；」拼多步）: {r:?}");
+        }
+        // 与 step_reason 拼装后仍带步骤序号与 label（口径沿用既有构造器）
+        let line = step_reason(2, "挂起更新服务", &timeout);
+        assert!(line.starts_with("第 3 步「挂起更新服务」: "), "{line}");
+    }
+
+    /// 真实非零退出：退出码 + stderr 原文都要进原因（旧实现只知道「非零」）。
+    #[test]
+    fn 非零退出带退出码与stderr原文() {
+        let r = cmd_step_failure(Ok(out(5, "ERROR: 系统找不到指定的文件。\r\n"))).expect("非零必须判失败");
+        assert!(r.contains("退出码 5"), "退出码没进原因: {r}");
+        assert!(r.contains("系统找不到指定的文件"), "stderr 原文没进原因: {r}");
+        assert!(!r.contains('\n') && !r.contains('\r'), "多行 stderr 必须折叠成单行: {r:?}");
+
+        // 没有 stderr 时如实说明「无错误输出」，不编造原因
+        let quiet = cmd_step_failure(Ok(out(2, ""))).expect("非零必须判失败");
+        assert!(quiet.contains("退出码 2") && quiet.contains("无错误输出"), "{quiet}");
+    }
+
+    /// 超时注记是引擎自己写的中文（UTF-8），而真实 cmd 的 stderr 是 OEM 代码页 ——
+    /// 判据要能在同一字段上认出前者。`decode_native_output` 先试 UTF-8，本断言钉住
+    /// 「换成别的解码也不会把注记读花」，并且坏字节不 panic。
+    #[test]
+    fn 超时注记按引擎口径解码() {
+        let note = format!("{CMD_TIMEOUT_STDERR_MARKER}60000ms），已终止");
+        assert_eq!(
+            crate::engine::systembin::decode_native_output(note.as_bytes()),
+            note,
+            "引擎的超时注记必须能被原样解回来（否则超时会被报成非零退出）"
+        );
+        // OEM 字节（非 UTF-8）不得 panic、也不得返回空串把原因吃没
+        let oem = [0xC4u8, 0xE3, 0xB2, 0xBB];
+        assert!(!crate::engine::systembin::decode_native_output(&oem).is_empty());
+    }
+
+    /// 成功不给原因；超长 stderr 按字符截断（按字节切会切在多字节字符中间 panic）。
+    #[test]
+    fn 成功不给原因_超长stderr按字符截断() {
+        assert!(cmd_step_failure(Ok(out(0, "任何输出"))).is_none(), "退出码 0 不得报失败");
+        let long = "错误".repeat(400);
+        let flat = one_line(&long, CMD_STDERR_MAX_CHARS);
+        assert_eq!(
+            flat.chars().count(),
+            CMD_STDERR_MAX_CHARS + 1,
+            "截断长度不对（应保留上限 + 一个省略号）: {}",
+            flat.chars().count()
+        );
+        assert!(flat.ends_with('…'), "截断必须以省略号收尾: {flat}");
+    }
+
+    /// 防漂移：超时判据的字符串取自 `engine/systembin.rs` 的注记原文。
+    ///
+    /// 引擎把超时折成「status=1 + 这行注记」，除此之外与真实非零退出不可辨 ——
+    /// 注记改字而本常量没跟，超时就会被重新报成「命令返回非零」。
+    #[test]
+    fn 超时标记与systembin源码同字() {
+        let src = include_str!("../../engine/systembin.rs");
+        assert!(
+            src.contains(CMD_TIMEOUT_STDERR_MARKER),
+            "systembin 的超时注记已改字（找不到 {CMD_TIMEOUT_STDERR_MARKER}），cmd 步骤会把超时报成非零退出"
+        );
+        assert!(
+            src.contains("CMD_STEP_TIMEOUT"),
+            "cmd 步骤的超时常量不见了（超时路径可能整条被摘）"
+        );
+    }
 }

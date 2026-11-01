@@ -456,18 +456,171 @@ fn stubborn_task_backup_name(task: &str) -> String {
 /// native-scanner `MAX_WALK_DEPTH` 同档。这里之前是唯一没有上限的 `stack` 递归。
 const STUBBORN_TASKS_MAX_DEPTH: usize = 64;
 
-/// 从磁盘任务库现算目标任务（返回任务全名：根下任务 `\Name`，文件夹任务 `\Folder\Name`）。
+// ==================== 任务 XML 备份的落盘形态（R5b-M01） ====================
+
+/// 从 XML 文本里取声明中 `encoding` **属性值**的字节区间（`None` = 没声明 / 声明里没这项）。
 ///
-/// 直读 `C:\Windows\System32\Tasks`（启动项域同款做法，毫秒级）；跳过 `Microsoft\`
-/// 子树（系统任务区）。根目录读不到时记 warn 并返回空——「这些软件一个都没装」
-/// 与「目录根本读不了」在日志上可区分。
+/// 归一（写侧改值）与自检（验侧读值）共用这一份解析：各写一套必然分叉，
+/// 而这里的判据恰恰是「声明与实际字节一致」。
+fn xml_decl_encoding_span(xml: &str) -> Option<(usize, usize)> {
+    let decl_end = xml.find("?>")?;
+    let head = &xml[..decl_end];
+    if !head.trim_start().starts_with("<?xml") {
+        return None;
+    }
+    // `to_ascii_lowercase` 只改 ASCII 字节、长度不变，所以下标可直接回用在 `head` 上。
+    let enc_at = head.to_ascii_lowercase().find("encoding")?;
+    let after = &head[enc_at + "encoding".len()..];
+    let eq_at = after.find('=')?;
+    let value_zone = &after[eq_at + 1..];
+    let lead = value_zone.len() - value_zone.trim_start().len();
+    let value_start = enc_at + "encoding".len() + eq_at + 1 + lead;
+    let rest = &xml[value_start..];
+    let quote = rest.chars().next()?;
+    if quote == '"' || quote == '\'' {
+        let close = rest[1..].find(quote)?;
+        Some((value_start + 1, value_start + 1 + close))
+    } else {
+        // 未加引号的畸形声明：取值到下一个空白 / 声明结束符
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '?' || c == '>')
+            .unwrap_or(rest.len());
+        if end == 0 { None } else { Some((value_start, value_start + end)) }
+    }
+}
+
+/// 声明里写的编码名（取不到返回空串）。
+fn declared_xml_encoding(xml: &str) -> String {
+    xml_decl_encoding_span(xml)
+        .map(|(s, e)| xml[s..e].to_string())
+        .unwrap_or_default()
+}
+
+/// 把 XML 声明的 `encoding` 值归一成 `UTF-16`（与实际字节一致）；声明缺这项时补上。
+///
+/// 只改声明属性值、不动正文：正文由 [`task_xml_backup_bytes`] 整体转码成 UTF-16LE。
+fn force_utf16_declaration(xml: &str) -> String {
+    if let Some((start, end)) = xml_decl_encoding_span(xml) {
+        return format!("{}{}{}", &xml[..start], "UTF-16", &xml[end..]);
+    }
+    // 声明里没有 encoding（XML 缺省按 UTF-8 解释）⇒ 补一项，否则声明仍与字节不一致。
+    let Some(decl_end) = xml.find("?>") else { return xml.to_string() };
+    let head = &xml[..decl_end];
+    if !head.trim_start().starts_with("<?xml") {
+        return xml.to_string();
+    }
+    format!("{head} encoding=\"UTF-16\"{}", &xml[decl_end..])
+}
+
+/// 任务 XML 备份的落盘字节：UTF-16LE + BOM，声明同步写成 `encoding="UTF-16"`（R5b-M01）。
+///
+/// 病根：`schtasks /Query /XML` 的产物是**单字节流**（经 `decode_native_output` 解成
+/// `String`），声明却写着 `encoding="UTF-16"`。旧实现按 UTF-8 落盘 ⇒ 声明与实际编码
+/// 不一致：实测 `System.Xml.XmlDocument.Load` 直接拒（`There is no Unicode byte order
+/// mark`），转成 UTF-16LE+BOM 才 `Load OK` —— 这份「删除前唯一还原凭据」因此不可解析。
+fn task_xml_backup_bytes(xml: &str) -> Vec<u8> {
+    let body = force_utf16_declaration(xml);
+    let mut bytes = Vec::with_capacity(2 + body.len() * 2);
+    bytes.extend_from_slice(&[0xFF, 0xFE]);
+    bytes.extend(body.encode_utf16().flat_map(|u| u.to_le_bytes()));
+    bytes
+}
+
+/// 落盘件回读自检（R5b-M01）：BOM、字节编码与 XML 声明三者必须自洽，且根元素在。
+///
+/// 本仓没有 XML 解析依赖（不新增依赖），所以判的正是实测里让 `System.Xml` 拒收的那几项
+/// ——BOM 在不在、字节是不是 UTF-16LE、声明写的是不是 UTF-16——再叠一道「任务根元素
+/// `<Task` 在不在」的通形状判据，挡掉「转码把正文弄丢」。
+/// 任一项不过 ⇒ 调用方必须放弃删除任务：宁可这次不删，也不留一份不可还原的凭据。
+fn verify_task_xml_backup(bytes: &[u8]) -> Result<(), String> {
+    if !bytes.starts_with(&[0xFF, 0xFE]) {
+        return Err("缺少 UTF-16LE BOM（按声明解析的读取器会拒）".to_string());
+    }
+    let body = &bytes[2..];
+    if body.len() % 2 != 0 {
+        return Err("UTF-16 字节数不是偶数（落盘件被截断？）".to_string());
+    }
+    let units: Vec<u16> = body
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let text = String::from_utf16(&units).map_err(|e| format!("UTF-16LE 解码失败: {e}"))?;
+    if !text.starts_with("<?xml") {
+        return Err("落盘件不以 XML 声明开头".to_string());
+    }
+    if !text.contains("?>") {
+        return Err("XML 声明没有结束标记".to_string());
+    }
+    let declared = declared_xml_encoding(&text);
+    if !declared.eq_ignore_ascii_case("UTF-16") {
+        return Err(format!("声明的编码是 {declared:?}，与实际 UTF-16LE+BOM 不一致"));
+    }
+    if !text.contains("<Task") {
+        return Err("落盘件里找不到任务根元素 `<Task`".to_string());
+    }
+    Ok(())
+}
+
+// ==================== 任务库根：必须由系统根派生（R5b-M02） ====================
+
+/// 任务库相对系统根的子路径。
+const SYSTEM_TASKS_SUBDIR: &str = r"System32\Tasks";
+
+/// 系统根 → 任务库根（纯函数：`sysroot` 取 `%SystemRoot%` 的值，单测直接注入）。
+///
+/// 病根：旧实现写死 C: 下的任务库，系统装在 D:/E: 的机器上 `read_dir` 直接失败，
+/// 清单恒空而回执报「成功但什么都没改」。同域启动项早已按 `%SystemRoot%` 取根，本域漏改。
+fn system_tasks_root_from(sysroot: Option<&str>) -> Option<std::path::PathBuf> {
+    let root = sysroot?.trim().trim_end_matches(|c| c == '\\' || c == '/');
+    if root.is_empty() {
+        return None;
+    }
+    Some(std::path::Path::new(root).join(SYSTEM_TASKS_SUBDIR))
+}
+
+/// 本机任务库根：`%SystemRoot%` → `%WINDIR%`。
+///
+/// 两个变量都取不到时返回**原因**，不退回某个写死的盘符：读不到 ≠ 没有任务，
+/// 调用方必须能把「系统根未解析」如实报进回执（R5b-M02）。
+fn system_tasks_root() -> Result<std::path::PathBuf, String> {
+    let sysroot = std::env::var("SystemRoot")
+        .ok()
+        .or_else(|| std::env::var("WINDIR").ok());
+    system_tasks_root_from(sysroot.as_deref())
+        .ok_or_else(|| "系统根未解析（%SystemRoot% / %WINDIR% 均缺失或为空）".to_string())
+}
+
+/// 任务库枚举结果（R5b-M02）：「读不到」与「确实没有任务」必须可区分。
+///
+/// 旧实现两者都是空 `Vec`，只有一条日志能分辨 ⇒ 根目录读不到时回执是 `tasks: []` +
+/// `failedCount: 0`，用户看到的是「执行成功、什么都没改」（与本仓「失败不得伪装成
+/// 空结果」口径冲突）。
+struct TaskEnum {
+    tasks: Vec<String>,
+    /// `Some(原因)` ⇒ 本轮清单不可信，调用方不得当成「没有任务」。
+    root_error: Option<String>,
+}
+
+/// 从本机任务库现算目标任务（根由 [`system_tasks_root`] 派生）。
+fn stubborn_enum_tasks() -> TaskEnum {
+    match system_tasks_root() {
+        Ok(root) => stubborn_enum_tasks_at(&root),
+        Err(e) => TaskEnum { tasks: Vec::new(), root_error: Some(e) },
+    }
+}
+
+/// 在给定任务库根下现算目标任务（返回任务全名：根下任务 `\Name`，文件夹任务
+/// `\Folder\Name`）；根由调用方注入，单测可指向任意盘符的临时目录。
+///
+/// 直读 %SystemRoot%\System32\Tasks（启动项域同款做法，毫秒级）；跳过 `Microsoft\`
+/// 子树（系统任务区）。根目录读不到时 `root_error` 带原因返回（不是「没有任务」）。
 ///
 /// R5b-M13（v7.2 C06）：补深度上限、重解析点拒绝与非根目录读失败计数。
-fn stubborn_enum_tasks() -> Vec<String> {
-    let root = std::path::Path::new(r"C:\Windows\System32\Tasks");
+fn stubborn_enum_tasks_at(root: &std::path::Path) -> TaskEnum {
     let mut out: Vec<String> = Vec::new();
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     let mut unreadable = 0usize;
+    let mut root_error: Option<String> = None;
     while let Some((dir, depth)) = stack.pop() {
         if depth >= STUBBORN_TASKS_MAX_DEPTH {
             crate::engine::log::write_log(
@@ -481,12 +634,10 @@ fn stubborn_enum_tasks() -> Vec<String> {
         }
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
-            Err(_) => {
+            Err(e) => {
+                // 根读不到 ⇒ 清单整体不可信，带原因返回；子目录读不到只记不完整（同旧口径）。
                 if dir.as_path() == root {
-                    crate::engine::log::write_log(
-                        "warn",
-                        &format!("顽固软件治理：计划任务目录读取失败（{}），本轮跳过任务清理", dir.display()),
-                    );
+                    root_error = Some(format!("计划任务目录读取失败（{}）: {e}", dir.display()));
                 } else {
                     unreadable += 1;
                 }
@@ -525,7 +676,7 @@ fn stubborn_enum_tasks() -> Vec<String> {
         );
     }
     out.sort();
-    out
+    TaskEnum { tasks: out, root_error }
 }
 
 /// 顽固软件自启阻断（原 PS 时代脚本 memory_stubborn_block.ps1，已退役；S3）
@@ -620,8 +771,18 @@ pub fn stubborn_block() -> Result<Value, String> {
             &format!("顽固软件治理：任务备份目录创建失败（{}），相关任务将不删除", backup_dir.display()),
         );
     }
-    let block_tasks = stubborn_enum_tasks();
-    for task in &block_tasks {
+    let task_enum = stubborn_enum_tasks();
+    if let Some(reason) = task_enum.root_error {
+        // R5b-M02：读不到 ≠ 没有任务。清单不可信时必须进失败清单——旧实现只写一条日志，
+        // 回执仍是 `tasks: []` + `failedCount: 0`，用户看到的是「成功但什么都没改」。
+        crate::engine::log::write_log(
+            "warn",
+            &format!("顽固软件治理：{reason}，本轮跳过任务清理"),
+        );
+        fail_tasks.push(format!("计划任务清单（{reason}）"));
+        failed += 1;
+    }
+    for task in &task_enum.tasks {
         // 检查任务是否存在
         // v6-K01（P0-2）：解析失败与执行失败同语义（按「任务不存在」跳过）
         let exists = crate::engine::systembin::system_tool("schtasks")
@@ -675,7 +836,9 @@ pub fn stubborn_block() -> Result<Value, String> {
                 continue;
             }
         };
-        // /Query /XML 的产物以 `<?xml` 开头；长度下限挡掉「只剩 BOM/空行」这种假成功
+        // /Query /XML 的产物以 `<?xml` 开头；这里只做粗筛（`<` 开头 + 长度下限，挡掉
+        // 「只剩 BOM/空行」这种假成功）——「声明在不在、编码对不对」由落盘前的回读自检判
+        // （R5b-M01，见 verify_task_xml_backup）。
         if !xml.starts_with('<') || xml.len() < 64 {
             crate::engine::log::write_log(
                 "warn",
@@ -688,9 +851,14 @@ pub fn stubborn_block() -> Result<Value, String> {
         // B2-2：备份走「私有 tmp 产出 → 判目标根 → 同卷 rename 落位」。
         // 旧实现是 `fs::write(&xml_path, …)` 直写目标 —— 备份根被换成 junction 时，
         // 「删除前唯一还原依据」就落在链接另一头，而调用方完全看不出来。
+        // R5b-M01：按 XML 声明落盘（UTF-16LE+BOM）并**立即回读自检**——落一份声明与实际
+        // 编码不符的凭据等于没备份，自检不过就走与写盘失败同一条「未删除」臂。
+        let xml_bytes = task_xml_backup_bytes(&xml);
         if let Err(e) =
             crate::engine::backup_write::land_backup(&backup_dir, &xml_path, |stage| {
-                std::fs::write(stage, xml.as_bytes()).map_err(|e| format!("写中转件失败: {e}"))
+                std::fs::write(stage, &xml_bytes).map_err(|e| format!("写中转件失败: {e}"))?;
+                let back = std::fs::read(stage).map_err(|e| format!("回读中转件失败: {e}"))?;
+                verify_task_xml_backup(&back)
             })
         {
             crate::engine::log::write_log(
@@ -956,5 +1124,179 @@ mod stubborn_block_selector_tests {
         ]);
         assert_eq!(names, vec!["a".to_string()], "同名只记一次");
         assert_eq!(unreadable, 1, "读不到必须单独计数");
+    }
+
+    // ==================== R5b-M01：任务 XML 备份的编码与声明一致 ====================
+
+    /// 写 → 读 → 解析：落盘件必须是 UTF-16LE+BOM，且声明写的编码与字节一致。
+    ///
+    /// 判红自证：把 `task_xml_backup_bytes` 换回 `xml.as_bytes()`（旧实现）⇒ 本条红
+    /// （无 BOM、声明写 UTF-16 而字节是 UTF-8，回读自检直接失败）。
+    #[test]
+    fn 任务xml备份写读解析一条龙() {
+        let xml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n<Task version=\"1.2\">\r\n  <RegistrationInfo><Author>WPS</Author></RegistrationInfo>\r\n  <Actions />\r\n</Task>";
+        let bytes = task_xml_backup_bytes(xml);
+        let sb = crate::testutil::Sandbox::new(&format!("r5bm01-{}", std::process::id()));
+        let path = sb.join("WpsUpdateTask_someone.xml");
+        std::fs::write(&path, &bytes).expect("写盘");
+        let back = std::fs::read(&path).expect("回读");
+        verify_task_xml_backup(&back).expect("落盘件必须按声明可解析");
+        assert_eq!(&back[..2], &[0xFF, 0xFE], "必须带 UTF-16LE BOM");
+        assert!((back.len() - 2) % 2 == 0, "UTF-16 字节数必须是偶数");
+        assert!(
+            std::str::from_utf8(&back).is_err(),
+            "落盘件不得是 UTF-8（那正是旧实现不可解析的形态）"
+        );
+        let units: Vec<u16> = back[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let text = String::from_utf16(&units).expect("落盘件必须是合法 UTF-16");
+        assert_eq!(declared_xml_encoding(&text), "UTF-16", "声明必须与字节编码一致");
+        assert!(text.contains("<Task") && text.contains("</Task>"), "正文不得被转码弄丢");
+    }
+
+    /// 声明写别的编码 / 干脆没有 encoding 时，落盘前必须归一成 UTF-16——否则声明与字节
+    /// 仍不一致，等于没修。
+    #[test]
+    fn 声明里的编码被归一成utf16() {
+        for xml in [
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Task />",
+            "<?xml version='1.0' encoding='utf-16'?><Task />",
+            "<?xml version=\"1.0\"?><Task />",
+        ] {
+            let normalized = force_utf16_declaration(xml);
+            assert_eq!(declared_xml_encoding(&normalized), "UTF-16", "未归一：{normalized}");
+            verify_task_xml_backup(&task_xml_backup_bytes(xml)).expect("归一后必须可解析");
+        }
+    }
+
+    /// 破坏自证：声明与实际编码不一致的落盘件必须被判红（不落一份坏凭据）。
+    #[test]
+    fn 声明与字节不一致必须被判红() {
+        // ① 旧实现：解码后的 String 直接按 UTF-8 落盘（无 BOM，声明却写 UTF-16）
+        assert!(
+            verify_task_xml_backup("<?xml version=\"1.0\" encoding=\"UTF-16\"?><Task />".as_bytes()).is_err(),
+            "旧 UTF-8 落盘件必须拒"
+        );
+        // ② 字节是 UTF-16LE+BOM，声明却写 UTF-8
+        let mut wrong_decl = vec![0xFF, 0xFE];
+        wrong_decl.extend(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Task />"
+                .encode_utf16()
+                .flat_map(|u| u.to_le_bytes()),
+        );
+        assert!(verify_task_xml_backup(&wrong_decl).is_err(), "声明与实际编码不一致必须拒");
+        // ③ 无 BOM 的 UTF-16LE（实测 System.Xml 同样拒）
+        let no_bom: Vec<u8> = "<?xml version=\"1.0\" encoding=\"UTF-16\"?><Task />"
+            .encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        assert!(verify_task_xml_backup(&no_bom).is_err(), "缺 BOM 必须拒");
+    }
+
+    // ==================== R5b-M02：任务库根由系统根派生 ====================
+
+    /// 纯函数：任务库根必须跟着 `%SystemRoot%` 走，不能钉在 C:。
+    ///
+    /// 判红自证：把 `system_tasks_root_from` 改回写死 C: 路径 ⇒ 本条红。
+    #[test]
+    fn 任务库根跟着系统根走() {
+        assert_eq!(
+            system_tasks_root_from(Some(r"D:\Windows")),
+            Some(std::path::PathBuf::from(r"D:\Windows\System32\Tasks"))
+        );
+        assert_eq!(
+            system_tasks_root_from(Some("E:\\Windows\\")),
+            Some(std::path::PathBuf::from(r"E:\Windows\System32\Tasks")),
+            "尾部分隔符不得产生双反斜杠"
+        );
+        assert_eq!(
+            system_tasks_root_from(Some(r"C:\Windows")),
+            Some(std::path::PathBuf::from(r"C:\Windows\System32\Tasks"))
+        );
+        assert_eq!(system_tasks_root_from(None), None, "系统根缺失不得猜一个盘符");
+        assert_eq!(system_tasks_root_from(Some("   ")), None, "空系统根不得当成合法根");
+    }
+
+    /// 枚举根是注入的：同一套目录结构放在任意盘符下（非系统盘样本）同样命中。
+    ///
+    /// 本机装不出 D: 系统盘，故用沙箱模拟「根不是写死的那一个」这一形态。
+    #[test]
+    fn 注入根下的任务样本同样命中() {
+        let sb = crate::testutil::Sandbox::new(&format!("r5bm02-{}", std::process::id()));
+        std::fs::create_dir_all(sb.join("Vendor")).expect("建样本目录");
+        std::fs::create_dir_all(sb.join("Microsoft")).expect("建系统任务区样本");
+        std::fs::write(sb.join("WpsUpdateTask_someone"), b"xml").expect("写根下样本任务");
+        std::fs::write(sb.join("Vendor").join("WpsUpdateLogonTask_someone"), b"xml")
+            .expect("写子目录样本任务");
+        std::fs::write(sb.join("Microsoft").join("WpsUpdateTask_system"), b"xml")
+            .expect("写系统任务区样本");
+        let got = stubborn_enum_tasks_at(&sb);
+        assert_eq!(got.root_error, None, "样本根必须可读");
+        assert_eq!(
+            got.tasks,
+            vec![
+                "\\Vendor\\WpsUpdateLogonTask_someone".to_string(),
+                "\\WpsUpdateTask_someone".to_string(),
+            ],
+            "注入根下的目标任务必须全部命中，Microsoft 子树必须跳过：{:?}",
+            got.tasks
+        );
+    }
+
+    /// 「根读不到」与「确实没有任务」必须可区分（旧实现两者都是空表 + 一条日志）。
+    ///
+    /// 判红自证：把 `read_dir` 的 `Err` 分支改回「只记日志、不留原因」⇒ 后半段红。
+    #[test]
+    fn 任务库读不到必须与没有任务区分() {
+        let sb = crate::testutil::Sandbox::new(&format!("r5bm02-empty-{}", std::process::id()));
+        let empty = stubborn_enum_tasks_at(&sb);
+        assert_eq!(empty.root_error, None, "空但可读 ≠ 读不到");
+        assert!(empty.tasks.is_empty(), "确实没有任务");
+
+        let missing = stubborn_enum_tasks_at(&sb.join("NoSuchTasksRoot"));
+        assert!(missing.tasks.is_empty());
+        assert!(missing.root_error.is_some(), "读不到必须带原因返回，不得伪装成空清单");
+    }
+
+    /// 取 `marker` 起点到下一个顶层项（或文档注释）之前的片段（本文件顶层项都在第 0 列）。
+    ///
+    /// 不用「按首个 `#[cfg(test)]` 截生产段」：本文件的生产代码被前面的单测模块切成两段，
+    /// 一刀切会漏掉后半段（`stubborn_block` 与这些助手都排在第一段单测之后）。
+    fn block_of<'a>(src: &'a str, marker: &str) -> &'a str {
+        let start = src.find(marker).unwrap_or_else(|| panic!("找不到 {marker}"));
+        let tail = &src[start + marker.len()..];
+        let mut cut = tail.len();
+        for anchor in ["\nfn ", "\nunsafe fn ", "\npub fn ", "\nstruct ", "\nimpl ", "\n///"] {
+            if let Some(i) = tail.find(anchor) {
+                cut = cut.min(i);
+            }
+        }
+        &src[start..start + marker.len() + cut]
+    }
+
+    /// 源码形态断言：任务库根必须由系统根派生（R5b-M02）。
+    ///
+    /// 判红自证：把 `stubborn_enum_tasks` 的根换回写死的那一行
+    /// `Path::new(<盘符>:\Windows\System32\Tasks)` ⇒ 第一条与第三条断言同时红。
+    #[test]
+    fn 生产段不得写死任务库根() {
+        let src = include_str!("process.rs");
+        let entry = block_of(src, "fn stubborn_enum_tasks()");
+        assert!(entry.contains("system_tasks_root()"), "任务库根必须经系统根派生：{entry}");
+        let derive = block_of(src, "fn system_tasks_root_from(");
+        assert!(
+            derive.contains("SYSTEM_TASKS_SUBDIR"),
+            "任务库根必须是「系统根 + 相对子路径」拼出来的：{derive}"
+        );
+        assert!(
+            !derive.to_ascii_uppercase().contains("C:"),
+            "派生函数里不得出现任何盘符字面量：{derive}"
+        );
+        assert!(
+            !src.contains("Path::new(r\"C:\\Windows"),
+            "写死的任务库根不得回潮（必须走 system_tasks_root）"
+        );
     }
 }

@@ -73,6 +73,11 @@ fn normalize_path(value: &str) -> String {
 }
 
 /// 从 App Paths 解析 exe 所在目录
+///
+/// R5b-M03：一次 `RegOpenKeyExW` 只配一次 `RegCloseKey`。旧写法在 `if let Some(exe)` 里先关
+/// 一次、分支尾再关一次——「值读到了但路径不是文件」（陈旧 App Paths、卸载残留，常态）时
+/// 同一句柄被关两次；第一次关闭后该句柄值可被其它线程复用，第二次关闭落在谁身上不确定
+/// （`NtClose` 语义），而被 `let _ =` 吞掉后永远看不见。故把关闭收敛到分支外一次。
 unsafe fn resolve_from_app_paths(exe_name: &str) -> String {
     for root in [
         r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths",
@@ -82,28 +87,30 @@ unsafe fn resolve_from_app_paths(exe_name: &str) -> String {
         let sk = to_wide(&key_path);
         let mut hk = HKEY::default();
         if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { continue; }
+        let mut hit = String::new();
         if let Some(exe) = reg_read_string(hk, "") {
             let norm = normalize_path(&exe);
-            let _ = RegCloseKey(hk);
             if !norm.is_empty() && std::path::Path::new(&norm).is_file() {
-                return std::path::Path::new(&norm).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                hit = std::path::Path::new(&norm).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
             }
         }
         let _ = RegCloseKey(hk);
+        if !hit.is_empty() { return hit; }
     }
-    // HKCU
+    // HKCU：同口径（开一次、关一次）
     let key_path = format!(r"Software\Microsoft\Windows\CurrentVersion\App Paths\{exe_name}");
     let sk = to_wide(&key_path);
     let mut hk = HKEY::default();
     if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok() {
+        let mut hit = String::new();
         if let Some(exe) = reg_read_string(hk, "") {
             let norm = normalize_path(&exe);
-            let _ = RegCloseKey(hk);
             if !norm.is_empty() && std::path::Path::new(&norm).is_file() {
-                return std::path::Path::new(&norm).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                hit = std::path::Path::new(&norm).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
             }
         }
         let _ = RegCloseKey(hk);
+        if !hit.is_empty() { return hit; }
     }
     String::new()
 }
@@ -472,5 +479,53 @@ mod tests {
         assert!(uninstall_entry_is_hidden(0, "Security Update"));
         assert!(uninstall_entry_is_hidden(0, "hotfix"));
         assert!(!uninstall_entry_is_hidden(0, "Full Application"));
+    }
+
+    // ==================== R5b-M03：注册表句柄开合一对一 ====================
+
+    /// 取 `marker` 起点到下一个顶层声明之前的片段（本文件顶层 `fn` / `struct` 都在第 0 列）。
+    ///
+    /// 不用花括号配平：函数体里 `format!("{root}\\{exe_name}")` 这类字符串字面量本身带
+    /// 花括号，配平版会在字面量上算错深度。
+    fn prod_fn_body<'a>(src: &'a str, marker: &str) -> &'a str {
+        let start = src.find(marker).unwrap_or_else(|| panic!("找不到 {marker}"));
+        let tail = &src[start + marker.len()..];
+        let mut cut = tail.len();
+        for anchor in ["\nfn ", "\nunsafe fn ", "\nstruct ", "\n// ===================="] {
+            if let Some(i) = tail.find(anchor) {
+                cut = cut.min(i);
+            }
+        }
+        &src[start..start + marker.len() + cut]
+    }
+
+    /// R5b-M03 回归钉：`resolve_from_app_paths` 里每次 `RegOpenKeyExW` 只允许配一次
+    /// `RegCloseKey`，且关闭不得下沉到内层 `if let`。
+    ///
+    /// 为什么用源码形态断言：旧缺陷只有「值读到但路径不是文件」（陈旧 App Paths /
+    /// 卸载残留）这一条运行时分支可达，本仓的单测不真开注册表、改不了 App Paths，
+    /// 行为用例钉不住它；而「同一句柄关两次」是**源码形态**。
+    ///
+    /// 判红自证：把 `if let Some(exe)` 块里那条 `let _ = RegCloseKey(hk);` 加回去
+    /// （即退回旧写法）⇒ 关闭数 3 > 打开数 2，且该行缩进 12 > 8，本条红。
+    #[test]
+    fn 句柄开合必须一一配对() {
+        let src = include_str!("paths_scan.rs");
+        let prod = &src[..src.find("mod tests").expect("找不到单测段起点")];
+        let body = prod_fn_body(prod, "fn resolve_from_app_paths");
+        let opens = body.matches("RegOpenKeyExW(").count();
+        let closes = body.matches("RegCloseKey(").count();
+        assert_eq!(opens, 2, "函数体应只剩 HKLM 循环与 HKCU 两支：{opens}");
+        assert_eq!(
+            closes, opens,
+            "每个 RegOpenKeyExW 只允许配一次 RegCloseKey（旧写法对同一句柄关两次）：\n{body}"
+        );
+        for line in body.lines().filter(|l| l.contains("RegCloseKey(")) {
+            let indent = line.len() - line.trim_start().len();
+            assert!(
+                indent <= 8,
+                "关闭不得出现在内层 if / if let 里（会与分支外的关闭重复）：{line}"
+            );
+        }
     }
 }

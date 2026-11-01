@@ -283,6 +283,27 @@ fn extra_steps(option_id: &str, extra_id: &str) -> Vec<Value> {
     }
 }
 
+/// 该项登记的**全部**附带开关步骤（不看用户勾选）—— 只看写面，供值级备份基线用。
+///
+/// R3-M02（2026-11-01）：extras 的步骤在**执行期**才由 [`extra_steps`] 生成，数据层
+/// `steps` 里从来没有它们；而备份发生在执行前、勾选发生在执行时，备份侧无从判断用户
+/// 这一次勾了哪个附带开关 ⇒ 只能把全部 extras 的写点**无条件**并入基线（与
+/// `apply::STORE_SERVICES` 的既有解法完全同构，代价是多读几个值）。
+///
+/// 不并入的后果（现算）：`tf_svc_bulk` / `tf_appx` 在数据层都没有 restore 段，
+/// 值级备份就是唯一还原出口 —— 勾了 `edge_prelaunch` 或 `onedrive_full_uninstall`
+/// 的用户点「还原」，主清单写回、回读全过、销账摘灰、回 `restored:N`，而附带项改的
+/// 那几个值一直是改过的，回执与账本里都不存在这件事。
+///
+/// 生成器只有 [`extra_steps`] 一份，本函数不另抄清单：执行侧写什么，基线侧就记什么。
+pub(super) fn all_extra_steps(option_id: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for ex in extras_of(option_id) {
+        out.extend(extra_steps(option_id, &ex));
+    }
+    out
+}
+
 /// OneDrive 附带操作的 .reg 文本（CRLF，与 regBlock 生成口径一致）
 fn onedrive_reg_text() -> String {
     const LINES: &[&str] = &[

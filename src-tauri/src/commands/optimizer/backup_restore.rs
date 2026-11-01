@@ -217,6 +217,20 @@ pub(super) fn backup_presence(entry: &Value) -> Option<&str> {
     }
 }
 
+/// `perf_wu_pause` 的写入面（R3-M03，2026-11-01）：动态项的步骤由
+/// `commands::optimizer::apply::wu_pause_steps` 在运行时生成（数据层 `steps` 为空），
+/// 本表的值名与那个生成器的 pwsh 原文**逐字对齐** —— 单测
+/// `perf_wu_pause基线对齐生成器与检测侧表` 用生成出来的脚本反查本表，漂了就红。
+const WU_PAUSE_SUBKEY: &str = "SOFTWARE\\Policies\\Microsoft\\Windows\\WindowsUpdate";
+const WU_PAUSE_VALUES: &[&str] = &[
+    "PauseFeatureUpdatesStartTime",
+    "PauseQualityUpdatesStartTime",
+    "PauseUpdatesStartTime",
+    "PauseFeatureUpdatesEndTime",
+    "PauseQualityUpdatesEndTime",
+    "PauseUpdatesExpiryTime",
+];
+
 pub(super) fn option_targets(option_id: &str) -> Option<Vec<RegTarget>> {
     if option_id == "svc_mem_gb" {
         return Some(vec![RegTarget {
@@ -224,6 +238,25 @@ pub(super) fn option_targets(option_id: &str) -> Option<Vec<RegTarget>> {
             sub: "SYSTEM\\ControlSet001\\Control".into(),
             key: "SvcHostSplitThresholdInKB".into(),
         }]);
+    }
+    // R3-M03（2026-11-01）：`perf_wu_pause` 与 `svc_mem_gb` 同属 dynamic —— 数据层
+    // `steps` 为空，走下面 `find_option` 那条分支只能得到空 targets ⇒
+    // `optimizer_backup_reg` 命中 `targets.is_empty()` 直接回 `count:0` 且**不落记录**，
+    // `preflight_reason` 又因无 restore 段拒还原 ⇒「暂停更新」写进 HKLM 的那组
+    // QWord 在应用内**没有任何还原出口**（唯一出路是用户自己去执行另一项
+    // `perf_wu_enable`，界面不做任何提示）。原值不存在时基线记 `presence=absent`，
+    // 还原走 Delete，语义正好。
+    if option_id == "perf_wu_pause" {
+        return Some(
+            WU_PAUSE_VALUES
+                .iter()
+                .map(|name| RegTarget {
+                    root: "HKEY_LOCAL_MACHINE".into(),
+                    sub: WU_PAUSE_SUBKEY.into(),
+                    key: (*name).to_string(),
+                })
+                .collect(),
+        );
     }
     let opt = find_option(option_id)?;
     let empty: &[Value] = &[];
@@ -239,11 +272,21 @@ pub(super) fn option_targets(option_id: &str) -> Option<Vec<RegTarget>> {
             targets.push(svc_start_target(name));
         }
     }
+    // R3-M02（2026-11-01）：子项**附带开关**（extras）的写面与上面商店服务同一种形态
+    // —— 步骤在执行期才由 `commands::optimizer::subitems::extra_steps` 生成，数据层
+    // `steps` 里没有，基线必须无条件并入（备份在执行前，勾选在执行时，备份侧判不出
+    // 用户这一次勾了哪个）。不并入的后果：`tf_svc_bulk` 的 `lfsvc_status` /
+    // `edge_prelaunch`、`tf_appx` 的 `onedrive_full_uninstall` 改的那些值不在回读范围，
+    // 用户点「还原」拿到 `success:true, restored:N` 而那几个值一直是改过的 —— 两项
+    // 在数据层都没有 restore 段，值级备份就是唯一还原出口。
+    // 生成器只经 subitems 那一份（不在这里重抄坐标），执行侧与基线侧结构上同源。
+    targets.extend(targets_from_steps(&super::subitems::all_extra_steps(option_id)));
     dedupe_targets(&mut targets);
     Some(targets)
 }
 
-/// 从数据层 steps 抽值级备份目标：`reg` 块 + pwsh/cmd/service 步骤里的「Start 写点」。
+/// 从数据层 steps 抽值级备份目标：`reg` 块 + pwsh 步骤里的**全部值写入**
+/// + cmd/service 步骤的启动类型写点（R3-M01：pwsh 不再只收 `Start`）。
 ///
 /// 在册项（[`option_targets`]）与退役项（[`retired_restore_surface`]）共用这一份解析 ——
 /// 还原侧的「声明面」与当年备份侧的「目标集」必须是同一套口径，否则要么误拒合法备份、
@@ -403,6 +446,10 @@ fn svc_start_target(name: &str) -> RegTarget {
 /// 与 `sc.exe config X start= disabled` **没有基线**：还原只能靠数据层硬编码的
 /// 「猜的原值」（`tf_svc_extra5.restore` 就写着 `SensrSvc=3; StorSvc=2`），
 /// 用户改前的实际值永久丢失。
+///
+/// R3-M01（2026-11-01）：② 不再只收 `-Name Start` —— 同一脚本里改的**所有**值都要进
+/// 基线，见 [`walk_ps_ops_for_start`] 的新语义。函数名保留历史叫法：`overview.rs` 的
+/// D0 三侧覆盖矩阵按名字引用它，改名要同步那个文件。
 fn collect_service_start_targets(steps: &[Value], out: &mut Vec<RegTarget>) {
     for s in steps {
         // ① service 步骤型：改启动类型就要进基线，两种形态都收（R0-a）
@@ -442,19 +489,35 @@ fn collect_service_start_targets(steps: &[Value], out: &mut Vec<RegTarget>) {
     }
 }
 
-/// 递归收集 pwsh op 列表里会改 `Start` 的落点（含 `if (Test-Path …)` 守卫的内层）
+/// 递归收集 pwsh op 列表里**全部值写入**的落点（含 `if (Test-Path …)` 守卫的内层）。
+///
+/// R3-M01（2026-11-01）：此前只收 `name == "Start"`，于是同一脚本里改的其它值拿不到
+/// 基线（`Keyboard Layout::Scancode Map`、`SmoothMouseXCurve`、`CommDucking`、
+/// `NOC_GLOBAL_SETTING_TOASTS_ENABLED`、`DelayedAutoStart`… 清单见 R3 分报告的探针输出）。
+/// 危害不是「少记几个值」：还原按旧基线写回 → 回读只验那几条 → 销账摘灰 →
+/// 回执 `success:true, restored:N`，被改的原值**永久丢失**；`peripheral_winkey_off`
+/// 更狠，它的 restore 段是 `Remove-ItemProperty "Scancode Map"`，本来有键盘重映射的
+/// 用户「还原」一下等于删掉自己的配置。
+///
+/// 基线与声明面共用本函数，所以「执行写什么」与「能还原什么」结构上不可能再漂：
+/// 每个 `PsOp::ValueWrite` 都是一个可读可写回的 (hive, subkey, name)。
 fn walk_ps_ops_for_start(ops: &[crate::engine::pssteps::PsOp], out: &mut Vec<RegTarget>) {
     use crate::engine::pssteps::{Hive, PsOp};
+    // 五个 hive 全部可读可写（`overview::reg_hive` 认这五个长名）；
+    // 旧实现只映射 Lm/Cu 是因为它只收 Services 树下的 Start，与 hive 无关。
+    let root_of = |h: Hive| -> &'static str {
+        match h {
+            Hive::Lm => "HKEY_LOCAL_MACHINE",
+            Hive::Cu => "HKEY_CURRENT_USER",
+            Hive::Cr => "HKEY_CLASSES_ROOT",
+            Hive::U => "HKEY_USERS",
+            Hive::Cc => "HKEY_CURRENT_CONFIG",
+        }
+    };
     for op in ops {
         match op {
-            PsOp::ValueWrite { hive, subkey, name, .. } if name == "Start" => {
-                let root = match hive {
-                    Hive::Lm => "HKEY_LOCAL_MACHINE",
-                    Hive::Cu => "HKEY_CURRENT_USER",
-                    // 其余 hive 上没有 Services 树，收进来只会读不到值
-                    _ => continue,
-                };
-                out.push(RegTarget { root: root.into(), sub: subkey.clone(), key: "Start".into() });
+            PsOp::ValueWrite { hive, subkey, name, .. } => {
+                out.push(RegTarget { root: root_of(*hive).into(), sub: subkey.clone(), key: name.clone() });
             }
             PsOp::SvcSetStart { name, .. } => out.push(svc_start_target(name)),
             PsOp::GuardedKeyExists { ops, .. } => walk_ps_ops_for_start(ops, out),
@@ -864,9 +927,13 @@ pub(super) fn restore_write_bytes(typ: &str, data: &str) -> Result<Vec<u8>, Stri
         }
         "REG_MULTI_SZ" => {
             let mut v: Vec<u8> = Vec::new();
-            for part in data.split('\0').filter(|s| !s.is_empty()) {
-                v.extend(part.encode_utf16().flat_map(|w| w.to_le_bytes()));
-                v.extend_from_slice(&[0, 0]);
+            // R5c-M02：空元素必须逐项保留（读侧已保真）——过滤掉再写回会得到不同的值，
+            // 而回读自比对又看不出来。末尾空元素与双 NUL 终止同形，属字符串表示法的固有边界。
+            if !data.is_empty() {
+                for part in data.split('\0') {
+                    v.extend(part.encode_utf16().flat_map(|w| w.to_le_bytes()));
+                    v.extend_from_slice(&[0, 0]);
+                }
             }
             v.extend_from_slice(&[0, 0]); // 双 NUL 收尾；零个元素时这就是「空 MULTI_SZ」
             Ok(v)
@@ -1286,6 +1353,23 @@ mod m01_type_label_tests {
         assert_eq!(canonical_type_label(restore_reg_kind("REG_SZ")), "REG_SZ");
         assert_eq!(canonical_type_label(restore_reg_kind("REG_DWORD")), "REG_DWORD");
         assert_eq!(canonical_type_label(restore_reg_kind("REG_BINARY")), "REG_BINARY");
+    }
+
+    /// R5c-M02：写侧同样必须保留空元素 —— 读侧保真 + 写侧过滤，等于还原写回另一个值。
+    #[test]
+    fn multi_sz_写侧保留空元素_空值仍是空多串() {
+        // "a\0\0b" = ["a", "", "b"]：元素间单 NUL、末尾双 NUL
+        let bytes = restore_write_bytes("REG_MULTI_SZ", "a\u{0}\u{0}b").unwrap();
+        assert_eq!(
+            bytes,
+            vec![0x61, 0, 0, 0, 0, 0, 0x62, 0, 0, 0, 0, 0],
+            "空元素必须在写回字节里占位（否则还原写回不同的值）"
+        );
+        assert_eq!(
+            restore_write_bytes("REG_MULTI_SZ", "").unwrap(),
+            vec![0, 0],
+            "零元素仍是双 NUL 终止的空 MULTI_SZ"
+        );
     }
 
     /// R3-U02 配套真机探针：真实 HKCU 探针键上做 EXPAND_SZ 值级还原往返 ——
@@ -1737,3 +1821,282 @@ mod r3_k01_gate_tests {
         assert!(pre < load, "前置闸必须在读台账之前（{pre} vs {load}）");
     }
 }
+
+/// R3-M01 / R3-M02 / R3-M03（2026-11-01）：基线完整性三连。
+///
+/// 三者的共同形态是「写了但没记」：值级备份是没有 restore 段那一批项的唯一还原出口，
+/// 基线漏一个写点，还原就按旧基线写回、回读只验那几条、销账摘灰、回 `restored:N`，
+/// 被改的原值永久丢失且回执与账本里都不存在这件事。
+///
+/// 判红对照（每条都能被以下改动打红）：
+/// - 把 `walk_ps_ops_for_start` 的 `ValueWrite` 分支改回 `if name == "Start"`
+///   ⇒ `pwsh全部值写入都进基线` / `附带开关写面进基线与回读范围` 红；
+/// - 把 `option_targets` 里的 extras 并入删掉 ⇒ `附带开关写面进基线与回读范围` 红；
+/// - 把 `perf_wu_pause` 分支删掉 ⇒ `perf_wu_pause基线对齐生成器与检测侧表` 红；
+/// - 把 `WU_PAUSE_VALUES` 少登记一个值 ⇒ 同上（与生成器/侧表三向对拍）；
+/// - 把声明面收窄到空 ⇒ `新增基线目标能过还原闸_面外仍拒` 红（还原被自己拒掉）。
+#[cfg(test)]
+mod r3_m01_m03_baseline_tests {
+    use super::*;
+
+    /// 规范化成 `root\sub::key`（全小写）—— 注册表路径本身大小写不敏感，按字面量比会假红。
+    fn surface_of(option_id: &str) -> Vec<String> {
+        option_targets(option_id)
+            .unwrap_or_default()
+            .iter()
+            .map(|t| format!("{}\\{}::{}", t.root, t.sub, t.key).to_ascii_lowercase())
+            .collect()
+    }
+
+    fn assert_in_surface(option_id: &str, coord: &str) {
+        let want = coord.to_ascii_lowercase();
+        let got = surface_of(option_id);
+        assert!(
+            got.iter().any(|c| *c == want),
+            "{option_id} 的基线/声明面里没有 {coord} —— 该写点改了值却拿不到基线，\
+             还原后原值永久丢失（R3-M01 回归）；实收 {got:?}"
+        );
+    }
+
+    fn admits(option_id: &str, entries: &[Value]) -> Result<usize, String> {
+        build_restore_ops(option_id, entries).map(|ops| ops.as_slice().len())
+    }
+
+    /// 把 `root\sub::key` 拆回三个字段（测试里的坐标写法与 RegTarget 的拼法互为逆运算）。
+    fn coord_parts(coord: &str) -> (String, String, String) {
+        let (path, key) = coord.split_once("::").expect("坐标格式应为 root\\sub::key");
+        let (root, sub) = path.split_once('\\').expect("坐标格式应为 root\\sub::key");
+        (root.to_string(), sub.to_string(), key.to_string())
+    }
+
+    /// 断言该坐标既在基线/声明面内，也**过了第二道闸**（声明面内放行）。
+    ///
+    /// 两道都要：只断言「在列表里」时，声明面与准入判据若被改成两套口径（或准入被
+    /// 收窄），基线记下了却还原不回去，回执会是一条「目标不在声明面内」的拒绝。
+    fn assert_target_in_surface_and_admitted(option_id: &str, coord: &str) {
+        assert_in_surface(option_id, coord);
+        let (hive, sub, key) = coord_parts(coord);
+        let got = admits(
+            option_id,
+            &[json!({
+                "hive": hive, "sub": sub, "key": key,
+                "presence": "absent", "exists": false
+            })],
+        );
+        assert_eq!(got, Ok(1), "{option_id} 的 {coord} 过不了还原闸（基线记下了却还原不回去）");
+    }
+
+    /// R3-M01 主病灶：pwsh 步骤里**非 Start 的值写入**拿不到基线（清单取自分报告的探针输出）。
+    ///
+    /// 判红点唯一：`walk_ps_ops_for_start` 一旦退回「只收 Start」，下面每一条都找不到。
+    #[test]
+    fn pwsh全部值写入都进基线() {
+        // tf_svc_bulk 的 extras 写点（lfsvc / Edge 两条策略）见下一条用例
+        for (id, coord) in [
+            (
+                "tf_privacy",
+                r"HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings::NOC_GLOBAL_SETTING_TOASTS_ENABLED",
+            ),
+            (
+                "tf_privacy",
+                r"HKEY_CURRENT_USER\SOFTWARE\Microsoft\Siuf\Rules::NumberOfSIUFInPeriod",
+            ),
+            (
+                "tf_privacy",
+                r"HKEY_CURRENT_USER\SOFTWARE\Microsoft\Siuf\Rules::PeriodInNanoSeconds",
+            ),
+            ("mouse_optimize", r"HKEY_CURRENT_USER\Control Panel\Mouse::SmoothMouseXCurve"),
+            ("mouse_optimize", r"HKEY_CURRENT_USER\Control Panel\Mouse::SmoothMouseYCurve"),
+            (
+                "tf_usb_power",
+                r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\USB::DisableSelectiveSuspend",
+            ),
+            (
+                "peripheral_winkey_off",
+                r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Keyboard Layout::Scancode Map",
+            ),
+            (
+                "audio_disable_comm_ducking",
+                r"HKEY_CURRENT_USER\Software\Microsoft\Multimedia\Audio::CommDucking",
+            ),
+            (
+                "audio_disable_comm_ducking",
+                r"HKEY_CURRENT_USER\Software\Microsoft\Multimedia\Audio\User::CommDucking",
+            ),
+            (
+                "audio_disable_comm_ducking",
+                r"HKEY_CURRENT_USER\Software\Microsoft\Multimedia\Audio\Ducking\Mode::Default",
+            ),
+            (
+                "audio_disable_service_restart",
+                r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\Audiosrv::DelayedAutoStart",
+            ),
+            (
+                "audio_disable_narrator_ducking",
+                r"HKEY_CURRENT_USER\Software\Microsoft\Narrator\NoRoam::DuckAudio",
+            ),
+            (
+                "audio_disable_narrator_ducking",
+                r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Narrator\NoRoam::DuckAudio",
+            ),
+        ] {
+            assert_target_in_surface_and_admitted(id, coord);
+        }
+        // 反向对照：只收真实值写入 —— 纯 cmd 项（fsutil 一族）基线必须为空。
+        // 若哪天开始写注册表值，这条会红，提醒把写点纳入核对。
+        assert_eq!(
+            option_targets("tf_ntfs").map(|t| t.len()),
+            Some(0),
+            "纯 cmd 项不该凭空多出基线目标（收的不是值写入 → 会写出没动过的值）"
+        );
+    }
+
+    /// R3-M02：子项**附带开关**（extras）的写面必须与主清单一起进基线、可准入。
+    ///
+    /// 判红点：`option_targets` 里的 `all_extra_steps` 并入被删 ⇒ 下面每一条都找不到；
+    /// `tf_appx` 会退回「基线为空 ⇒ 备份 count:0 不落记录」的旧形态。
+    #[test]
+    fn 附带开关写面进基线与回读范围() {
+        // tf_svc_bulk：lfsvc_status（Status=0）+ edge_prelaunch（两条 Edge 策略）
+        assert_target_in_surface_and_admitted(
+            "tf_svc_bulk",
+            r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\lfsvc\Service\Configuration::Status",
+        );
+        assert_target_in_surface_and_admitted(
+            "tf_svc_bulk",
+            r"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\MicrosoftEdge\Main::AllowPrelaunch",
+        );
+        assert_target_in_surface_and_admitted(
+            "tf_svc_bulk",
+            r"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\MicrosoftEdge\TabPreloader::AllowTabPreloading",
+        );
+        // tf_appx：onedrive_full_uninstall 的 CLSID 入口两条 + 同步策略四条
+        assert_target_in_surface_and_admitted(
+            "tf_appx",
+            r"HKEY_CLASSES_ROOT\CLSID\{018D5C66-4533-4307-9B53-224DE2ED1FE6}\ShellFolder::Attributes",
+        );
+        assert_target_in_surface_and_admitted(
+            "tf_appx",
+            r"HKEY_CLASSES_ROOT\Wow6432Node\CLSID\{018D5C66-4533-4307-9B53-224DE2ED1FE6}\ShellFolder::Attributes",
+        );
+        for key in [
+            "DisableFileSync",
+            "DisableFileSyncNGSC",
+            "DisableMeteredNetworkFileSync",
+            "DisableLibrariesDefaultSaveToOneDrive",
+        ] {
+            assert_target_in_surface_and_admitted(
+                "tf_appx",
+                &format!(r"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\OneDrive::{key}"),
+            );
+        }
+        // 与生成器同源：extras 现算出的**每一个**写点都在基线/声明面内 ——
+        // 少一个就是「执行写了、还原回读不到」，而这批值级备份是唯一还原出口。
+        for id in ["tf_svc_bulk", "tf_appx"] {
+            let extra = targets_from_steps(&super::super::subitems::all_extra_steps(id));
+            assert!(!extra.is_empty(), "{id} 的 extras 一个写点都没解析出来（生成器或解析链断了）");
+            let surface = surface_of(id);
+            for t in extra {
+                let c = format!("{}\\{}::{}", t.root, t.sub, t.key).to_ascii_lowercase();
+                assert!(surface.contains(&c), "{id} 的 extras 写点 {c} 不在基线/声明面内");
+            }
+        }
+    }
+
+    /// R3-M02 的还原侧：extras 目标必须过得了第二道闸（台账摘要之外的目标准入），
+    /// 且**面外仍拒** —— 它们进还原操作集之后，`verify_restore_ops` 的回读范围
+    /// 就是这份操作集，所以「回读覆盖 extras」由准入等价保证（可测的那一半）。
+    #[test]
+    fn extras目标能过还原闸_面外仍拒() {
+        // HKCR 坐标（OneDrive 资源管理器入口）必须准入：写入用 ClassesRoot 别名也对得上
+        let ok = admits(
+            "tf_appx",
+            &[json!({
+                "hive": "ClassesRoot",
+                "sub": r"CLSID\{018D5C66-4533-4307-9B53-224DE2ED1FE6}\ShellFolder",
+                "key": "Attributes",
+                "presence": "value", "exists": true, "type": "REG_DWORD", "data": "0"
+            })],
+        );
+        assert_eq!(ok, Ok(1), "tf_appx 的 OneDrive CLSID 写点必须准入（否则还原被自己拒掉）");
+        // 面外仍拒：tf_appx 不该凭空获得写任意 HKLM 值的能力（R3-K01 的第二道闸不许被撬开）
+        let Err(msg) = admits(
+            "tf_appx",
+            &[json!({
+                "hive": "LocalMachine",
+                "sub": r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+                "key": "TrimUpdate",
+                "presence": "absent", "exists": false
+            })],
+        ) else {
+            panic!("tf_appx 的面外目标必须拒绝")
+        };
+        assert!(msg.contains("不在本项声明的还原面内"), "{msg}");
+    }
+
+    /// R3-M03：动态项 `perf_wu_pause` 的那组 QWord 必须进基线/声明面，
+    /// 且与**写入生成器**、**检测侧表**三向对齐。
+    #[test]
+    fn perf_wu_pause基线对齐生成器与检测侧表() {
+        let got = surface_of("perf_wu_pause");
+        assert_eq!(got.len(), 6, "perf_wu_pause 的声明面应为 6 个值（3 组起止），实收 {got:?}");
+
+        // ① 与写入生成器同源：wu_pause_steps 的 pwsh 原文里被写的值名与本表逐字相等。
+        //    生成器多写一个值 / 改一个名字而本表没跟 ⇒ 这里红。
+        let steps = super::super::apply::wu_pause_steps(7);
+        let pwsh = steps[0].get("pwsh").and_then(|v| v.as_str()).unwrap_or_default();
+        assert!(pwsh.contains(WU_PAUSE_SUBKEY), "生成器写的键与本表登记的键不一致: {pwsh}");
+        let mut from_gen: Vec<String> = pwsh
+            .split('"')
+            .enumerate()
+            .filter(|(i, _)| i % 2 == 1)
+            .map(|(_, s)| s.to_string())
+            .filter(|s| s.starts_with("Pause"))
+            .collect();
+        from_gen.sort();
+        from_gen.dedup();
+        let mut from_table: Vec<String> = WU_PAUSE_VALUES.iter().map(|s| s.to_string()).collect();
+        from_table.sort();
+        assert_eq!(from_gen, from_table, "基线的 6 个值名与 wu_pause_steps 的写入值名漂移");
+
+        // ② 与检测侧表同源（overview 的 regTimeWindow 判据也读这张表）
+        let spec = super::super::catalog::write_spec_of("perf_wu_pause")
+            .expect("检测侧表应登记 perf_wu_pause");
+        let mut from_spec: Vec<String> = Vec::new();
+        for r in spec.reg_writes {
+            from_spec.push(r.value.to_string());
+            if !r.value2.is_empty() {
+                from_spec.push(r.value2.to_string());
+            }
+            assert_eq!(r.subkey, WU_PAUSE_SUBKEY, "检测侧表的键与本表登记不一致");
+        }
+        from_spec.sort();
+        assert_eq!(from_spec, from_table, "基线的 6 个值名与检测侧表漂移");
+    }
+
+    /// R3-M03 的还原侧：这些基线必须过得了第二道闸（否则「暂停更新」依旧无从还原），
+    /// 同键下未声明的值仍被拒。
+    #[test]
+    fn perf_wu_pause基线能过还原闸_面外仍拒() {
+        let entries: Vec<Value> = WU_PAUSE_VALUES
+            .iter()
+            .map(|v| {
+                json!({
+                    "hive": "LocalMachine", "sub": WU_PAUSE_SUBKEY, "key": v,
+                    "presence": "absent", "exists": false
+                })
+            })
+            .collect();
+        assert_eq!(admits("perf_wu_pause", &entries), Ok(6), "6 条基线必须全部准入");
+        let mut bad = entries;
+        bad.push(json!({
+            "hive": "LocalMachine", "sub": WU_PAUSE_SUBKEY, "key": "PauseWhatever",
+            "presence": "absent", "exists": false
+        }));
+        let Err(msg) = admits("perf_wu_pause", &bad) else {
+            panic!("同键下未声明的值也必须拒绝（收窄不许被同键前缀打通）")
+        };
+        assert!(msg.contains("不在本项声明的还原面内"), "{msg}");
+    }
+}
+

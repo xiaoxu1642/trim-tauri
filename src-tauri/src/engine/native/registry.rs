@@ -153,15 +153,29 @@ pub(super) unsafe fn reg_enum_values_scan(hk: HKEY) -> (Vec<String>, bool) {
             return (names, true);
         }
         let name = decode_name_lossy_with_warn(&name_buf[..name_len as usize]);
-        if !name.is_empty() { names.push(name); }
+        // R5c-M03：**空名是默认值，它是合法值名** —— `RegEnumValueW` 把默认值以空名列出，
+        // 删除面 `to_wide_checked("")` 也放行（见单测「空值名合法（= 默认值）」）。
+        // 旧实现 `if !name.is_empty()` 在这里丢掉它，`incomplete` 仍是 false ⇒「有值」被
+        // 报成「没有值」：`value:"*"` 会漏删默认值，展开结果为空还会被当成「空键 = 目标状态
+        // 已达成」记成功。过滤只许留在只读展示包装 [`reg_enum_values`]；本函数的清单契约
+        // 是「一个都不丢」，调用方自己按需筛。
+        names.push(name);
         index += 1;
     }
 }
 
 /// 只读枚举出口（右键菜单、路径扫描等「少一条只是显示不全」的调用方）。
 /// 需要区分「没有」与「没枚举完」的调用方一律走 [`reg_enum_values_scan`]。
+///
+/// R5c-M03：空名（= 默认值）在这里被过滤 —— 展示链没有一行「无名值」可显示
+/// （`cm_scan` 的 GUID 判定、`startup_scan` 的 `if vp.is_empty()` 本来就跳过它）。
+/// 过滤**只许留在这里**：枚举层若也过滤，调用方就会把「有默认值」读成「这个键没有值」。
 pub(super) unsafe fn reg_enum_values(hk: HKEY) -> Vec<String> {
-    reg_enum_values_scan(hk).0
+    reg_enum_values_scan(hk)
+        .0
+        .into_iter()
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 /// 枚举注册表键的所有子键名，**并区分「这个键没有子键」与「没枚举完」**。
@@ -706,7 +720,9 @@ pub fn read_reg_value_text(hive: HKEY, subkey: &str, name: &str) -> Option<(&'st
 /// 新的备份台账写入与还原比对一律直接用 [`read_reg_value_state`]，
 /// 因为这里 `None` 分不出「不存在」还是「读不出来」。
 /// 不展平的理由不变：展开过的 EXPAND_SZ 写回去会把 `%VAR%` 永久变成字面量，
-/// MULTI_SZ 的 NUL 连接可逆（NUL 不可能出现在元素里），其余字节原样往返。
+/// MULTI_SZ 的 NUL 连接可逆（NUL 不可能出现在元素里，**空元素也逐项保留**，见
+/// [`decode_reg_value_bytes`] 的 R5c-M02 注释；末尾空元素与终止符同形是固有边界），
+/// 其余字节原样往返。
 pub fn read_reg_value_faithful(hive: HKEY, subkey: &str, name: &str) -> Option<(&'static str, String)> {
     match read_reg_value_state(hive, subkey, name, false) {
         RegReadState::Value(t, d) => Some((t, d)),
@@ -806,16 +822,19 @@ pub fn decode_reg_value_bytes(
         REG_MULTI_SZ => {
             let u = units(buf);
             let text = decode_utf16_strict(&u)?;
-            let parts: Vec<&str> = text
-                .trim_end_matches('\0')
-                .split('\0')
-                .filter(|s| !s.is_empty())
-                .collect();
+            // R5c-M02：只剥掉**终止** NUL，**不过滤空元素**。`a\0\0b\0\0` 是 `["a","","b"]`；
+            // 旧写法 `.filter(|s| !s.is_empty())` 把它解成 `["a","b"]`，写侧按元素重新编码
+            // 就写回 `a\0b\0\0` —— 那是**另一个值**，而回读自比对走同一个解码器 ⇒ 恒相等，
+            // 用户拿到「已还原」但内容已变形。元素内不可能含 NUL，所以「按 NUL 拆」在保留
+            // 空元素时才真的可逆（末尾的空元素与终止符同形，那是本表示法的固有边界，
+            // 彻底解法是 faithful 分支不走字符串往返）。
+            let elements: Vec<&str> = text.trim_end_matches('\0').split('\0').collect();
             if flatten {
-                // PS `[string]$v` 对字符串数组是空格连接
-                Some(("REG_SZ", parts.join(" ")))
+                // PS `[string]$v` 对字符串数组是空格连接：空元素照样占位（连写两个空格），
+                // 否则「有元素被吞」在显示链上也看不出来
+                Some(("REG_SZ", elements.join(" ")))
             } else {
-                Some(("REG_MULTI_SZ", parts.join("\u{0}")))
+                Some(("REG_MULTI_SZ", elements.join("\u{0}")))
             }
         }
         _ => None,
@@ -906,6 +925,9 @@ pub fn file_ads_bytes(path: &std::path::Path) -> (u64, usize) {
 /// 在调用方同形：「这个键确实没有值」与「键打不开 / 枚举中途报错 / 值名长过缓冲上限」。
 /// 前者展开成 0 条删除是正确行为，后者展开成 0 条则是「静默空转 + 回执报成功」——
 /// 正是 `value:"*"` 那条链最怕的形状。开键失败同样算 `incomplete`（它不是「无值」）。
+///
+/// R5c-M03：清单里**可能出现空名 `""`**（= 默认值）。它是合法值名，删除面同样接受，
+/// 调用方不得把它当「没有值」跳过 —— 跳过就等于对一个「数据放默认值」的键漏删并记成功。
 pub fn reg_enum_value_names_pub(hive: HKEY, subkey: &str) -> (Vec<String>, bool) {
     let sk = to_wide(subkey);
     let mut hk = HKEY::default();
@@ -1121,10 +1143,21 @@ mod tests {
             "含 NUL 的目标被拒后，盘上同名真键不得被删（这正是旧实现会踩的坑）"
         );
 
-        // ③ 值名方向同样：含 NUL 的值名必须拒，且那个真值不得被删
+        // ③ 值名方向同样：含 NUL 的值名必须拒，且那个真值不得被删。
+        // R5c-M01（本轮）：原断言极性反了 —— 旧写法 `assert!(reg_restore_delete(…))` 要求
+        // 「被拒」返回 **true**，而 `reg_restore_delete` = `reg_restore_delete_checked(..).is_ok()`，
+        // 形态闸一律 `Err(123)` ⇒ `is_ok()` 恒 false，这条断言只可能失败（发布前 `--ignored`
+        // 批次必红）。更坏的是它诱导「为了让用例过」把形态非法的删值改成幂等成功 ——
+        // 那正好推翻「判不出本来存不存在就不许记成功」。现在按真实语义断言：
+        // false（没删）+ Err(123)（拒的原因可判）。
         assert!(
-            super::reg_restore_delete(HKEY_CURRENT_USER, REAL, &"v\0x".to_string()),
-            "含 NUL 的值名必须被拒（拒 = false = 没删）"
+            !super::reg_restore_delete(HKEY_CURRENT_USER, REAL, &"v\0x".to_string()),
+            "含 NUL 的值名必须被拒（拒 = false = 没删；旧断言在此处要求 true，极性反了）"
+        );
+        assert_eq!(
+            super::reg_restore_delete_checked(HKEY_CURRENT_USER, REAL, &"v\0x".to_string()),
+            Err(123),
+            "含 NUL 的值名必须判 ERROR_INVALID_NAME(123)，不得折成幂等成功"
         );
         assert!(
             unsafe { super::reg_read_value_typed(HKEY_CURRENT_USER, REAL, "v") }.is_some(),
@@ -1544,5 +1577,191 @@ mod tests {
         let (names, incomplete) = reg_enum_subkeys_pub_scan(hive_hklm(), r"Software\Trim不存在的键_枚举探针");
         assert!(names.is_empty(), "不存在的键不应枚举出子键");
         assert!(incomplete, "开键失败必须算 incomplete（不是「没有子键」）");
+    }
+
+    /// R5c-M02 回归钉：`REG_MULTI_SZ` 的 faithful 解码**必须保留空元素**。
+    ///
+    /// 旧实现 `text.trim_end_matches('\0').split('\0').filter(|s| !s.is_empty())` 在
+    /// faithful（`flatten=false`）下同样过滤 ⇒ `a\0\0b\0\0`（= `["a","","b"]`）被解成
+    /// `a\0b`（= `["a","b"]`）。写侧按元素重新编码就写回 `a\0b\0\0` —— **另一个值**；
+    /// 而还原回读自比对（`verify_restore_ops`）走同一个解码器 ⇒ 两侧一起丢、恒相等，
+    /// 用户拿到「已还原」但内容已变形。
+    ///
+    /// 判红自证：把 faithful 分支的 `.split('\0').collect()` 换回带
+    /// `.filter(|s| !s.is_empty())` 的旧写法 ⇒ 本文第①②③④条红（第⑤条是空串回归钉，
+    /// 两条写法同结论，故不参与判红）。
+    #[test]
+    fn r5c_m02_multi_sz空元素必须保真往返() {
+        use windows::Win32::System::Registry::REG_MULTI_SZ;
+
+        /// 元素列表 → MULTI_SZ 字节：元素间单 NUL，末尾双 NUL。
+        /// 空元素就是「两个相邻分隔符」，正是旧过滤会吞掉的那一项。
+        ///
+        /// 为什么不用生产写侧 `optimizer::restore_write_bytes` 来做这一步：那条链今天仍带
+        /// `.filter(|s| !s.is_empty())`（`backup_restore.rs`，本轮改动范围之外），用它编码
+        /// 会把空元素再吞一次 —— 那条链要补齐才谈得上端到端可逆，本文件只钉解码端的可逆性。
+        fn encode(elements: &[&str]) -> Vec<u8> {
+            let mut units: Vec<u16> = Vec::new();
+            for (i, e) in elements.iter().enumerate() {
+                if i > 0 {
+                    units.push(0);
+                }
+                units.extend(e.encode_utf16());
+            }
+            units.push(0);
+            units.push(0);
+            units.iter().flat_map(|u| u.to_le_bytes()).collect()
+        }
+
+        // ① 中间空元素：`a\0\0b\0\0` = ["a","","b"]，解码必须逐元素保留
+        let raw = encode(&["a", "", "b"]);
+        // 逐元素字节：a\0 + \0(空元素) + b\0 + 终止 \0（元素间单 NUL、末尾双 NUL）
+        assert_eq!(
+            raw,
+            vec![0x61, 0, 0, 0, 0, 0, 0x62, 0, 0, 0, 0, 0],
+            "夹具字节形态自检（空元素必须占位）"
+        );
+        let (ty, data) =
+            decode_reg_value_bytes(REG_MULTI_SZ, &raw, false).expect("faithful 解码不得失败");
+        assert_eq!(ty, "REG_MULTI_SZ", "faithful 口径不得把类型降级成 REG_SZ");
+        assert_eq!(
+            data.split('\0').collect::<Vec<_>>(),
+            vec!["a", "", "b"],
+            "空元素被吞掉 ⇒ 还原会写回另一个值（实得 {data:?}）"
+        );
+
+        // ② 开头空元素：`\0b\0\0`
+        let lead = encode(&["", "b"]);
+        let (_, lead_data) = decode_reg_value_bytes(REG_MULTI_SZ, &lead, false).unwrap();
+        assert_eq!(
+            lead_data.split('\0').collect::<Vec<_>>(),
+            vec!["", "b"],
+            "开头空元素同样不得被丢（实得 {lead_data:?}）"
+        );
+
+        // ③ 往返：解码 → 按元素编码 → 与原始字节逐字节一致
+        assert_eq!(encode(&data.split('\0').collect::<Vec<_>>()), raw, "含空元素的 MULTI_SZ 往返必须字节一致");
+        assert_eq!(encode(&lead_data.split('\0').collect::<Vec<_>>()), lead);
+
+        // ④ 展平口径：空元素照样占位（PS `[string]$v` 按空格连接），显示链也不得「少一条」
+        assert_eq!(
+            decode_reg_value_bytes(REG_MULTI_SZ, &raw, true),
+            Some(("REG_SZ", "a  b".to_string())),
+            "展平口径下空元素必须占位（两个空格），不得静默合并成一个"
+        );
+
+        // ⑤ 空 MULTI_SZ（只有终止 NUL）仍是空串，不是「一个空元素」
+        assert_eq!(
+            decode_reg_value_bytes(REG_MULTI_SZ, &[0, 0], false),
+            Some(("REG_MULTI_SZ", String::new())),
+            "空 MULTI_SZ 必须解成空串"
+        );
+    }
+
+    /// R5c-M03 回归钉（纯逻辑侧）：**值名枚举层不得过滤空名**。
+    ///
+    /// 空名就是「默认值」，它是合法值名（删除面 `to_wide_checked("")` 放行）；枚举层过滤
+    /// 它会把「有值」报成「没有值」，`value:"*"` 于是漏删默认值、展开为空还记成功。
+    /// 只含默认值的键只能靠真写注册表造出来（见下面那条 `#[ignore]` 真机用例），所以这里
+    /// 用源码形态守住「过滤只许出现在只读展示包装」。
+    ///
+    /// 判红自证：把 `reg_enum_values_scan` 的 `names.push(name)` 换回
+    /// `if !name.is_empty() { names.push(name); }` ⇒ 第①条红。
+    #[test]
+    fn r5c_m03_值名枚举层不得丢弃默认值() {
+        let src = include_str!("registry.rs");
+        let prod = &src[..src.find("mod tests").expect("找不到单测段起点")];
+
+        /// 取某个函数从声明行到首个顶格 `}` 的片段（本文件函数体花括号一律缩进，
+        /// 首个顶格 `}` 就是函数结束行）。
+        fn body_of<'a>(prod: &'a str, marker: &str) -> &'a str {
+            let start = prod.find(marker).unwrap_or_else(|| panic!("找不到 {marker}"));
+            let rest = &prod[start..];
+            let end = rest.find("\n}\n").unwrap_or_else(|| panic!("{marker} 之后找不到顶格 }}"));
+            &rest[..end]
+        }
+
+        // ① 枚举原语：无条件收进值名，不按空名筛。
+        // 只判**代码行**：本函数体的注释里为了说明旧实现会写出 `is_empty` 这个词，
+        // 「注释里提到的写法」不是「代码里做的事」（同 `check-registry-delete-guard` 的
+        // 正向对照口径），把它算进来会让否定断言假红。
+        let scan = body_of(prod, "pub(super) unsafe fn reg_enum_values_scan");
+        let scan_code: String = scan
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            scan_code.contains("names.push(name)"),
+            "值名枚举层必须把每个值名都收进清单"
+        );
+        assert!(
+            !scan_code.contains("is_empty"),
+            "值名枚举层不得按空名过滤 —— 空名 = 默认值，是合法值名（R5c-M03）"
+        );
+
+        // ② 只读展示包装：空名的去留必须显式写在这里（这里是唯一允许过滤的地方）
+        let disp = body_of(prod, "pub(super) unsafe fn reg_enum_values(");
+        assert!(
+            disp.contains("is_empty"),
+            "空名过滤只许留在只读展示包装 reg_enum_values（枚举层一个都不丢）"
+        );
+    }
+
+    /// R5c-M03 回归钉（日常可跑）：键打不开 ⇒ `incomplete=true`，不是「这个键没有值」。
+    #[test]
+    fn r5c_m03_值名枚举失败必须报不完整() {
+        let (names, incomplete) = reg_enum_value_names_pub(hive_hklm(), r"Software\Trim不存在的键_值名枚举探针");
+        assert!(names.is_empty(), "不存在的键不应枚举出值名");
+        assert!(incomplete, "开键失败必须算 incomplete（不是「这个键没有值」）");
+    }
+
+    /// R5c-M03 真机 `#[ignore]` 探针（发布前门禁跑）：**只含默认值的键**必须枚举出空名，
+    /// 且清单不得谎报不完整；空名还必须能被删除面接受。
+    ///
+    /// 旧实现 `if !name.is_empty()` 把默认值静默丢掉、`incomplete` 仍是 false ⇒ 对这样的键
+    /// 执行 `value:"*"` 会漏删默认值，展开为空还被当成「空键 = 目标状态已达成」记成功。
+    /// 只读探针实测参照：`HKLM\SOFTWARE\Classes\.txt` 的 `GetValueNames()` 含空名。
+    ///
+    /// 判红自证：把 `reg_enum_values_scan` 的 `names.push(name)` 换回带空名过滤的旧写法
+    /// ⇒ 第②条红（清单为空）。卫生口径照本文件既有真机探针：只碰 HKCU scratch 键，
+    /// `Drop` 里删干净（含断言提前 panic 的路径）。
+    #[test]
+    #[ignore = "真实写注册表（HKCU scratch 键 + Drop 清理），发布前门禁跑"]
+    fn r5c_m03_真机_默认值必须枚举到且清单完整() {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ};
+        const SUB: &str = r"Software\TrimEnumDefaultProbe";
+        struct Probe;
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                let _ = reg_key_remove(HKEY_CURRENT_USER, SUB, true);
+            }
+        }
+        let _probe = Probe;
+
+        // ① 只写默认值（空名），键里没有别的值
+        let payload: Vec<u8> = to_wide("默认值探针").into_iter().flat_map(|u| u.to_le_bytes()).collect();
+        assert!(
+            reg_restore_write(HKEY_CURRENT_USER, SUB, "", REG_SZ, &payload),
+            "空值名（= 默认值）应可写入"
+        );
+
+        // ② 枚举必须报出空名，且不得谎报「清单不完整」
+        let (names, incomplete) = reg_enum_value_names_pub(HKEY_CURRENT_USER, SUB);
+        assert!(!incomplete, "正常结束不得报「清单不完整」");
+        assert_eq!(
+            names,
+            vec![String::new()],
+            "只含默认值的键必须枚举出空名，实得 {names:?}"
+        );
+
+        // ③ 空名必须能被删除面接受（漏删默认值那条链的末端）
+        assert!(
+            super::reg_restore_delete(HKEY_CURRENT_USER, SUB, ""),
+            "空值名（默认值）必须可删"
+        );
+        let (after, after_incomplete) = reg_enum_value_names_pub(HKEY_CURRENT_USER, SUB);
+        assert!(!after_incomplete, "删除后枚举仍须完整");
+        assert!(after.is_empty(), "默认值删掉后清单应为空，实得 {after:?}");
     }
 }
