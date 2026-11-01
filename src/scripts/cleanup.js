@@ -222,7 +222,8 @@
     for (const group of Object.values(CATEGORIES)) {
       if (!group.subGroups) continue;
       const sg = group.subGroups.find(s => s.id === subGroupId);
-      if (sg) return sg.items.map(i => i.id);
+      // 只取可见项（detect 未命中被隐藏的条目不在列表上，不能被「分组全选」静默勾上）
+      if (sg) return visibleItems(sg.items).map(i => i.id);
     }
     return [];
   }
@@ -730,11 +731,12 @@
   // 总计数因此虚高、与分组计数（已按 hiddenIds 过滤）分裂；三处判据同源到本函数。
   function selectableIds() { return ALL_IDS.filter(id => !hiddenIds.has(id)); }
 
-  // 实际可清理集合（F4a1-M01）：勾选里**已有扫描结果**的那些条目。
+  // 实际可清理集合（F4a1-M01）：勾选里**已有扫描结果且当前可见**的那些条目。
   // selectedIds 还承担「扫描范围」语义（见下方 scan() 的 scopeIds），所以不能把未扫描项
   // 清出勾选；改由本函数单独回答「现在点开始清理，真能清掉什么」——「全选 → 开始清理」
   // 这条零动作却报成功的路径，靠 #btnClean 的判据与 clean() 的空计划早退共同堵住。
-  function selectedWithResultIds() { return Array.from(selectedIds).filter(id => scanResults.has(id)); }
+  // hiddenIds 必须排除：隐藏项不在列表上，用户看不见它们，不能出现在确认清单或执行计划里。
+  function selectedWithResultIds() { return Array.from(selectedIds).filter(id => scanResults.has(id) && !hiddenIds.has(id)); }
 
   function selectAll() {
     for (const id of selectableIds()) selectedIds.add(id);
@@ -782,7 +784,9 @@
     for (const group of Object.values(CATEGORIES)) {
       if (!group.subGroups) continue;
       for (const sg of group.subGroups) {
-        const sgItems = sg.items;
+        // 与渲染同源：隐藏项（detect 未命中）不在表上，三段态/计数/大小都只按可见项算，
+        // 否则「全选可见项」后父复选框永远停在 indeterminate，用户看不出已全选。
+        const sgItems = visibleItems(sg.items);
         if (!sgItems.length) continue;
         const cb = document.querySelector(`[data-sub-checkbox="${sg.id}"]`);
         if (!cb) continue;
@@ -1504,7 +1508,7 @@
     // 信任源统一为 $rule.risk（PS 侧门禁同源，见 cleanup-scripts.js），渲染层不做二次映射。
     // G-4：回收站**不参与这两档分级**——它是不可逆的批量动作，单独走下面那段
     // 「先现查条目数与体积、再红色确认」，避免同一件事被弹两次。
-    const risky = Array.from(selectedIds)
+    const risky = selectedWithResultIds()
       .map(id => scanResults.get(id))
       .filter(r => r && r.id !== RECYCLE_ID && (r.risk === 'high' || r.risk === 'medium'));
     const highRisk = risky.filter(r => r.risk === 'high');
@@ -1599,7 +1603,7 @@
     // 目标，扫描后新增的文件、超出单次清单上限被截掉的行也会被清理，却从未出现在
     // 确认清单里。filesTruncated 此前标记了但渲染层零消费；清单被截断的条目必须在
     // 确认环节如实告知，让用户带着这个事实做决定（语义不变：差异可见而非绑定文件集）。
-    const truncatedItems = Array.from(selectedIds)
+    const truncatedItems = selectedWithResultIds()
       .map(id => scanResults.get(id))
       .filter(r => r && r.filesTruncated);
     if (truncatedItems.length > 0) {
@@ -1617,7 +1621,7 @@
     // 只在常规清理项（有扫描计划清单）上做检测；文件清理项（FILECLEAN_IDS）不走此通道。
     // G-4：回收站也不走——占用检测按**文件路径**问「谁锁着它」，而清空回收站是
     // 系统级动作，没有「某个被锁的文件」可以指认，列进去只会给出一堆无关进程。
-    const lockIds = Array.from(selectedIds).filter(id => scanResults.has(id) && !FILECLEAN_IDS.includes(id) && id !== RECYCLE_ID);
+    const lockIds = selectedWithResultIds().filter(id => !FILECLEAN_IDS.includes(id) && id !== RECYCLE_ID);
     let abandonIds = new Set();
     const lockDecision = await offerCloseLocked(lockIds);
     if (lockDecision === 'aborted') {
@@ -1627,7 +1631,7 @@
     if (lockDecision === 'cancel') return null;
     if (lockDecision && lockDecision.skipIds) abandonIds = lockDecision.skipIds;
 
-    const allItems = Array.from(selectedIds)
+    const allItems = selectedWithResultIds()
       .filter(id => !abandonIds.has(id))
       .map(id => scanResults.get(id))
       .filter(Boolean);
