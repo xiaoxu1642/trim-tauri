@@ -1067,8 +1067,45 @@ fn read_if_table_frame(
     }
 }
 
+/// `--interval` 的合法区间（毫秒）：下界不能低于一次采样本身的量级，上界 = 10 s。
+const NET_INTERVAL_MIN_MS: u64 = 200;
+const NET_INTERVAL_MAX_MS: u64 = 10_000;
+/// 没给 `--interval` 时的默认间隔（与 Electron 时代 `--interval 1000` 同值）。
+const NET_INTERVAL_DEFAULT_MS: u64 = 1000;
+
+/// N1b-L04：`--interval` 的判据出口。三种输入必须可分：
+///   · 没给 ⇒ 默认值；
+///   · 给了但解析不了 / 越界 ⇒ **Err**（调用方 stderr 留痕 + exit 2，不静默回落、不静默夹取）。
+/// 旧写法 `.parse().unwrap_or(1000).clamp(200, 10_000)` 让「给了垃圾」「给了 50」
+/// 与「什么都没给」在回执上完全同形 —— CLI 是调试入口，参数面判红必须能被看到。
+fn net_interval(args: &[String]) -> Result<u64, String> {
+    let Some(i) = args.iter().position(|a| a == "--interval") else {
+        return Ok(NET_INTERVAL_DEFAULT_MS);
+    };
+    let raw = args
+        .get(i + 1)
+        .ok_or_else(|| "--interval 缺少取值（不能当「没给」回落默认）".to_string())?;
+    let v = raw
+        .parse::<u64>()
+        .map_err(|_| format!("--interval={raw:?} 不是数字"))?;
+    if !(NET_INTERVAL_MIN_MS..=NET_INTERVAL_MAX_MS).contains(&v) {
+        return Err(format!(
+            "--interval={v} 越界（允许 {NET_INTERVAL_MIN_MS}..={NET_INTERVAL_MAX_MS} 毫秒）"
+        ));
+    }
+    Ok(v)
+}
+
 pub fn run_net_sample(args: &[String]) -> i32 {
-    let interval = arg_value(args, "interval").map(|v| v.parse::<u64>().unwrap_or(1000)).unwrap_or(1000).clamp(200, 10_000);
+    // N1b-L04：参数面 fail-closed（与 main.rs 的数值参数同口径）——畸形/越界立即
+    // 退出 2，不进入采样循环，也不把非法值夹成合法值后端上「已按你的参数在跑」。
+    let interval = match net_interval(args) {
+        Ok(v) => v,
+        Err(msg) => {
+            eprintln!("[finder-warn] net-sample {msg}（fail-closed exit 2）");
+            return 2;
+        }
+    };
     let mut sampler = NetSampler::new();
     // 只在「失败码变化」的那一拍出声：本函数是 1s 一轮的常驻循环，
     // 每拍都写 stderr 会把真留痕淹掉（lib 直调侧由宿主读 last_error，不经过这里）。
@@ -1467,7 +1504,10 @@ mod tests {
 
 #[cfg(test)]
 mod p1_6e_arg_tests {
-    use super::{bench_warn_field, clamp_to_whitelist, close_bench_json, parse_bench_arg, resolve_bench_dir};
+    use super::{
+        bench_warn_field, clamp_to_whitelist, close_bench_json, net_interval, parse_bench_arg,
+        resolve_bench_dir,
+    };
 
     /// 「没给参数」与「给了但不是数字」都回落默认，但只有后者留痕。
     /// 判红自证：把 `parse_bench_arg` 的 `Err(_) =>` 支并回 `unwrap_or(default)` ⇒ 第二条红。
@@ -1534,6 +1574,38 @@ mod p1_6e_arg_tests {
             with.rfind('}').expect("必须有闭合大括号") > with.find("\"warn\"").expect("warn 字段必须存在"),
             "闭合大括号必须位于 warn 之后：{with}"
         );
+    }
+
+    /// N1b-L04：`net-sample --interval` 的三种输入必须可分 —— 「没给」回落默认，
+    /// 「畸形」「缺值」「越界」一律判红（旧写法 `unwrap_or(1000).clamp(200,10_000)`
+    /// 把这三类都折成「静默按一个数跑」，回执上分不出是谁）。
+    /// 判红自证：把 `net_interval` 的 `Err` 两支并回 `unwrap_or` / `clamp`，红的那几条立刻变 Ok。
+    #[test]
+    fn net_sample间隔参数畸形与越界都判红() {
+        let argv = |v: &[&str]| -> Vec<String> { v.iter().map(|s| s.to_string()).collect() };
+        // ① 没给 ⇒ 默认（这不是异常）
+        assert_eq!(net_interval(&argv(&[])), Ok(1000));
+        assert_eq!(net_interval(&argv(&["--daemon"])), Ok(1000));
+        // ② 合法区间（含两端）原样采用
+        assert_eq!(net_interval(&argv(&["--interval", "200"])), Ok(200));
+        assert_eq!(net_interval(&argv(&["--interval", "10000"])), Ok(10_000));
+        assert_eq!(net_interval(&argv(&["--interval", "1000"])), Ok(1000));
+        // ③ 畸形：不回落默认
+        for bad in ["abc", "", "1.5", "-100", "1e3"] {
+            let got = net_interval(&argv(&["--interval", bad]));
+            assert!(got.is_err(), "--interval={bad:?} 必须判红，不许静默回落 1000：{got:?}");
+            assert!(got.unwrap_err().contains("不是数字"), "留痕要点名是「不是数字」");
+        }
+        // ④ 越界：不静默夹取
+        for bad in ["0", "50", "199", "10001", "600000"] {
+            let got = net_interval(&argv(&["--interval", bad]));
+            assert!(got.is_err(), "--interval={bad} 必须判红，不许静默夹到 200..=10000：{got:?}");
+            assert!(got.unwrap_err().contains("越界"), "留痕要点名是「越界」");
+        }
+        // ⑤ 缺值：不许当成「没给」
+        let missing = net_interval(&argv(&["--daemon", "--interval"]));
+        assert!(missing.is_err(), "--interval 缺值必须判红：{missing:?}");
+        assert!(missing.unwrap_err().contains("缺少取值"));
     }
 
     /// 目录名的唯一来源（真机取证发现的两侧不同名）：调用方给名，原生只验形状。

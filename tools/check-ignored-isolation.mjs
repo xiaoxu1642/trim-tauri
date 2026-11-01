@@ -38,11 +38,14 @@
 // 用法：node tools/check-ignored-isolation.mjs
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { gate } from './lib/gate.mjs';
 import { blankNonCode, splitFunctions, lineAt, skipBraces } from './lib/src-scan.mjs';
 
-const ROOT = process.cwd();
+// 仓根由本文件位置推出，不用 `process.cwd()`：在 src-tauri/ 下单跑会「判据对象消失」
+// 假红（T1b-L01 实测 rc=1，四处不一致全是路径算出来的）。
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const TESTS = join(ROOT, 'src-tauri', 'tests');
 const SRC = join(ROOT, 'src-tauri', 'src');
 // 幂等放行：这些写法本身就会先定根（`common/mod.rs` 的 runtime 构造路径）。
@@ -514,10 +517,28 @@ function analyzeControl(code) {
 // ==================== 执行 ====================
 
 const g = gate(import.meta.url);
-// T1e-L09：SKIP 必须短路（`g.finish()` 在 0 失败时不退出，随后 readdirSync 会 ENOENT 崩栈）。
+
+/**
+ * T1e-L09：缺目录收口。逐个做在场检查（打印显式 SKIP 文案），返回「是否全部在场」。
+ * 调用方**必须**消费返回值并短路退出——旧实现丢了返回值，缺目录时退化成
+ * 「SKIP 文案 + 对象地板判红」（`g.finish()` 在 0 失败时不退出，那就不是 SKIP 收口）。
+ * `check` 参数供合成对照注入，不打印假 SKIP。
+ */
+function inputsAllPresent(dirs, check) {
+  let present = true;
+  for (const [dir, label] of dirs) present = check(dir, label) && present;
+  return present;
+}
+
 // 本门禁两段判据的对象都在 src-tauri 下；缺目录时显式 SKIP，不冒充满分。
-for (const [dir, label] of [[SRC, 'src-tauri/src（注册表写守卫）'], [TESTS, 'src-tauri/tests（隔离根 + 注册表写守卫）']]) {
-  g.skipUnlessPresent(dir, label);
+const INPUTS = [
+  [SRC, 'src-tauri/src（注册表写守卫）'],
+  [TESTS, 'src-tauri/tests（隔离根 + 注册表写守卫）'],
+];
+if (!inputsAllPresent(INPUTS, g.skipUnlessPresent)) {
+  console.warn('⚠ 输入缺失：两道对账（隔离根 / 注册表写守卫）全部**未校验**（SKIP，不是通过）');
+  g.finish();
+  process.exit(0);
 }
 const files = [...listRs(SRC), ...listRs(TESTS)].sort();
 const ignored = collectIgnored(files);
@@ -624,6 +645,16 @@ for (const c of CONTROLS) {
   } else {
     ctrlResults.push(c.label.split(' ')[0]);
   }
+}
+
+// 结构对照（T1e-L09）：SKIP 收口必须消费返回值 —— 丢返回值 / 恒放行的实现必须在这里判红。
+{
+  const fakeSkip = (dir) => !dir.includes('__absent__');
+  const allHere = inputsAllPresent([['a', 'A'], ['b', 'B']], fakeSkip);
+  const missingOne = inputsAllPresent([['a', 'A'], ['__absent__', 'B']], fakeSkip);
+  if (!allHere) g.fail('结构对照：目录齐全时误走 SKIP 收口（正常仓库会整轮静默跳过，判据全灭）');
+  if (missingOne) g.fail('结构对照：缺一个目录仍判「齐全」—— skip 返回值被丢弃（T1e-L09 原缺陷形态）');
+  if (allHere && !missingOne) g.ok('结构对照：目录齐全放行 / 缺一个必不通过（SKIP 收口消费返回值）');
 }
 
 // 汇总输出：对象数、分面、R3b 现场、对照组数都要能从 stdout 直接看出。

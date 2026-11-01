@@ -7,7 +7,9 @@
 //! - 危险操作前/退出前 `flush_sync()` 强制刷盘，防尾部日志丢失；
 //! - 启动时清理 30 天前日志（应用自产诊断数据，回收站优先，见 `prune_old_logs`；当天文件不受影响）；
 //! - **入口清洗在 `write_log` 里做**（R6b-M07）：`level` 走 [`sanitize_log_level`] 白名单、
-//!   `message` 走 [`sanitize_log_message`]（控制符含 CR/LF/NUL → 空格 + 折叠连续空白）。
+//!   `message` 走 [`sanitize_log_message`]（控制符含 CR/LF/NUL → 空格 + 折叠连续空白），
+//!   并按 `LOG_MESSAGE_MAX_CHARS` 截断 —— 子进程 stderr 这类外部文本没有长度约束
+//!   （R7-L02），不截断时一条失控输出就能写成单行几十 MB 的日志。
 //!   这两个函数是**全仓唯一真源**，命令层 `log:write` 只是多套一层长度上限——
 //!   此前清洗只存在于 `commands/log.rs`，而 `write_log` 的直调点远多于那条通道，
 //!   其中插值外部文本的消息（远端模型返回的错误体、子进程输出）能把 `\n[时间] [ERROR] …`
@@ -139,8 +141,9 @@ pub fn sanitize_log_level(level: &str) -> &'static str {
 
 /// 消息清洗（**唯一真源**）：控制符（含 CR/LF/NUL）换成空格 + 折叠连续空白 + 可选截断。
 ///
-/// `limit` 传 `usize::MAX` 即只清洗不定长——长度上限是 **IPC 边界**的策略（渲染层可控串），
-/// 不是行完整性的判据，内部调用点的诊断消息不该被它砍掉。
+/// `limit` 由调用方给：[`write_log`] 用 `LOG_MESSAGE_MAX_CHARS` 定默认上限（R7-L02：
+/// 子进程 stderr、远端错误体这类外部文本没有长度约束，一条失控输出能把单行日志写到
+/// 几十 MB）；传 `usize::MAX` 仍表示只清洗不定长，留给确实需要完整正文的调用方。
 /// 截断标记只在还没带上时追加一次，所以本函数**幂等**：`sanitize(sanitize(x)) == sanitize(x)`，
 /// 命令层多套一层上限不会出现「…（已截断）…（已截断）」。
 pub fn sanitize_log_message(message: &str, limit: usize) -> String {
@@ -174,6 +177,13 @@ pub fn sanitize_log_message(message: &str, limit: usize) -> String {
     out.trim().to_string()
 }
 
+/// `write_log` 单条消息的默认字符上限（R7-L02）。
+///
+/// 此前上限只挂在 IPC 通道上，直调点（子进程 stderr、远端错误体）以 `usize::MAX`
+/// 进日志——一条失控的 stderr 就能把单行日志写成几十 MB。诊断所需内容（脚本栈 +
+/// 错误体摘要）远小于这个量级；超出部分截断并留下「…（已截断）」痕迹，不是静默丢弃。
+const LOG_MESSAGE_MAX_CHARS: usize = 32 * 1024;
+
 /// 写日志。返回完整日志行（对齐 Electron 版 writeLog 返回值）。
 ///
 /// 测试进程只返回行、不入队（见 [`is_test_process`]）—— 既有用例断言的都是**返回值**
@@ -183,7 +193,7 @@ pub fn sanitize_log_message(message: &str, limit: usize) -> String {
 /// 把清洗放在某一条通道上（此前只有 `log:write`）等于给其余直调点留旁路。
 pub fn write_log(level: &str, message: &str) -> String {
     let level = sanitize_log_level(level);
-    let message = sanitize_log_message(message, usize::MAX);
+    let message = sanitize_log_message(message, LOG_MESSAGE_MAX_CHARS);
     let now = SystemTime::now();
     let (y, mo, d, h, mi, s) = local_parts(now);
     let line = format!(
@@ -511,9 +521,21 @@ mod tests {
         assert_eq!(once.chars().count(), 1006, "1000 字符 + 6 字符标记，多一位少一位都算口径变了");
         let twice = sanitize_log_message(&once, 1000);
         assert_eq!(once, twice, "清洗必须幂等：命令层与 write_log 各套一次不得出现两个截断标记");
-        // usize::MAX = 只清洗不定长（内部诊断消息不砍长度）
+        // usize::MAX = 只清洗不定长（留给确实要完整正文的调用方）
         let long = "路径 ".repeat(5000);
-        assert!(sanitize_log_message(&long, usize::MAX).chars().count() > 1000, "内部调用点不得被边界上限砍掉");
+        assert!(
+            sanitize_log_message(&long, usize::MAX).chars().count() > 1000,
+            "usize::MAX 仍应只清洗不定长"
+        );
+        // R7-L02：write_log 自身必须有默认上限——直调点的外部长文本不得整段进一行日志。
+        // 判红自证：把上限改回 `usize::MAX` ⇒ 第一条断言红（整条消息原样落行）。
+        let huge = write_log("warn", &"x".repeat(LOG_MESSAGE_MAX_CHARS * 2));
+        assert!(
+            huge.len() < LOG_MESSAGE_MAX_CHARS * 2,
+            "write_log 必须对单条消息截断（R7-L02），实得 {} 字节",
+            huge.len()
+        );
+        assert!(huge.contains("…（已截断）"), "截断必须留痕，不能静默丢内容");
         // 折叠与去空白口径与既有通道一致（这两条向量来自命令层用例，两侧同判据）
         assert_eq!(sanitize_log_message("  a\t\rb   c  ", 100), "a b c");
         assert_eq!(sanitize_log_level(" WARN "), "warn");

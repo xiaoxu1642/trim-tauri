@@ -542,6 +542,7 @@ fn walk_level_flush(
 }
 
 /// 快速返回某个顶层目录下的一级子目录大小（用于 AppData 迁移挑选）。
+/// 体积口径 = [`dir_size`] 的逻辑大小（硬链接按路径各计一次、稀疏/压缩按名义长度）。
 fn child_dir_sizes(root: &Path, out: &mut Vec<(PathBuf, u64)>, beat: &ScanBeat) {
     let rd = match fs::read_dir(root) {
         Ok(r) => r,
@@ -575,6 +576,17 @@ fn child_dir_sizes(root: &Path, out: &mut Vec<(PathBuf, u64)>, beat: &ScanBeat) 
     out.extend(sizes);
 }
 
+/// 目录树体积 —— **逻辑大小**口径（N1b-L01 的口径声明，三处消费面共用这一份）。
+///
+/// 累加的是 `Metadata::len()`，即文件的名义长度，不是一个「精确占盘量」原语：
+///   · 硬链接：同一份数据被多条路径指向时**按路径各计一次**，不做 FileId 去重；
+///   · 稀疏 / NTFS 压缩(WOF) / 去重卷：按名义长度计，不查 `GetCompressedFileSizeW`
+///     的实际分配量；
+///   · 重解析点不深入（下方循环内跳过），链接指向的外部内容不计入。
+/// 所以本值可能大于资源管理器「占用空间」，而「硬链接各计一次」时也可能大于
+/// 卷上真实占用。要与实际占用对齐须另立条目（改判据需先量收益，本条只声明口径）。
+/// 消费面：`child_dir_sizes`（appdata 排行）、`sizes`、`delete` 的 freed 汇总，
+/// 三处输出说明都指向本文，口径不许各自漂。
 fn dir_size(dir: &Path, beat: Option<&ScanBeat>) -> u64 {
     let mut total: u64 = 0;
     let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
@@ -1873,6 +1885,14 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
                             tops.push(ent.path());
                         }
                         Ok(t) if t.is_file() => {
+                            // N1b-L02：**文件型**重解析点（云占位符、去重/WOF 条目、
+                            // 非链接形态的 reparse）的 `file_type()` 仍报 is_file ——
+                            // 只有符号链接才走 is_symlink。判据必须在大小判定之前，
+                            // 否则一个「名义占用为 0」的占位文件会被当成空文件产候选。
+                            if is_reparse(&ent) {
+                                acc.note_reparse_skip();
+                                continue;
+                            }
                             // FD-6（2026-09-15）：根第一层的 0 字节文件此前被忽略（tops 只收子目录），
                             // 与 duplicates 链路「根层文件也参与」的口径不一致。补上根层空文件。
                             // 2026-09-28 五轮裁定：创建满 **14 天**（EMPTY_MIN_AGE，不是注释早前写的
@@ -2059,6 +2079,14 @@ fn collect_empty_fast(
                 }
             }
             Ok(t) if t.is_file() => {
+                // N1b-L02：文件型重解析点先于大小判定拦住，按「有内容」处理 ——
+                // 既不产候选（否则占位文件被当成空文件），也不让父目录被判空
+                //（父目录整棵进删除链时，链接本体与它指向的东西一并消失）。
+                if is_reparse(&ent) {
+                    acc.note_reparse_skip();
+                    empty = false;
+                    continue;
+                }
                 // P0：DirEntry 自带大小，不额外 syscall。
                 // 2026-09-28 五轮/八轮口径（用户拍板「空文件夹=包含 0 字节的文件以及空文件夹」
                 // 且「2025 年前的不扫」）：
@@ -2159,6 +2187,11 @@ fn prune_tree_empty_at(dir: &Path, ignore: &HashSet<String>, depth: usize, up: O
                 return false;
             }
         } else if t.is_file() {
+            // N1b-L02：文件型重解析点同样按「有内容」处理（与目录分支同一属性位判据；
+            // 删除侧复检不产候选、没有留痕累加器，故沿用 `is_reparse_target`）。
+            if is_reparse_target(&ent.path()) {
+                return false;
+            }
             match ent.metadata() {
                 Ok(m) if m.len() == 0 => {
                     if created_too_new(&m) || !created_in_current_year(&m) {
@@ -2231,6 +2264,8 @@ pub fn appdata(min_size_mb: u64, sink: &dyn Sink) {
 }
 
 /// 计算一批路径的总大小（用于磁盘清理扫描核心 Rust 化）。路径已由调用方解析为绝对路径。
+/// 目录项的体积口径 = [`dir_size`] 的逻辑大小（硬链接按路径各计一次、稀疏/压缩按名义长度）；
+/// 文件项取 `Metadata::len()`，同一口径。
 pub fn sizes(paths: &[String], sink: &dyn Sink) {
     let mut total_files = 0usize;
     let mut total_dirs = 0usize;
@@ -2948,6 +2983,8 @@ pub fn delete(items: &[(String, OsString)], protect_json: Option<&str>, sink: &d
             );
             continue;
         }
+        // N1b-L01：条目体积 = 逻辑大小（口径声明见 [`dir_size`]）——`freed` 汇总与
+        // `sizes` / `appdata` 同源同口径，硬链接/稀疏文件的差异在这里同样成立。
         let sz = if kind == "dir" {
             // `None`：这里是**删除阶段**在算释放空间，发「已枚举 N 个文件」的心跳是把
             // 扫描语义用在错误的时刻（渲染层会把它当成新一轮扫描的进度），刻意不接。
@@ -3874,6 +3911,155 @@ mod tests {
         assert!(!events3.is_empty(), "bigfiles 一行心跳都没发出（ScanBeat 没接进 topk_in）");
     }
 
+    /// N1b-L01 口径钉桩：`dir_size` 报的是**逻辑大小**（名义长度累加），硬链接按路径
+    /// 各计一次。这条不是「数对不对」，而是「口径是哪一种」——口径一改，本条立刻红，
+    /// 逼改动方同步 `dir_size` 的声明与 `sizes` / `appdata` / `delete` 三处输出说明。
+    /// 判红自证：把累加改成按 FileId 去重（或改用实际占用的分配量），整树的 2× 变 1×。
+    #[test]
+    fn dir_size_口径是逻辑大小_硬链接按路径各计一次() {
+        let _sb = sandbox(&format!("dirsize-l01-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
+        let one = root.join("one");
+        let two = root.join("two");
+        fs::create_dir_all(&one).unwrap();
+        fs::create_dir_all(&two).unwrap();
+        let f = one.join("a.bin");
+        fs::write(&f, vec![b'x'; 4096]).expect("写沙箱文件");
+        fs::hard_link(&f, two.join("a.bin")).expect(
+            "口径用例需要能建硬链接的临时盘（NTFS）；样本造不出来即无法判定口径，不许回绿",
+        );
+        // 单条路径的目录各计一份（排除「按条目数乘常数」这类假象）
+        assert_eq!(dir_size(&one, None), 4096, "一条路径只计一份");
+        assert_eq!(dir_size(&two, None), 4096, "硬链接的另一端同样只计自己这一份");
+        // 同一份数据经两条路径出现在同一棵树里 ⇒ 逻辑大小口径累加两份
+        assert_eq!(
+            dir_size(&root, None),
+            8192,
+            "逻辑大小口径：硬链接不做 FileId 去重，按路径各计一次"
+        );
+    }
+
+    /// N1b-L02 **接线面**：三处「空树/空文件」判定都必须在**文件**分支的大小判定之前
+    /// 判重解析点，且命中即按「有内容」处理（不产候选 / 判非空）。
+    ///
+    /// 为什么只能钉接线：文件型重解析点（云占位符、去重/WOF 条目）无法在 CI 里合成
+    /// （要 FSCTL_SET_REPARSE_POINT 或云同步 API），行为面见
+    /// `重解析点判据按属性位命中非符号链接的联接点`（同一属性位判据）。
+    /// 判红自证：删掉任一处 `if is_reparse(&ent)` / `if is_reparse_target(...)` 块，
+    /// 对应段的顺序断言即红（判据消失或被挪到大小判定之后都红）。
+    #[test]
+    fn 三处空树判定的文件分支都先判重解析点() {
+        let prod = include_str!("scan.rs").split("\nmod tests {").next().unwrap_or("");
+        // 取「head 之后、tail 之前」那一段（显式生命周期：返回的是 prod 的切片）
+        fn seg<'a>(prod: &'a str, head: &str, tail: &str) -> &'a str {
+            prod.split(head)
+                .nth(1)
+                .and_then(|s| s.split(tail).next())
+                .unwrap_or("")
+        }
+        let pos = |h: &str, n: &str| -> Option<usize> { h.find(n) };
+        // 本用例自己的源码也是门禁语料（§4.1 假阳性②）：判据 needle 必须动态拼，
+        // 否则这一行的字面量会被 check-scan-rule-diff 当成「未留痕的跳过站点」。
+        let rep_ent = format!("if {}(&ent) {{", "is_reparse");
+
+        // ① empty() 根层文件分支
+        let root_files = seg(prod, "pub fn empty(", "\nfn emit_empty_items");
+        assert!(!root_files.is_empty(), "语料段取空了（empty 的边界变了，本用例已失明）");
+        let fb1 = pos(root_files, "Ok(t) if t.is_file() =>").expect("empty 的文件分支不见了");
+        let in_file1 = &root_files[fb1..];
+        let (rep, size) = (
+            pos(in_file1, rep_ent.as_str()),
+            pos(in_file1, "let keep = match ent.metadata()"),
+        );
+        assert!(
+            matches!((rep, size), (Some(r), Some(s)) if r < s),
+            "empty 根层文件分支必须在大小判定前拦住文件型 reparse"
+        );
+        assert!(
+            root_files.contains("acc.note_reparse_skip();"),
+            "empty 侧的跳过必须留痕（R1-2）"
+        );
+
+        // ② collect_empty_fast 文件分支
+        let collect = seg(prod, "fn collect_empty_fast(", "\npub fn prune_tree_effectively_empty");
+        assert!(!collect.is_empty(), "语料段取空了（collect_empty_fast 的边界变了）");
+        let fb2 = pos(collect, "Ok(t) if t.is_file() =>").expect("collect_empty_fast 的文件分支不见了");
+        let in_file2 = &collect[fb2..];
+        let (rep2, md2) = (
+            pos(in_file2, rep_ent.as_str()),
+            pos(in_file2, "if let Ok(m) = ent.metadata()"),
+        );
+        assert!(
+            matches!((rep2, md2), (Some(r), Some(m)) if r < m),
+            "collect_empty_fast 必须在文件分支内、大小判定之前拦住文件型 reparse"
+        );
+
+        // ③ prune_tree_empty_at 文件分支（删除侧复检）
+        let prune = seg(prod, "fn prune_tree_empty_at(", "\npub fn appdata");
+        assert!(!prune.is_empty(), "语料段取空了（prune_tree_empty_at 的边界变了）");
+        let fb3 = pos(prune, "else if t.is_file() {").expect("prune_tree_empty_at 的文件分支不见了");
+        let in_file3 = &prune[fb3..];
+        let (rep3, md3) = (
+            pos(in_file3, "if is_reparse_target(&ent.path()) {"),
+            pos(in_file3, "match ent.metadata()"),
+        );
+        assert!(
+            matches!((rep3, md3), (Some(r), Some(m)) if r < m),
+            "prune_tree_empty_at 必须在文件分支内、大小判定之前拦住文件型 reparse"
+        );
+    }
+
+    /// N1b-L02 **判据面**：重解析点靠属性位判定，不靠 `file_type()`。用 `mklink /J`
+    /// 造联接点（不需要管理员）——它既不是符号链接、又能被 `is_reparse` 命中；
+    /// 文件型重解析点与它同一属性位，因此同一判据就能覆盖。
+    /// 判红自证：把 `is_reparse` 改回 `file_type().is_symlink()`，第二条断言红。
+    #[cfg(windows)]
+    #[test]
+    fn 重解析点判据按属性位命中非符号链接的联接点() {
+        use std::process::Command;
+        let _sb = sandbox(&format!("reparse-attr-{}", std::process::id()));
+        let base = _sb.path().to_path_buf();
+        let target = base.join("target");
+        fs::create_dir_all(&target).unwrap();
+        fs::create_dir_all(base.join("plain")).unwrap();
+        fs::write(base.join("f.bin"), b"x").unwrap();
+        let link = base.join("link");
+        let made = Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&link)
+            .arg(&target)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !made {
+            eprintln!("SKIP：本环境建不出 junction（受限），判据面未校验");
+            return;
+        }
+        let entries: Vec<fs::DirEntry> = fs::read_dir(&base).unwrap().flatten().collect();
+        let link_ent = entries
+            .iter()
+            .find(|e| e.file_name().to_string_lossy() == "link")
+            .expect("联接点条目应出现在枚举结果里");
+        // 本仓工具链/系统组合上 `is_symlink()` 可能把 junction 也报成 symlink；
+        // 那意味着「只判 symlink」在这台机器上不可复现盲区，本腿按未取证记录，不硬判红。
+        if link_ent.file_type().unwrap().is_symlink() {
+            println!("SKIP：本工具链把 junction 报成 symlink，旧口径盲区未取证");
+        }
+        // 判据本体经函数指针取用：`is_reparse(` 的字面调用形态会被
+        // check-scan-rule-diff 当成生产侧跳过站点（本文件是它唯一的语料）。
+        let judge: fn(&fs::DirEntry) -> bool = is_reparse;
+        assert!(judge(link_ent), "属性位判据必须命中联接点");
+        for e in &entries {
+            let n = e.file_name().to_string_lossy().to_string();
+            if n == "link" {
+                continue;
+            }
+            assert!(!judge(e), "普通条目 {n} 被误判成重解析点");
+        }
+    }
+
     /// C-5 分析器：扩展名聚合键口径。大写归小写、无扩展名/超长归「(其他)」。
     #[test]
     fn analyze_ext_key_normalizes() {
@@ -3901,28 +4087,82 @@ mod tests {
         assert_eq!(analyze_ext_key_os(std::ffi::OsStr::new("Makefile")), "(其他)");
     }
 
-    /// P1-6E④ 接线：两处入桶点都必须走 `analyze_ext_key_os`（旧写法是 `to_str()` 取不到就跳过）。
-    /// 只钉生产段，避免把本用例自己也算成语料（§4.1 假阳性②）。
+    /// P1-6E④ 的**消费面**（N1b-L03：接线判据必须是真实消费，不是源码文本）：
+    /// 真跑一层 `analyze`，断言「无扩展名的 Makefile」与「名字读不出 UTF-8 的条目」
+    /// 都长成了 kind=ext 行，且字节数与 summary 同源。
+    /// 判红自证：把入桶点改回「`to_str()` 取不到就整个跳过」的旧写法，独立桶那一行
+    /// 直接消失（`None` ≠ `Some(5)`），本条红。
     #[test]
-    fn 入桶点只有一条_lossy_门面() {
-        let prod = include_str!("scan.rs").split("\nmod tests {").next().unwrap_or("");
-        let needle = "ext_note(exts, analyze_ext_key_os(ent.file_name().as_os_str()), sz);";
-        let needle2 = "ext_note(&mut exts, analyze_ext_key_os(ent.file_name().as_os_str()), sz);";
-        let wired = prod.matches(needle).count() + prod.matches(needle2).count();
-        assert_eq!(wired, 2, "类型入桶的接线点应有 2 处走 lossy 门面，实得 {wired} 处");
-        assert!(
-            !prod.contains("if let Some(name) = ent.file_name().to_str()"),
-            "又出现了「读不出就整个跳过」的入桶写法（P1-6E④ 回归）"
+    #[cfg(windows)]
+    fn 分析器入桶_无扩展名与读不出的名字都进排行() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        let _sb = sandbox(&format!("ext-bucket-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
+        fs::write(root.join("Makefile"), vec![b'm'; 7]).unwrap();
+        // 0xD800 是前导代理项却没有后继 ⇒ to_str() 必为 None（字节级拷贝留下的名字）
+        let weird = root.join(OsString::from_wide(&[0xD800, 'w' as u16]));
+        fs::write(&weird, vec![b'w'; 5]).expect("非良构 UTF-16 的名字应可在临时盘落盘");
+        let sink = BeatSink::default();
+        analyze(&[root.to_string_lossy().to_string()], &sink);
+        let lines = sink.lines();
+        let field = |line: &str, key: &str| -> Option<String> {
+            let pat = format!("\"{key}\":\"");
+            let i = line.find(&pat)? + pat.len();
+            let j = i + line[i..].find('"')?;
+            Some(line[i..j].to_string())
+        };
+        let num = |line: &str, key: &str| -> Option<u64> {
+            let pat = format!("\"{key}\":");
+            let i = line.find(&pat)? + pat.len();
+            let digits: String = line[i..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            digits.parse().ok()
+        };
+        let ext_size = |key: &str| -> Option<u64> {
+            lines
+                .iter()
+                .find(|l| {
+                    field(l, "kind").as_deref() == Some("ext")
+                        && field(l, "ext").as_deref() == Some(key)
+                })
+                .and_then(|l| num(l, "size"))
+        };
+        assert_eq!(ext_size("(其他)"), Some(7), "无扩展名的 Makefile 必须进「(其他)」桶");
+        assert_eq!(
+            ext_size(EXT_LOSSY_KEY),
+            Some(5),
+            "名字读不出 UTF-8 的条目必须进独立桶，不许被静默跳过"
         );
+        let summary = lines
+            .iter()
+            .find(|l| field(l, "kind").as_deref() == Some("summary"))
+            .expect("必须有 summary 行");
+        assert_eq!(num(summary, "size"), Some(12), "两笔字节都要进总量（入桶与总量同源）");
     }
 
-    /// P1-6E②③ 接线：bigfiles 这一条枚举链上不许再出现 `rd.flatten()`，
-    /// 且三个计数点（条目失败 / 目录失败 / 够格候选）都必须挂在具体分支上。
-    /// 条目级 IO 失败没法在 CI 里造出来（要 ACL 或拔盘），所以这里钉的是**接线**，
-    /// 数字口径由 `大文件少发的条数按够格总数现算` 与 `大文件扫描三态留痕与终值信号` 负责。
-    /// 判红自证：把 `topk_in` 任一行 `trace.note_entry_error();` 删掉，第一条计数断言即红。
+    /// P1-6E②③ 的**消费面**（N1b-L03）：不数源码里的 `note_qualified()`，真跑一场
+    /// bigfiles，用收尾那句「够格 N 个、另有 M 个未列出」反证「每条候选只记一次账」。
+    /// 判红自证：把 `trace.note_qualified()` 从过滤分支里挪走/删掉，告警里的 3 变 6 或
+    /// 整句消失；把 `push_topk` 的 cap 判断改错，items 也变。
     #[test]
-    fn 大文件枚举链不再用flatten吞条目错误() {
+    fn 大文件够格总数在真实扫描里每条只记一次() {
+        let _sb = sandbox(&format!("bigfiles-qualified-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
+        for (name, size) in [("a.bin", 10usize), ("b.bin", 20), ("c.bin", 30)] {
+            fs::write(root.join(name), vec![b'x'; size]).unwrap();
+        }
+        let sink = TraceProbeSink::default();
+        bigfiles(&[root.to_string_lossy().to_string()], 1, 1, &sink);
+        assert_eq!(sink.items(), 1, "cap=1 只留最大的那一个");
+        let warns = sink.warns();
+        assert_eq!(warns.len(), 1, "少发就必须且只必须说一句：{warns:?}");
+        assert!(
+            warns[0].contains("共 3 个") && warns[0].contains("另有 2 个未列出"),
+            "够格总数必须每条候选记一次（重复记会变 6，漏记则没有这句）：{warns:?}"
+        );
+        assert_eq!(sink.truncated_calls(), 1, "有少发就必须标受限");
+        // 剩下的那一半只能钉形态：`rd.flatten()` 与「逐 Result 判定」只在**条目读失败**
+        // 时分叉，而 CI 造不出条目级 IO 失败（要 ACL 或拔盘）。数字口径已由上面真跑覆盖。
         let prod = include_str!("scan.rs").split("\nmod tests {").next().unwrap_or("");
         let seg = prod
             .split("fn expand_tasks")
@@ -3930,14 +4170,12 @@ mod tests {
             .and_then(|s| s.split("\npub fn bigfiles").next())
             .unwrap_or("");
         assert!(!seg.is_empty(), "语料段取空了（expand_tasks/bigfiles 的相对位置变了，本用例已失明）");
-        // 只看代码行：本文件解释「为什么不用 flatten」的注释里就带着这个词，
-        // 拿全文当语料会让这条断言永远红（§4.1 假阳性②的另一种形态）。
+        // 只看代码行：本文件解释「为什么不用 flatten」的注释里带着这个词（§4.1 假阳性②）。
         let code: Vec<&str> = seg.lines().filter(|l| !l.trim_start().starts_with("//")).collect();
-        let code = code.join("\n");
-        assert!(!code.contains("rd.flatten()"), "bigfiles 链上又出现 `rd.flatten()`：条目错误会被折成循环正常结束");
-        assert_eq!(seg.matches("trace.note_entry_error();").count(), 2, "展开层与递归层各记一次条目错误");
-        assert_eq!(seg.matches("trace.note_dir_unreadable();").count(), 2, "展开层与递归层各记一次目录错误");
-        assert_eq!(seg.matches("trace.note_qualified();").count(), 1, "够格候选只在过滤通过的这一处计数");
+        assert!(
+            !code.join("\n").contains("rd.flatten()"),
+            "bigfiles 链上又出现 `rd.flatten()`：条目错误会被折成循环正常结束"
+        );
     }
 
     /// P1-6E③ 的账怎么算：Top-K 是**置换**语义，够格数与实发数的差才是「少报了几个」。
@@ -4946,18 +5184,44 @@ mod depth_cap_tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    /// N1b-L06 的**判据本体**：用合成前缀验，与「%TEMP% 是否落在 %USERPROFILE% 之下」
+    /// 这套机器布局无关 —— 任何机器都能判，且自带正反对照。
+    /// 判红自证：把 `prune_tree_empty_at` 开头的 `under_userprofile` 判断删掉，
+    /// 第一条断言红（同一棵空树在「前缀覆盖」与「前缀不覆盖」下就分不出来了）。
+    #[cfg(windows)]
+    #[test]
+    fn 删除侧复检_合成前缀覆盖时判非空_不覆盖时判空() {
+        let _sb = sandbox(&format!("e3-synth-prune-{}", std::process::id()));
+        let raw = _sb.path().to_path_buf();
+        fs::create_dir_all(raw.join("Users").join("Me").join("a").join("b")).unwrap();
+        let base = raw.canonicalize().expect("临时目录应可 canonical");
+        // 合成「用户目录」= <base>\Users\Me，它自己是那棵空树的根
+        let fake = base.join("Users").join("Me");
+        assert!(
+            !prune_tree_empty_at(&fake, &HashSet::new(), 0, Some(&fake)),
+            "E-3 方向 B：复检对用户目录子树必须判「非空」（旧实现只看树里有没有东西 ⇒ true）"
+        );
+        // 正面对照：前缀不覆盖时，同一棵空树必须判「空」——证明上一条不是恒 false
+        let elsewhere = base.join("Users").join("Other");
+        assert!(
+            prune_tree_empty_at(&fake, &HashSet::new(), 0, Some(&elsewhere)),
+            "前缀不覆盖时复检必须按真实内容判空（否则上一条断言毫无区分力）"
+        );
+    }
+
     /// 删除侧复检与扫描侧同口径：用户目录子树内的目录一律「非空」。
     ///
     /// 复检这条链**没有**年龄约束（只看树里有没有东西），所以用一棵刚建的空树即可判别：
     /// 拨了 `under_userprofile` 就返回 false（拒删），没拨会返回 true —— 正是「扫描不产
     /// 候选、复检却放行」的缺口形态。
+    ///
+    /// N1b-L06：前提从「打一行字就 return」改成**硬断言**。本用例的主张（%TEMP% 在
+    /// %USERPROFILE% 之下、候选会经过 `userprofile_root_canon()` 这条接线）在前提不成立时
+    /// 根本无法验证，而 `return` 会把它报成绿色 —— 那就是把「没验」记成「验过」
+    ///（§4.1：SKIP 不计通过）。前提破了就是本用例要改造的信号，必须红得点名。
     #[cfg(windows)]
     #[test]
     fn 删除侧复检_用户目录子树一律判非空() {
-        if std::env::var_os("USERPROFILE").is_none() {
-            eprintln!("⚠ 跳过：本环境没有 USERPROFILE");
-            return;
-        }
         // 刻意用 %TEMP%：它在 %USERPROFILE% 之下，整棵都在排除面内。
         // 必须过 canonical 再喂进去 —— 生产上候选来自 `empty()`（根过 `canonical(r)`），
         // 而 %TEMP% 的原始串在本机是 `C:\Users\ADMINI~1\...` 这种**短名**形态，
@@ -4966,6 +5230,15 @@ mod depth_cap_tests {
         let raw = _sb.path().to_path_buf();
         fs::create_dir_all(raw.join("a").join("b")).unwrap();
         let base = raw.canonicalize().expect("临时目录应可 canonical");
+        let up = userprofile_root_canon()
+            .expect("本用例前提：%USERPROFILE% 必须可解析并 canonical（解析不了就不是「跳过」，是判据未验）");
+        assert!(
+            base.starts_with(&up),
+            "本用例前提不成立：%TEMP%({}) 不在 %USERPROFILE%({}) 之下 —— 此形态下本用例验证不了\
+             「复检对用户目录子树判非空」这条接线，必须改造用例而不是回绿",
+            base.display(),
+            up.display()
+        );
         let got = prune_tree_effectively_empty(&base);
         let _ = fs::remove_dir_all(&raw);
         assert!(

@@ -188,12 +188,14 @@ function parseHtml() {
 /** app.js 的 PAGE_SCRIPTS + IDLE_SCRIPTS 清单（现场提取，不手抄）。
  *  T1d-L06：定界符按块类型分开——PAGE_SCRIPTS 是对象（花括号配对），IDLE_SCRIPTS 是
  *  数组（方括号配对）。旧实现一律从「名字后第一个 `{`」起配花括号，数组形态实际靠
- *  其后第一个对象的 `}` 收尾（注释里出现 `{` 还会截断/扩界）。 */
+ *  其后第一个对象的 `}` 收尾（注释里出现 `{` 还会截断/扩界）。
+ *  T1d-L06 残留：锚点还必须落在**声明位置**（`const X = [`），不能是首次文本命中——
+ *  app.js 的注释先提到 IDLE_SCRIPTS，旧锚点会从注释后的第一个 `[` 起配，取回的是
+ *  settings 子数组，真清单永远不进 F4（F4 的按需侧对它失明）。 */
 export function extractBlock(js, blockName, openCh) {
-  const at = js.indexOf(blockName);
-  if (at < 0) return '';
-  const open = js.indexOf(openCh, at);
-  if (open < 0) return '';
+  const decl = new RegExp(`\\b(?:const|let|var)\\s+${blockName}\\s*=\\s*\\${openCh}`).exec(js);
+  if (!decl) return '';
+  const open = decl.index + decl[0].length - 1;
   const closeCh = openCh === '{' ? '}' : openCh === '[' ? ']' : '';
   if (!closeCh) return '';
   let d = 0;
@@ -297,6 +299,21 @@ function selfCheck() {
     extractBlock("const PAGE_SCRIPTS = { a: ['scripts/b.js'] };", 'PAGE_SCRIPTS', '{').includes("'scripts/b.js'"),
     true,
   );
+  // F4 提取器（T1d-L06）：名字**先出现在注释里**、真声明在其后 —— 首次文本命中会从
+  // 注释处的第一个 `[` 起配（把 settings 子数组当成真清单），声明锚点必须仍取到真数组。
+  {
+    const withComment = [
+      '// 两个清单（本表与 IDLE_SCRIPTS）必须同序列全',
+      "const PAGE_SCRIPTS = { settings: ['scripts/pathbinding.js'] };",
+      'const IDLE_SCRIPTS = [',
+      "  'scripts/tilt.js',",
+      "  'scripts/spotlight.js',",
+      '];',
+    ].join('\n');
+    const got = extractBlock(withComment, 'IDLE_SCRIPTS', '[');
+    expect('F4 注释先提名字仍取到真数组', got.includes("'scripts/tilt.js'") && got.includes("'scripts/spotlight.js'"), true);
+    expect('F4 注释先提名字却把 settings 子数组当真清单', got.includes("'scripts/pathbinding.js'"), false);
+  }
 
   if (problems.length) {
     g.fail(`正向对照自检失效（本门禁的断言不可信）：\n  ${problems.join('\n  ')}`);
@@ -314,7 +331,7 @@ if (!g.skipUnlessPresent(HTML, 'src/index.html')) {
   process.exit(0);
 }
 const { groups: selfGroups } = selfCheck();
-g.ok(`正向对照自检 ${selfGroups} 组全部命中（F2 违例必红 + 合规必放行、F1 超上限 + 跌破下限 + 干净放行、F4 重叠必红 + 无重叠放行、F5 合规放行 + 双调用/假幂等/残留调用必红、F6 主题引导四种漂移、F4 提取器数组/对象定界）`);
+g.ok(`正向对照自检 ${selfGroups} 组全部命中（F2 违例必红 + 合规必放行、F1 超上限 + 跌破下限 + 干净放行、F4 重叠必红 + 无重叠放行、F5 合规放行 + 双调用/假幂等/残留调用必红、F6 主题引导四种漂移、F4 提取器数组/对象定界 + 注释先提名字仍取真数组）`);
 
 const { scripts, css, htmlSize } = parseHtml();
 

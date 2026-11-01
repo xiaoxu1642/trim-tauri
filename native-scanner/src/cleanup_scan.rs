@@ -4,7 +4,10 @@
 // 输入（方案 v1.1 输入通道定案）：
 //   argv = ["cleanup", categories_json, configured_paths_json]（均为短参数，JSON 数组/对象）
 //   stdin = 规则 JSON 全文（60KB 级，超 CreateProcessW 32767 字符命令行上限，故走 stdin）
-// 输出：@@ITEM@@{json} 行协议，与 cleanup-scripts.js SCAN_SCRIPT 逐字段一致（UTF-8）。
+// 输出：@@ITEM@@{json} 行协议，与行协议消费方 `src-tauri/src/commands/cleanup/scan_execute.rs`
+//   的 `ScanAccum::ingest_line` 逐字段一致（渲染侧另有 `src/scripts/cleanup.js` 消费同一协议）。
+//   N1a-L07：旧注释按前端 `src/scripts` 下的同名脚本与 `SCAN_SCRIPT` 符号标注，那份脚本
+//   早已不在生产树里（只剩 vendor/upstream-js 的上游对照副本），别再照抄。
 // fail-closed：stdin 空/坏 JSON/结构不符 → stderr + exit 2（与 PS SCAN 致命守卫同口径）；
 //   pathPs 表达式求值失败 → 跳过该条目（不回落表达式原文，审查 v2.2 D1 纪律）。
 //
@@ -449,9 +452,19 @@ impl Json {
     }
 }
 
+/// JSON 解析的嵌套深度上限（N1a-L06）。
+///
+/// 为什么必须有：递归下降没有护栏时，深嵌套输入会把调用线程的栈直接打穿 ——
+/// Rust 的栈溢出是 abort 不是 panic，`capture` 的 catch_unwind 兜不住，
+/// 进程内直调（`run_json` → 本文件 `scan_body`）会把宿主应用一起带走。
+/// 与路径表达式的 `RULE_PATH_MAX_DEPTH` 取同档思路（fail-closed），不引外部依赖。
+const JSON_PARSE_MAX_DEPTH: u32 = 64;
+
 struct Jp {
     s: Vec<char>,
     i: usize,
+    /// 当前嵌套层数：只为深度上限服务（N1a-L06），不参与任何解析语义。
+    depth: u32,
 }
 
 impl Jp {
@@ -465,9 +478,19 @@ impl Jp {
         if self.i >= self.s.len() {
             return Err("JSON 意外结束".into());
         }
-        match self.s[self.i] {
-            '{' => self.object(),
-            '[' => self.array(),
+        let c = self.s[self.i];
+        // N1a-L06：容器嵌套先过深度闸再递归。失败是「输入畸形」而不是引擎 bug，
+        // 由 parse_json 的调用方按原有「坏 JSON → fatal」通道处理。
+        if c == '{' || c == '[' {
+            self.depth += 1;
+            if self.depth > JSON_PARSE_MAX_DEPTH {
+                return Err(format!("JSON 嵌套过深（超过 {} 层）", JSON_PARSE_MAX_DEPTH));
+            }
+            let v = if c == '{' { self.object() } else { self.array() };
+            self.depth -= 1;
+            return v;
+        }
+        match c {
             '"' => Ok(Json::Str(self.string()?)),
             't' => self.lit("true", Json::Bool(true)),
             'f' => self.lit("false", Json::Bool(false)),
@@ -632,7 +655,7 @@ impl Jp {
 }
 
 pub fn parse_json(text: &str) -> Result<Json, String> {
-    let mut p = Jp { s: text.chars().collect(), i: 0 };
+    let mut p = Jp { s: text.chars().collect(), i: 0, depth: 0 };
     let v = p.value()?;
     p.ws();
     if p.i != p.s.len() {
@@ -822,6 +845,22 @@ pub fn is_drive_relative(p: &str) -> bool {
     // readdirSync('C:') 返回进程 CWD 内容），子路径无根 ⇒ 保护判据 fail-closed
     // 全拦 ⇒「体积 0 + locked=全部 + 零留痕」。旧判据只认前导单 `\`/`/`，
     // 这三种形态全部放行。
+    true
+}
+
+/// §4.10 盘符相对形态的统一拒绝口（N1a-L01）：命中即留痕并返回 true，调用方跳过该路径。
+///
+/// 为什么收成函数：configured 覆盖值此前是六个路径域里唯一没过这道闸的字段；补接时
+/// 若再各写一个 `is_drive_relative` 调用点，判定接线会被重复计数、文案也会分叉。
+/// 判定本体仍是 [`is_drive_relative`] 单点实现，这里只统一「拒绝 + 留痕」的形状；
+/// pathPs 主路径的既有判定一并收编到本函数。
+fn reject_drive_relative(field: &str, cat_id: &str, p: &str) -> bool {
+    if !is_drive_relative(p) {
+        return false;
+    }
+    err_line(&format!(
+        "[cleanup-scan] [DIAG] stage=scan.{field} mutation=skip detail={cat_id} {field} 为盘符相对路径（{p}），已拒绝使用（§4.10）"
+    ));
     true
 }
 
@@ -1193,6 +1232,12 @@ struct DirSnapshot {
     /// 本目录枚举时命中的 reparse 目录/其他项数。walker 处理到该目录时一次加总，
     /// 保证「预算耗尽后不再下钻」时不会把未处理目录的计数算进去。
     skipped_reparse: u64,
+    /// 本目录**逐项**枚举/取类型失败的条目数（N1a-L04）。
+    ///
+    /// 与 `error`（目录级失败）并列：`ReadDir` 的逐项 `Err` 与 `file_type()` 失败
+    /// 旧写法被 `flatten()` / `continue` 静默吞掉，`skippedUnreadable` 因此恒少报
+    /// ——「没扫到」必须在回执上可数。同样由 walker 处理到该目录时一次加总。
+    unreadable: u64,
     /// `Some` = 预取时该目录不可读；walker 按原口径计数并留痕，不静默丢。
     error: Option<String>,
 }
@@ -1203,14 +1248,35 @@ struct WalkCache {
     probes: std::collections::HashMap<std::path::PathBuf, FileProbe>,
 }
 
+/// 取下一条有效目录项：逐项 `Err` 只计数不中断（N1a-L04 的唯一实现）。
+///
+/// 为什么不用 `ReadDir::flatten()`：`flatten()` 把「这一项枚举失败」与「这一项不存在」
+/// 压成同形，失败数无处可查 ⇒ `skippedUnreadable` 恒少报。计数走向与目录级失败同一出口。
+fn next_entry<I>(it: &mut I, unreadable: &mut u64) -> Option<fs::DirEntry>
+where
+    I: Iterator<Item = std::io::Result<fs::DirEntry>>,
+{
+    loop {
+        match it.next()? {
+            Ok(ent) => return Some(ent),
+            Err(_) => *unreadable += 1,
+        }
+    }
+}
+
 /// 读一个目录并转成缓存条目。预取与 walker 的 live 回退共用这一份枚举实现，
 /// 防止「两套目录分类」造成顺序/过滤分叉。
 fn snapshot_dir(dir: &Path, all: bool, pattern: &str) -> Result<DirSnapshot, String> {
-    let rd = fs::read_dir(dir).map_err(|e| e.to_string())?;
+    let mut rd = fs::read_dir(dir).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     let mut skipped_reparse = 0u64;
-    for ent in rd.flatten() {
-        let Ok(ft) = ent.file_type() else { continue };
+    let mut unreadable = 0u64;
+    while let Some(ent) = next_entry(&mut rd, &mut unreadable) {
+        let Ok(ft) = ent.file_type() else {
+            // N1a-L04：条目类型读不到 = 这一项没扫到（旧写法 `continue` 零计数）。
+            unreadable += 1;
+            continue;
+        };
         if ft.is_dir() {
             let reparse = crate::is_reparse(&ent);
             if reparse {
@@ -1232,7 +1298,7 @@ fn snapshot_dir(dir: &Path, all: bool, pattern: &str) -> Result<DirSnapshot, Str
             out.push(CachedEntry::Other);
         }
     }
-    Ok(DirSnapshot { entries: out, skipped_reparse, error: None })
+    Ok(DirSnapshot { entries: out, skipped_reparse, unreadable, error: None })
 }
 
 /// 整树预取：串行枚举目录、记录目录快照，并把匹配 pattern 的文件一次性并行探测。
@@ -1288,7 +1354,7 @@ fn prefetch_walk(
                 }
             }
             Err(e) => {
-                cache.dirs.insert(dir, DirSnapshot { entries: Vec::new(), skipped_reparse: 0, error: Some(e) });
+                cache.dirs.insert(dir, DirSnapshot { entries: Vec::new(), skipped_reparse: 0, unreadable: 0, error: Some(e) });
             }
         }
     }
@@ -1326,6 +1392,15 @@ impl DirView<'_> {
         match self {
             DirView::Cached(s) => s.skipped_reparse,
             DirView::Live(s) => s.skipped_reparse,
+            DirView::Error(_) => 0,
+        }
+    }
+
+    /// 本目录逐项枚举失败的条目数（N1a-L04）：与目录级失败同一出口（unreadable 计数）。
+    fn unreadable(&self) -> u64 {
+        match self {
+            DirView::Cached(s) => s.unreadable,
+            DirView::Live(s) => s.unreadable,
             DirView::Error(_) => 0,
         }
     }
@@ -1378,6 +1453,9 @@ fn walk_deletable(
     // 本目录的 reparse 跳过数在枚举时已统计；只在本目录真正被处理时一次加总
     // （预算耗尽后不再下钻的目录不会被算进来）。
     res.skipped_reparse += view.skipped_reparse();
+    // N1a-L04：逐项枚举失败与目录级失败同列「不可读」，同样只在本目录被处理时加总
+    // （旧写法 `flatten()` / `file_type()` 失败静默丢，回执里的 skippedUnreadable 恒少报）。
+    res.unreadable_dirs += view.unreadable();
     let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
     let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
     for ent in view.entries() {
@@ -1698,7 +1776,7 @@ fn join_path(r: &str, seg: &str) -> String {
 fn list_matching_dirs(parent: &str, seg: &str, force: bool, skipped_reparse: &mut u64, unreadable: &mut u64) -> Vec<String> {
     let pd = Path::new(parent);
     let mut out = Vec::new();
-    let rd = match fs::read_dir(pd) {
+    let mut rd = match fs::read_dir(pd) {
         Ok(r) => r,
         // v7.2-C03（N1a-M04）：glob 段级列目录失败原先静默返回空 ⇒ 「展开为空」
         // 与「目录不可读」同形。留痕后按空返回（不改变展开语义）。
@@ -1711,14 +1789,19 @@ fn list_matching_dirs(parent: &str, seg: &str, force: bool, skipped_reparse: &mu
             return out;
         }
     };
-    for ent in rd.flatten() {
+    // N1a-L04：逐项枚举失败也要计数（旧 `rd.flatten()` 静默丢，汇总行因此少报）。
+    while let Some(ent) = next_entry(&mut rd, &mut *unreadable) {
         if crate::is_reparse(&ent) {
             *skipped_reparse += 1; // R1-2：留痕，不进 out（展开结果）判定
             continue;
         }
         let ft = match ent.file_type() {
             Ok(t) => t,
-            Err(_) => continue,
+            Err(_) => {
+                // N1a-L04：类型读不到 = 这一项没扫到（旧写法静默 continue）。
+                *unreadable += 1;
+                continue;
+            }
         };
         if !ft.is_dir() {
             continue;
@@ -1782,7 +1865,7 @@ pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
         ));
         return Vec::new();
     }
-    if !expanded.contains('*') {
+    if !expanded.contains('*') && !expanded.contains('?') {
         // 非通配快路径：目录直接回；**文件也要回**（2026-10-04 审计 §4.2）。
         //
         // 原先只认 `is_container`（即 is_dir），于是 `fileKeys` 里直指单个文件的条目
@@ -1813,6 +1896,14 @@ pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
         roots.push("\\".to_string());
     }
     for seg in &segments[start..] {
+        // N1a-L02：`**` 不被当作「递归下钻」——`wildcard_match` 只按单层通配匹配，
+        // 展开结果会比作者预期窄。能力不扩（递归展开超出本函数），但必须留痕：
+        // 旧写法在这里静默降级成单层 `*`。
+        if seg.contains("**") {
+            err_line(&format!(
+                "[trim-scanner] glob 段 {seg} 含 ** 递归通配，不支持递归展开，按单层通配处理（{expanded}）"
+            ));
+        }
         let wild = seg.contains('*') || seg.contains('?');
         let mut next: Vec<String> = Vec::new();
         for r in &roots {
@@ -1839,7 +1930,11 @@ pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
             }
         });
         if next.is_empty() {
-            return Vec::new();
+            // N1a-L05：展开为空也要先把已累计的汇总诊断发出去 —— 旧写法在这里
+            // 直接 `return Vec::new()`，把 skippedReparse / unreadable 两句汇总
+            // 整段吞掉，正好与函数头「不许静默」的承诺相反。
+            roots.clear();
+            break;
         }
         roots = next;
     }
@@ -1854,8 +1949,10 @@ pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
 
 // ==================== checklocked 子命令（清理前占用检测，v3.3.4） ====================
 // 输入：stdin JSON {"files":[{"path":"...","id":"..."}, ...]}（来自主进程扫描快照的计划清单）
-// 输出：@@LOCKED@@{"path":"...","id":"...","apps":[...],"critical":[...]} 逐个被占用文件；
-//       终止行 @@LOCKED_DONE@@{"scanned":N,"locked":M}
+// 输出：@@LOCKED@@{"path":"...","id":"...","procs":[{"pid":…,"app":…,"critical":…}]} 逐个被占用文件；
+//       终止行 @@LOCKED_DONE@@{"scanned":N,"locked":M,"skipped":K}
+// N1a-L07：旧注释把进程列表写成 `apps` 与 `critical` 两个并列键 —— 实际协议只有 `procs`
+//   （进程项自带 critical 标志；见 `checklocked_body` 的拼装与 scan_execute.rs 的消费侧）。
 // 两段式探测：独占打开（FileShare.None，与 ListDeletable.Deletable 同口径）快速过滤 →
 //   打不开且确实存在的文件逐个查 Restart Manager 拿占用进程应用名（per-file session，
 //   RM 不提供 file→process 归属，locked 文件通常为少数，per-file 开销可接受）。
@@ -1864,12 +1961,48 @@ pub fn expand_glob_dirs(pattern: &str, force: bool) -> Vec<String> {
 mod rstrtmgr {
     const CCH_RM_SESSION_KEY: usize = 32;
     const ERROR_MORE_DATA: i32 = 234;
+    /// `RmGetList` 因 ERROR_MORE_DATA 重试的次数上限（N1a-L08）。
+    ///
+    /// 为什么必须有：`continue` 只把 `count` 换成 `needed`，`needed` 不前进时就是
+    /// 同参数无限重试；调用线程是 `checklocked` 的同步主线程，外层**没有超时**
+    /// （`src-tauri/src/commands/cleanup/mod.rs` 成文登记「无 60s 占用检测超时」），
+    /// 一旦触发就是不可中止的挂死。超限放弃的方向是「少报占用」，不是伪造结果。
+    const RM_GETLIST_MAX_RETRY: u32 = 3;
 
     // 结构、布局断言与 FFI 声明已上移 `crate::util::ffi`（v3 C-3）。
+    use super::err_line;
     use crate::util::ffi::{
         RM_PROCESS_INFO, RmEndSession, RmGetList, RmRegisterResources, RmStartSession,
     };
     use crate::util::to_wide;
+
+    /// ERROR_MORE_DATA 重试的决策本体（N1a-L08）：`Some(n)` = 用 n 个槽位再试一次，
+    /// `None` = 放弃（超过上限 / needed 为 0 时再分配只会原地打转）。
+    ///
+    /// 抽成纯函数便于单测判红：真实竞态（两轮之间恰好持续有新占用者加入）无法在
+    /// 单测里复现，但「上限与零值」两条边界可以直接钉住。
+    fn rm_more_data_next(retries: u32, needed: u32) -> Option<u32> {
+        if retries >= RM_GETLIST_MAX_RETRY || needed == 0 {
+            None
+        } else {
+            Some(needed)
+        }
+    }
+
+    /// N1a-L08 判红自证：删掉 `retries >= RM_GETLIST_MAX_RETRY` 这条 ⇒ 第三条断言红；
+    /// 删掉 `needed == 0` ⇒ 第四条红。
+    #[cfg(test)]
+    mod tests {
+        use super::rm_more_data_next;
+
+        #[test]
+        fn rmgetlist_more_data_重试上限与零值边界() {
+            assert_eq!(rm_more_data_next(1, 64), Some(64), "正常扩容必须放行");
+            assert_eq!(rm_more_data_next(2, 4096), Some(4096), "上限前最后一轮仍可重试");
+            assert_eq!(rm_more_data_next(3, 4096), None, "达到上限必须放弃（否则同参数无限重试）");
+            assert_eq!(rm_more_data_next(2, 0), None, "needed 为 0 时必须放弃（0 尺寸缓冲区只会原地打转）");
+        }
+    }
 
     /// Restart Manager 查询单个文件的占用者：返回进程列表（PID + 应用名 + 是否系统关键进程）。
     /// RM 不提供 file→process 归属，session 只注册本文件，结果即本文件占用者。
@@ -1893,13 +2026,30 @@ mod rstrtmgr {
             if rc == 0 {
                 let mut needed: u32 = 0;
                 let mut count: u32 = 32;
+                let mut retries: u32 = 0;
                 loop {
+                    // N1a-L08：needed 为 0 时不再分配 0 元素缓冲区原地打转。
+                    if count == 0 {
+                        break;
+                    }
                     let mut buf: Vec<RM_PROCESS_INFO> = vec![std::mem::zeroed(); count as usize];
                     let mut reboot: u32 = 0;
                     let rc2 = RmGetList(sess, &mut needed, &mut count, buf.as_mut_ptr(), &mut reboot);
                     if rc2 == ERROR_MORE_DATA {
-                        count = needed;
-                        continue;
+                        retries += 1;
+                        match rm_more_data_next(retries, needed) {
+                            Some(next) => {
+                                count = next;
+                                continue;
+                            }
+                            None => {
+                                err_line(&format!(
+                                    "[trim-scanner] RmGetList 连续返回 ERROR_MORE_DATA 达 {} 次，已放弃本次占用查询（{path}）",
+                                    RM_GETLIST_MAX_RETRY
+                                ));
+                                break;
+                            }
+                        }
                     }
                     if rc2 == 0 {
                         buf.truncate(count as usize);
@@ -2072,7 +2222,8 @@ fn detect_by_candidates(rule: &Json) -> Option<bool> {
                 ));
                 continue;
             }
-            if cp.contains('*') {
+            if cp.contains('*') || cp.contains('?') {
+                // N1a-L02：`?`-only 候选旧守卫不认，落到 path_exists 字面量判定上恒假。
                 if !expand_glob_dirs(&cp, true).is_empty() {
                     return Some(true);
                 }
@@ -2115,7 +2266,12 @@ fn test_rule_detect(rule: &Json, configured: &str) -> bool {
     // （正是 pathbinding 提供手动填写的唯一用途）整条条目在这里 continue，
     // 用户配置的路径一次也没被扫过，且零留痕。判据与主支同源：同一取值 + 同一个
     // path_exists，不另立口径。
-    if !configured.is_empty() && path_exists(configured) {
+    // N1a-L01：盘符相对形态（`\Foo`）会按当前盘根解析成真实目录，`path_exists` 可能
+    // 为真 ⇒ 必须与其它路径域同一道 §4.10 闸先拒掉，不能当「已确认路径」。
+    if !configured.is_empty()
+        && !reject_drive_relative("configured", rid, configured)
+        && path_exists(configured)
+    {
         return true;
     }
     if let Some(d) = rule.get("detect") {
@@ -2129,9 +2285,17 @@ fn test_rule_detect(rule: &Json, configured: &str) -> bool {
                 return false;
             };
             for c in arr {
+                    // N1a-L03：detect 项畸形（缺 path / 空串 / 非字符串）旧写法静默
+                    // `continue` —— 与 detect_by_candidates 的已修口径（N1a-M09）统一：
+                    // 畸形必须 REPORTED，否则「规则隐身」没有对账依据。
                     let path = match c.get("path").and_then(|p| p.as_str()) {
                         Some(p) if !p.is_empty() => p,
-                        _ => continue,
+                        _ => {
+                            err_line(&format!(
+                                "[cleanup-scan] 规则 {rid} detect[] 项 path 缺失、为空或非字符串，已跳过（N1a-L03）"
+                            ));
+                            continue;
+                        }
                     };
                     let is_reg = c.get("type").and_then(|t| t.as_str()) == Some("reg");
                     if is_reg {
@@ -2149,7 +2313,9 @@ fn test_rule_detect(rule: &Json, configured: &str) -> bool {
                             err_line(&format!(
                                 "[cleanup-scan] 规则 {rid} detect[].path 盘符相对路径（{p}），已按不存在处理（§4.10）"
                             ));
-                        } else if p.contains('*') {
+                        } else if p.contains('*') || p.contains('?') {
+                            // N1a-L02：守卫曾只认 `*`，`?`-only 路径落到 path_exists
+                            // 的字面量判定上恒假 ⇒ 整条规则静默隐身、零留痕。
                             if !expand_glob_dirs(&p, true).is_empty() {
                                 return true;
                             }
@@ -2169,7 +2335,8 @@ fn test_rule_detect(rule: &Json, configured: &str) -> bool {
                     if let Some(fp0) = first.get("path").and_then(|p| p.as_str()) {
                         let fp = expand_env_path(fp0);
                         report_unexpanded_token("fileKeys[0].path(detect回退)", rid, &fp);
-                        if fp.contains('*') {
+                        if fp.contains('*') || fp.contains('?') {
+                            // N1a-L02：`?`-only 路径同样必须走 glob 展开（旧守卫只测 `*`）。
                             return !expand_glob_dirs(&fp, true).is_empty();
                         }
                         // §4.10：盘符相对形态在 detect 阶段就按「不存在」处理——
@@ -2679,6 +2846,8 @@ fn walk_fk_dll(
     }
     // 本目录的 reparse 跳过数在枚举时已统计；只在本目录真正被处理时一次加总。
     acc.skipped_reparse += view.skipped_reparse();
+    // N1a-L04：逐项枚举失败与目录级失败同一出口（fileKeys 侧 skippedUnreadable）。
+    acc.unreadable_dirs += view.unreadable();
     let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
     let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
     for ent in view.entries() {
@@ -2786,6 +2955,8 @@ fn walk_fk_snapshot(
     }
     // 本目录的 reparse 跳过数在枚举时已统计；只在本目录真正被处理时一次加总。
     acc.skipped_reparse += view.skipped_reparse();
+    // N1a-L04：与 walk_fk_dll 同口径 —— 逐项枚举失败计入 unreadable。
+    acc.unreadable_dirs += view.unreadable();
     let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
     let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
     for ent in view.entries() {
@@ -3542,11 +3713,9 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
             }
         };
         // §4.10：盘符相对形态（`$env:UNDEF + '\Foo'` → `\Foo`）不枚举——
-        // 「当前盘」是 CWD 的偶然属性，不是规则作者的决定
-        if is_drive_relative(&evaluated) {
-            err_line(&format!(
-                "[cleanup-scan] [DIAG] stage=scan.pathPs mutation=skip detail={cat_id} pathPs 求值为盘符相对路径（{evaluated}），已拒绝枚举（§4.10）"
-            ));
+        // 「当前盘」是 CWD 的偶然属性，不是规则作者的决定。
+        // N1a-L01：拒绝形状收编进 [`reject_drive_relative`]，与设置页覆盖值共用同一道闸。
+        if reject_drive_relative("pathPs", cat_id, &evaluated) {
             continue;
         }
         let mut path = evaluated.clone();
@@ -3561,8 +3730,12 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
             // §4.8：设置页存量配置值也可能带未解析 %TOKEN%（按原文永远 0 命中）——
             // 只留痕不拒用，让「为什么这项扫不出来」可对账
             report_unexpanded_token("configured", cat_id, &configured_value);
-            path = configured_value;
-            path_source = "configured".to_string();
+            // N1a-L01：configured 是全文件最后一个没过 §4.10 的路径字段——盘符相对形态
+            // 会按当前盘根被真实枚举。命中则不采用覆盖值（退回 pathPs 求值结果）。
+            if !reject_drive_relative("configured", cat_id, &configured_value) {
+                path = configured_value;
+                path_source = "configured".to_string();
+            }
         }
 
         // [D19 键名已对齐（2026-10-01 拍板修复）] 此前按缺陷原样读 `candidates`/`globCandidates`，
@@ -3573,18 +3746,28 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
             if cands.ps_count() > 0 {
                 if let Some(arr) = cands.as_arr() {
                     for cexpr in arr {
-                        if let Some(ce) = cexpr.as_str() {
-                            if let Some(cp) = resolve_rule_path(ce) {
-                                // §4.10：盘符相对候选不进候选集（自动定位会按当前盘根枚举）
-                                if is_drive_relative(&cp) {
-                                    err_line(&format!(
-                                        "[cleanup-scan] 条目 {cat_id} candidatesPs 求值为盘符相对路径（{cp}），已跳过（§4.10）"
-                                    ));
-                                    continue;
-                                }
-                                path_candidates.push(cp);
-                            }
+                        // N1a-L03：候选项非字符串 / 求值失败旧写法两者都静默跳过
+                        // （`if let` 嵌套），与 detect_by_candidates 的已修口径分叉。
+                        let Some(ce) = cexpr.as_str() else {
+                            err_line(&format!(
+                                "[cleanup-scan] 规则 {cat_id} candidatesPs 存在非字符串候选项，已跳过（N1a-L03）"
+                            ));
+                            continue;
+                        };
+                        let Some(cp) = resolve_rule_path(ce) else {
+                            err_line(&format!(
+                                "[cleanup-scan] 规则 {cat_id} candidatesPs 候选求值失败（{ce}），已跳过（N1a-L03）"
+                            ));
+                            continue;
+                        };
+                        // §4.10：盘符相对候选不进候选集（自动定位会按当前盘根枚举）
+                        if is_drive_relative(&cp) {
+                            err_line(&format!(
+                                "[cleanup-scan] 条目 {cat_id} candidatesPs 求值为盘符相对路径（{cp}），已跳过（§4.10）"
+                            ));
+                            continue;
                         }
+                        path_candidates.push(cp);
                     }
                 }
                 if !path_exists(&path) {
@@ -3603,8 +3786,19 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
             if globs.ps_count() > 0 {
                 if let Some(arr) = globs.as_arr() {
                     for gexpr in arr {
-                        let Some(ge) = gexpr.as_str() else { continue };
-                        let Some(pat) = resolve_rule_path(ge) else { continue };
+                        // N1a-L03：与 candidatesPs 同口径 —— 非字符串 / 求值失败必须留痕。
+                        let Some(ge) = gexpr.as_str() else {
+                            err_line(&format!(
+                                "[cleanup-scan] 规则 {cat_id} globCandidatesPs 存在非字符串候选项，已跳过（N1a-L03）"
+                            ));
+                            continue;
+                        };
+                        let Some(pat) = resolve_rule_path(ge) else {
+                            err_line(&format!(
+                                "[cleanup-scan] 规则 {cat_id} globCandidatesPs 候选求值失败（{ge}），已跳过（N1a-L03）"
+                            ));
+                            continue;
+                        };
                         // GCI -Path pat -Directory（无 -Force：隐藏目录不参与）取第一个匹配
                         let hit = expand_glob_dirs(&pat, false).into_iter().next();
                         if let Some(full) = hit {
@@ -5330,6 +5524,279 @@ mod n1a_m01_m03_tests {
             (st.nfiles, st.size),
             (0, 0),
             "目标自身是重解析点却报可删 —— 树分支对重解析点一律跳过（N1a-M03）"
+        );
+    }
+}
+
+#[cfg(test)]
+mod n1a_g6_l_tests {
+    //! P2-G6 · N1a-L01..L08 的回归钉（每条都写明「破坏哪一行会红」）。
+    use super::*;
+
+    /// JSON 文本里的 Windows 路径（反斜杠双写）。
+    fn js(p: &Path) -> String {
+        p.to_string_lossy().replace('\\', "\\\\")
+    }
+
+    /// 找一个 read_dir 会失败的盘符（不写死字母：本机可能有任意映射盘）。
+    fn unusable_drive() -> Option<char> {
+        ('D'..='Z').find(|c| std::fs::read_dir(format!("{c}:\\")).is_err())
+    }
+
+    /// N1a-L01：configured 覆盖值是全文件最后一个没接 §4.10 闸的路径字段。
+    /// 判红自证：`reject_drive_relative` 返回 false（删掉 `is_drive_relative` 判定）⇒ 第一条红；
+    /// `test_rule_detect` 删掉该判据 ⇒ 第二条红（`.` 在盘上存在，会被当成「已确认路径」）。
+    #[test]
+    fn configured_盘符相对在detect被拒并留痕() {
+        let (code, _out, err) = capture(None, || {
+            assert!(reject_drive_relative("configured", "l01", r"\Foo"), "前导单反斜杠必须拒");
+            assert!(reject_drive_relative("configured", "l01", "."), "无根相对串必须拒");
+            assert!(!reject_drive_relative("configured", "l01", r"C:\Foo"), "盘符根必须放行");
+            assert!(!reject_drive_relative("configured", "l01", r"\\server\share"), "UNC 必须放行");
+            0
+        });
+        assert_eq!(code, 0, "判定边界不符: {err}");
+        assert!(err.contains("configured 为盘符相对路径"), "拒绝必须留痕: {err}");
+
+        let rule = parse_json(r#"{"id":"l01","detect":[{"path":"C:\\TrimNoSuchDirL01"}]}"#).unwrap();
+        let (code2, _o2, err2) = capture(None, || {
+            assert!(!test_rule_detect(&rule, "."), "盘符相对配置值不得作为 detect 命中依据");
+            0
+        });
+        assert_eq!(code2, 0, "detect 仍把盘符相对配置值当命中: {err2}");
+    }
+
+    /// N1a-L01 端到端：盘符相对的配置值不得顶替 pathPs 成为扫描目标。
+    /// 判红自证：删掉主路径分支的 `reject_drive_relative` ⇒ `path` 被写成那个相对串，第一条红。
+    #[test]
+    fn configured_盘符相对不顶替扫描目标() {
+        let _sb = sandbox(&format!("n1a-g6-l01-{}", std::process::id()));
+        let root = _sb.path().join("cache");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.tmp"), b"abcd").unwrap();
+        let root_json = js(&root);
+
+        let rules = format!(
+            r#"{{"groups":[{{"items":[{{"id":"n1aL01","name":"配置闸","pathPs":"'{root_json}'"}}]}}]}}"#
+        );
+        let (code, out, err) = run_json(
+            &[
+                r#"["n1aL01"]"#.to_string(),
+                r#"{"n1aL01":"not-a-rooted-value"}"#.to_string(),
+                String::new(),
+            ],
+            &rules,
+            None,
+        );
+        assert_eq!(code, 0, "扫描不得失败: {err}");
+        let item = out
+            .lines()
+            .find(|l| l.starts_with("@@ITEM@@") && l.contains("\"id\":\"n1aL01\""))
+            .unwrap_or_else(|| panic!("条目未输出: {out}"));
+        assert!(
+            item.contains(&format!("\"path\":\"{root_json}\"")),
+            "盘符相对配置值顶替了 pathPs 目标: {item}"
+        );
+        assert!(err.contains("configured 为盘符相对路径"), "拒绝必须留痕: {err}");
+    }
+
+    /// N1a-L02：四处入口守卫曾只测 `*`，`?`-only 路径静默回空（规则整条隐身）。
+    /// 判红自证：任一守卫改回只测 `contains('*')` ⇒ 对应断言红（四处各一条）。
+    #[test]
+    fn 问号通配四处入口都走展开() {
+        let _sb = sandbox(&format!("n1a-g6-l02-{}", std::process::id()));
+        let root = _sb.path().join("q");
+        for d in ["ab", "ac", "zz"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        // 通配串按本文件约定要带转义分隔符（`js` 把 `\` 翻成 `\\`），否则 `\a` 会被当成非法转义。
+        let pat_raw = format!("{}\\\\a?", js(&root));
+        let pat = format!("{}\\\\a?", js(&root));
+
+        // ① expand_glob_dirs 的非通配快路径守卫
+        let (code, _out, _err) = capture(None, || {
+            let mut got = expand_glob_dirs(&pat_raw, false);
+            got.sort();
+            assert_eq!(got.len(), 2, "? 通配必须展开出 ab/ac: {got:?}");
+            0
+        });
+        assert_eq!(code, 0);
+
+        // ② detect[].path
+        let rule = parse_json(&format!(r#"{{"id":"q1","detect":[{{"path":"{pat}"}}]}}"#)).unwrap();
+        let (code2, _o2, _e2) = capture(None, || {
+            assert!(test_rule_detect(&rule, ""), "detect[].path 的 ? 通配必须命中");
+            0
+        });
+        assert_eq!(code2, 0);
+
+        // ③ detect 候选档（candidatesPs）
+        let cand = parse_json(&format!(r#"{{"id":"q2","candidatesPs":["'{pat}'"]}}"#)).unwrap();
+        let (code3, _o3, _e3) = capture(None, || {
+            assert_eq!(detect_by_candidates(&cand), Some(true), "候选档的 ? 通配必须命中");
+            0
+        });
+        assert_eq!(code3, 0);
+
+        // ④ fileKeys[0] 的 detect 回退
+        let fk = parse_json(&format!(r#"{{"id":"q3","fileKeys":[{{"path":"{pat}"}}]}}"#)).unwrap();
+        let (code4, _o4, _e4) = capture(None, || {
+            assert!(test_rule_detect(&fk, ""), "fileKeys 回退的 ? 通配必须命中");
+            0
+        });
+        assert_eq!(code4, 0);
+    }
+
+    /// N1a-L02：`**` 没有递归展开能力，被降级成单层匹配 —— 旧写法零留痕。
+    /// 判红自证：删掉 `seg.contains("**")` 的 err_line ⇒ 断言红。
+    #[test]
+    fn 双星通配降级必须留痕() {
+        let _sb = sandbox(&format!("n1a-g6-l02b-{}", std::process::id()));
+        let root = _sb.path().join("s");
+        for d in ["ab", "ac"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let pat_raw = format!("{}\\\\**", js(&root));
+        let (code, _out, err) = capture(None, || {
+            let got = expand_glob_dirs(&pat_raw, false);
+            assert_eq!(got.len(), 2, "** 按单层通配处理: {got:?}");
+            0
+        });
+        assert_eq!(code, 0);
+        assert!(err.contains("不支持递归展开"), "** 降级必须留痕: {err}");
+    }
+
+    /// N1a-L03：detect 项畸形（缺 path / 非字符串）旧写法 `_ => continue` 零留痕。
+    /// 判红自证：改回不 err_line ⇒ 断言红。
+    #[test]
+    fn detect项畸形必须留痕() {
+        let rule = parse_json(r#"{"id":"l03d","detect":[{"path":123},{"type":"reg"}]}"#).unwrap();
+        let (code, _out, err) = capture(None, || {
+            assert!(!test_rule_detect(&rule, ""), "两项目畸形 ⇒ 整条按不存在处理");
+            0
+        });
+        assert_eq!(code, 0);
+        assert!(err.contains("detect[] 项 path 缺失、为空或非字符串"), "畸形 detect 项必须留痕: {err}");
+    }
+
+    /// N1a-L03：candidatesPs / globCandidatesPs 的非字符串与求值失败四类静默。
+    /// 判红自证：任一处改回 `continue` 不 err_line ⇒ 对应断言红。
+    #[test]
+    fn 候选字段畸形与求值失败必须留痕() {
+        let _sb = sandbox(&format!("n1a-g6-l03-{}", std::process::id()));
+        let root = _sb.path().join("c");
+        fs::create_dir_all(&root).unwrap();
+        let rules = format!(
+            r#"{{"groups":[{{"items":[{{"id":"n1aL03","pathPs":"'{root_s}'","candidatesPs":[123,"'unclosed"],"globCandidatesPs":[456,"'unclosed"]}}]}}]}}"#,
+            root_s = js(&root)
+        );
+        let (code, out, err) = run_json(
+            &[r#"["n1aL03"]"#.to_string(), "{}".to_string(), String::new()],
+            &rules,
+            None,
+        );
+        assert_eq!(code, 0, "{err}");
+        assert!(out.contains("@@ITEM@@"), "条目应正常输出（本条只补留痕）: {out}");
+        for m in [
+            "candidatesPs 存在非字符串候选项",
+            "candidatesPs 候选求值失败",
+            "globCandidatesPs 存在非字符串候选项",
+            "globCandidatesPs 候选求值失败",
+        ] {
+            assert!(err.contains(m), "缺留痕 {m}: {err}");
+        }
+    }
+
+    /// N1a-L06：JSON 递归深度必须有上限（栈溢出是 abort，catch_unwind 兜不住）。
+    /// 判红自证：删掉 `value()` 里的 depth 判定 ⇒ 65 层断言红。
+    #[test]
+    fn json嵌套深度上限() {
+        let ok = format!("{}{}", "[".repeat(64), "]".repeat(64));
+        assert!(parse_json(&ok).is_ok(), "64 层在上限内，必须可解析");
+        let deep = format!("{}{}", "[".repeat(65), "]".repeat(65));
+        match parse_json(&deep) {
+            Ok(_) => panic!("65 层必须 fail-closed（无深度上限会把栈打穿）"),
+            Err(e) => assert!(e.contains("嵌套过深"), "失败原因必须可辨: {e}"),
+        }
+    }
+
+    /// N1a-L04：逐项枚举失败必须计数（旧 `flatten()` / `file_type()` 失败静默丢）。
+    /// 判红自证：`next_entry` 不再计数 ⇒ 第一条红；walker 不再加总 ⇒ 第二条红。
+    #[test]
+    fn 逐项枚举失败计入unreadable() {
+        let mut unreadable = 0u64;
+        let mut it = vec![
+            Err::<fs::DirEntry, _>(std::io::Error::new(std::io::ErrorKind::Other, "boom")),
+            Err::<fs::DirEntry, _>(std::io::Error::new(std::io::ErrorKind::Other, "boom2")),
+        ]
+        .into_iter();
+        assert!(next_entry(&mut it, &mut unreadable).is_none());
+        assert_eq!(unreadable, 2, "逐项 Err 必须逐条计数");
+
+        // walker 加总：DirSnapshot.unreadable → res.unreadable_dirs（回执 skippedUnreadable）
+        let _sb = sandbox(&format!("n1a-g6-l04-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
+        let mut cache = WalkCache::default();
+        cache.dirs.insert(
+            root.clone(),
+            DirSnapshot { entries: Vec::new(), skipped_reparse: 0, unreadable: 2, error: None },
+        );
+        let mut res = DeletableResult {
+            files: Vec::new(),
+            total: 0,
+            deletable_count: 0,
+            deletable_bytes: 0,
+            skipped_reparse: 0,
+            unreadable_dirs: 0,
+            files_truncated: false,
+        };
+        walk_deletable(&root, true, "*", AgeGuard::Off, &[], &[], None, &mut res, 0, false, None, Some(&cache));
+        assert_eq!(res.unreadable_dirs, 2, "逐项失败必须进回执（skippedUnreadable）");
+    }
+
+    /// N1a-L05：glob 展开为空时旧写法在汇总 `err_line` 之前就 `return`，
+    /// 把已累计的「不可读目录数」整段吞掉。
+    /// 判红自证：把 `break` 改回 `return Vec::new()` ⇒ 汇总行消失、断言红。
+    #[test]
+    fn glob展开为空仍发送汇总留痕() {
+        let Some(drive) = unusable_drive() else {
+            println!("SKIP：本机 D..Z 盘全部可读，glob 空展开的汇总留痕未取证（本节未验证）");
+            return;
+        };
+        let pat = format!("{drive}:\\*");
+        let mut got = vec!["sentinel".to_string()];
+        let (code, _out, err) = capture(None, || {
+            got = expand_glob_dirs(&pat, false);
+            0
+        });
+        assert_eq!(code, 0);
+        assert!(got.is_empty(), "不可读盘的展开结果必须为空: {got:?}");
+        assert!(
+            err.contains("glob 展开有") && err.contains("个目录不可读"),
+            "展开为空也必须发送累计汇总（N1a-L05）: {err}"
+        );
+    }
+
+    /// N1a-L07：两处注释腐烂（不存在的脚本名 / 错误的行协议字段）必须绝迹。
+    /// 判红自证：注释改回旧文 ⇒ 对应断言红。needle 用 concat! 拼两半，避免自我命中。
+    #[test]
+    fn 注释与现行协议一致() {
+        let src = include_str!("cleanup_scan.rs");
+        assert!(
+            !src.contains(concat!("cleanup-", "scripts.js")),
+            "文件头注释仍指向仓库里不存在的脚本（N1a-L07）"
+        );
+        assert!(
+            !src.contains(concat!("\"apps\":", "[...]")),
+            "checklocked 输出协议注释仍写着旧的并列键（N1a-L07）"
+        );
+        assert!(
+            src.contains(concat!("\"procs\":", "[{\"pid\"")),
+            "checklocked 注释必须写明实际发射的 procs 字段（N1a-L07）"
+        );
+        assert!(
+            src.contains(concat!("\"locked\":M", ",\"skipped\":K")),
+            "终止行注释必须补上现协议里的 skipped 字段（N1a-L07）"
         );
     }
 }

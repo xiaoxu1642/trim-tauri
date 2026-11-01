@@ -64,6 +64,54 @@ fn parse_u64_or_fatal(s: &str, flag: &str) -> u64 {
     }
 }
 
+/// `finder delete` 的参数解析（N1b-L05）：**单一判据**，返回 `(protect JSON, 待删条目)`。
+///
+/// 任何一处畸形都返回 Err 且调用方**不执行任何删除** —— 成对性一旦破坏，后面参数的位置
+/// 语义就不可信（旧实现只在循环里报成对的那一对，尾部单个参数被静默吞掉，
+/// 于是 `delete file a.txt dir` 只删 a.txt 并以 0 退出，与函数注释的「不许部分执行」相反）。
+/// `raw` 是 `delete` 之后的原始 argv（路径保留 OsString，见审查v4-L4）。
+fn parse_delete_args(
+    raw: &[OsString],
+) -> Result<(Option<String>, Vec<(String, OsString)>), Vec<String>> {
+    let args: Vec<String> = raw.iter().map(|a| a.to_string_lossy().to_string()).collect();
+    let mut problems: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    let mut protect_json: Option<String> = None;
+    // FD-2：可选前置 `--protect <json>`（主进程 protectedRootsJson()），缺省回落 default_from_env。
+    // 缺值同样记为畸形：旧写法 `i += 2` 越过末尾后打印用法并以 0 退出，「参数写错」与
+    // 「什么都没给」同形。
+    if args.first().map(|s| s.as_str()) == Some("--protect") {
+        if args.len() >= 2 {
+            protect_json = Some(args[1].clone());
+            i = 2;
+        } else {
+            problems.push("delete --protect 缺少 JSON 取值".to_string());
+            return Err(problems);
+        }
+    }
+    // v7.2-C03（N1b-M05）：畸形目标（kind 不是 file/dir、路径空/以 - 开头）原先静默丢弃
+    // 且退出码 0——「没删」伪装成「删完」。任一畸形即留痕 + exit 2，**不执行任何删除**。
+    let mut items: Vec<(String, OsString)> = Vec::new();
+    while i + 1 < raw.len() {
+        let kind = args[i].to_lowercase();
+        let p = &args[i + 1];
+        if (kind == "file" || kind == "dir") && !p.is_empty() && !p.starts_with('-') {
+            items.push((kind, raw[i + 1].clone()));
+        } else {
+            problems.push(format!("delete 畸形目标（kind={kind:?}, path={p:?}），已拒绝"));
+        }
+        i += 2;
+    }
+    // N1b-L05：尾部落单的那个参数必须点名 —— 它既没配成一对，也不属于任何一条合法条目。
+    if i < raw.len() {
+        problems.push(format!("delete 尾部参数不成对，已拒绝：{:?}", args[i]));
+    }
+    if !problems.is_empty() {
+        return Err(problems);
+    }
+    Ok((protect_json, items))
+}
+
 fn main() {
     // N2：CLI 是独立调试入口，没有宿主注入数据根。这里把两个根都设成 Electron 时代的
     // 老根，使 CLI 的排除/忽略名单行为与迁移前**逐字一致**（crate 的搬迁原则）；
@@ -214,44 +262,24 @@ fn main() {
         }
         "delete" => {
             // 审查v4-L4：路径取原始 OsString，命令名与格式校验用 lossy 字符串
-            // FD-2：可选前置 `--protect <json>`（主进程 protectedRootsJson()）三端同源；
-            // 缺省回落保守默认（default_from_env）——B 批改为按 JSON 文本注入 scan::delete。
-            let mut i = 1;
-            let mut protect_json: Option<String> = None;
-            if args.get(i).map(|s| s.as_str()) == Some("--protect") {
-                if i + 1 < raw.len() {
-                    protect_json = Some(args[i + 1].clone());
+            // FD-2：可选前置 `--protect <json>`（主进程 protectedRootsJson()）三端同源。
+            // N1b-L05：参数面收进 `parse_delete_args` 单一判据 —— 尾部不成对、`--protect`
+            // 缺值同样判红（exit 2 且不执行任何删除），不再把「参数写错」走成「用法提示」。
+            match parse_delete_args(&raw[1..]) {
+                Ok((protect_json, items)) => {
+                    if items.is_empty() {
+                        println!("delete [--protect <json>] <file|dir> <path>...");
+                        return;
+                    }
+                    scan::delete(&items, protect_json.as_deref(), &sink);
                 }
-                i += 2;
-            }
-            let mut items: Vec<(String, OsString)> = Vec::new();
-            // v7.2-C03（N1b-M05）：畸形目标（kind 不是 file/dir、路径空/以 - 开头、
-            // 或不成对）原先静默丢弃且退出码 0——「没删」伪装成「删完」。改
-            // fail-closed：任一畸形即 stderr 留痕 + exit 2，**不执行任何删除**
-            //（成对性破坏后剩余参数的位置语义已不可信，不许部分执行）。
-            let mut malformed = 0usize;
-            while i + 1 < raw.len() {
-                let kind = args[i].to_lowercase();
-                let p = &args[i + 1];
-                if (kind == "file" || kind == "dir") && !p.is_empty() && !p.starts_with('-') {
-                    items.push((kind, raw[i + 1].clone()));
-                } else {
-                    malformed += 1;
-                    eprintln!("[finder-warn] delete 畸形目标（kind={kind:?}, path={p:?}），已拒绝");
-                }
-                i += 2;
-            }
-            if items.is_empty() {
-                println!("delete [--protect <json>] <file|dir> <path>...");
-                if malformed > 0 {
+                Err(problems) => {
+                    for msg in problems {
+                        eprintln!("[finder-warn] {msg}");
+                    }
                     std::process::exit(2);
                 }
-                return;
             }
-            if malformed > 0 {
-                std::process::exit(2);
-            }
-            scan::delete(&items, protect_json.as_deref(), &sink);
         }
         "protectcheck" => {
             // FD-2 只读对拍探针：`protectcheck --protect <json> <vector...>`
@@ -273,5 +301,77 @@ fn main() {
         _ => {
             println!("未知命令: {}", args[0]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(v: &[&str]) -> Vec<OsString> {
+        v.iter().map(|s| OsString::from(*s)).collect()
+    }
+
+    /// N1b-L05 破坏自证：成对性破坏（尾部单出一个参数）必须整体判红，
+    /// 那个参数必须被点名。删掉 `parse_delete_args` 末尾的 `if i < raw.len()` 尾部检查，
+    /// 本条立刻红（旧实现正是「静默吞掉 dir、只删 a.txt、退出 0」）。
+    #[test]
+    fn delete_尾部不成对的参数必须判红() {
+        let e = parse_delete_args(&argv(&["file", "a.txt", "dir"])).unwrap_err();
+        assert!(
+            e.iter().any(|m| m.contains("尾部参数不成对")),
+            "成对性破坏必须点名判红：{e:?}"
+        );
+        assert!(
+            e.iter().any(|m| m.contains("dir")),
+            "留痕要点名被吞的那个参数（正是它让位置语义不可信）：{e:?}"
+        );
+        // 只有 kind 没有路径、或只有路径没有 kind，都属不成对
+        assert!(parse_delete_args(&argv(&["file"])).is_err(), "单个 kind 也不成对");
+        assert!(parse_delete_args(&argv(&["a.txt"])).is_err(), "单个路径也不成对");
+    }
+
+    /// 成对参数照常解析，`--protect` 的 JSON 不会被当成条目；空参数表 = 用法提示（不是畸形）。
+    #[test]
+    fn delete_成对参数照常解析且保护前缀不丢() {
+        let (protect, items) = parse_delete_args(&argv(&["file", "a.txt", "dir", r"C:\x"])).unwrap();
+        assert!(protect.is_none(), "没给 --protect 就是 None（由 scan 侧回落保守默认）");
+        assert_eq!(items.len(), 2, "两对应得两条：{items:?}");
+        assert_eq!(items[0].0, "file");
+        assert_eq!(items[0].1, OsString::from("a.txt"));
+        assert_eq!(items[1].0, "dir");
+        assert_eq!(items[1].1, OsString::from(r"C:\x"));
+
+        let (protect2, items2) =
+            parse_delete_args(&argv(&["--protect", r#"{"exact":[]}"#, "file", "b.txt"])).unwrap();
+        assert_eq!(
+            protect2.as_deref(),
+            Some(r#"{"exact":[]}"#),
+            "--protect 的 JSON 不许被当成待删条目"
+        );
+        assert_eq!(items2.len(), 1, "保护前缀之后的参数才配对：{items2:?}");
+
+        let (protect3, items3) = parse_delete_args(&argv(&[])).unwrap();
+        assert!(protect3.is_none() && items3.is_empty(), "空参数表走用法提示，不是畸形");
+    }
+
+    /// N1b-L05 同族漏点：`--protect` 缺值原先静默越过末尾（随后打印用法并以 0 退出）。
+    #[test]
+    fn delete_protect缺值必须判红() {
+        let e = parse_delete_args(&argv(&["--protect"])).unwrap_err();
+        assert!(
+            e.iter().any(|m| m.contains("--protect") && m.contains("缺少")),
+            "--protect 缺值必须判红：{e:?}"
+        );
+    }
+
+    /// 畸形 kind 仍逐条留痕（口径不变），但只要有畸形就整体 Err —— 不部分执行。
+    #[test]
+    fn delete_畸形kind整体判红() {
+        let e = parse_delete_args(&argv(&["file", "a.txt", "folder", "b"])).unwrap_err();
+        assert_eq!(e.len(), 1, "只有一处畸形：{e:?}");
+        assert!(e[0].contains("畸形目标"), "留痕要点名 kind/path：{e:?}");
+        // 同一份输入里合法的 (file,a.txt) 不得被返回 —— 调用方拿不到 items 就不可能部分执行
+        assert!(e[0].contains("folder"), "要点名写错的那个 kind：{e:?}");
     }
 }

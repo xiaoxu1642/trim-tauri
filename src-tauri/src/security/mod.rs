@@ -1,4 +1,4 @@
-//! 配置写入与密钥处理（对照 src/main/security.js）
+//! 配置写入与密钥处理（纯后端实现；渲染层不再持有同名常量，掩码只由后端产出）
 //!
 //! - `atomic_write_*`：临时文件 + 随机后缀 + fsync + rename（审查 L-5 的 4 字节随机后缀
 //!   防同进程同毫秒并发写撞名导致 rename 覆盖）；
@@ -15,10 +15,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::safestorage;
 
-/// 密钥掩码（与渲染层 API_KEY_MASK 同值）
+/// 密钥掩码。渲染层不再持有同名常量，掩码只由后端产出。
+/// 汇总出口 [`mask_settings`]：`src-tauri/src/commands/settings.rs:1117`。
 pub const SECRET_MASK: &str = "••••••••";
 
-/// 需加密/脱敏的字段名（与 JS 侧 SECRET_FIELDS 同源）
+/// 需加密/脱敏的字段名（加密与掩码共用这一份表）。
+/// 写回判定：`src-tauri/src/commands/models.rs:151` 的 `SECRET_MASK` 分支（用户未改密钥时原样回传掩码）。
 pub const SECRET_FIELDS: &[&str] = &[
     "apiKey",
     "aiApiKey",
@@ -697,6 +699,24 @@ mod tests {
         dir
     }
 
+    // ==================== 审查 R7-L03：模块注释不引用已退役的渲染层符号 ====================
+
+    /// R7-L03：`src/main` 目录已不存在，掩码只由后端产出——模块注释不得再写「与渲染层
+    /// 同名常量同值 / 同源」。源码形态断言：谁把旧措辞贴回来，这里立刻红。
+    /// 判红自证：把任一处旧注释恢复 ⇒ 第一条断言红（判定串用 concat! 拼接，
+    /// 避免判定串本身被 include_str! 读成命中，造成自指假红）。
+    #[test]
+    fn 模块注释不得引用已退役的渲染层符号() {
+        let src = include_str!("mod.rs");
+        for needle in [
+            concat!("API_KEY_", "MASK"),
+            concat!("src/main/", "security.js"),
+            concat!("JS 侧 `SECRET_", "FIELDS`"),
+        ] {
+            assert!(!src.contains(needle), "模块注释又引用了已退役符号/路径：{needle}");
+        }
+    }
+
     // ==================== 审查 v2-U3：永久删除出口的匹配面 ====================
 
     /// v5-K01 批次 4（R7-M05）：IO 失败（非 NotFound）≠ 空数据——update_json 拒写、
@@ -1014,13 +1034,13 @@ mod tests {
         assert!(!bad.exists(), "解析失败的现场必须被隔离（改名）");
     }
 
-    /// 审查 v3 裁定①的前置判据：**逐个点名**六个密钥键（与 JS 侧 `SECRET_FIELDS` 同源）
+    /// 审查 v3 裁定①的前置判据：**逐个点名**六个密钥键（与 `SECRET_FIELDS` 逐键一致）
     /// 都必须被检出。这不是性能断言，是**安全断言**——`has_secret_field` 漏判任一键，
     /// 早退路径就会让该字段**明文落盘**，等于绕过「密钥不明文回渲染层/不落盘」这条红线。
     /// 末条反向对照（非登记名不得命中）保证判据不是「一律返回 true」蒙绿。
     #[test]
     fn has_secret_field_逐个点名密钥键() {
-        assert_eq!(SECRET_FIELDS.len(), 6, "密钥键表条数变动要同步本用例与 JS 侧");
+        assert_eq!(SECRET_FIELDS.len(), 6, "密钥键表条数变动必须同步本用例");
         // 用显式 Map 构造：`json!({ k: … })` 里裸 ident 会被当**字面量键名**而不是变量值，
         // 且 `&&str` 不满足 `String: From<_>`，用宏反而会写出恒真的好测试。
         for k in SECRET_FIELDS {

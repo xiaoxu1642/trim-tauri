@@ -18,7 +18,7 @@
 //! 本模块只做两件事：拒把脚本写到 reparse 替换过的目录（见 `paths::temp_script_dir`）、
 //! 用 `TempScript` 守卫保证「写完就删」不再依赖调用方的 finally 手写 remove_file。
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::os::windows::process::CommandExt;
@@ -113,18 +113,30 @@ fn take_reader(
 
 /// 宽限期到点且**不终止**子进程树时，只能交回读线程已经写进快照的字节。
 /// 返回 lossy 后的串：与 `read_all` 末尾同口径，非 UTF-8 字节替换成 U+FFFD 而不是丢整段。
+///
+/// R7-L05：快照只保留**尾部窗口**（`SNAPSHOT_TAIL_BYTES`）。它是降级兜底而不是第二份
+/// 完整输出——协议判定（`@@RESULT@@` / `@@RECYCLE@@`）只看收尾，尾部窗口正是它需要的；
+/// 旧实现随读入同步增长到与 `acc` 同一上限，读到 cap 时峰值是 cap 的数倍。
 #[derive(Default)]
 struct Snapshot(std::sync::Mutex<Vec<u8>>);
+
+/// 快照尾部窗口的字节上限：与 `MAX_OUTPUT_BYTES` 无关，保证「读满 cap」时快照最多
+/// 再占这么一份，而不是与 `acc` 各占一份 cap。
+const SNAPSHOT_TAIL_BYTES: usize = 256 * 1024;
 
 impl Snapshot {
     fn append(&self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend_from_slice(bytes);
+        let mut buf = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        buf.extend_from_slice(bytes);
+        // 只留尾部：窗口起点可能切在一个 UTF-8 序列中间，`text()` 的 lossy 解码会把
+        // 那半个字符换成 U+FFFD —— 降级路径允许，判定行本身是 ASCII。
+        let over = buf.len().saturating_sub(SNAPSHOT_TAIL_BYTES);
+        if over > 0 {
+            buf.drain(..over);
+        }
     }
 
     fn text(&self) -> String {
@@ -254,11 +266,19 @@ pub fn injection_hazard(script: &str) -> Option<&'static str> {
 /// 再也清不掉，漂松则别人的文件被当垃圾永久删）。
 fn write_temp_script_bytes(bytes: &[u8]) -> Result<TempScript, String> {
     let dir = paths::temp_script_dir()?;
+    write_temp_script_in(&dir, |f| f.write_all(bytes))
+}
+
+/// 写入执行体；`write` 做成注入点，是为了让「写失败必须回收已落盘的空壳」能在
+/// 一次性沙箱里用失败的写入闭包判红（R7-L01）。
+fn write_temp_script_in(
+    dir: &Path,
+    write: impl Fn(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<TempScript, String> {
     // 审查 L-19（2026-10-03 L4）：独占创建（CREATE_NEW 语义）而非 create+truncate。
     // 同名文件若被同用户进程预先放好（哪怕做成 reparse 点），truncate 写入会跟随它
     // 写进去；独占创建下名字碰撞直接报错重取（random_token 内含原子序号，重试必得
     // 新名），与熵强弱无关地消灭「观察目录 → 换件」的竞态窗口。
-    use std::io::Write;
     for _ in 0..3 {
         let candidate = dir.join(tmpnames::SCRIPT_PS1.build(crate::engine::now_ms(), &random_token()));
         match std::fs::OpenOptions::new()
@@ -267,9 +287,18 @@ fn write_temp_script_bytes(bytes: &[u8]) -> Result<TempScript, String> {
             .open(&candidate)
         {
             Ok(mut f) => {
-                f.write_all(&bytes)
-                    .map_err(|e| format!("写入临时脚本失败: {e}"))?;
-                return Ok(TempScript(candidate));
+                // R7-L01：守卫先于写入构造。写入失败即早退，guard 的 Drop 删掉
+                // `create_new` 落下的空壳；旧实现把守卫放在写入之后，半截脚本会留到
+                // 1h 清扫。守卫不能在 `create_new` 之前构造——`AlreadyExists` 分支会
+                // 误删别人的同名文件。
+                let guard = TempScript(candidate);
+                if let Err(e) = write(&mut f) {
+                    // 先关句柄再删：删除不依赖句柄的共享位（File 与 guard 的默认析构顺序
+                    // 是 guard 在前，单靠 Drop 删除会依赖 FILE_SHARE_DELETE 的默认值）。
+                    drop(f);
+                    return Err(format!("写入临时脚本失败: {e}"));
+                }
+                return Ok(guard);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(format!("写入临时脚本失败: {e}")),
@@ -519,7 +548,13 @@ fn read_all_capped(mut pipe: Option<impl Read>, snapshot: Option<&Snapshot>, cap
             &format!("PowerShell stdout 超过 {cap} 字节读取上限，已截断（防失控脚本撑爆内存）"),
         );
     }
-    String::from_utf8_lossy(&acc).to_string()
+    // R7-L05：合法 UTF-8（正常路径）直接交所有权，不再 `from_utf8_lossy(&acc).to_string()`
+    // 复制一整份；只有非法字节才走 lossy 回退（替换 U+FFFD，不丢整段）——彼时多一份
+    // 输出是可接受的一次性代价，正常路径的峰值已被压到 cap 的单份。
+    match String::from_utf8(acc) {
+        Ok(s) => s,
+        Err(e) => String::from_utf8_lossy(e.as_bytes()).to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -580,6 +615,46 @@ mod tests {
         let input = "b".repeat(1_000);
         let out = read_all_capped(Some(std::io::Cursor::new(input.as_bytes())), None, 1_000);
         assert_eq!(out, input, "等于上限的正常输出必须完整交出");
+    }
+
+    // ==================== 审查 R7-L05：快照尾部窗口与有界收尾 ====================
+
+    /// 快照必须只留尾部窗口。旧实现随读入同步增长到与 `acc` 同一 cap，读到上限时
+    /// 进程峰值是 cap 的数倍（快照 + acc + lossy 转换各一份）。
+    /// 判红自证：删掉 `Snapshot::append` 末尾的 `drain` ⇒ 第一条断言红。
+    #[test]
+    fn 快照只保留尾部窗口() {
+        let snap = Snapshot::default();
+        let chunk = "A".repeat(4096);
+        for _ in 0..(SNAPSHOT_TAIL_BYTES / 4096 + 8) {
+            snap.append(chunk.as_bytes());
+        }
+        snap.append(b"TAIL-SENTINEL");
+        let text = snap.text();
+        assert!(
+            text.len() <= SNAPSHOT_TAIL_BYTES,
+            "快照长度必须钉在尾部窗口内，实得 {} 字节",
+            text.len()
+        );
+        assert!(text.ends_with("TAIL-SENTINEL"), "尾部内容必须保留（降级判据只看收尾）");
+        // 单块就超过窗口（一次 read 交来一大块）同样只留尾部
+        let big = Snapshot::default();
+        big.append(&vec![b'B'; SNAPSHOT_TAIL_BYTES * 3]);
+        assert_eq!(big.text().len(), SNAPSHOT_TAIL_BYTES, "单块超窗也必须截到窗口");
+    }
+
+    /// R7-L05 收尾：合法 UTF-8 走 `String::from_utf8` 所有权转移（不再整份复制）；
+    /// 非法字节仍按 U+FFFD 替换，不丢整段 —— 旧 lossy 回退的语义不变。
+    #[test]
+    fn 收尾转换合法utf8原样非法字节替换不丢整段() {
+        let ok = read_all_capped(
+            Some(std::io::Cursor::new("清理完成\n".as_bytes().to_vec())),
+            None,
+            1_024,
+        );
+        assert_eq!(ok, "清理完成\n");
+        let bad = read_all_capped(Some(std::io::Cursor::new(vec![b'A', 0xFF, b'B'])), None, 1_024);
+        assert_eq!(bad, "A\u{FFFD}B", "非法字节必须替换为 U+FFFD，不能丢整段");
     }
 
     // ==================== 审查 v2-M8：宽限期语义与降级不丢 stdout ====================
@@ -772,6 +847,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ==================== 审查 R7-L01：写入失败不得残留半截脚本 ====================
+
+    /// R7-L01：`write` 失败时，`create_new` 落下的空壳必须由守卫在早退路径删掉。
+    /// 判红自证：把 `TempScript(candidate)` 移回 `write` 之后（旧形态）⇒ 本用例在沙箱
+    /// 里数到 1 件残留，红。
+    #[test]
+    fn 写入失败不得留下半截脚本() {
+        let dir = sandbox_dir("write-fail");
+        let err = match write_temp_script_in(&dir, |_f| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "测试注入的写失败",
+            ))
+        }) {
+            Ok(g) => panic!("注入写失败却返回成功: {}", g.path().display()),
+            Err(e) => e,
+        };
+        assert!(err.contains("写入临时脚本失败"), "错误文案必须如实上报: {err}");
+        let left = std::fs::read_dir(&dir).expect("沙箱可读").flatten().count();
+        assert_eq!(left, 0, "写失败后残留 {left} 件半截脚本：守卫必须在写入前构造");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 与上一条互为正向对照：成功路径仍交回内容完整的守卫文件（别为了删残留废掉正常写入）。
+    #[test]
+    fn 写入成功的脚本由守卫持有且内容完整() {
+        let dir = sandbox_dir("write-ok");
+        let guard = write_temp_script_in(&dir, |f| f.write_all(b"Write-Output 'ok'"))
+            .expect("沙箱写入不应失败");
+        let path = guard.path().to_path_buf();
+        assert_eq!(
+            std::fs::read(&path).expect("守卫文件可读"),
+            b"Write-Output 'ok'".to_vec(),
+            "落盘字节必须与写入闭包一致"
+        );
+        drop(guard);
+        assert!(!path.exists(), "守卫出作用域后脚本必须被删除");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ==================== 审查 v2-L13：保留期回收覆盖面 ====================
 
     #[test]
@@ -880,6 +995,26 @@ mod tests {
             "注册表中转件只该出现在私有根；公共根里同形态的文件不认"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// R7-L04：执行体同时服务私有根与公共根，可信基必须**按根**给。
+    /// 判红自证：把 `sweep_trusted_base` 改回写死 `%TEMP%` ⇒ 第一条断言红（私有根
+    /// 的可信基变成 `%TEMP%`，而路径工厂给的是数据根）——正是「`%APPDATA%` 链上有
+    /// reparse 时私有根清扫每轮恒跳过」的旧形态。
+    #[test]
+    fn 清扫可信基私有根走数据根公共根回落temp() {
+        let private = crate::engine::paths::app_data_dir().join("tmp");
+        assert_eq!(
+            sweep_trusted_base(&private),
+            crate::engine::paths::data_root_base(&private),
+            "私有根的可信基必须由 data_root_base 给出，不能写死 %TEMP%"
+        );
+        let public = std::env::temp_dir().join("Trim");
+        assert_eq!(
+            sweep_trusted_base(&public),
+            Some(std::env::temp_dir()),
+            "公共根不在任何数据根下，可信基回落 %TEMP%（与旧行为一致）"
+        );
     }
 
     /// 一次性沙箱目录：唯一命名 + 结束自删，测试不具备改动真实数据目录的能力。
@@ -1191,6 +1326,17 @@ fn collect_temp_files(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// 清扫根的可信基：**按根**给，不能两族共用一个 `%TEMP%`。
+///
+/// R7-L04：私有根在数据根之下（`%APPDATA%\<id>\tmp`），可信基必须由路径工厂
+/// [`paths::data_root_base`] 给出，与同族备份/日志裁剪同一判据；否则 `%APPDATA%` 链上
+/// 任意一级是 reparse 都会让私有根清扫每轮恒跳过（方向是少删、不误删，但保留期失效）。
+/// 公共根 `%TEMP%\Trim` 不在任何数据根下（`data_root_base` 返回 `None`）才回落 `%TEMP%`，
+/// 与旧行为一致。
+fn sweep_trusted_base(dir: &Path) -> Option<PathBuf> {
+    paths::data_root_base(dir).or_else(|| Some(std::env::temp_dir()))
+}
+
 /// 单个目录的回收执行体（不写日志，便于在一次性沙箱里断言，审查纪律：测试不改系统状态）。
 ///
 /// `allow` 是该根的件名白名单（B2-1）。**只有同时满足「过了保留期」与「名字命中白名单」
@@ -1208,7 +1354,7 @@ fn prune_temp_scripts_in(
     // 判定放在执行体而不是入口循环：门禁只认「自己 read_dir 那个函数 + 1 跳内删除」，
     // 隔两跳的守卫记不上账。日志口径不破纪律——`note_root_skipped` 只在 Rejected 时落一条，
     // 沙箱根是普通目录 ⇒ Trusted ⇒ 测试路径仍然一行日志都不写。
-    let verdict = protect::inspect_root(dir, Some(std::path::Path::new(&std::env::temp_dir())));
+    let verdict = protect::inspect_root(dir, sweep_trusted_base(dir).as_deref());
     if !verdict.is_trusted() {
         protect::note_root_skipped("临时脚本清扫", dir, &verdict);
         return SweepCount::default();
