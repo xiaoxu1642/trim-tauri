@@ -684,7 +684,7 @@
     const famLegend = fams.map(([f, sz], i) => {
       const pct = Math.round(sz * 100 / total);
       const color = AN_EXT_COLORS[i] || 'var(--fg-tertiary)';
-      return `<span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${color};margin-right:4px"></span>${esc(f)} ${pct}% · ${formatSize(sz)}</span>`;
+      return `<span><span style="display:inline-block;width:8px;height:8px;border-radius:var(--radius-badge);background:${color};margin-right:4px"></span>${esc(f)} ${pct}% · ${formatSize(sz)}</span>`;
     }).join('');
     const topExt = exts.slice(0, 5).map(r => `${esc(r.ext)} ${formatSize(r.size)}`).join(' · ');
     box.style.display = 'flex';
@@ -723,7 +723,7 @@
       if (sz <= 0) return '';
       const pct = Math.round(sz * 100 / total);
       const label = r.label || AN_TIME_ORDER[i] || '未知';
-      return `<span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${AN_EXT_COLORS[i] || 'var(--fg-tertiary)'};margin-right:4px"></span>${esc(label)} ${pct}% · ${esc(formatSize(sz))}</span>`;
+      return `<span><span style="display:inline-block;width:8px;height:8px;border-radius:var(--radius-badge);background:${AN_EXT_COLORS[i] || 'var(--fg-tertiary)'};margin-right:4px"></span>${esc(label)} ${pct}% · ${esc(formatSize(sz))}</span>`;
     }).join('');
     box.style.display = 'flex';
     box.innerHTML = `<div style="flex:1;min-width:0">
@@ -938,7 +938,7 @@
       html += `<tr>
         <td><div class="finder-cell"><span class="finder-name-text" data-an-drill="${esc(r.path)}" data-tip="点击下钻到 ${esc(r.path)}" style="color:var(--accent);cursor:pointer">${esc(nameOf(r.path))} ▸</span><span class="finder-path-text" style="color:var(--fg-tertiary)" data-tip="${esc(r.path)}">${esc(middleEllipsis(r.path, 58))}</span></div></td>
         <td class="finder-col-size">${formatSize(r.size)}</td>
-        <td><div style="height:6px;border-radius:3px;background:var(--accent-light)"><div style="height:6px;border-radius:3px;background:var(--accent);width:${pct}%"></div></div></td>
+        <td><div style="height:6px;border-radius:var(--radius-badge);background:var(--accent-light)"><div style="height:6px;border-radius:var(--radius-badge);background:var(--accent);width:${pct}%"></div></div></td>
         <td class="finder-col-size"><span class="finder-reveal" data-reveal="${esc(r.path)}" data-tip="在资源管理器中定位" style="cursor:pointer">定位</span> · <span data-an-del="${esc(r.path)}" data-tip="整树移入回收站" style="cursor:pointer;color:var(--danger-text)">删除</span></td>
       </tr>`;
     }

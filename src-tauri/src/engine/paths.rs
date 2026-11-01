@@ -91,6 +91,13 @@ const MIGRATION_DIRS: &[&str] = &[
 //   整批复制过去既拖慢首启动（这批可能有几百 MB），又把用户的本机路径带上共享介质。
 // 结论：备份的"看得见 + 还能还原"由读取兜底负责，搬迁不是必要环节。
 
+/// 集成测试数据根环境变量名的**唯一真源**（X1-M01）。
+///
+/// 读取侧在本文件，写入侧在 `tests/common/mod.rs`；写入侧直接引用本常量，
+/// 不再各写一份字面量。门禁 `tools/check-tests-helper-parity.mjs` 对拍：
+/// tests/ 里再出现该字符串字面量即判红。
+pub const TEST_DATA_ROOT_ENV: &str = "TRIM_TEST_DATA_ROOT";
+
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 pub fn exe_dir() -> PathBuf {
@@ -131,7 +138,7 @@ pub fn app_data_dir() -> &'static PathBuf {
         {
             // 集成测试启动器（tests/common/mod.rs）注入；普通 release 进程
             // 不经 cargo test 运行、没有这个变量 ⇒ 生产行为逐字节不变。
-            if let Ok(root) = std::env::var("TRIM_TEST_DATA_ROOT") {
+            if let Ok(root) = std::env::var(TEST_DATA_ROOT_ENV) {
                 if !root.is_empty() {
                     let dir = PathBuf::from(root);
                     trim_finder::util::set_data_roots(dir.clone(), legacy_data_dir());

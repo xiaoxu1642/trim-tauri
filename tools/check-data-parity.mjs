@@ -26,6 +26,7 @@ import { join } from 'node:path';
 import { ORIGIN, REPO_ROOT } from './ps-origin.mjs';
 import { buildParityFixture, FIXTURE_PATH } from './gen-protect-parity.mjs';
 import { allItems } from './lib/rule-shape.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const VERBOSE = process.argv.includes('--verbose');
 const require = createRequire(import.meta.url);
@@ -488,12 +489,19 @@ const NO_COMMENT_REGISTRY = [
   const gaps = [];
   for (const c of PRUNE_COVERAGE) {
     const p = join(REPO_ROOT, c.file);
-    if (!existsSync(p) || !readFileSync(p, 'utf8').includes(c.token)) {
+    // T1b-M05：判据必须落在「只剩代码」的文本上。旧实现读原文 includes(token)，
+    // 注释里写一句裁剪函数名即可顶账（cleanup.rs 模块头、syspanel.rs 文档注释都现成有）。
+    const code = existsSync(p) ? blankNonCode(readFileSync(p, 'utf8'), 'rs') : '';
+    if (!code.includes(c.token)) {
       gaps.push(`${c.what} ⇒ ${c.file} 缺 ${c.token}`);
     }
   }
+  // 正向对照：token 只出现在注释里的合成样本，blankNonCode 后必须查不到。
+  const commentOnly = '// prune_backups( 只写在注释里\nfn f() {}\n';
+  const commentOnlyHits = blankNonCode(commentOnly, 'rs').includes('prune_backups(');
   if (gaps.length > 0) fail++, console.error(`✗ 6. 备份根 prune 覆盖面缺口：${gaps.join('；')}`);
-  else console.log(`✓ 6. 备份根 prune 覆盖面：${PRUNE_COVERAGE.length} 个备份根都有对应裁剪出口`);
+  else if (commentOnlyHits) fail++, console.error('✗ 6. 正向对照失败：注释里的 token 仍被当成调用点（blankNonCode 失效）');
+  else console.log(`✓ 6. 备份根 prune 覆盖面：${PRUNE_COVERAGE.length} 个备份根都有对应裁剪出口（注释提及不计；正向对照通过）`);
 }
 
 // ---- P7（R1a-L06）：paths:save 的 Rust 白名单 ⇄ 渲染层 GROUPS 键集 ----

@@ -99,8 +99,18 @@ const RAW_EXEMPT = [
   },
   {
     file: 'src-tauri/src/engine/native/cleanup.rs',
-    anchor: 'Command::new("cmd")',
+    anchor: 'let out = std::process::Command::new("cmd")',
     reason: '2026-10-04 审计 §4.5 测试夹具：mklink /J 造 junction 验证备份裁剪包含性核验（cfg(test) 专用，native-scanner/tests 同款；junction 无稳定 Rust API，symlink_dir 需特权）',
+  },
+  {
+    file: 'src-tauri/src/engine/native/cleanup.rs',
+    anchor: 'let backup_link = std::process::Command::new("cmd")',
+    reason: 'R5a-M11 测试夹具：mklink /J 把备份根换成 junction，验证 land_backup 判根后拒绝写出（cfg(test) 专用）',
+  },
+  {
+    file: 'src-tauri/src/engine/native/cleanup.rs',
+    anchor: 'let collect_link = std::process::Command::new("cmd")',
+    reason: 'R5a-M12 测试夹具：mklink /J 造 junction 验证采集阶段丢弃单独成档（cfg(test) 专用）',
   },
   {
     file: 'src-tauri/src/commands/fileclean.rs',

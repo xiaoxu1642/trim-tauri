@@ -1362,7 +1362,9 @@ fn residue_execute_still_accepts_call_without_backup_arg() {
 /// 次序纪律：本用例的子窗档位段先建窗、`temp_script_dir()` 在后 ⇒ 环境变量先于首次
 /// `app_data_dir()`（新增「直接取数据根」的步骤时刻核对这条，见 reg_backup 真机用例）。
 #[test]
+#[ignore = "写私有 tmp 夹具（内容闸），按快速组纪律挪真机组"]
 fn cleanup_reg_backup_restore_shares_the_uninstall_domain_gates() {
+    ensure_test_data_root();
     use trim_tauri_lib::engine::paths;
     use trim_tauri_lib::engine::reg_backup::reg_backup_restore_guards;
 
@@ -2624,19 +2626,16 @@ fn u_r1d_sync_command_blocking_pool_exit_still_reachable() {
     assert_eq!(res["removed"], json!(0), "拒绝路径不得声称删过东西: {res}");
 }
 
-/// `netcheck_repair` 的 R1d-M07 出口：快照作废之后，修复必须被快照闸整条拒掉。
+/// `netcheck_repair` 的白名单闸：不在当前快照内的动作 id 必须被拒。
 ///
-/// 为什么这条能当机检用：`netcheck_collect` 需要管理员（`guard::MAIN` + 只读档在
-/// MockRuntime 里能过，但 `is_admin()` 取决于跑测试的进程），非管理员态下 collect
-/// 会走 needAdmin 分支、**根本不写快照** ⇒ 恰好是「槽为空」这个待验形态。
-/// 提权态跑则先 collect 再 repair，两种形态都要求 repair 的回执非绿（判「不在快照内」
-/// 或 needAdmin），不许出现 success:true。
+/// X1-M02：旧用例先调 `netcheck_collect`（真实外呼）且用 `let _ =` 丢弃回执——
+/// 在快速组里跑了网络探测却没有断言价值，用例名承诺的「快照作废」也从未构造。
+/// 现在只断言真正被测的语义：动作 id 不在快照白名单内 ⇒ 拒，且拒因点名快照闸。
+/// 「采集后快照作废」需要真实外呼，属 `#[ignore]` 真机组，不在本用例范围内。
 #[test]
-fn u_r1d_netcheck_stale_snapshot_does_not_pass() {
+fn u_r1d_netcheck_unknown_action_rejected_by_snapshot_gate() {
     let w = main_window();
-    // 先做一次采集：成功则本窗槽有账，失败/需提权则槽为空——两种都继续往下判
-    let _ = invoke(&w, "netcheck_collect", json!({}));
-    // 再判一个**不在本窗快照里**的动作 id：必须拒，且拒因点名快照闸
+    // 不先采集：本窗快照为空（或没有该 id），走的正是白名单闸
     let res = invoke(&w, "netcheck_repair", json!({ "actionId": "__trim_probe_absent__" }));
     assert_eq!(res["success"], json!(false), "白名单外的动作 id 必须拒: {res}");
     assert!(
@@ -2924,11 +2923,16 @@ fn u_r2a_l07_execute_entry_revalidates_app_id_shape() {
 
 /// R2a-L03：批次报告列表的形状与「先挑文件名、再解析」的口径。
 ///
-/// 夹具写在**隔离的测试数据根**（`TRIM_TEST_DATA_ROOT`，C08）里的 `uninstall-reports/`，
-/// 不碰用户目录。正向特征点名"回来的 batchId 集合与顺序"，反向对照点名"非法名不进列表、
+/// 夹具写在**隔离的测试数据根**（C08）里的 `uninstall-reports/`，不碰用户目录。
+/// 正向特征点名"回来的 batchId 集合与顺序"，反向对照点名"非法名不进列表、
 /// 但计入 totalCount 之外的口径"——旧写法是边读边收再截断，缺这两条就没人能抓住它。
+///
+/// X1-M03：本用例真实写盘 ⇒ 按快速组纪律进 `#[ignore]`；收尾只删自己写的固定文件名，
+/// 绝不 `remove_dir_all` 整个 reports 目录（数据根隔离失效时那会删掉用户真实历史报告）。
 #[test]
+#[ignore = "写隔离数据根夹具（uninstall-reports），按快速组纪律挪真机组"]
 fn u_r2a_l03_report_list_uses_filename_keeps_real_count() {
+    ensure_test_data_root();
     // 次序纪律：先建窗（注入测试数据根），再取 app_data_dir()
     let w = main_window();
     let dir = trim_tauri_lib::engine::paths::app_data_dir().join("uninstall-reports");
@@ -2941,12 +2945,33 @@ fn u_r2a_l03_report_list_uses_filename_keeps_real_count() {
     };
     let newest = "2026-10-21T00-00-00-002Z";
     let older = "2026-10-21T00-00-00-001Z";
-    std::fs::write(dir.join(format!("{newest}.json")), row(newest, 2).to_string()).unwrap();
-    std::fs::write(dir.join(format!("{older}.json")), row(older, 1).to_string()).unwrap();
-    // 反向对照：非法 batchId（含空格）与坏 JSON 都不得进列表
-    std::fs::write(dir.join("2026 10 21 有 空格.json"), row("x", 1).to_string()).unwrap();
-    std::fs::write(dir.join("2026-10-21T00-00-00-003Z.json"), "{坏掉的 json").unwrap();
-    std::fs::write(dir.join("readme.txt"), b"not a report").unwrap();
+    // X1-M03：只清自己写的固定文件；成功路径与 panic 路径都走同一个 Drop。
+    let fixtures = vec![
+        dir.join(format!("{newest}.json")),
+        dir.join(format!("{older}.json")),
+        dir.join("2026 10 21 有 空格.json"),
+        dir.join("2026-10-21T00-00-00-003Z.json"),
+        dir.join("readme.txt"),
+    ];
+    struct Cleanup(Vec<std::path::PathBuf>);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for p in &self.0 {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+    let _clean = Cleanup(fixtures.clone());
+    for (p, body) in [
+        (&fixtures[0], row(newest, 2).to_string()),
+        (&fixtures[1], row(older, 1).to_string()),
+        // 反向对照：非法 batchId（含空格）与坏 JSON 都不得进列表
+        (&fixtures[2], row("x", 1).to_string()),
+        (&fixtures[3], "{坏掉的 json".to_string()),
+        (&fixtures[4], "not a report".to_string()),
+    ] {
+        std::fs::write(p, body).unwrap();
+    }
 
     let res = invoke(&w, "uninstall_report_list", json!({}));
     common::assert_guard_passed(&res.to_string(), "主窗调 uninstall_report_list", &["reports"]);
@@ -2964,7 +2989,6 @@ fn u_r2a_l03_report_list_uses_filename_keeps_real_count() {
     assert_eq!(reports[0]["failCount"], json!(1), "{:?}", reports[0]);
     assert_eq!(reports[1]["skipCount"], json!(1), "{:?}", reports[1]);
     assert!(reports[0]["appId"].is_string() && reports[0]["time"].is_string(), "点开明细要用的字段不得塌成 null");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 真机 `#[ignore]` 探针（2026-10-22 用户裁定「不允许优化 ctfmon 的自启动与启动链」）：

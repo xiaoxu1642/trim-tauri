@@ -114,6 +114,13 @@ assertAllEqual('5b. 高风险项数（注意事项措辞）', /(\d+)\s*项高风
 assertAllEqual('6a. 高风险无还原数（重要提示措辞）', /其中\s*\*{0,2}(\d+)\s*项执行后无自动还原/g, optHighNoRestore);
 assertAllEqual('6b. 高风险无还原数（注意事项措辞）', /\d+\s*项高风险里\s*(\d+)\s*项无自动还原/g, optHighNoRestore);
 assertAllEqual('7. SSD 通常可见项数 = 前端口径实算', /通常可见\s*(\d+)\s*项/g, visibleSsd);
+// 7b/7c（T1b-M02）：readme「隐私自护」面板与「其余 N 项支持一键还原」两处用户可见数字。
+// 前者真源是隐私面板侧表 sections[].items 合计；后者是派生数（高风险 − 无还原），
+// 5a/6a 只钉了 9 与 3，这两处此前零判据。
+const privacyPanel = JSON.parse(read('src-tauri/data/optimizer-privacy-panel.json'));
+const privacyTotal = (privacyPanel.sections ?? []).reduce((n, s) => n + (s.items?.length ?? 0), 0);
+assertAllEqual('7b. 隐私面板收拢项数 = 侧表 sections[].items 合计', /面板收拢\s*(\d+)\s*个隐私\/遥测项/g, privacyTotal);
+assertAllEqual('7c. 其余 N 项支持一键还原 = 高风险 − 无还原', /其余\s*(\d+)\s*项支持一键还原/g, optHigh - optHighNoRestore);
 
 // 8（v2-R6）：「还剩几个 PS 步」这句对用户公开的数字。readme 里它是唯一一处**双数**声明
 // （N 项 / M 步），所以不复用 assertAllEqual，单独对拍两个捕获组。
@@ -154,6 +161,26 @@ if (psClaims.length === 0) {
         ? 'readme 中未找到该声明——数字改了/措辞改了/句子删了都必须同步改本断言并复核命令层账'
         : hits.length > 1 ? `出现 ${hits.length} 处（承诺句不该复制多份）` : '在场',
     );
+  }
+}
+
+// 8c（T1b-M02）：38/40 与「只剩两步」此前只有在场钉——两个数不自洽也不会红。
+// 编译报告不是机读真源，能机检的是**同句自洽**与「两个 AppX 项」的锚点存在性：
+// 句子里的三个数必须满足 原生 + PS = 总数，且 tf_appx / tf_cortana 仍在数据层。
+{
+  const claimRe = /执行时\s*(\d+)\/(\d+)\s*步由 Rust 原生引擎完成[^。]*?只剩\s*(\d+)\s*步（两个 AppX 移除项）/g;
+  const claims = [...readme.matchAll(claimRe)];
+  if (claims.length !== 1) {
+    check(false, '8c. 「38/40 步」同句自洽（恰好 1 处）',
+      `实得 ${claims.length} 处——句子结构变了，必须同步复核命令层账`);
+  } else {
+    const [, native, total, ps] = claims[0].map(Number);
+    check(native + ps === total, '8c. 「38/40 步」同句自洽（原生 + PowerShell = 总步数）',
+      `${native} + ${ps} = ${native + ps} vs 声明总数 ${total}`);
+    const optIds = new Set(optItems.map((o) => o.id));
+    const missing = ['tf_appx', 'tf_cortana'].filter((id) => !optIds.has(id));
+    check(missing.length === 0, '8c-2. 「两个 AppX 移除项」锚点仍存在（tf_appx / tf_cortana）',
+      missing.length ? `数据层缺 ${missing.join('、')}——承诺句的「两个」失去对象` : '两项均在');
   }
 }
 

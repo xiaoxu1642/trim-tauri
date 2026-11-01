@@ -28,7 +28,7 @@
   // （F2-L06：不写死统计数字，防过期误导）。生成规则：':' 与 '-' 统一转 '_'，显式列出、不做运行时
   // 隐式推导，防「Rust 有了、前端没接 / 拼错」静默断裂。
   var CHANNEL_MAP = {
-    // app 域（onMemoryTrim 是事件，不在此表）
+    // app 域（memory:trim 事件已退役：Rust 侧从未有发射点，见 app 段注释）
     'app:get-info': 'app_get_info',
     'app:read-usage': 'app_read_usage',
     'app:open-external': 'app_open_external',
@@ -369,8 +369,9 @@
       // 裸标量载荷（preload 直传 url 而非对象）：Tauri 命令必须收到具名参数，此处整形为 { url }
       openExternal: function (url) { return invokeChannel('app:open-external', { url: url }); },
       // 子窗专用窄出口：只传白名单 key，地址在 Rust 侧常量表里（open-external 按主窗判档，子窗调必被拒）
-      openDoc: function (key) { return invokeChannel('app:open-doc', { key: key }); },
-      onMemoryTrim: function (callback) { return onEvent('memory:trim', function () { callback(); }); }
+      openDoc: function (key) { return invokeChannel('app:open-doc', { key: key }); }
+      // onMemoryTrim 已退役：Rust 侧从无 memory:trim 发射点，订阅恒不回调。
+      // 渲染层回收改由 app.js 的 visibilitychange 兜底（外部 js-flags 暴露 gc 时生效）。
     },
 
     updater: {

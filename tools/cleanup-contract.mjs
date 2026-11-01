@@ -320,9 +320,15 @@ export function validateCleanupPackage(pkg) {
       const live = crossTrack('liveSourceKeys');
       const deadOnly = crossTrack('deadSourceKeys');
       const handlers = crossTrack('specialHandlers');
+      // T1c-M02：空串/空白串不算「有路径来源」。旧判据只排除 undefined 与空数组，
+      // 于是 `pathPs: ""` 能过 A13 —— 契约说「有活来源」，扫描器一个字节都不会扫。
       const hasLive = live.some((k) => {
         const v = it[k];
-        return v !== undefined && !(Array.isArray(v) && v.length === 0);
+        if (typeof v === 'string') return v.trim() !== '';
+        if (Array.isArray(v)) {
+          return v.some((x) => (typeof x === 'string' ? x.trim() !== '' : x !== null && x !== undefined));
+        }
+        return v !== undefined && v !== null;
       });
       // 专用分流条目：必须有登记在案的 handler，且取值在消费方代码的字面量集合内
       const handled = handlers.find((h) => it[h.key] !== undefined);
@@ -631,5 +637,56 @@ export function selfTest(validate) {
   if (badPatternErrs && !badPatternErrs.some((e) => e.startsWith('[A2]'))) {
     problems.push('非字符串 pattern 未被 A2 判红（类型闸失明）');
   }
+  // T1c-M02：空串路径来源必须被 A13 判红（旧判据把 `pathPs: ""` 算「有来源」）。
+  const blankSource = JSON.parse(JSON.stringify(goodPkg));
+  delete blankSource.groups[0].items[0].fileKeys;
+  blankSource.groups[0].items[0].pathPs = '';
+  if (!validate(blankSource).some((e) => e.startsWith('[A13]'))) {
+    problems.push('pathPs 为空串未被 A13 判红（死规则可过契约）');
+  }
+  const blankArraySource = JSON.parse(JSON.stringify(goodPkg));
+  blankArraySource.groups[0].items[0].fileKeys = [];
+  blankArraySource.groups[0].items[0].pathPs = '   ';
+  if (!validate(blankArraySource).some((e) => e.startsWith('[A13]'))) {
+    problems.push('fileKeys 空数组 + pathPs 空白未被 A13 判红');
+  }
+  // T1g-L02：三条上限的「等值放行 + 越界判红」边界（夹具里此前没有任何越界用例）。
+  const clone = () => JSON.parse(JSON.stringify(goodPkg));
+  const baseGroup = () => clone().groups[0];
+  const baseItem = () => baseGroup().items[0];
+  const groupsPkg = (n) => {
+    const p = clone();
+    p.groups = Array.from({ length: n }, (_, i) => {
+      const g = baseGroup();
+      g.key = `g${i}`;
+      g.title = `组${i}`;
+      g.items = [{ ...baseItem(), id: `selftest-g${i}`, group: `g${i}` }];
+      return g;
+    });
+    return p;
+  };
+  const overGroups = groupsPkg(41);
+  if (!validate(overGroups).some((e) => e.startsWith('[A5]'))) problems.push('41 组（maxGroups=40）未被 A5 判红');
+  const edgeGroups = groupsPkg(40);
+  if (validate(edgeGroups).some((e) => e.startsWith('[A5]'))) problems.push('40 组（maxGroups 等值）被 A5 误判红');
+
+  const manyKeys = clone();
+  manyKeys.groups[0].items[0].fileKeys = Array.from({ length: 33 }, (_, i) => ({
+    path: `%LOCALAPPDATA%\\SelfTest\\f${i}`, pattern: '*', recurse: true,
+  }));
+  if (!validate(manyKeys).some((e) => e.startsWith('[A5]'))) problems.push('33 个 fileKeys（maxFileKeysPerItem=32）未被 A5 判红');
+  const edgeKeys = clone();
+  edgeKeys.groups[0].items[0].fileKeys = Array.from({ length: 32 }, (_, i) => ({
+    path: `%LOCALAPPDATA%\\SelfTest\\f${i}`, pattern: '*', recurse: true,
+  }));
+  if (validate(edgeKeys).some((e) => e.startsWith('[A5]'))) problems.push('32 个 fileKeys（等值）被 A5 误判红');
+
+  const prefix = '%LOCALAPPDATA%\\SelfTest\\';
+  const longPath = clone();
+  longPath.groups[0].items[0].fileKeys[0].path = prefix + 'a'.repeat(260 - prefix.length);
+  if (validate(longPath).some((e) => e.startsWith('[A2]'))) problems.push('260 字符 target（maxTargetLen 等值）被 A2 误判红');
+  const overPath = clone();
+  overPath.groups[0].items[0].fileKeys[0].path = prefix + 'a'.repeat(261 - prefix.length);
+  if (!validate(overPath).some((e) => e.startsWith('[A2]'))) problems.push('261 字符 target（maxTargetLen=260）未被 A2 判红');
   return problems;
 }

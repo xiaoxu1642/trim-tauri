@@ -707,7 +707,7 @@ pub(super) unsafe fn service_findings(
                     },
                     "confidence": if stale { "medium" } else { "high" },
                     "risk": "high",
-                    "readonly": true, "defaultChecked": false,
+                    "defaultChecked": false,
                     "details": details,
                     "contribs": contribs(&[
                         ("serviceKeyAlive", format!("{SERVICES_ROOT}\\{} 仍可打开", e.name)),
@@ -724,7 +724,7 @@ pub(super) unsafe fn service_findings(
                             "kind": "reg_key", "target": target,
                             "class": class_label(c),
                             "reason": note,
-                            "readonly": true, "details": details,
+                            "details": details,
                         }));
                     }
                 } else {

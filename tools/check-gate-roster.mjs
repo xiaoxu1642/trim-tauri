@@ -76,6 +76,7 @@ const MUST_RUN = [
   'check-elapsed-facts',
   'check-version-sync',
   'check-updater-pubkey',
+  'check-release-artifacts',
   'check-readme-claims',
   'check-readme-negative-claims',
   'check-doc-refs',

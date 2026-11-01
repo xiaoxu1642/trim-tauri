@@ -3,7 +3,7 @@
 //
 // 用法（发版顺序见发版手册 §7；本工具只碰 AtomGit API。GitHub 侧上传仍归 gh CLI，不在这里）：
 //   node tools/publish-atomgit.mjs --dry-run         # 本地预检 + 打印计划，不写文件不联网
-//   node tools/publish-atomgit.mjs --offline         # 只生成三份清单（产物区两份 + 仓根 latest-atomgit.json）
+//   node tools/publish-atomgit.mjs --offline         # 只生成产物区两份清单；仓根清单等附件上线后再写
 //   node tools/publish-atomgit.mjs --token-file <p>  # 全流程：等 tag 就位 → 建 release → 传三件 → 匿名回读验 sha256
 //   node tools/publish-atomgit.mjs --verify-feed     # push 之后：轮询 AtomGit raw 清单直到与仓根逐字节一致
 //
@@ -143,17 +143,26 @@ function manifestFor(notes, sigText, setupSha, url) {
 
 const json = (o) => JSON.stringify(o, null, 2) + '\n';
 
-function writeManifests(notes, sigText, setupSha) {
-  const attachUrl = `${API}/releases/v${ver}/attach_files/${encodeURIComponent(setupName)}/download`;
+const atomgitAttachUrl = () =>
+  `${API}/releases/v${ver}/attach_files/${encodeURIComponent(setupName)}/download`;
+
+/** T1c-M06：产物区两份清单与附件无关，可先写；仓根清单是「客户端会立刻拉」的入口，
+ *  必须等三次 ensureAsset 成功后再写——否则 --offline 会让发版人先 push 一份指向 404 的清单。 */
+function writeBuildManifests(notes, sigText, setupSha) {
   const targets = [
-    [join(OUT, MANIFEST_NAME), manifestFor(notes, sigText, setupSha, attachUrl)],
+    [join(OUT, MANIFEST_NAME), manifestFor(notes, sigText, setupSha, atomgitAttachUrl())],
     [join(OUT, 'latest.json'), manifestFor(notes, sigText, setupSha, `https://github.com/${GITHUB_SLUG}/releases/download/v${ver}/${setupName}`)],
-    [join(ROOT, MANIFEST_NAME), manifestFor(notes, sigText, setupSha, attachUrl)],
   ];
   for (const [p, obj] of targets) {
     writeFileAtomic(p, json(obj));
     ok(`写入 ${p.replace(ROOT + '\\', '').replace(ROOT + '/', '')}`);
   }
+}
+
+function writeRootManifest(notes, sigText, setupSha) {
+  const p = join(ROOT, MANIFEST_NAME);
+  writeFileAtomic(p, json(manifestFor(notes, sigText, setupSha, atomgitAttachUrl())));
+  ok(`写入 ${MANIFEST_NAME}（附件已全部上线之后）`);
 }
 
 // ---------------- AtomGit API ----------------
@@ -322,11 +331,12 @@ try {
       process.exit(0);
     }
 
-    writeManifests(notes, sigText, setupSha);
+    writeBuildManifests(notes, sigText, setupSha);
 
     if (OFFLINE) {
       console.log('');
-      info('--offline：到此为止。仓根清单已生成，先 commit/push 再跑联网流程（或直接跑全流程）');
+      info('--offline：只生成 build-release 两份清单。仓根清单未写——它必须等附件上线后再生成，');
+      info('  否则 hash/url 指向还不存在的附件，客户端会拿到 404。联网流程会自动在三次上传后写它。');
     } else {
       const token = loadToken();
       console.log('');
@@ -336,6 +346,7 @@ try {
       await ensureAsset(token, setupName, files.setup);
       await ensureAsset(token, portableName, files.portable);
       await ensureAsset(token, sigName, files.sig);
+      writeRootManifest(notes, sigText, setupSha);
       console.log('');
       console.log('附件已全部上线。下一步（顺序不能反）：');
       console.log(`  git add ${MANIFEST_NAME} && git commit && git push   # 推仓根清单；镜像已停用，AtomGit 须直推（发版手册 §7.4）`);

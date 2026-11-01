@@ -249,10 +249,57 @@ const runValueVectors = [
   { target: 'HKCU\\Software\\Acme\\..\\Microsoft::X', gate: 'denied', cls: '含 .. 段' },
 ];
 
+// T1g-L05：每条反例必须声明「应当被哪条断言拒」。旧夹具只钉 ok=false，
+// 某条断言被删后包被另一条规则顺手拒掉仍绿；mustTrigger 取校验器拒因里的
+// 稳定子串，Node 门禁按它断言命中（与 cleanup 侧 mustTrigger 同构）。
+function triggerFor(label) {
+  const table = [
+    [/^顶层未知字段$/, '顶层 未知字段'],
+    [/^条目缺 ver/, '缺条目级版本戳'],
+    [/^条目 ver/, '与顶层 rulesVersion'],
+    [/^规则条目未知字段/, '未知字段'],
+    [/^residue 条目未知字段/, 'residue 未知字段'],
+    [/^reg_value 缺 ::/, '恰好一个 ::'],
+    [/^reg_value 值名为空/, '值名为空'],
+    [/^reg_value 键路径为系统容器/, '受保护容器'],
+    [/^reg_value 键路径在 Run/, '系统命名空间'],
+    [/^reg_value 含两个/, '恰好一个 ::'],
+    [/^reg_value 键路径用变量/, '不允许变量形态'],
+    [/^reg_value 值名首尾/, '首尾含空白'],
+    [/^shortcut 非/, '必须是 .lnk'],
+    [/^shortcut 含通配符/, '目标含通配符'],
+    [/^三条件组/, '三条件组只有'],
+    [/^displayName 不是数组/, 'displayName 不是数组'],
+    [/^匹配组含空白/, '含空白或超长条目'],
+    [/^未登记 %TOKEN%/, '未登记'],
+    [/^token 根/, '禁止 token 根'],
+    [/^路径含通配符/, '目标含通配符'],
+    [/^相对路径/, '既不是登记变量的子路径'],
+    [/^路径含 \.\./, '含空段'],
+    [/^target 首尾/, '首尾含空白'],
+    [/^路径中第二个变量/, '第二个变量替换'],
+    [/^note 缺失/, 'residue.note 缺失'],
+    [/^规则 id 含非法/, '规则 id 缺失'],
+    [/^规则 id 重复/, '规则 id 重复'],
+    [/^residue 为空/, 'residue 缺失'],
+    [/^rules 为空/, 'rules 缺失'],
+    [/^prov 缺失/, 'prov 缺失'],
+    [/^prov 条目含未知字段/, 'prov 未知字段'],
+    [/^rulesVersion 非数字/, 'rulesVersion 缺失'],
+    [/^reg_key 目标为 HKLM/, '受保护容器'],
+    [/^reg_key 目标为 Microsoft/, '系统命名空间'],
+    [/^reg_key 目标带 ::值名/, '::值名'],
+    [/^reg_key 目标用不支持的 hive/, 'hive 只支持'],
+    [/^reg_key 目标含变量/, '变量形态'],
+  ];
+  const hit = table.find(([re]) => re.test(label));
+  return hit ? hit[1] : '';
+}
+
 const packages = cases.map(({ label, ok, mutate }) => {
   const pkg = basePackage();
   mutate(pkg);
-  return { label, ok, pkg };
+  return ok ? { label, ok, pkg } : { label, ok, pkg, mustTrigger: triggerFor(label) };
 });
 
 // 自校验：基线必须是放行用例；每条拒绝用例的 id 不许与基线重复（否则会把「id 重复」
@@ -261,6 +308,7 @@ if (!packages[0].ok) throw new Error('基线用例必须是放行用例');
 for (const c of packages.filter((x) => !x.ok)) {
   const dup = c.pkg.rules.length > 1 && !c.label.includes('id 重复');
   if (dup) throw new Error(`用例「${c.label}」意外含多条规则，请改为单条规则表达该缺陷`);
+  if (!c.mustTrigger) throw new Error(`反例「${c.label}」没有 mustTrigger 登记（新增反例必须写明应命中哪条断言）`);
 }
 
 const doc = {

@@ -143,15 +143,36 @@ function rustFnBody(src, name) {
   return '';
 }
 
-/** 取 match 臂体：`"id" =>` 之后到下一个同缩进臂或函数体结尾。 */
+/** 取 match 臂体：`"id" =>` 之后到下一个**同缩进**臂或函数体结尾。
+ *  T1f-M01：旧实现把下一臂锚点写死 4 空格，而 apply.rs 的 match 臂实际是 8 空格 ⇒
+ *  永远找不到边界，臂体退化成 1200 字符窗口，相邻臂的 `p.<field>` 会替本臂作证。 */
 function armSlice(body, id) {
   if (!body) return '';
   const m = new RegExp(`^\\s*"${id}"\\s*=>`, 'm').exec(body);
   if (!m) return '';
+  const indent = (/^\s*/.exec(m[0])?.[0] ?? '').length;
   const start = m.index + m[0].length;
   const rest = body.slice(start);
-  const next = rest.search(/^\s{4}"[a-z0-9_]+" =>|^\s{4}_\s*=>/m);
+  const pad = `[ \\t]{${indent}}`;
+  const next = rest.search(new RegExp(`^${pad}"[a-z0-9_]+"\\s*=>|^${pad}_\\s*=>`, 'm'));
   return next < 0 ? rest.slice(0, 1200) : rest.slice(0, next);
+}
+
+// T1f-M01 正向对照：相邻臂字段不得越界作证（旧 4 空格锚点在此必红）。
+{
+  const sample = [
+    'match key {',
+    '        "svc_mem_gb" => { let a = p.gb; }',
+    '        "perf_wu_pause" => { let b = p.days; }',
+    '    }',
+  ].join('\n');
+  const own = armSlice(sample, 'svc_mem_gb');
+  const next = armSlice(sample, 'perf_wu_pause');
+  if (/p\.days/.test(own) || !/p\.gb/.test(own) || !/p\.days/.test(next)) {
+    console.error('✗ T1f-M01 正向对照失败：match 臂边界仍按错误缩进切片（相邻臂字段越界作证）');
+    process.exit(1);
+  }
+  console.log('✓ T1f-M01 正向对照：相邻 match 臂字段互不越界');
 }
 
 // ---- A1：数据层 dynamic 集合 ⇄ 前端分派表键集合 ----
@@ -448,8 +469,8 @@ function sideMarkerProblem(src, field, sideName, anchor) {
 
 // 为什么是「三侧」而不是报告 §5.2 设计的「只查 collect_checks」：
 // v0.5.0 的 startType **执行链根本没读这个字段**（`grep -rn startType src-tauri/src/`
-// 全仓 3 处命中全是注释；2026-11-01 复核实测现盘 41 处命中，执行链在 `optimizer/apply.rs:112`
-// 读 `s.get("startType")`，本段陈述已过期），而报告判定它是「检测盲区 · 0.5 天」并写明
+// 全仓三处命中全是注释；2026-11-01 复核实测现盘数十处命中，执行链在 `src-tauri/src/commands/optimizer/apply.rs:112` 读 `startType`
+// （`s.get("startType")`），本段陈述已过期），而报告判定它是「检测盲区 · 0.5 天」并写明
 // 「执行链已走 Set-Service 解释器分支，是好的」。只查检测侧的门禁会把这个
 // 真缺陷完整放过去 —— 门禁查的那一侧恰好是当时唯一「看起来有进展」的一侧。
 //

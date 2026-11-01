@@ -512,12 +512,35 @@ if (fixture) {
   });
   check(regBad.length === 0, `F1. 注册表保护判定与夹具一致（${(fixture.regVectors || []).length} 条向量）`,
     regBad.length ? `${regBad.length} 处不一致：${regBad.map((v) => `${v.target}(${v.cls})`).join('；')}` : '');
-  const pkgBad = (fixture.packages || []).filter((c) => {
-    const got = validateResiduePackage(c.pkg) === null;
-    return got !== Boolean(c.ok);
-  });
-  check(pkgBad.length === 0, `F2. 语义校验与夹具一致（${(fixture.packages || []).length} 条用例）`,
-    pkgBad.length ? `${pkgBad.length} 处不一致：${pkgBad.map((c) => `${c.label} 期望 ${c.ok ? '放行' : '拒绝'}`).join('；')}` : '');
+  // T1g-L05：反例不只要「被拒」，还要「被声明的那条断言拒」。
+  // mustTrigger 是夹具里逐条登记的拒因子串；某条断言被删后包被另一条规则顺手拒掉，
+  // 这里会因拒因不匹配而红（与 cleanup 侧 mustTrigger 同构）。
+  const pkgBad = [];
+  const pkgNoTrigger = [];
+  for (const c of fixture.packages || []) {
+    const err = validateResiduePackage(c.pkg);
+    if (c.ok) {
+      if (err !== null) pkgBad.push(`${c.label} 期望放行，实得 ${err}`);
+      continue;
+    }
+    if (typeof c.mustTrigger !== 'string' || !c.mustTrigger.trim()) {
+      pkgNoTrigger.push(c.label);
+      continue;
+    }
+    if (err === null) pkgBad.push(`${c.label} 期望拒绝，实得放行`);
+    else if (!err.includes(c.mustTrigger)) pkgBad.push(`${c.label} 拒因漂移：期望含「${c.mustTrigger}」，实得「${err}」`);
+  }
+  check(pkgBad.length === 0 && pkgNoTrigger.length === 0,
+    `F2. 语义校验与夹具一致且拒因命中 mustTrigger（${(fixture.packages || []).length} 条用例）`,
+    pkgBad.length || pkgNoTrigger.length
+      ? `${pkgBad.length} 处不一致${pkgNoTrigger.length ? `；${pkgNoTrigger.length} 条反例缺 mustTrigger：${pkgNoTrigger.join('、')}` : ''}：${pkgBad.join('；')}`
+      : '');
+  if (process.argv.includes('--dump-errors')) {
+    for (const c of fixture.packages || []) {
+      if (c.ok) continue;
+      console.log(`${c.label}\t${validateResiduePackage(c.pkg)}`);
+    }
+  }
   const negCount = (fixture.packages || []).filter((c) => !c.ok).length;
   check(negCount >= 20, `F3. 夹具判红用例数量充足（当前 ${negCount} 条，方案 §7 要求每类保护都有反例）`);
 

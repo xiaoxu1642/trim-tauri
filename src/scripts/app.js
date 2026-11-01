@@ -1163,13 +1163,9 @@
       }));
     }
 
-    // 内存占用优化：窗口最小化/隐藏后主动回收渲染进程堆内存
-    // （主进程经 js-flags --expose-gc 暴露 gc()，同时通过 memory:trim 通知；浏览器模式退化为 visibilitychange）
+    // 内存占用优化：窗口隐藏后主动回收渲染进程堆内存
+    // （memory:trim 事件已退役：Rust 侧无发射点；仅当外部 js-flags 暴露 gc() 时此兜底才真正生效）
     const trimRendererMemory = () => { try { window.gc && window.gc(); } catch (e) {} };
-    if (window.api?.app?.onMemoryTrim) {
-      // F3-L03：订阅返回值收账（同上）
-      trackSubscription(window.api.app.onMemoryTrim(trimRendererMemory));
-    }
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') trimRendererMemory();
     });

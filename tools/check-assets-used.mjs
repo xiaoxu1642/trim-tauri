@@ -22,6 +22,7 @@ import { join, basename, relative } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
 import { walkFiles } from './lib/fs-walk.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const VERBOSE = process.argv.includes('--verbose');
 const DIST = join(REPO_ROOT, 'src');            // = tauri.conf.json 的 build.frontendDist
@@ -36,9 +37,11 @@ const WHITELIST = new Map([
 ]);
 
 /** 引用语料：会真的加载资源的那些地方（前端源码 + Rust 侧 + 打包清单 + 能力面） */
+// T1d-M06：头注一直声称排除 vendor/，但 walkFiles 没传 ignoreDir——上游基线的注释
+// 里写一句文件名就能让死资源自我证明。这里把排除真正落实。
 const CORPUS_DIRS = [
-  join(REPO_ROOT, 'src'),
-  join(REPO_ROOT, 'src-tauri', 'src'),
+  { dir: join(REPO_ROOT, 'src'), ignoreDir: (n) => n === 'vendor' },
+  { dir: join(REPO_ROOT, 'src-tauri', 'src') },
 ];
 const CORPUS_FILES = [
   join(REPO_ROOT, 'src-tauri', 'tauri.conf.json'),
@@ -48,11 +51,30 @@ const CORPUS_FILES = [
 // 语料只收文本件（图片/字体当语料既慢又会误命中字节序列）
 const isCorpusText = (f) => /\.(?:js|mjs|cjs|css|html|json|toml|rs|md|txt)$/i.test(f);
 const corpus = [];
-for (const d of CORPUS_DIRS) for (const f of walkFiles(d)) if (isCorpusText(f)) corpus.push(f);
+for (const d of CORPUS_DIRS) {
+  for (const f of walkFiles(d.dir, null, d.ignoreDir ? { ignoreDir: d.ignoreDir } : {})) {
+    if (isCorpusText(f)) corpus.push(f);
+  }
+}
 for (const f of CORPUS_FILES) if (existsSync(f) && isCorpusText(f)) corpus.push(f);
 
-const texts = corpus.map((f) => [f, readFileSync(f, 'utf8')]);
+/** 只剥注释、保留字符串：资源名通常写在字符串字面量里（url()/src=/include_bytes!）。 */
+function stripCommentsForRefs(file, text) {
+  if (/\.(?:js|mjs|cjs)$/i.test(file)) return blankNonCode(text, 'js', { keepStrings: true });
+  if (/\.rs$/i.test(file)) return blankNonCode(text, 'rs', { keepStrings: true });
+  if (/\.css$/i.test(file)) return text.replace(/\/\*[\s\S]*?\*\//g, ' ');
+  if (/\.html$/i.test(file)) return text.replace(/<!--[\s\S]*?-->/g, ' ');
+  return text;
+}
+const texts = corpus.map((f) => [f, stripCommentsForRefs(f, readFileSync(f, 'utf8'))]);
 const assets = walkFiles(DIST);
+
+/** 引用命中 = basename 出现在「剥注释后」的语料代码里；文件自身不算。 */
+function referenceHits(name, self, corpusTexts) {
+  return corpusTexts
+    .filter(([cf, code]) => cf !== self && code.includes(name))
+    .map(([cf]) => relative(REPO_ROOT, cf).replace(/\\/g, '/'));
+}
 
 let unused = 0;
 let unusedBytes = 0;
@@ -68,11 +90,7 @@ for (const f of assets) {
   const rel = relative(REPO_ROOT, f).replace(/\\/g, '/');
   const size = statSync(f).size;
   const name = basename(f);
-  const hits = [];
-  for (const [cf, text] of texts) {
-    if (cf === f) continue;                      // 自引用不算被引用
-    if (text.includes(name)) hits.push(relative(REPO_ROOT, cf).replace(/\\/g, '/'));
-  }
+  const hits = referenceHits(name, f, texts);   // 自引用不算被引用
   if (hits.length || WHITELIST.has(rel)) {
     if (VERBOSE) console.log(`✓ ${rel} (${KB(size)})  ←  ${hits.length ? hits.slice(0, 3).join(', ') : WHITELIST.get(rel)}`);
     continue;
@@ -80,6 +98,30 @@ for (const f of assets) {
   unused++;
   unusedBytes += size;
   console.log(`✗ ${rel} (${KB(size)}) 无人引用 —— 它仍会随 frontendDist 进产物`);
+}
+
+// ---- T1d-M06 正向对照：注释提及不算引用、vendor/ 不在语料 ----
+{
+  const commentOnly = '// 见 src/assets/ico/Trim.ico\nconst x = 1;\n';
+  const commentHits = referenceHits('Trim.ico', '(self)', [['sample.js', stripCommentsForRefs('sample.js', commentOnly)]]);
+  if (commentHits.length !== 0) {
+    console.error('✗ T1d-M06 正向对照失败：注释里的资源名仍被当成引用（剥注释失效）');
+    process.exit(1);
+  }
+  const realRef = "const icon = 'src/assets/ico/Trim.ico';";
+  const realHits = referenceHits('Trim.ico', '(self)', [['sample.js', stripCommentsForRefs('sample.js', realRef)]]);
+  if (realHits.length !== 1) {
+    console.error('✗ T1d-M06 正向对照失败：字符串里的真实引用未被识别（剥注释过严）');
+    process.exit(1);
+  }
+  const vendorLeak = corpus
+    .map((f) => relative(REPO_ROOT, f).replace(/\\/g, '/'))
+    .filter((f) => /(^|\/)src\/vendor(\/|$)/.test(f));
+  if (vendorLeak.length !== 0) {
+    console.error(`✗ T1d-M06：语料仍包含 vendor/（${vendorLeak.slice(0, 3).join('、')}）—— 上游基线不得替资源作证`);
+    process.exit(1);
+  }
+  console.log('✓ T1d-M06 参照对照：注释提及不计、真实字符串引用命中、vendor/ 已排除');
 }
 
 if (unused) {

@@ -12,9 +12,9 @@
 //      不在这里另写一套——否则"矩阵说有覆盖、引擎其实不消费"这种分叉迟早出现。
 //   2. **域内密度**按 `domain` × `nature` 出，不按"分组标题"出（标题是文案）。
 //   3. **基线只增不减**：`tools/fixtures/rule-coverage-baseline.json` 记下
-//      「有效条目 id 集合」。条目变少 = 覆盖缩水，必须显式 `--bump-baseline` 并在
-//      审核记录里写原因，否则判红。参照的是 semgrep 的做法：存量可以慢慢加，
-//      但倒退必须有人签字。
+//      「有效条目 id 集合」。条目变少 = 覆盖缩水，必须显式 `--write`（T1c-M04：
+//      此前写的是不存在的 `--bump-baseline`）并在审核记录里写原因，否则判红。
+//      参照的是 semgrep 的做法：存量可以慢慢加，但倒退必须有人签字。
 //
 // 用法：
 //   node tools/gen-rule-coverage.mjs              打印矩阵并与基线比对（缩水即红）
@@ -42,11 +42,21 @@ const schema = JSON.parse(fs.readFileSync(SCHEMA, 'utf8'));
 const liveKeys = schema.crossTrack.liveSourceKeys;
 const handlers = schema.crossTrack.specialHandlers;
 
+// T1c-M02：与 cleanup-contract.mjs 的 A13 同口径——空串/空白串不算活来源，
+// 否则死规则会被覆盖面矩阵计成「有效条目」。
 const isLive = (it) => {
   for (const k of liveKeys) {
     const v = it[k];
     if (v === undefined || v === null) continue;
-    if (Array.isArray(v) ? v.length > 0 : true) return true;
+    if (typeof v === 'string') {
+      if (v.trim() !== '') return true;
+      continue;
+    }
+    if (Array.isArray(v)) {
+      if (v.some((x) => (typeof x === 'string' ? x.trim() !== '' : x !== null && x !== undefined))) return true;
+      continue;
+    }
+    return true;
   }
   const h = handlers.find((x) => it[x.key] !== undefined);
   return Boolean(h && (h.values || []).includes(it[h.key]));
@@ -158,7 +168,7 @@ if (WRITE) {
   const added = [...now].filter((x) => !before.has(x));
   if (lost.length) {
     console.error(`\n✗ 覆盖缩水 ${lost.length} 条：${lost.join('、')}`);
-    console.error('  条目被删或路径来源变成引擎不认的键都算缩水。有意收缩请跑 --bump-baseline 并在审核记录里写明原因。');
+    console.error('  条目被删或路径来源变成引擎不认的键都算缩水。有意收缩请跑 --write 刷新基线，并在审核记录里写明原因。');
     fail = 1;
   } else {
     console.log(`\n✓ 覆盖基线未缩水（${now.size} 条${added.length ? `，本轮新增 ${added.length} 条：${added.join('、')}` : ''}）`);

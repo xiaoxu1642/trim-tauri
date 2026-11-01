@@ -215,7 +215,7 @@ pub(super) fn ifeo_findings(raws: &[IfeoRaw], image_present: &dyn Fn(&str) -> bo
             "class": class,
             "reason": reason,
             "confidence": confidence, "risk": if confidence == "high" { "high" } else { "low" },
-            "readonly": true, "defaultChecked": false,
+            "defaultChecked": false,
             "details": json!({
                 "image": image,
                 "view": raw.view.label(),
@@ -324,7 +324,6 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert!(notes.iter().any(|n| n.contains("已达上限")));
         for it in &items {
-            assert_eq!(it["readonly"], true);
             assert_eq!(it["defaultChecked"], false);
             assert_eq!(it["class"], "ifeo_stale_options");
         }

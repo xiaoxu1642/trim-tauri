@@ -66,7 +66,16 @@ const TRANSITION = [];
 // 第二道判据的登记表：只收「自有 scratch + Drop 恢复」经人工确认、但静态判据
 // 暂时表达不了的探针；双向咬合 —— 修好后仍挂着同样判红。当前 18 条命中全部
 // 能由自有命名空间或 created/original 真语句放行，故为空。
-const WRITE_GUARD_TRANSITION = [];
+const WRITE_GUARD_TRANSITION = [
+  {
+    rel: 'src-tauri/tests/module_smoke.rs',
+    fn: 'cleanup_reg_backup_restore_shares_the_uninstall_domain_gates',
+    batch: '2026-11-02 M条中危收口',
+    reason: '夹具 .reg 内容只写进私有 tmp 文件供恢复链读取，从不执行 reg import；'
+      + '文件内的 HKLM\\SOFTWARE / HKCU\\Software 正是被测的拒绝面（必须能构造出危险目标）。'
+      + '用例自身有 Drop 清理两个夹具文件，无真实注册表副作用。',
+  },
+];
 
 /** 递归收集 .rs 文件，忽略 target（构建产物里也有同名测试源码）。 */
 function listRs(dir) {

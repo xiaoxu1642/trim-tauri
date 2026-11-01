@@ -56,8 +56,12 @@ const REGISTRY = [
   // 对照块坏了没人红。迁入 REGISTRY 后受第 1/2 组实跑核验。
   { file: 'check-item-intro.mjs', reason: '对拍型：item-intro.json 多形态 ⇄ 前端消费口径（内置对照块随跑随验，2026-10-20 从 PENDING 迁入）' },
   { file: 'check-test-sandbox.mjs', reason: 'D 轮（2026-10-25）新增：测试沙箱必须走自删守卫。判定器 judge() 与门禁共用同一实现，内置三向合成对照——未登记新文件 / 计数上升 / 守卫实现整体消失，任一失效即红；另钉守卫本体活性（impl Drop + remove_dir_all 缺一即红，防「①全绿而守卫已被掏空」）' },
-  { file: 'check-optimizer-security.mjs', reason: '找违规型：扩库夹带关闭安全组件即红（内置对照块随跑随验，2026-10-20 从 PENDING 迁入）' },
+  { file: 'check-optimizer-security.mjs', reason: '找违规型：扩库夹带关闭安全组件即红（内置对照块随跑随验，2026-10-20 从 PENDING 迁入；T1f-M02 起 sc disabled / Set-Service / 变量数组 / 结构化 service / restore 步逐形态有正反样本）' },
   { file: 'check-optimizer-groups-sidecar.mjs', reason: '对拍型：分类侧表 ⇄ 渲染层兜底常量（内置 6 条对照样本随跑随验，2026-10-20 从 PENDING 迁入）' },
+  { file: 'check-assets-used.mjs', reason: 'T1d-M06：资源引用判定抽 referenceHits，注释提及不计 / 真实字符串引用命中 / vendor 已排除三向对照随跑随验' },
+  { file: 'check-data-parity.mjs', reason: 'T1b-M05：第 6 组 prune 覆盖改用 blankNonCode，注释-only token 必红的正向对照随跑随验' },
+  { file: 'check-optimizer-dynamic.mjs', reason: 'T1f-M01：armSlice 按本臂实际缩进切边界，相邻 match 臂字段不得越界作证的正向对照随跑随验' },
+  { file: 'check-release-artifacts.mjs', reason: 'D1-L03：setup.exe ⇄ .sig ⇄ 两份清单三方对拍；judgeReleaseArtifacts 4 组自检（正确放行 / 签名字节不符 / sha256 不符 / 版本漂移）随跑随验' },
   { file: 'check-optimizer-schema-sync.mjs', reason: '优化域标量 ⇄ 契约表 optimizer 段：六条合成样本（齐全放行 / Rust 常量、渲染层常量、风险档清单、目录越档 risk、侧表 schemaVer 各自判红）' },
   { file: 'check-bcd-row-ids.mjs', reason: '永劫 BCD 行 id 四端对拍：面板 JSON / NARA_ROW_LABEL / ALL_ROW_IDS / row_targets 分支；合成样本覆盖缺项、多项、解析为空 fail-closed' },
   // T1c-M02 / T1c-M05（v7.2 C09）两条新门禁：
@@ -98,13 +102,10 @@ const PENDING_CONTROLS = [
   { name: 'check-ps-extraction', reason: '对拍型：JS 源 ⇄ .ps1 正文逐字（文本层 + --run 行为层双档），缺「单字节漂移必须红」样本' },
   { name: 'check-csp-consistency', reason: '对拍型：meta CSP ⇄ 三子窗副本逐字一致，缺合成样本' },
   // check-css-tokens 已于 2026-10-18 v6 P2 配好三组判定器自检并迁入 REGISTRY（本表只减不增）。
-  { name: 'check-assets-used', reason: '找违规型：src/assets 零引用文件即红，缺违规样本自检' },
   // check-asset-size 已于 2026-10-14 v3 P2-I 配好内置正向对照并迁入 REGISTRY（本表只减不增）。
   // check-item-intro / check-optimizer-security / check-optimizer-groups-sidecar
   // 已于 2026-10-20（T1b-M02）证实各自带对照块，迁入 REGISTRY（本表只减不增）。
   { name: 'check-desktop-entry', reason: '对拍型：桌面入口 ⇄ 发布暂存目录合并状态，缺合成样本' },
-  { name: 'check-data-parity', reason: '对拍型：data/*.json 派生副本 ⇄ 真源（6+1 个），缺「改一侧必须红」样本' },
-  { name: 'check-optimizer-dynamic', reason: '对拍型：dynamic 标记 ⇄ 后端分支要求，缺合成样本；R3-L06（v7.2 P2）把参数校验合并进 dynamic_steps 后，A2/A3 的解析面已扩成「分派分支 + match 臂」两处来源（只找 `option_id ==` 会同时瞎两条），并经真破坏验证——把 svc_mem_gb 臂里的 `p.gb` 读取摘掉 ⇒ A3 判红且点名「判断体（match 臂）没读 p.gb」，恢复回绿' },
   { name: 'check-optimizer-subitem-contract', reason: '对拍型：可自选目标契约 ⇄ 侧表，缺合成样本' },
   // T1a-M13：上面这条曾逐字重复登记（PENDING 计数虚高、条数等式对不上 MUST_RUN
   // 且 Set 差集看不见重复）。重复行已删，dup 断言见下方断言 4b。

@@ -30,6 +30,10 @@ check(htmlFiles.length >= 4, `0. src/*.html 输入面 ${htmlFiles.length} 份（
 // T1d-M08：内联 script 判据的唯一实现（真仓扫描与对照共用）。
 const stripHtmlComments = (text) => text.replace(/<!--[\s\S]*?-->/g, ' ');
 const hasInlineScript = (text) => /<script(?![^>]*\bsrc=)[^>]*>/i.test(stripHtmlComments(text));
+// T1d-M05：与内联 <script> 同属「CSP 静默拦截」的另两种写法——on*= 内联事件与
+// javascript: URL。它们被 script-src 拦掉时页面功能消失但零报错，必须与内联 script 同档。
+const hasInlineHandler = (text) => /\son[a-z]+\s*=/i.test(stripHtmlComments(text));
+const hasJavascriptUrl = (text) => /\s(?:href|src|action|formaction)\s*=\s*["']\s*javascript:/i.test(stripHtmlComments(text));
 // T1d-M12：ds 使用方集合现算（剥注释后逐文件），不是手抄一个 modal.js。
 const jsFiles = readdirSync(join(SRC, 'scripts')).filter((f) => f.endsWith('.js'));
 const dsUsers = new Set();
@@ -41,6 +45,8 @@ for (const f of jsFiles) {
   if (/\bwindow\.ds\b|\bds\.[A-Za-z_$]/.test(code)) dsUsers.add(f);
 }
 const inlineHits = [];
+const handlerHits = [];
+const jsUrlHits = [];
 const missingDs = [];
 const spotOrderHits = [];
 const dsOrderHits = [];
@@ -55,6 +61,8 @@ for (const f of htmlFiles) {
   if (hasInlineScript(text)) {
     inlineHits.push(f);
   }
+  if (hasInlineHandler(text)) handlerHits.push(f);
+  if (hasJavascriptUrl(text)) jsUrlHits.push(f);
   // 2. ds.css + ds.js 挂载
   if (!/href="[^"]*styles\/ds\.css"/.test(clean)) missingDs.push(`${f}: ds.css`);
   if (!/src="[^"]*scripts\/ds\.js"/.test(clean)) missingDs.push(`${f}: ds.js`);
@@ -84,6 +92,16 @@ check(
   inlineHits.length === 0,
   '1. src/*.html 零内联 <script>（CSP 静默拦截红线）',
   inlineHits.join(', '),
+);
+check(
+  handlerHits.length === 0,
+  '1b. src/*.html 零内联 on*= 事件（CSP 静默拦截红线）',
+  handlerHits.join(', '),
+);
+check(
+  jsUrlHits.length === 0,
+  '1c. src/*.html 零 javascript: URL（CSP 静默拦截红线）',
+  jsUrlHits.join(', '),
 );
 check(
   missingDs.length === 0,
@@ -306,7 +324,19 @@ const POSITIVE_CONTROLS = (() => {
     console.error('✗ 正向对照失败：内联 script 判定失效');
     process.exit(1);
   }
-  console.log('✓ 正向对照自检通过（内联样本命中、外链样本放行）');
+  const handlerDirty = '<button onclick="go()">x</button>';
+  const urlDirty = '<a href="javascript:go()">x</a>';
+  const handlerClean = '<button data-act="go">x</button>';
+  const commentOnly = '<!-- <button onclick="go()"> -->';
+  if (!hasInlineHandler(handlerDirty) || hasInlineHandler(handlerClean) || hasInlineHandler(commentOnly)) {
+    console.error('✗ 正向对照失败：on*= 内联事件判定失效');
+    process.exit(1);
+  }
+  if (!hasJavascriptUrl(urlDirty) || hasJavascriptUrl('<a href="https://x">x</a>')) {
+    console.error('✗ 正向对照失败：javascript: URL 判定失效');
+    process.exit(1);
+  }
+  console.log('✓ 正向对照自检通过（内联 script / on*= / javascript: 样本命中、合规样本放行）');
   return true;
 })();
 

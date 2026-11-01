@@ -18,11 +18,13 @@
       "why": "关闭 Defender 的实时/行为/云上报等防护面并停用 Sense/WinDefend/WdNisSvc/SecurityHealthService/wscsvc，系统将没有杀毒防护；同时关掉 SmartScreen。",
       "writes": [
         "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender\\* :: Disable*=1",
-        "EnableSmartScreen=0"
+        "EnableSmartScreen=0",
+        "HKLM\\SYSTEM\\CurrentControlSet\\Services\\{Sense,WinDefend,WdNisSvc,SecurityHealthService} :: Start=4"
       ],
       "rules": [
         "defender-off",
-        "smartscreen-off"
+        "smartscreen-off",
+        "sec-svc-disable"
       ]
     },
     "perf_windows_update_off": {

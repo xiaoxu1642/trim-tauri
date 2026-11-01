@@ -43,6 +43,9 @@ const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 
 const optimizer = JSON.parse(read('src-tauri/data/optimizer-runtime.json'));
 const retired = new Set(JSON.parse(read('src-tauri/data/retired-optimizations.json')).items.map((x) => x.id));
+// T1b-M03：条件追加的服务禁用只在写入侧表里（storeServices / expectStart=4 的服务组），
+// 不在 runtime 的 pwsh 主段文本里——只看 steps 会漏掉「弹窗确认后追加商店段」的真实写入。
+const writes = JSON.parse(read('src-tauri/data/optimizer-writes.json'));
 
 // ---- 承诺真源（本机资料区，不入库）：缺失时只有文档段 SKIP（红线口径），不崩也不打 ✓ ----
 // T1a-K01：本机资料区的真实路径不得写进跟踪文件（含门禁源码），用段拼接；
@@ -162,6 +165,61 @@ const THEMES = [
     ],
   },
   {
+    // T1b-M03：以下四条此前只存在于承诺文档、没有任何判据。
+    topic: '清空待机列表「释放内存」',
+    docAnchor: '**清空整个待机列表「释放内存」**',
+    matcher: {
+      ids: ['mem_clean', 'memory_clean', 'standby_clean', 'standby_list_clean'],
+      stepText: [/EmptyStandbyList/i, /MemoryPurgeStandbyList/i, /clear[^\n]{0,40}standby/i, /待机列表/i],
+    },
+    reason: '待机列表本就计入可用内存，清空丢掉的是热缓存',
+    allow: [],
+  },
+  {
+    topic: '高频自动「内存整理」',
+    docAnchor: '**高频自动「内存整理」**',
+    matcher: {
+      ids: ['mem_defrag', 'memory_defrag', 'mem_compact', 'memory_compact'],
+      stepText: [/Memory\s*Compression/i, /内存整理/i, /内存压缩/i, /EmptyWorkingSet/i],
+      // 计划任务里做内存整理：两条必须同一步命中，避免把普通计划任务项误伤
+      stepTextAll: [[/schtasks|Register-ScheduledTask/i, /memory|内存/i]],
+    },
+    reason: '反复清工作集只会把数据换回页面文件再读回来',
+    allow: [],
+  },
+  {
+    topic: '禁用系统服务「越全越好」（商店/同步服务保持默认）',
+    docAnchor: '**禁用系统服务「越全越好」**',
+    matcher: {
+      // 商店/账户同步相关服务：默认清单里必须保持系统默认。
+      // CscService（离线文件缓存）不在此列：它不属于商店/账户同步承诺的范围。
+      serviceDisableNames: [
+        'AppXSvc', 'ClipSVC', 'InstallService', 'LicenseManager', 'StoreInstallService',
+        'PushToInstall', 'wlidsvc', 'OneSyncSvc', 'Wns', 'TokenBroker',
+      ],
+    },
+    reason: '商店与同步相关服务保持系统默认，批量禁用会破坏商店/更新/账户同步',
+    allow: [
+      {
+        id: 'tf_svc_bulk',
+        scope: '商店相关服务仅在用户弹窗确认后追加禁用（默认保持系统默认）',
+        scopeDocAnchor: '商店相关服务仅在用户弹窗确认后追加禁用',
+        why: '默认清单不含商店服务；includeStore 段由用户在独立弹窗确认后追加，'
+          + '属用户显式选择，不是「越全越好」的默认批量禁用。写入侧表 storeServices 是这条边界的真源。',
+      },
+    ],
+  },
+  {
+    topic: 'AMD 驱动注册表深度调优',
+    docAnchor: '**AMD 驱动注册表深度调优**',
+    matcher: {
+      regKeyPaths: [/\\AMD(?:\\|$)/i, /\\Services\\amd/i],
+      stepText: [/HKLM:\\+SOFTWARE\\+AMD/i, /HKLM:\\+SYSTEM\\+CurrentControlSet\\+Services\\+amd/i],
+    },
+    reason: 'A 卡用户实机反馈存在副作用，只保留清理类规则',
+    allow: [],
+  },
+  {
     topic: '静默/永久禁用 UCPD 驱动',
     docAnchor: '**静默/永久禁用 UCPD 驱动来接管默认应用**',
     matcher: { stepText: [/UCPD/] },
@@ -216,10 +274,57 @@ function regValueNamesIn(text) {
   return [...String(text).matchAll(/"([^"]+)"\s*=/g)].map((m) => m[1]);
 }
 
-function matchesTheme(item, matcher) {
+/** 步骤文本里的服务名（reg 段路径 / sc config / Set-Service / 显式 service 字段 / $disabled 数组）。 */
+function serviceNamesInStep(st, text) {
+  const names = new Set();
+  for (const m of text.matchAll(/\\Services\\([^\\\]"'\s]+)/gi)) names.add(m[1]);
+  for (const m of text.matchAll(/sc(?:\.exe)?\s+config\s+(?:"([^"]+)"|([^\s]+))/gi)) {
+    names.add((m[1] || m[2] || '').replace(/^["']|["']$/g, ''));
+  }
+  for (const m of text.matchAll(/Set-Service[^\n]*?-Name\s+["']?([\w.$-]+)/gi)) names.add(m[1]);
+  if (typeof st.service === 'string') names.add(st.service);
+  // tf_svc_bulk 形态：$disabled = @("A","B",...) 后统一写 Start=4
+  const arr = text.match(/\$(?:disabled|services|svc)\w*\s*=\s*@\(([\s\S]*?)\)/i);
+  if (arr) for (const q of arr[1].matchAll(/["']([^"']+)["']/g)) names.add(q[1]);
+  return [...names].filter((n) => n && !n.includes('$'));
+}
+
+/** 该步骤是否是「把服务改成禁用/手动」的写入（读操作不算）。 */
+function isServiceDisableStep(st, text) {
+  if (st.disable === true) return true;
+  if (typeof st.service === 'string' && /disabled|^4$/i.test(String(st.startType ?? ''))) return true;
+  return /(?:start\s*"?\s*=\s*(?:4\b|dword:0*4\b|disabled))|(?:-Name\s+["']?Start["']?\s+-Value\s+4\b)|(?:-StartupType\s+Disabled)/i.test(text);
+}
+
+/** 服务禁用主题：runtime 步骤 + 写入侧表（条件追加段）两处都查。 */
+function serviceDisableHits(item, denyNames, writesItem) {
+  const hit = [];
+  const denied = (n) => denyNames.some((d) => {
+    const want = String(d).toLowerCase();
+    return String(n).toLowerCase() === want
+      || (want.endsWith('*') && String(n).toLowerCase().startsWith(want.slice(0, -1)));
+  });
+  for (const st of [...(item.steps || []), ...(item.restore || [])]) {
+    const text = [st.cmd, st.pwsh, st.reg].filter(Boolean).join('\n');
+    if (!isServiceDisableStep(st, text)) continue;
+    for (const n of serviceNamesInStep(st, text)) if (denied(n)) hit.push(`服务=${n}`);
+  }
+  const w = writesItem || {};
+  const sideServices = new Set([
+    ...(w.storeServices || []),
+    ...(w.groups || []).filter((g) => g.expectStart === 4).flatMap((g) => g.services || []),
+  ]);
+  for (const n of sideServices) if (denied(n)) hit.push(`写入侧表=${n}`);
+  return hit;
+}
+
+function matchesTheme(item, matcher, writesItem) {
   const hit = [];
   if (matcher.ids) {
     for (const id of matcher.ids) if (item.id === id) hit.push(`id=${id}`);
+  }
+  if (matcher.serviceDisableNames) {
+    hit.push(...serviceDisableHits(item, matcher.serviceDisableNames, writesItem));
   }
   const steps = [...(item.steps || []), ...(item.restore || [])];
   for (const st of steps) {
@@ -229,9 +334,19 @@ function matchesTheme(item, matcher) {
         for (const n of names) if (rx.test(n)) hit.push(`值=${n}`);
       }
     }
+    if (matcher.regKeyPaths && st.reg) {
+      for (const m of st.reg.matchAll(/^\[([^\]]+)\]/gm)) {
+        for (const rx of matcher.regKeyPaths) if (rx.test(m[1])) hit.push(`键=${m[1]}`);
+      }
+    }
+    const blob = [st.cmd, st.pwsh, st.reg].filter(Boolean).join('\n');
     if (matcher.stepText) {
-      const blob = [st.cmd, st.pwsh, st.reg].filter(Boolean).join('\n');
       for (const rx of matcher.stepText) if (rx.test(blob)) hit.push(`文本/${rx.source}`);
+    }
+    if (matcher.stepTextAll) {
+      for (const pair of matcher.stepTextAll) {
+        if (pair.every((rx) => rx.test(blob))) hit.push(`同一步文本/${pair.map((r) => r.source).join(' & ')}`);
+      }
     }
   }
   return hit;
@@ -273,7 +388,7 @@ for (const t of THEMES) {
   // 2. 活动清单逐条命中核对
   const hits = [];
   for (const o of optimizer) {
-    const m = matchesTheme(o, t.matcher);
+    const m = matchesTheme(o, t.matcher, writes.items?.[o.id]);
     if (m.length) hits.push({ id: o.id, title: o.title, evidence: [...new Set(m)] });
   }
 

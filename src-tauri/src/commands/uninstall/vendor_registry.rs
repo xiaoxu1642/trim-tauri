@@ -97,7 +97,7 @@ pub(super) fn vendor_findings(
             "class": "vendor_product_key_no_landing",
             "reason": "厂商产品键记着的安装落点与主程序全部已不存在，且卸载列表里没有同名程序",
             "confidence": "medium", "risk": "high",
-            "readonly": true, "defaultChecked": false,
+            "defaultChecked": false,
             "details": json!({ "vendor": raw.vendor, "product": raw.product, "landings": raw.landings, "denyFaceKeepsIt": blocked.is_some() }),
             "contribs": contribs(&[
                 ("productSubkeyScope", format!("判定粒度到产品子键：{}\\{}", raw.vendor, raw.product)),
@@ -210,7 +210,6 @@ mod tests {
         let (out, notes) = vendor_findings(&raws, &alive(&[]), &|_: &str| false, 60);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["class"], "vendor_product_key_no_landing");
-        assert_eq!(out[0]["readonly"], true);
         assert_eq!(out[0]["defaultChecked"], false);
         assert!(notes.is_empty());
     }

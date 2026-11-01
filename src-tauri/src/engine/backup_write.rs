@@ -108,17 +108,26 @@ where
     }
 }
 
+/// 测试期共享锁：`land_backup` 的中转件落在同一个私有 tmp，任何并行用例的在途 stage
+/// 都会让「不留中转件」断言假红。凡在测试里调用 `land_backup` 的用例都先拿这把锁
+/// （不只是本文件的五条——cleanup 的端到端用例也会经删除链触发备份写出）。
+#[cfg(test)]
+static STAGE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 见 [`STAGE_SERIAL`]；`pub(crate)` 供同 crate 的测试模块共用。
+#[cfg(test)]
+pub(crate) fn lock_stage_serial() -> std::sync::MutexGuard<'static, ()> {
+    STAGE_SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// 这组用例共用**同一个**私有 tmp 目录，而 `assert_no_stage_left` 扫的是整个目录。
     /// 不加锁时并行跑到一半的另一条用例会在里面留下自己的在途中转件 ⇒ 本组互相判红。
-    /// 锁只保护这五条用例（都是毫秒级），不是生产语义的一部分。
-    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn serial() -> std::sync::MutexGuard<'static, ()> {
-        SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        lock_stage_serial()
     }
 
     /// 落位成功：目标内容 = 产出内容，且私有 tmp 里不留中转件。

@@ -26,8 +26,8 @@
 mod common;
 
 use common::{
-    assert_guard_passed, invoke, invoke_text, main_window, message_of, probe_guard,
-    sub_windows, window_with_label,
+    assert_guard_passed, assert_guard_rejected, invoke, invoke_text, main_window, message_of,
+    probe_guard, sub_windows, window_with_label, GUARD_REJECT_MARK,
 };
 use serde_json::json;
 
@@ -323,10 +323,7 @@ fn peripheral_apply_is_main_only() {
 
     let sub = window_with_label("peripheral");
     let text = invoke_text(&sub, "peripheral_apply", json!({ "options": {} }));
-    assert!(
-        text.contains("IPC 来源校验失败"),
-        "外设优化已退役子窗档，peripheral label 调 peripheral_apply 必须被拒，回执 {text}"
-    );
+    assert_guard_rejected(&text, "外设优化已退役子窗档，peripheral label 调 peripheral_apply");
 }
 
 /// 提权仍是主窗专属红线（AGENTS.md §3）：子窗不得触发放开。
@@ -335,9 +332,9 @@ fn subwindow_cannot_request_elevation() {
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "elevate_request", json!({}));
-        assert!(
-            text.contains("IPC 来源校验失败"),
-            "{label} 窗调 elevate_request 必须被拒（红线：提权只认主窗），回执 {text}"
+        assert_guard_rejected(
+            &text,
+            &format!("{label} 窗调 elevate_request（红线：提权只认主窗）"),
         );
     }
 }
@@ -351,9 +348,9 @@ fn subwindow_cannot_call_stubborn_commands() {
         for cmd in ["memory_stubborn_kill", "memory_stubborn_block"] {
             let w = window_with_label(label);
             let text = invoke_text(&w, cmd, json!({}));
-            assert!(
-                text.contains("IPC 来源校验失败"),
-                "{label} 窗调 {cmd} 必须被拒（v2-H2：主窗专属高危通道），回执 {text}"
+            assert_guard_rejected(
+                &text,
+                &format!("{label} 窗调 {cmd}（v2-H2：主窗专属高危通道）"),
             );
         }
     }
@@ -383,7 +380,7 @@ fn main_window_reaches_stubborn_commands() {
             let w = main_window();
             let text = invoke_text(&w, cmd, json!({}));
             assert!(
-                !text.contains("IPC 来源校验失败"),
+                !text.contains(GUARD_REJECT_MARK),
                 "主窗调 {cmd} 不得被档位拒杀，回执 {text}"
             );
             assert!(
@@ -396,9 +393,9 @@ fn main_window_reaches_stubborn_commands() {
         for label in sub_windows() {
             let sub = window_with_label(label);
             let text = invoke_text(&sub, cmd, json!({}));
-            assert!(
-                text.contains("IPC 来源校验失败"),
-                "{label} 窗调 {cmd} 必须被拒（v2-H2：主窗专属高危通道），回执 {text}"
+            assert_guard_rejected(
+                &text,
+                &format!("{label} 窗调 {cmd}（v2-H2：主窗专属高危通道）"),
             );
         }
     }
@@ -412,9 +409,9 @@ fn subwindow_cannot_delete_fileclean_image() {
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "fileclean_delete_file", json!({ "filePath": "C:\\nope\\a.jpg" }));
-        assert!(
-            text.contains("IPC 来源校验失败"),
-            "{label} 窗调 fileclean_delete_file 必须被拒（主窗档），回执 {text}"
+        assert_guard_rejected(
+            &text,
+            &format!("{label} 窗调 fileclean_delete_file（主窗档）"),
         );
     }
 }
@@ -428,9 +425,9 @@ fn subwindow_cannot_open_recycle_bin() {
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "cleanup_open_recycle_bin", json!({}));
-        assert!(
-            text.contains("IPC 来源校验失败"),
-            "{label} 窗调 cleanup_open_recycle_bin 必须被拒（主窗档），回执 {text}"
+        assert_guard_rejected(
+            &text,
+            &format!("{label} 窗调 cleanup_open_recycle_bin（主窗档）"),
         );
     }
 }

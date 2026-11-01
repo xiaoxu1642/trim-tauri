@@ -604,6 +604,32 @@ fn manifest_rels(manifest: &std::path::Path) -> Option<Vec<String>> {
 /// 被单测**（`is_path_protected` 读全局清单；`configure()` 一写就污染同进程里
 /// 并发跑的保护断言，正是 protect.rs M13 注释里记的那个坑）。
 /// 纯函数化之后，「受保护拒绝不许混进被占用」这条就能被直接钉住。
+/// 采集阶段的丢弃统计（R5a-M12）。这些目标在进入删除循环前就被跳过，旧实现不记账：
+/// 若某条规则唯一的目标是链接/不可读项，回执会落成「ok / 空结果」，
+/// 把失败伪装成空结果——本文件 P0 纪律明确禁止的形态。
+#[derive(Debug, Clone, Default)]
+struct CollectDrops {
+    reparse: i64,
+    unreadable: i64,
+    samples: Vec<String>,
+}
+
+impl CollectDrops {
+    fn note_reparse(&mut self, path: &str) {
+        self.reparse += 1;
+        if self.samples.len() < 5 {
+            self.samples.push(format!("{path}（链接/junction）"));
+        }
+    }
+
+    fn note_unreadable(&mut self, path: &str) {
+        self.unreadable += 1;
+        if self.samples.len() < 5 {
+            self.samples.push(format!("{path}（无法读取）"));
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct OutcomeCounters {
     deleted: i64,
@@ -624,6 +650,9 @@ struct OutcomeCounters {
     excluded: i64,
     /// 文件名含孤立代理项/无法无损解码（保护清单按 lossy 串比对不可靠）而拒删的数量
     lossy: i64,
+    /// R5a-M12：采集阶段因目标本身是链接/junction 被跳过、或读不出来的数量
+    collect_reparse: i64,
+    collect_unreadable: i64,
     unresolved: Vec<String>,
     to_recycle: bool,
 }
@@ -680,6 +709,19 @@ fn classify_outcome(
     if nothing_done && c.lossy > 0 {
         return ("skip", format!("{} 个文件名无法无损解码，保护判定不可靠，已拒绝删除", c.lossy));
     }
+    // R5a-M12：采集阶段就丢掉的目标同样必须显式成档，不能落进「成功空结果」。
+    if nothing_done && c.collect_reparse > 0 {
+        return (
+            "skip",
+            format!("{} 个目标本身是链接/junction（扫描后被替换或扫描已跳过），未执行删除", c.collect_reparse),
+        );
+    }
+    if nothing_done && c.collect_unreadable > 0 {
+        return (
+            "skip",
+            format!("{} 个目标无法读取（权限不足或 IO 失败），未执行清理", c.collect_unreadable),
+        );
+    }
     // R4（2026-10-15）：权限不足与「已不存在」是两档独立的残留结局，都按 skip 出口
     // 说清自己的下一步（前者提权重试、后者无需处理），不许落回「N 个被占用」。
     if nothing_done && c.denied > 0 {
@@ -711,6 +753,12 @@ fn classify_outcome(
     }
     if c.lossy > 0 {
         suffix = format!("{suffix}；{} 个文件名无法无损解码已跳过", c.lossy);
+    }
+    if c.collect_reparse > 0 {
+        suffix = format!("{suffix}；{} 个目标本身是链接/junction 已跳过", c.collect_reparse);
+    }
+    if c.collect_unreadable > 0 {
+        suffix = format!("{suffix}；{} 个目标无法读取已跳过", c.collect_unreadable);
     }
     // R4（2026-10-15）：两个新档的 partial 后缀（与 protected_blocked 同一姿势：
     // 独立出现、不许被「被占用」那个数吞掉）。
@@ -909,7 +957,12 @@ fn cleanup_execute_with_backup_root(
         if let Some(reg_keys) = rule.get("regKeys").and_then(|v| v.as_array()) {
             if !reg_keys.is_empty() {
                 let backup_dir = crate::engine::paths::backup_write_dir("cleanup-reg-backup");
-                let _ = std::fs::create_dir_all(&backup_dir);
+                // R5a-M11：备份根被换成 junction 时直写会落在链接另一头（提权态落点不受控）。
+                // 根不可信 ⇒ 本批不留副本，也就不执行删除（注册表备份是删除前提）。
+                if !backup_root_ready(&backup_dir) {
+                    details.push(json!({"id": id, "name": name, "status": "error", "freed": 0, "message": "注册表备份根不可信（可能被换成链接/junction），未执行删除", "fileCount": 0, "ruleVer": rule_ver}));
+                    continue;
+                }
                 // 解析 + 存在性过滤（与 PS Measure-RegRule 同口径）
                 let mut parsed: Vec<(HKEY, String, Option<String>)> = Vec::new();
                 // P0 fail-closed：变量未解析的键不能混进「注册表项不存在」的 benign 结论
@@ -998,8 +1051,6 @@ fn cleanup_execute_with_backup_root(
                 let mut backup_failed = false;
                 for (i, (hive, rest, _)) in parsed.iter().enumerate() {
                     let file = backup_dir.join(format!("{stamp}_reg_{id}_{}.reg", i + 1));
-                    // 备份路径由 app_data_dir + ASCII 段拼成，非 UTF-8 场景按 fail-closed 处理
-                    let Some(file_str) = file.to_str() else { backup_failed = true; break; };
                     let hive_short = if *hive == HKEY_LOCAL_MACHINE { "HKLM" }
                         else if *hive == HKEY_CURRENT_USER { "HKCU" }
                         else if *hive == windows::Win32::System::Registry::HKEY_CLASSES_ROOT { "HKCR" }
@@ -1008,16 +1059,28 @@ fn cleanup_execute_with_backup_root(
                     let export_path = format!("{hive_short}\\{rest}");
                     // v2-L4P-29（B-7）：备份类子进程统一走带超时入口
                     // v6-K01（P0-2）：解析失败并进 backup_failed 分支（备份不完整绝不删）
-                    match crate::engine::systembin::system_tool("reg.exe")
-                        .map_err(std::io::Error::other)
-                        .and_then(|exe| {
-                            crate::engine::systembin::quiet_cmd_timeout(
-                                exe,
-                                &["export", &export_path, file_str, "/y"],
-                                crate::engine::systembin::REG_EXPORT_TIMEOUT,
-                            )
-                        }) {
-                        Ok(o) if o.status.success() && file.exists() => {
+                    // R5a-M11：`reg.exe export` 产物先写私有 tmp，由 land_backup 判根后落位。
+                    // 旧实现直写目标路径，备份根被换成 junction 时会写到链接另一头。
+                    let landed = crate::engine::backup_write::land_backup(&backup_dir, &file, |stage| {
+                        let Some(stage_str) = stage.to_str() else {
+                            return Err("备份中转件路径不是 UTF-8".to_string());
+                        };
+                        match crate::engine::systembin::system_tool("reg.exe")
+                            .map_err(std::io::Error::other)
+                            .and_then(|exe| {
+                                crate::engine::systembin::quiet_cmd_timeout(
+                                    exe,
+                                    &["export", &export_path, stage_str, "/y"],
+                                    crate::engine::systembin::REG_EXPORT_TIMEOUT,
+                                )
+                            }) {
+                            Ok(o) if o.status.success() => Ok(()),
+                            Ok(o) => Err(format!("reg.exe export 退出码 {:?}", o.status.code())),
+                            Err(e) => Err(format!("reg.exe export 启动失败：{e}")),
+                        }
+                    });
+                    match landed {
+                        Ok(_) => {
                             // N9：清理域此前**根本不产封条**，于是还原链那道"封条核对"对本域
                             // 永远只能走 missing 分支（等于没闸）。与卸载域同口径落一份，
                             // 半截写入与手工误改才有可发现性。写封条失败不阻断删除（增强而非前提）。
@@ -1025,7 +1088,14 @@ fn cleanup_execute_with_backup_root(
                             // P1-02：两份锚共用一次哈希快照（两次重读可能分叉）。
                             crate::engine::reg_backup::write_reg_backup_seals("cleanup", &file, &export_path);
                         }
-                        _ => { backup_failed = true; break; }
+                        Err(e) => {
+                            crate::engine::log::write_log(
+                                "warn",
+                                &format!("规则 {id}：注册表备份未做成，已放弃删除 —— {export_path}：{e}"),
+                            );
+                            backup_failed = true;
+                            break;
+                        }
                     }
                 }
                 if backup_failed {
@@ -1212,6 +1282,11 @@ fn cleanup_execute_with_backup_root(
         // 往返可能指向另一个真实路径，而保护清单也按 lossy 串比对。收集阶段即拒收，
         // 失败不会降级成「可能被占用」的误导文案。
         let mut lossy = 0i64;
+        // R5a-M12：采集阶段的丢弃必须记账，否则独占目标时回执落成 ok/0 删。
+        let mut drops = CollectDrops::default();
+        // R5a-M10：auto_rebuild 只对**删除前是目录**的 fileKey 根有意义。记录本轮
+        // 实际按目录枚举过的根；单文件目标（含被换成链接的）不得在删后补建同名目录。
+        let mut rebuild_dirs: std::collections::HashSet<String> = std::collections::HashSet::new();
         // 规则级 excludePaths（C-2，2026-09-28 开门）：与扫描侧同一判定/归一口径
         //（trim_finder 同源），执行侧再拦一次——规则可能换版本，执行时必须以当下为准。
         // U1-b（2026-10-01）：全局排除名单已整链下线，这里不再有任何全局种子。
@@ -1300,6 +1375,7 @@ fn cleanup_execute_with_backup_root(
                         match std::fs::symlink_metadata(&base) {
                             Ok(md) if md.is_file() => {
                                 if crate::engine::protect::is_reparse(&md) {
+                                    drops.note_reparse(&base);
                                     continue; // 单文件也不接受重解析点（与 collect_files 同口径）
                                 }
                                 // 时效护栏与目录分支同款：太新不删、且**如实计数**
@@ -1316,14 +1392,16 @@ fn cleanup_execute_with_backup_root(
                             }
                             Ok(md) if md.is_dir() => {
                                 if crate::engine::protect::is_reparse(&md) {
+                                    drops.note_reparse(&base);
                                     continue;
                                 }
-                                collect_files(&base, pattern, recurse, guard, &mut files, &mut too_new, &mut lossy);
+                                rebuild_dirs.insert(base.to_lowercase());
+                                collect_files(&base, pattern, recurse, guard, &mut files, &mut too_new, &mut lossy, &mut drops);
                             }
                             // 既非目录也非文件（已消失 / 不可访问 / 多形态设备）：
-                            // 跳过。不记 failed —— 「读不到」与「被占用」不是一回事，
-                            // 混进去又是一次理由错报（与 §4.1 同族）。
-                            _ => {}
+                            // 不记 failed —— 「读不到」与「被占用」不是一回事；
+                            // 但必须进采集丢弃档，否则回执会伪装成「成功 0 删」。
+                            _ => drops.note_unreadable(&base),
                         }
                     }
                 }
@@ -1344,7 +1422,8 @@ fn cleanup_execute_with_backup_root(
                     &format!("规则 {id}：目标为盘符相对路径（{target}），已拒绝枚举（§4.10）"),
                 );
             } else if !target.is_empty() && cleanup_root_ok(target) {
-                collect_files(target, "*", true, guard, &mut files, &mut too_new, &mut lossy);
+                rebuild_dirs.insert(target.to_lowercase());
+                collect_files(target, "*", true, guard, &mut files, &mut too_new, &mut lossy, &mut drops);
             } else if !target.is_empty() {
                 // 「根不可用」必须留一个可见的痕迹（2026-10-04 审计 §4.2）。
                 //
@@ -1453,12 +1532,18 @@ let mut freed = 0i64;
         // 说「超备份上限」——真机实测那次两档都是几十 KB 的小文件被占用导致复制失败，
         // 用户却被指去「文件太大」，与 §C06 回执诚实度同族。
         let mut backup_over_cap = 0usize;
+        // R5a-M11：备份根不可信是第三个成因，文案必须单独说清（不是「被占用」也不是「超上限」）。
+        let mut backup_root_untrusted = false;
 
         // 2026-10-23：同一条规则的所有副本 parent 恒为 `<备份根>\<规则id>`
         // （见 backup_rel_name），旧实现逐文件 create_dir_all ——1.5 万文件就是
         // 1.5 万次多余的 CreateDirectory。这里每规则建一次。
-        let rule_backup_ready = !to_recycle
-            && std::fs::create_dir_all(files_backup_root.join(id)).is_ok();
+        // R5a-M11：建目录前必须先过根判定；根被换成 junction 时 create_dir_all 本身就会写到链接另一头。
+        let rule_backup_dir = files_backup_root.join(id);
+        let rule_backup_ready = !to_recycle && backup_root_ready(&rule_backup_dir);
+        if !to_recycle && !rule_backup_ready {
+            backup_root_untrusted = true;
+        }
 
         for (path, size) in &files {
             if to_recycle {
@@ -1546,15 +1631,28 @@ let mut freed = 0i64;
                     // rel 必须同时带**批次段**和**序号段**（N10），见 `backup_rel_name`
                     let rel = backup_rel_name(id, &backup_batch_id, seq, &fname);
                     let dst = files_backup_root.join(&rel);
-                    if rule_backup_ready
-                        && std::fs::copy(path, &dst).map(|n| n == *size).unwrap_or(false)
-                    {
+                    // R5a-M11：副本先落私有 tmp，由 land_backup 判根后 rename 落位——
+                    // 旧实现 std::fs::copy 直写目标，备份根被换成 junction 时内容写到链接另一头。
+                    let copied = rule_backup_ready
+                        && crate::engine::backup_write::land_backup(&rule_backup_dir, &dst, |stage| {
+                            let n = std::fs::copy(path, stage).map_err(|e| e.to_string())?;
+                            if n != *size {
+                                return Err(format!("副本大小 {n} 与源 {size} 不符"));
+                            }
+                            Ok(())
+                        })
+                        .is_ok();
+                    if copied {
                         backup_total += size;
                         backup_entries.push(json!({
                             "file": rel, "path": path.clone(), "size": size, "rule": id,
                         }));
                     } else {
-                        let _ = std::fs::remove_file(&dst);
+                        // 落位失败时 land_backup 已自行清理中转件；目标侧可能留下跨卷复制的半截件。
+                        // 根不可信时**不得**对 dst 做任何删除：那正是链接另一头的路径，删的是别人的文件。
+                        if rule_backup_ready {
+                            let _ = std::fs::remove_file(&dst);
+                        }
                         backup_skipped += 1;
                     }
                 } else {
@@ -1610,6 +1708,8 @@ let mut freed = 0i64;
             too_new,
             excluded,
             lossy,
+            collect_reparse: drops.reparse,
+            collect_unreadable: drops.unreadable,
             unresolved: unresolved.clone(),
             to_recycle,
         };
@@ -1636,9 +1736,15 @@ let mut freed = 0i64;
                 s.push_str(&format!("；{over} 个文件超备份上限未留副本"));
             }
             if failed_copy > 0 {
-                s.push_str(&format!(
-                    "；{failed_copy} 个文件副本复制失败未留副本（文件被占用或权限不足，与体积上限无关）"
-                ));
+                if backup_root_untrusted {
+                    s.push_str(&format!(
+                        "；{failed_copy} 个文件未留副本（备份根不可信，可能被换成链接/junction）"
+                    ));
+                } else {
+                    s.push_str(&format!(
+                        "；{failed_copy} 个文件副本复制失败未留副本（文件被占用或权限不足，与体积上限无关）"
+                    ));
+                }
             }
             s
         } else {
@@ -1707,6 +1813,10 @@ let mut freed = 0i64;
             "denied": denied,
             "gone": gone,
             "lossySkipped": lossy,
+            // R5a-M12：采集阶段的丢弃（目标本身是链接 / 读不出来）也必须外发，
+            // 否则「扫描命中、执行 0 删」与「本来就没有东西」在回执里长得一样。
+            "collectReparseSkipped": drops.reparse,
+            "collectUnreadableSkipped": drops.unreadable,
             "tooNew": too_new, "ruleVer": rule_ver,
         }));
 
@@ -1719,7 +1829,10 @@ let mut freed = 0i64;
                     // P0 fail-closed：变量未解析时绝不 create_dir_all——否则会在进程
                     // 工作目录下造出形如 `%WINDIR%\...` 的字面量垃圾目录树
                     if first_unexpanded_token(&expanded).is_some() { continue; }
-                    if !expanded.contains('*') && !expanded.is_empty() {
+                    // R5a-M10：只重建本轮确实按目录枚举过的根。单文件目标（例如
+                    // %WINDIR%\inf\setupapi.dev.log）删完后此处若仍按「路径不含 *」补建，
+                    // 会造出与文件同名的目录，永久占位、让系统再也写不回该日志。
+                    if !expanded.is_empty() && rebuild_dirs.contains(&expanded.to_lowercase()) {
                         let _ = std::fs::create_dir_all(&expanded);
                     }
                 }
@@ -1731,7 +1844,8 @@ let mut freed = 0i64;
     if !backup_entries.is_empty() {
         let manifest = json!({ "ts": backup_batch_ts, "entries": backup_entries });
         let mpath = files_backup_root.join(format!("manifest-{backup_batch_id}.json"));
-        if std::fs::create_dir_all(&files_backup_root).is_ok() {
+        // R5a-M11：清单同样住在备份根下，写前必须过根判定。
+        if backup_root_ready(&files_backup_root) {
             match serde_json::to_string_pretty(&manifest) {
                 Ok(text) => {
                     // 审查 L-6：manifest 是该批还原的唯一依据，裸 std::fs::write 断电可留
@@ -1819,6 +1933,47 @@ fn cleanup_root_ok(dir: &str) -> bool {
     }
 }
 
+/// R5a-M11：备份根写前准入（判根，不判目标文件——目标此刻还不存在）。
+///
+/// 根不存在时先建再判一次：`create_dir_all` 本身会穿过被换成 junction 的父链，
+/// 所以建完必须重新确认落点是真实目录。返回 false 时调用方不得再往该根写任何东西。
+fn backup_root_ready(root: &std::path::Path) -> bool {
+    let base = crate::engine::paths::data_root_base(root);
+    match crate::engine::protect::inspect_root(root, base.as_deref()) {
+        crate::engine::protect::RootVerdict::Trusted => true,
+        crate::engine::protect::RootVerdict::SkipMissing => {
+            // 根还不存在：先判最近的现存祖先。绝不能先 create_dir_all 再判——
+            // 父链若已被换成 junction，建目录这一步本身就会写到链接另一头。
+            if let Some(existing) = root
+                .ancestors()
+                .skip(1)
+                .find(|p| std::fs::symlink_metadata(p).is_ok())
+            {
+                let ancestor_base = crate::engine::paths::data_root_base(existing);
+                let av = crate::engine::protect::inspect_root(existing, ancestor_base.as_deref());
+                if !av.is_trusted() {
+                    crate::engine::protect::note_root_skipped("清理备份", existing, &av);
+                    return false;
+                }
+            }
+            if std::fs::create_dir_all(root).is_err() {
+                return false;
+            }
+            let again = crate::engine::protect::inspect_root(root, base.as_deref());
+            if again.is_trusted() {
+                true
+            } else {
+                crate::engine::protect::note_root_skipped("清理备份", root, &again);
+                false
+            }
+        }
+        rejected => {
+            crate::engine::protect::note_root_skipped("清理备份", root, &rejected);
+            false
+        }
+    }
+}
+
 /// Kudu S2（2026-10-16）：删除瞬间父链复检的 memo 包装——判据本体在
 /// `trim_finder::scan::reparse_ancestor`（finder 删除链与常规清理链共用，§5.16/N6 一份实现）。
 /// 按**父目录**记忆：同一目录下成千上万个文件只走一次祖先链。
@@ -1864,8 +2019,9 @@ fn collect_files(
     files: &mut Vec<(String, u64)>,
     too_new: &mut i64,
     lossy: &mut i64,
+    drops: &mut CollectDrops,
 ) {
-    collect_files_at(dir, pattern, recurse, guard, files, too_new, lossy, 0)
+    collect_files_at(dir, pattern, recurse, guard, files, too_new, lossy, drops, 0)
 }
 
 fn collect_files_at(
@@ -1876,17 +2032,27 @@ fn collect_files_at(
     files: &mut Vec<(String, u64)>,
     too_new: &mut i64,
     lossy: &mut i64,
+    drops: &mut CollectDrops,
     depth: usize,
 ) {
     if depth >= ENGINE_WALK_MAX_DEPTH { return; }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        drops.note_unreadable(dir);
+        return;
+    };
     for entry in rd.filter_map(|e| e.ok()) {
         let path = entry.path();
-        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(meta) = entry.metadata() else {
+            drops.note_unreadable(&path.to_string_lossy());
+            continue;
+        };
         // v2-L4P-11/C-1：子项判定从 is_symlink() 收紧为 protect::is_reparse（0x400
         // 属性位）。此处产物直接喂删除链，弱口径会把 OneDrive 云占位符 / NFS / WIM
         // 这类 reparse 目录当普通目录递归进去、在永久删除分支下不可恢复地删到另一块存储。
-        if crate::engine::protect::is_reparse(&meta) { continue; }
+        if crate::engine::protect::is_reparse(&meta) {
+            drops.note_reparse(&path.to_string_lossy());
+            continue;
+        }
         if meta.is_dir() {
             // 目录名无法无损表示时，`to_string_lossy()` 递进去的可能是另一个目录：
             // 宁可不深入，也不要把别处的文件带进永久删除清单。
@@ -1895,7 +2061,7 @@ fn collect_files_at(
                 continue;
             }
             if recurse {
-                collect_files_at(&path.to_string_lossy(), pattern, recurse, guard, files, too_new, lossy, depth + 1);
+                collect_files_at(&path.to_string_lossy(), pattern, recurse, guard, files, too_new, lossy, drops, depth + 1);
             }
         } else if meta.is_file() {
             if trim_finder::util::has_lossy_path(&path) {
@@ -2134,6 +2300,7 @@ mod cleanup_engine_contract_tests {
         let mut files = Vec::new();
         let mut too_new = 0i64;
         let mut lossy = 0i64;
+        let mut drops = CollectDrops::default();
         collect_files(
             &link.parent().unwrap().to_string_lossy(),
             "*.txt",
@@ -2142,7 +2309,9 @@ mod cleanup_engine_contract_tests {
             &mut files,
             &mut too_new,
             &mut lossy,
+            &mut drops,
         );
+        assert_eq!(drops.reparse, 1, "reparse 子项必须计入采集丢弃档");
         let _ = std::fs::remove_dir_all(&base);
         assert!(
             !files.iter().any(|(p, _)| p.to_lowercase().contains("marker.txt")),
@@ -2165,7 +2334,8 @@ mod cleanup_engine_contract_tests {
         let mut files = Vec::new();
         let mut too_new = 0i64;
         let mut lossy = 0i64;
-        collect_files(&base.to_string_lossy(), "*.txt", true, trim_finder::cleanup_scan::AgeGuard::Off, &mut files, &mut too_new, &mut lossy);
+        let mut drops = CollectDrops::default();
+        collect_files(&base.to_string_lossy(), "*.txt", true, trim_finder::cleanup_scan::AgeGuard::Off, &mut files, &mut too_new, &mut lossy, &mut drops);
         let _ = std::fs::remove_dir_all(&base);
         assert!(
             !files.iter().any(|(p, _)| p.contains("deep-marker.txt")),
@@ -2399,6 +2569,8 @@ mod cleanup_engine_contract_tests {
             too_new: 0,
             excluded: 0,
             lossy: 0,
+            collect_reparse: 0,
+            collect_unreadable: 0,
             unresolved: Vec::new(),
             to_recycle: false,
         };
@@ -2461,6 +2633,8 @@ mod cleanup_engine_contract_tests {
             too_new: 0,
             excluded: 0,
             lossy: 0,
+            collect_reparse: 0,
+            collect_unreadable: 0,
             unresolved: Vec::new(),
             to_recycle: false,
         };
@@ -2504,6 +2678,8 @@ mod cleanup_engine_contract_tests {
             too_new: 0,
             excluded: 0,
             lossy: 0,
+            collect_reparse: 0,
+            collect_unreadable: 0,
             unresolved: Vec::new(),
             to_recycle: false,
         };
@@ -2822,6 +2998,149 @@ mod cleanup_engine_contract_tests {
         assert_eq!(d["gone"].as_i64(), Some(0), "不该进 gone: {d}");
         let msg = d["message"].as_str().unwrap_or("");
         assert!(msg.contains("已清理 1 个文件"), "消息必须如实报删了 1 个: {msg}");
+    }
+
+    /// R5a-M10：auto_rebuild 不得给**单文件**目标补建同名目录。
+    ///
+    /// 修前：路径不含 `*` 就 create_dir_all ⇒ 删除 `%WINDIR%\inf\setupapi.dev.log`
+    /// 之后会造出同名目录，系统再也写不回该日志（提权态还会落在系统目录）。
+    #[test]
+    fn auto_rebuild_不给单文件目标补建同名目录() {
+        let _stage = crate::engine::backup_write::lock_stage_serial();
+        let sb = crate::testutil::Sandbox::new(&format!("m10-rebuild-{}", std::process::id()));
+        let dir = sb.path().to_path_buf();
+
+        let target = dir.join("setupapi.dev.log");
+        std::fs::write(&target, b"log").unwrap();
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"m10","name":"单文件重建探测",
+            "fileKeys":[{"path": target.to_string_lossy(), "pattern":"*", "recurse":true}]
+        }]}]});
+        let items = vec![serde_json::json!({"id":"m10","name":"单文件重建探测","path": target.to_string_lossy()})];
+        let bk = BackupSandbox::new("m10");
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, true, Some(bk.path()), None)
+            .expect("执行应返回结果");
+        assert!(!target.exists(), "单文件目标应被删除");
+        assert!(!target.is_dir(), "auto_rebuild 不得把已删文件补建成同名目录");
+        assert_eq!(res.details[0]["fileCount"].as_i64(), Some(1), "{}", res.details[0]);
+    }
+
+    /// R5a-M11：备份根换成 junction ⇒ 不写链接另一头、不阻断删除（备份是增强），
+    /// 且回执点名「备份根不可信」而不是「文件被占用」。
+    #[test]
+    fn 文件备份根换成junction时链接另一头零写入() {
+        let _stage = crate::engine::backup_write::lock_stage_serial();
+        let sb = BackupSandbox::new("m11");
+        let other = sb.path().join("elsewhere");
+        let root = sb.path().join("backups");
+        std::fs::create_dir_all(&other).unwrap();
+        let backup_link = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &root.to_string_lossy(),
+                &other.to_string_lossy(),
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !backup_link {
+            eprintln!("SKIP 文件备份根换成junction时链接另一头零写入：本环境建不出 junction，该判据未校验");
+            return;
+        }
+        let target = sb.path().join("victim.log");
+        std::fs::write(&target, b"0123").unwrap();
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"m11","name":"备份根链接探测",
+            "fileKeys":[{"path": target.to_string_lossy(), "pattern":"*", "recurse":true}]
+        }]}]});
+        let items = vec![serde_json::json!({"id":"m11","name":"备份根链接探测","path": target.to_string_lossy()})];
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(&root), None)
+            .expect("执行应返回结果");
+        assert!(!target.exists(), "备份是增强：根不可信时删除照常");
+        let leftover: Vec<String> = std::fs::read_dir(&other)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(leftover.is_empty(), "junction 另一头被写入：{leftover:?}");
+        assert_eq!(res.details[0]["fileCount"].as_i64(), Some(1), "{}", res.details[0]);
+        let msg = res.details[0]["message"].as_str().unwrap_or("");
+        assert!(msg.contains("备份根不可信"), "回执必须点名根判定: {msg}");
+        assert!(!msg.contains("被占用"), "根不可信不得伪装成被占用: {msg}");
+    }
+
+    /// R5a-M12：采集阶段唯一目标被跳过时，回执必须是 skip + 计数，不得是「成功 0 删」。
+    #[test]
+    fn 采集阶段唯一目标被跳过时回执不伪装成功() {
+        let sb = crate::testutil::Sandbox::new(&format!("m12-collect-{}", std::process::id()));
+        let dir = sb.path().to_path_buf();
+        let other = dir.join("elsewhere");
+        std::fs::create_dir_all(&other).unwrap();
+        let link = dir.join("linked");
+        let collect_link = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &link.to_string_lossy(),
+                &other.to_string_lossy(),
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !collect_link {
+            eprintln!("SKIP 采集阶段唯一目标被跳过时回执不伪装成功：本环境建不出 junction，该判据未校验");
+            return;
+        }
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"m12","name":"采集丢弃探测",
+            "fileKeys":[{"path": dir.to_string_lossy(), "pattern":"*", "recurse":true}]
+        }]}]});
+        let items = vec![serde_json::json!({"id":"m12","name":"采集丢弃探测","path": dir.to_string_lossy()})];
+        let bk = BackupSandbox::new("m12");
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+            .expect("执行应返回结果");
+        let d = &res.details[0];
+        assert_eq!(d["status"].as_str(), Some("skip"), "唯一目标被跳过时必须 skip: {d}");
+        assert_eq!(d["collectReparseSkipped"].as_i64(), Some(1), "采集丢弃必须计数: {d}");
+        let msg = d["message"].as_str().unwrap_or("");
+        assert!(msg.contains("链接/junction"), "措辞必须指向链接: {msg}");
+        assert!(!msg.contains("已清理 0 个文件"), "不得伪装成成功 0 删: {msg}");
+        assert!(other.is_dir(), "链接目标不得被删除");
+    }
+
+    /// R5a-M12：classify_outcome 的两个采集丢弃档（纯函数，无环境依赖）。
+    #[test]
+    fn 采集阶段丢弃在分类里单独成档() {
+        let base = || OutcomeCounters {
+            deleted: 0,
+            failed: 0,
+            denied: 0,
+            gone: 0,
+            protected_blocked: 0,
+            reparse_blocked: 0,
+            identity_blocked: 0,
+            too_new: 0,
+            excluded: 0,
+            lossy: 0,
+            collect_reparse: 0,
+            collect_unreadable: 0,
+            unresolved: Vec::new(),
+            to_recycle: false,
+        };
+        let mut c = base();
+        c.collect_reparse = 3;
+        let (st, msg) = classify_outcome(&c, "", "", "");
+        assert_eq!(st, "skip");
+        assert!(msg.contains("链接/junction"), "{msg}");
+        assert!(!msg.contains("被占用"), "{msg}");
+        let mut c = base();
+        c.collect_unreadable = 2;
+        let (st, msg) = classify_outcome(&c, "", "", "");
+        assert_eq!(st, "skip");
+        assert!(msg.contains("无法读取"), "{msg}");
     }
 
     /// R3/R4 的真机探针（`#[ignore]`，发版前实跑）：真实 Win32 码与真实文件属性的
@@ -3557,6 +3876,7 @@ mod phase_probe_tests {
         let mut files: Vec<(String, u64)> = Vec::new();
         let mut too_new = 0i64;
         let mut lossy = 0i64;
+        let mut drops = CollectDrops::default();
         collect_files(
             &root.to_string_lossy(),
             "*",
@@ -3565,6 +3885,7 @@ mod phase_probe_tests {
             &mut files,
             &mut too_new,
             &mut lossy,
+            &mut drops,
         );
         let enum_ms = t1.elapsed().as_secs_f64() * 1e3;
         assert_eq!(files.len(), DIRS * PER_DIR, "枚举必须全量");

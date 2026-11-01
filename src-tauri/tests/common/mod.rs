@@ -75,8 +75,10 @@ pub fn window_with_label(label: &str) -> WebviewWindow<MockRuntime> {
 /// - **进程内首次调用即清根**：上一次 cargo test 的残留会让「初始状态」类断言
 ///   假红/假绿（判红实验跑过之后里面会留残留，optimization_state 夹具踩过两次）。
 ///
-/// 环境变量名与 `paths::app_data_dir()` 的读取侧互为契约：改一侧必须同步另一侧
-/// （`tools/check-fail-closed.mjs` 有 D 段钉注入，本变量名由其对拍兜底）。
+/// 环境变量名的唯一真源是 `paths::TEST_DATA_ROOT_ENV`（本文件直接引用常量，不写字面量）。
+/// X1-M01：旧注释声称 `check-fail-closed.mjs` 的 D 段对拍变量名，实际那段钉的是
+/// `set_data_roots` 注入；现由 `tools/check-tests-helper-parity.mjs` 对拍：
+/// tests/ 里再出现该字符串字面量即判红。
 ///
 /// **可见性必须是 `pub`**：只有 `main_window`/`window_with_label` 会调它，而
 /// 直接调引擎函数的真机 `#[ignore]` 探针（启动项台账、pref 写入那一族）不建窗——
@@ -108,7 +110,7 @@ pub fn ensure_test_data_root() -> &'static std::path::PathBuf {
         std::fs::create_dir_all(&root).expect("测试数据根可创建");
         // edition 2021：set_var 尚非 unsafe。进程内并行用例写入同一个值，
         // 与 DATA_DIR 的 OnceLock 首次 init 竞态无害（值相同，谁先设都一样）。
-        std::env::set_var("TRIM_TEST_DATA_ROOT", &root);
+        std::env::set_var(trim_tauri_lib::engine::paths::TEST_DATA_ROOT_ENV, &root);
         root
     })
 }

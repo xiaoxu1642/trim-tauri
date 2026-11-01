@@ -558,7 +558,8 @@
           "sig": ""
         },
         "extra": 1
-      }
+      },
+      "mustTrigger": "顶层 未知字段"
     },
     {
       "label": "条目缺 ver（版本戳对齐）",
@@ -606,7 +607,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "缺条目级版本戳"
     },
     {
       "label": "条目 ver 与顶层不等",
@@ -655,7 +657,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "与顶层 rulesVersion"
     },
     {
       "label": "条目 ver 非数字",
@@ -704,7 +707,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "与顶层 rulesVersion"
     },
     {
       "label": "规则条目未知字段 recurse",
@@ -754,7 +758,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "未知字段"
     },
     {
       "label": "residue 条目未知字段 flags",
@@ -804,7 +809,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "residue 未知字段"
     },
     {
       "label": "reg_value 缺 :: 分隔",
@@ -853,7 +859,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "恰好一个 ::"
     },
     {
       "label": "reg_value 值名为空",
@@ -902,7 +909,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "值名为空"
     },
     {
       "label": "reg_value 键路径为系统容器",
@@ -951,7 +959,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "受保护容器"
     },
     {
       "label": "reg_value 键路径在 Run（系统命名空间按键路径否决）",
@@ -1000,7 +1009,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "系统命名空间"
     },
     {
       "label": "reg_value 含两个 ::",
@@ -1049,7 +1059,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "恰好一个 ::"
     },
     {
       "label": "reg_value 键路径用变量",
@@ -1098,7 +1109,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "不允许变量形态"
     },
     {
       "label": "reg_value 值名首尾含空白",
@@ -1147,7 +1159,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "首尾含空白"
     },
     {
       "label": "shortcut 非 .lnk 后缀",
@@ -1196,7 +1209,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "必须是 .lnk"
     },
     {
       "label": "shortcut 含通配符",
@@ -1245,7 +1259,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "目标含通配符"
     },
     {
       "label": "合法：reg_value 目标（键路径::值名）",
@@ -1387,7 +1402,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "三条件组只有"
     },
     {
       "label": "三条件组全空",
@@ -1430,7 +1446,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "三条件组只有"
     },
     {
       "label": "合法：恰好两组（放行边界）",
@@ -1524,7 +1541,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "displayName 不是数组"
     },
     {
       "label": "匹配组含空白元素",
@@ -1573,7 +1591,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "含空白或超长条目"
     },
     {
       "label": "未登记 %TOKEN%",
@@ -1622,7 +1641,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "未登记"
     },
     {
       "label": "token 根（无子段）",
@@ -1671,7 +1691,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "禁止 token 根"
     },
     {
       "label": "token 根带尾随分隔符",
@@ -1720,7 +1741,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "禁止 token 根"
     },
     {
       "label": "路径含通配符",
@@ -1769,7 +1791,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "目标含通配符"
     },
     {
       "label": "相对路径",
@@ -1818,7 +1841,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "既不是登记变量的子路径"
     },
     {
       "label": "路径含 .. 段",
@@ -1867,7 +1891,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "含空段"
     },
     {
       "label": "target 首尾含空白",
@@ -1916,7 +1941,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "首尾含空白"
     },
     {
       "label": "路径中第二个变量替换",
@@ -1965,7 +1991,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "第二个变量替换"
     },
     {
       "label": "note 缺失",
@@ -2013,7 +2040,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "residue.note 缺失"
     },
     {
       "label": "规则 id 含非法字符",
@@ -2062,7 +2090,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "规则 id 缺失"
     },
     {
       "label": "规则 id 重复",
@@ -2141,7 +2170,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "规则 id 重复"
     },
     {
       "label": "residue 为空数组",
@@ -2174,7 +2204,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "residue 缺失"
     },
     {
       "label": "rules 为空数组",
@@ -2192,7 +2223,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "rules 缺失"
     },
     {
       "label": "prov 缺失",
@@ -2235,7 +2267,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "prov 缺失"
     },
     {
       "label": "prov 条目含未知字段",
@@ -2285,7 +2318,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "prov 未知字段"
     },
     {
       "label": "rulesVersion 非数字",
@@ -2334,7 +2368,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "rulesVersion 缺失"
     },
     {
       "label": "reg_key 目标为 HKLM\\SOFTWARE",
@@ -2383,7 +2418,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "受保护容器"
     },
     {
       "label": "reg_key 目标为 Microsoft 树下系统键",
@@ -2432,7 +2468,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "系统命名空间"
     },
     {
       "label": "reg_key 目标带 ::值名",
@@ -2481,7 +2518,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "::值名"
     },
     {
       "label": "reg_key 目标用不支持的 hive",
@@ -2530,7 +2568,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "hive 只支持"
     },
     {
       "label": "reg_key 目标含变量",
@@ -2579,7 +2618,8 @@
           "alg": "ed25519",
           "sig": ""
         }
-      }
+      },
+      "mustTrigger": "变量形态"
     },
     {
       "label": "合法：HKLM 下产品键",

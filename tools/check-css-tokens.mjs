@@ -111,6 +111,86 @@ function radiusViolations(text, rel) {
   }
   return out;
 }
+// T1d-M07：JS 内联圆角（style 模板串里的 `border-radius:2px` 与 `borderRadius: '6px'`）。
+// 内联样式是渲染层真实生效的圆角，只扫 CSS 等于把绕过 token 的逃逸口留在射程外。
+function jsRadiusViolations(text, rel) {
+  const out = [...radiusViolations(text, rel)];
+  for (const m of text.matchAll(/\bborder(?:Top|Right|Bottom|Left)?Radius\s*[:=]\s*(['"`])([^'"`]*)\1/g)) {
+    for (const pxm of m[2].matchAll(/(\d+(?:\.\d+)?)px/g)) {
+      const px = Number(pxm[1]);
+      if (px >= 90) continue;
+      if (px < 4) out.push(`${rel} borderRadius: ${px}px（低于 badge 档 4px，禁字面值，走 var(--radius-badge)）`);
+      else if (![4, 6, 8, 10, 14].includes(px)) out.push(`${rel} borderRadius: ${px}px（不在档位 4/6/8/10/14）`);
+    }
+  }
+  return out;
+}
+// T1d-M07 颜色侧：用户可见的颜色属性（color/background*/border-color/fill/stroke）
+// 出现颜色字面量即命中。var() 的 fallback 与 rgba(var(--x-rgb), a) 不算硬编码；
+// 既有刻意设计登记在 COLOR_ALLOW，每条必须唯一命中（登记腐烂双向判红）。
+const COLOR_PROPS = new Set(['color', 'background', 'background-color', 'border-color', 'fill', 'stroke']);
+const COLOR_ALLOW = [
+  // LiteBox 是图片对比专用独立调色板（纯黑底/白色控件），AGENTS §2 明确保留，整文件登记。
+  { file: 'src/styles/litebox.css', fileWide: true, why: 'LiteBox 图片对比独立调色板（纯黑底/白色控件，AGENTS §2 刻意设计）' },
+  { file: 'src/styles/main.css', anchor: 'linear-gradient(135deg, rgba(255, 255, 255, 0.10) 0%, rgba(255, 255, 255, 0.02) 34%, transparent 60%)', why: '液态玻璃白纱（玻璃皮肤 floor 之上的高光层）' },
+  { file: 'src/styles/main.css', anchor: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent)', why: '进度条流光高光（动效前景，非容器表面）' },
+  { file: 'src/styles/main.css', anchor: 'background: #f7f8fb', why: 'electron-mica 标题栏与原生按钮覆盖层的回退色（恒浅色）' },
+  { file: 'src/styles/main.css', anchor: 'color-mix(in srgb, var(--bg-app) 60%, rgba(0, 0, 0, 0.4))', why: '全屏遮罩的压暗层（叠加在主题底上）' },
+  { file: 'src/styles/main.css', anchor: 'linear-gradient(145deg, #F9F9F9 0%, #E9E9E9 100%)', why: '材质样块：云母观感预览（刻意独立于玻璃档位）' },
+  { file: 'src/styles/main.css', anchor: 'linear-gradient(145deg, #F2F2F2 0%, #DFDFDF 62%, #D2D2D2 100%)', why: '材质样块：层次云母观感预览' },
+  { file: 'src/styles/main.css', anchor: 'linear-gradient(145deg, #DADADA 0%, #BFBFBF 100%)', why: '材质样块：轻磨砂观感预览' },
+  { file: 'src/styles/main.css', anchor: 'background-color: #C9C9C9', why: '材质样块：轻磨砂底色' },
+  { file: 'src/styles/main.css', anchor: 'linear-gradient(145deg, #5A5A5A 0%, #2E2E2E 100%)', why: '材质样块：透亮深色观感预览' },
+  { file: 'src/styles/main.css', anchor: 'background: rgba(255, 255, 255, 0.28)', why: '按钮涟漪高光（动效前景）' },
+  { file: 'src/styles/main.css', anchor: 'rgba(255, 255, 255, 0.55)', why: '液态玻璃边框高光（玻璃皮肤专用）' },
+  { file: 'src/styles/main.css', anchor: 'rgba(255, 255, 255, .38)', why: '启动页独立覆盖层的白色暗角（不随玻璃皮肤联动）' },
+  { file: 'src/styles/main.css', anchor: 'background: rgba(255, 255, 255, .78)', why: '启动页徽章底色（启动页独立调色板）' },
+  { file: 'src/styles/main.css', anchor: 'color: #fff', why: '启动页进入按钮文字（启动页独立调色板）' },
+  { file: 'src/styles/main.css', anchor: 'background: rgba(0, 0, 0, 0.04)', why: 'win-inactive 纱（后绘制覆盖层，不破坏玻璃采样）' },
+  { file: 'src/styles/main.css', anchor: 'background: #ffffff', why: '滑块旋钮恒白（保证任意强调色/壁纸上可见）' },
+];
+
+/** 去掉 var(...) 与其 fallback、以及 rgba(var(--x-rgb), a) 整段，剩下的才是硬编码色。 */
+function stripVarColors(value) {
+  return String(value)
+    .replace(/rgba?\(\s*var\([^)]*\)[^)]*\)/gi, '')
+    .replace(/var\([^)]*\)/gi, '');
+}
+
+/** CSS 声明级颜色扫描：返回 { line, prop, value, text }[]。 */
+function colorViolations(text, rel) {
+  const out = [];
+  for (const m of text.matchAll(/([-\w]+)\s*:\s*([^;{}]+)/g)) {
+    if (m[1].startsWith('--')) continue;
+    if (!COLOR_PROPS.has(m[1].toLowerCase())) continue;
+    const value = m[2].trim();
+    if (!value) continue;
+    const rest = stripVarColors(value);
+    if (!/#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)/.test(rest)) continue;
+    out.push({ line: lineOf(text, m.index), prop: m[1], value, text: m[0] });
+  }
+  return out;
+}
+
+/** JS/HTML 内联样式里的颜色字面量（token fallback 不算）。 */
+function inlineColorViolations(text, rel) {
+  const out = [];
+  let line = 0;
+  for (const raw of text.split('\n')) {
+    line++;
+    const t = raw.trim();
+    if (!t || t.startsWith('//') || t.startsWith('*') || (t[0] === '/' && t[1] === '*')) continue;
+    if (/cssVar\(|getCssColor\(/.test(raw)) continue;
+    const isProp = /(?:^|[;{'"`\s])(color|background|background-color|border-color|fill|stroke)\s*:/i.test(raw)
+      || /\.style\.(color|background|backgroundColor|borderColor|fill|stroke)\s*=/i.test(raw);
+    if (!isProp) continue;
+    const rest = stripVarColors(raw);
+    if (!/#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)/.test(rest)) continue;
+    out.push({ line, prop: 'inline', value: t, text: t });
+  }
+  return out;
+}
+
 // 未定义引用：refs（名字 → 引用位）∧ ¬defined ∧ ¬allow ⇒ 红。
 function undeclaredTokenRefs(refs, defined, allow) {
   return [...refs.keys()].filter((n) => !defined.has(n) && !allow.has(n)).sort();
@@ -129,12 +209,25 @@ function curveOffenders(text, easeTokens) {
   // 曲线越集必红、值集内放行。
   const r = (px) => radiusViolations(`.x { border-radius: ${px}px; }`, 'fake.css').length;
   const rMulti = radiusViolations('.x { border-radius: 0 2px 2px 0; }', 'fake.css').length;
-  const radiusOk = r(5) === 1 && r(2) === 1 && r(8) === 0 && r(999) === 0 && r(10) === 0 && rMulti === 2;
+  // T1d-M07 对照：HTML 串里的 CSS 形态与 JS 赋值形态都要命中；合法档位与变量放行。
+  const jsInline = jsRadiusViolations('el.style = "border-radius:2px"', 'fake.js').length;
+  const jsAssign = jsRadiusViolations("el.style.borderRadius = '3px';", 'fake.js').length;
+  const jsOk = jsRadiusViolations("el.style.borderRadius = '6px'; el.style = 'border-radius:var(--radius-badge)'", 'fake.js').length;
+  const radiusOk = r(5) === 1 && r(2) === 1 && r(8) === 0 && r(999) === 0 && r(10) === 0 && rMulti === 2
+    && jsInline === 1 && jsAssign === 1 && jsOk === 0;
   const u = (refs, defined, allow = new Set()) => undeclaredTokenRefs(refs, defined, allow);
   const undefOk =
     u(new Map([['--ghost', []]]), new Set(), new Set()).length === 1 &&
     u(new Map([['--real', []]]), new Set(['--real']), new Set()).length === 0 &&
     u(new Map([['--allowed', []]]), new Set(), new Set(['--allowed'])).length === 0;
+  // T1d-M07 颜色侧对照：裸色必红；var()、var fallback、rgba(var()) 与 token 定义放行。
+  const colorHit = colorViolations('.x { color: #123456; }', 'fake.css').length === 1;
+  const colorVar = colorViolations('.x { color: var(--fg); }', 'fake.css').length === 0;
+  const colorFallback = colorViolations('.x { color: var(--fg, #123456); }', 'fake.css').length === 0;
+  const colorRgbVar = colorViolations('.x { background: rgba(var(--x-rgb), .1); }', 'fake.css').length === 0;
+  const colorToken = colorViolations(':root { --x: #123456; }', 'fake.css').length === 0;
+  const inlineHit = inlineColorViolations("el.style.color = '#123456';", 'fake.js').length === 1;
+  const colorOk = colorHit && colorVar && colorFallback && colorRgbVar && colorToken && inlineHit;
   const ease = new Set(['0.111,0.222,0.333,1']);
   const cBad = curveOffenders('.x { a: cubic-bezier(0.4,0,0.2,1); }', ease).length;
   const cOk = curveOffenders('.x { a: cubic-bezier(0.111, 0.222, 0.333, 1); }', ease).length;
@@ -150,11 +243,11 @@ function curveOffenders(text, easeTokens) {
     && j3[0].length === 0 && j3[1].length === 0
     && j4[0].length === 0 && j4[1].join() === '--exempt'
     && j5[0].length === 0 && j5[1].join() === '--gone';
-  if (!radiusOk || !undefOk || !writeOk || cBad !== 1 || cOk !== 0) {
-    console.error(`✗ 正向对照失败：圆角=${radiusOk} 未定义引用=${undefOk} 写入未消费=${writeOk} 曲线越集=${cBad}（应 1） 曲线放行=${cOk}（应 0）——四组判定器至少一组失灵`);
+  if (!radiusOk || !undefOk || !writeOk || !colorOk || cBad !== 1 || cOk !== 0) {
+    console.error(`✗ 正向对照失败：圆角=${radiusOk} 未定义引用=${undefOk} 写入未消费=${writeOk} 颜色=${colorOk} 曲线越集=${cBad}（应 1） 曲线放行=${cOk}（应 0）——五组判定器至少一组失灵`);
     process.exit(1);
   }
-  console.log('✓ 判定器自检：圆角档位 / 未定义引用 / 写入未消费 / 动效曲线 四组合成样本全对');
+  console.log('✓ 判定器自检：圆角档位 / 未定义引用 / 写入未消费 / 硬编码颜色 / 动效曲线 五组合成样本全对');
 }
 
 const defined = new Set();     // 定义面
@@ -280,6 +373,43 @@ for (const file of cssFiles) {
   // v6-P2：判据本体是 radiusViolations（与自检共用同一实现）。
   radiusBad.push(...radiusViolations(text, rel));
 }
+// T1d-M07：JS 内联圆角同档位（剥注释后判，注释里的史实不算）。
+for (const file of jsFiles) {
+  const rel = file.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
+  radiusBad.push(...jsRadiusViolations(blankJsComments(readFileSync(file, 'utf8')), rel));
+}
+
+// T1d-M07 颜色侧：用户可见颜色属性不得出现未登记的硬编码色。
+const colorBad = [];
+const colorHits = [];
+for (const file of cssFiles) {
+  const rel = file.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
+  colorHits.push(...colorViolations(blankComments(readFileSync(file, 'utf8')), rel).map((h) => ({ ...h, rel })));
+}
+for (const file of jsFiles) {
+  const rel = file.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
+  colorHits.push(...inlineColorViolations(blankJsComments(readFileSync(file, 'utf8')), rel).map((h) => ({ ...h, rel })));
+}
+for (const file of htmlFiles) {
+  const rel = file.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
+  colorHits.push(...inlineColorViolations(blankHtmlComments(readFileSync(file, 'utf8')), rel).map((h) => ({ ...h, rel })));
+}
+const colorAllowCount = new Map(COLOR_ALLOW.map((a, i) => [i, 0]));
+for (const h of colorHits) {
+  const idx = COLOR_ALLOW.findIndex((a) => a.file === h.rel && (a.fileWide || h.text.includes(a.anchor)));
+  if (idx >= 0) {
+    colorAllowCount.set(idx, colorAllowCount.get(idx) + 1);
+    continue;
+  }
+  colorBad.push(`${h.rel}:${h.line} ${h.value}（未登记的硬编码颜色）`);
+}
+for (const [i, a] of COLOR_ALLOW.entries()) {
+  const n = colorAllowCount.get(i);
+  const okCount = a.fileWide ? n >= 1 : n === 1;
+  if (!okCount) colorBad.push(`COLOR_ALLOW 条目${n === 0 ? '失效（未命中）' : `重复命中 ${n} 处`}：${a.file} ${a.fileWide ? '（整文件）' : a.anchor}`);
+}
+console.log(`颜色纪律：${colorBad.length ? `${colorBad.length} 处未登记/登记失效` : `✓ ${colorHits.length} 处既有刻意设计均有登记`}`);
+for (const c of colorBad) console.log(`✗ ${c}`);
 
 console.log(`引用面 ${refs.size} 个自定义属性；定义面 ${defined.size} 个（CSS 声明 + JS/HTML 运行时写入）`);
 console.log(`圆角纪律：${radiusBad.length ? `${radiusBad.length} 处违档` : '✓ 全部字面值落在档位或 token 上'}`);
@@ -471,8 +601,8 @@ const tripletProblems = [];
 }
 if (tripletProblems.length) for (const p of tripletProblems) console.log(`✗ 三值同步：${p}`);
 
-if (!bad.length && !radiusBad.length && !curveBad.length && !tripletProblems.length) {
-  console.log('✓ 全部引用的自定义属性都有定义（无静默 fallback、无被丢弃的声明）');
+if (!bad.length && !radiusBad.length && !curveBad.length && !tripletProblems.length && !colorBad.length) {
+  console.log('✓ 全部引用的自定义属性都有定义（无静默 fallback、无被丢弃的声明）；硬编码颜色均有登记');
   process.exit(0);
 }
 
@@ -482,5 +612,5 @@ for (const name of bad) {
   console.log(`✗ ${name} 无定义 —— ${sites.length} 处引用：${sites.map((s) => s.at).join(', ')}`);
   console.log(`  ${noFallback ? `其中 ${noFallback} 处连 fallback 都没有 ⇒ 整条声明被解析器丢弃（功能静默消失）` : '全部恒吃 fallback ⇒ token 被架空'}`);
 }
-console.log(`\n${bad.length} 个未定义的自定义属性被引用（v2-L6 类缺陷）${radiusBad.length ? `；${radiusBad.length} 处圆角违档（v2 批次 D4）` : ''}${curveBad.length ? `；${curveBad.length} 处动效曲线越集（F5-G-5）` : ''}${tripletProblems.length ? `；${tripletProblems.length} 处三值不同步（T1d-M05）` : ''}`);
+console.log(`\n${bad.length} 个未定义的自定义属性被引用（v2-L6 类缺陷）${radiusBad.length ? `；${radiusBad.length} 处圆角违档（v2 批次 D4）` : ''}${curveBad.length ? `；${curveBad.length} 处动效曲线越集（F5-G-5）` : ''}${tripletProblems.length ? `；${tripletProblems.length} 处三值不同步（T1d-M05）` : ''}${colorBad.length ? `；${colorBad.length} 处硬编码颜色未登记（T1d-M07）` : ''}`);
 process.exit(1);

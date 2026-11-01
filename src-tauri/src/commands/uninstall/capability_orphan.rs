@@ -115,7 +115,7 @@ pub(super) fn capability_findings(
             "class": "capability_consent_dead_landing",
             "reason": "非打包程序的能力授权还留着，但它记的可执行文件已不存在",
             "confidence": "medium", "risk": "low",
-            "readonly": true, "defaultChecked": false,
+            "defaultChecked": false,
             "details": json!({ "decodedPath": path, "hive": hive_label }),
             "contribs": contribs(&[
                 ("valueNameDecoded", format!("值名按 `#` 切第一段得到：{path}")),
@@ -231,7 +231,6 @@ mod tests {
         assert_eq!(undec, 1);
         assert!(out[0]["target"].as_str().unwrap_or("").starts_with("HKLM\\") && out[0]["target"].as_str().unwrap_or("").ends_with("#InternetClient"));
         assert_eq!(out[0]["class"], "capability_consent_dead_landing");
-        assert_eq!(out[0]["readonly"], true);
         assert_eq!(out[0]["defaultChecked"], false);
         // 解不出的那 1 条必须留下可见的痕迹，而不是静默少一列
         assert_eq!(notes.len(), 1);

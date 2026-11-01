@@ -89,8 +89,10 @@ function stripCommentsKeepStrings(src) {
 /** 判定器（纯函数，合成样本可对拍）：返回违规描述数组 */
 export function judgeDocPaths(code) {
   const out = [];
-  // ① path.join / path.resolve 里的独立 'docs' 段（单双引号与模板串的裸段都算）
-  for (const m of code.matchAll(/path\.(?:join|resolve)\s*\(/g)) {
+  // ① join / resolve 里的独立 'docs' 段（单双引号与模板串的裸段都算）。
+  // T1b-M01：仓内主流写法是 `import { join } from 'node:path'` 后的裸 `join(...)`，
+  // 旧判据只认 `path.join` ⇒ 仓内主流裸 `join(...)` 写法全不在射程。
+  for (const m of code.matchAll(/(?:\bpath\.)?(?:join|resolve)\s*\(/g)) {
     const open = m.index + m[0].length - 1;
     // 取平衡括号内文本
     let depth = 0, end = -1;
@@ -99,8 +101,9 @@ export function judgeDocPaths(code) {
       else if (code[i] === ')') { depth--; if (depth === 0) { end = i; break; } }
     }
     const args = end > 0 ? code.slice(open + 1, end) : '';
-    if (/(?:^|,)\s*['"`]docs['"`]\s*(?:,|$)/.test(args)) {
-      out.push(`path.join/resolve 用了 'docs' 段@字节 ${m.index}`);
+    // 独立段 + 拼接形态（`'docs' + x`）都算；模板串 `\`docs/${x}\`` 由下方 ② 兜住
+    if (/(?:^|,)\s*['"`]docs['"`]\s*(?:,|$|\+)/.test(args)) {
+      out.push(`join/resolve 用了 'docs' 段@字节 ${m.index}`);
     }
   }
   // ② 字符串/模板字面量以 docs/ 或 docs\ 开头（写死的仓外相对路径）
@@ -118,24 +121,31 @@ function lineOf(code, byteIdx) {
 // ---------- 正向对照（合成样本双向验，AGENTS §4.1） ----------
 const g = gate(import.meta.url);
 {
-  const bad = [
-    "const p = path.join(ROOT, 'docs', 'x.ini');",
-    "const p = path.resolve(ROOT, \"docs\", 'x');",
-       'const p = "docs\\\\a\\\\b.md";',
-    'const p = `docs/x`;',
-  ].join('\n');
+  // 逐样本断言：裸 join 与拼接形态是 T1b-M01 的现场，必须各有独立判红证据。
+  const badCases = [
+    ['path.join 独立段', "const p = path.join(ROOT, 'docs', 'x.ini');"],
+    ['path.resolve 独立段', "const p = path.resolve(ROOT, \"docs\", 'x');"],
+    ['裸 join 独立段（仓内主流）', "const p = join(ROOT, 'docs', 'x');"],
+    ['裸 join 拼接形态', "const p = join(ROOT, 'docs' + x);"],
+    ['写死 docs 反斜杠字面量', 'const p = "docs\\\\a\\\\b.md";'],
+    ['模板串 docs/ 开头', 'const p = `docs/x`;'],
+  ];
+  let miss = 0;
+  for (const [label, sample] of badCases) {
+    const n = judgeDocPaths(stripCommentsKeepStrings(sample)).length;
+    if (n < 1) {
+      miss++;
+      g.fail(`对照a「${label}」：必须判红，实得 0 命中`);
+    }
+  }
+  if (miss === 0) console.log(`✓ 对照a：${badCases.length} 条假样本逐条判红`);
   const good = [
     "const p = path.join(ROOT, 'src-tauri', 'data', 'cleanup-rules.json');",
+    "const q = join(ROOT, 'src', 'scripts', 'app.js');",
     '// 语料排除 vendor/ 与 docs/（注释不算）',
     'console.log("不含 docs/ 目录");',
   ].join('\n');
-  const nBad = judgeDocPaths(stripCommentsKeepStrings(bad)).length;
   const nGood = judgeDocPaths(stripCommentsKeepStrings(good)).length;
-  if (nBad < 4) {
-    g.fail(`对照a：四形态假样本必须判红（实得命中 ${nBad}/4）`);
-  } else {
-    console.log(`✓ 对照a：四形态假样本命中 ${nBad} 条`);
-  }
   if (nGood !== 0) {
     g.fail(`对照b：合规样本必须放行（实得误报 ${nGood} 条：${judgeDocPaths(stripCommentsKeepStrings(good)).join('；')}）`);
   } else {

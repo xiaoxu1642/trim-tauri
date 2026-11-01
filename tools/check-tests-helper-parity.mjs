@@ -126,6 +126,59 @@ if (dupCount === 0 && wiredCount === 0) {
   g.ok(`${files.length} 个测试文件均无本地重复定义、调用方全部接真源（${files.map((f) => relative(ROOT, f)).join(', ')}）`);
 }
 
+// ---- X1-M01：测试数据根环境变量名的跨侧契约 ----
+// 读取侧在 paths.rs、写入侧在 tests/common/mod.rs。真源收成一个常量后，
+// tests/ 里再写字符串字面量（改名时只改一侧的旧形态）必须判红。
+const PATHS_RS = join(ROOT, 'src-tauri', 'src', 'engine', 'paths.rs');
+const TEST_ROOT_LITERAL = '"TRIM_TEST_DATA_ROOT"';
+
+/** 剥注释后仍写死环境变量字面量的源文件（合成样本也走它）。 */
+function testRootLiteralProblems(sources) {
+  const problems = [];
+  for (const [label, src] of sources) {
+    if (stripComments(src).includes(TEST_ROOT_LITERAL)) {
+      problems.push(`${label}: 直接写死 ${TEST_ROOT_LITERAL} —— 应引用 paths::TEST_DATA_ROOT_ENV`);
+    }
+  }
+  return problems;
+}
+
+if (!existsSync(PATHS_RS)) {
+  g.fail('src-tauri/src/engine/paths.rs 不在 —— 测试数据根环境变量名的真源失踪');
+} else {
+  const pathsCode = stripComments(readFileSync(PATHS_RS, 'utf8'));
+  const declRe = /pub\s+const\s+TEST_DATA_ROOT_ENV\s*:\s*&\s*(?:'static\s+)?str\s*=\s*"TRIM_TEST_DATA_ROOT"\s*;/;
+  if (!declRe.test(pathsCode)) {
+    g.fail('paths.rs 缺 TEST_DATA_ROOT_ENV 常量声明（或常量值不是 TRIM_TEST_DATA_ROOT）—— 跨侧契约失去唯一真源');
+  } else {
+    g.ok('测试数据根环境变量名由 paths::TEST_DATA_ROOT_ENV 单一真源声明');
+  }
+  const literalSources = [
+    ['tests/common/mod.rs', commonSrc],
+    ...files.map((f) => [relative(ROOT, f).replace(/\\/g, '/'), readFileSync(f, 'utf8')]),
+  ];
+  const literalProblems = testRootLiteralProblems(literalSources);
+  for (const p of literalProblems) g.fail(p);
+  if (literalProblems.length === 0) {
+    g.ok(`X1-M01：${literalSources.length} 个测试源均未写死环境变量字面量（引用常量）`);
+  }
+  // 判定器自检：同一函数喂「写死字面量」必须判红、引用常量必须放行。
+  const litControls = [
+    ['写死字面量（必红）', 'std::env::set_var("TRIM_TEST_DATA_ROOT", &root);', 1],
+    ['引用常量（放行）', 'std::env::set_var(paths::TEST_DATA_ROOT_ENV, &root);', 0],
+    ['注释提及（放行）', '// 旧写法 "TRIM_TEST_DATA_ROOT" 已退役\nset(paths::TEST_DATA_ROOT_ENV);', 0],
+  ];
+  let litBad = 0;
+  for (const [label, src, want] of litControls) {
+    const got = testRootLiteralProblems([['sample.rs', src]]).length;
+    if (got !== want) {
+      litBad++;
+      g.fail(`X1-M01 正向对照「${label}」：期望 ${want} 处，实测 ${got} 处 —— 判定器与样本口径不一致`);
+    }
+  }
+  if (litBad === 0) g.ok(`X1-M01 POSITIVE_CONTROLS：${litControls.length} 条字面量判据样本结论正确`);
+}
+
 // ==================== POSITIVE_CONTROLS：判定器自检 ====================
 // 合成样本喂同一个 auditContent：抄定义必须判红、干净用法必须放行。
 // 防的是判据本身退化成「永远红」（把正常用法也判违规）或「永远绿」（正则永不命中）。

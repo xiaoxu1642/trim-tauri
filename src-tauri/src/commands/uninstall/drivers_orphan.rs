@@ -146,7 +146,6 @@ pub(super) fn driver_findings(
                 "kind": "file", "target": shown,
                 "class": "microsoft_component",
                 "reason": "没有服务引用，但由微软签名 —— 按系统组件保护，不作为残留",
-                "readonly": true,
             }));
             continue;
         }
@@ -159,7 +158,7 @@ pub(super) fn driver_findings(
             "class": "orphan_sys_file",
             "reason": "没有任何服务键引用这个 .sys（服务表已反查全部 ImagePath），且签名主体不是微软",
             "confidence": "medium", "risk": "high",
-            "readonly": true, "defaultChecked": false,
+            "defaultChecked": false,
             "details": json!({ "signer": subject }),
             "contribs": contribs(&[
                 ("noServiceReference", format!("服务表 ImagePath 反查未命中：{key}")),
@@ -230,7 +229,6 @@ mod tests {
         );
         assert_eq!(cand.len(), 1);
         assert_eq!(cand[0]["class"], "orphan_sys_file");
-        assert_eq!(cand[0]["readonly"], true);
         assert_eq!(cand[0]["defaultChecked"], false);
         assert!(prot.is_empty());
         assert!(notes.is_empty());

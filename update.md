@@ -1,5 +1,21 @@
 # 更新日志
 
+## 版本 0.8.9（2026-11-02 中危余量与发布闸收口）
+
+> 本版把第五轮全仓重审遗留在 P1/P2 施工面之外的 25 条中危、R2b-L09 死字段、D1-L03 发布产物签名闸与 T1g 三条夹具缺口一起收口，并补上用户可见颜色的硬编码门禁。无新增用户功能。
+
+① **清理前备份不再写到数据根之外** —— 症状：数据根被同用户换成 junction 时，注册表导出与文件副本会落到链接另一头（提权运行时落点不受控），还原链还看不见。根因：清理域两处备份直接写目标路径，没走 B2-2 的 `land_backup`。修法：导出/副本先写私有 tmp，判目标根可信后同卷 rename 落位；清单写前同样判根，根不可信时本批不留副本并在回执里点名。
+
+② **采集阶段被跳过的目标不再伪装成「成功清理 0 个文件」** —— 症状：唯一目标在扫描后被换成链接（或读不出来）时，回执是 ok / 已清理 0 个文件，无任何计数。修法：采集侧记录 reparse / 不可读两类丢弃，0 删时显式 skip 并给出计数与首个样本。
+
+③ **单文件清理目标不再被自动补建成同名目录** —— 症状：清理 `%WINDIR%\inf\setupapi.dev.log` 这类单文件规则后，auto_rebuild 会在原路径 `create_dir_all`，造出同名目录，系统再也写不回日志。修法：只重建本轮确实按目录枚举过的根。
+
+④ **发布产物签名闸** —— 症状：手工漏签 `.sig` 时，用户端 `requireSignedVersion` 会拒绝更新，表现为「发了新版但所有人收不到」。修法：新增 `check-release-artifacts`，在产物区存在时对拍 `setup.exe` ⇄ `.sig` ⇄ 两份清单的 `version` / `signature` / `sha256`；缺产物显式 SKIP、不冒充通过。
+
+⑤ **内部收口（不改变用户功能）** —— 测试数据根变量收成单一常量并由门禁对拍、快速组移除真实外呼与写盘、颜色与资源引用门禁补齐、residue 夹具增加 `mustTrigger`、`protect-parity` 覆盖 extras 合并、清理解除只读死字段 `readonly`。
+
+⑥ **本版验证（如实标注）** —— release 构建真实跑完（`cargo tauri build --bundles nsis`，3 分 35 秒），按 `--app-version 0.8.9` 完成签名（trusted comment 含 `file:Trim_0.8.9_x64-setup.exe` 与 `version:0.8.9`）；`cargo test --lib` **1029 passed / 0 failed / 76 ignored**；集成 `module_smoke` 55 + `ipc_smoke` 14 + `safestorage_compat` 1 = **70 passed / 0 failed**，另两条新移入 `#[ignore]` 的用例（`cleanup_reg_backup_restore`、`u_r2a_l03`）单独实跑通过；native-scanner **146 passed / 0 failed / 10 ignored**；必跑 Node 门禁 **71/71**，产物体积基线按 0.8.9 重算。本版新增的颜色、residue `mustTrigger`、protect extras 判据均做过「破坏一次、确认退出非零、再恢复」。**本版未做的验证**：渲染层未真机目检（未启动新构建的 UI）；src-tauri 其余 `#[ignore]` 真机用例未逐条跑；安装包升级安装未人工目检。
+
 ## 文档整理：审查产物与修复方案回迁仓库 docs（2026-11-01）
 
 > 本条目只影响本机协作资料与仓库卫生，不改产品行为、不改版本号。`docs/` 整体不入库（`.gitignore` 2026-09-24 裁定），干净克隆不受影响；`AGENTS.md` 与 `update.md` 本身入库，本条与下条 ② 的改动为待提交变更。

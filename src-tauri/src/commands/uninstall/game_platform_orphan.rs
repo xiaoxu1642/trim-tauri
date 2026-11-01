@@ -939,7 +939,7 @@ pub(super) fn untracked_dir_findings(index: &PlatformIndex, listings: &[LibraryL
                 "class": "untracked_game_dir",
                 "reason": "游戏库目录还在，但当前各平台清单里查不到对应安装记录",
                 "confidence": "medium", "risk": "high",
-                "readonly": true, "defaultChecked": false,
+                "defaultChecked": false,
                 "contribs": contribs(&[
                     ("platformIndexMissing", format!("库根 {} 下的一级目录，未匹配到任何安装记录", listing.root)),
                     ("indexComplete", "各平台清单本轮都读到了，不是读不到清单造成的缺口".to_string()),
@@ -1036,7 +1036,6 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["target"], "D:\\SteamLibrary\\steamapps\\common\\Gone");
         // 只读阶段：既不给勾选，也不给删除口径
-        assert_eq!(items[0]["readonly"], true);
         assert_eq!(items[0]["defaultChecked"], false);
         assert_eq!(items[0]["class"], "untracked_game_dir");
     }

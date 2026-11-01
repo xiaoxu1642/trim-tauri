@@ -110,7 +110,9 @@ export function buildParityFixture({ runPs = false } = {}) {
   // Electron 版的 APP_DATA_DIR 是 %APPDATA%\Trim；Tauri 版是 %APPDATA%\<identifier>，
   // 两者都必须在 exact/subtree 里有正确语义 —— 夹具把它们一起覆盖。
   const extras = {
-    extraSubtree: [join(APPDATA, 'Trim')],
+    // T1g-L06：加一条不与默认清单重合的合成子树，证明 extras 合并语义真的被夹具覆盖；
+    // 旧夹具的 extras 全是默认段的同值副本，退化成「忽略 extras」也不会红。
+    extraSubtree: [join(APPDATA, 'Trim'), 'C:\\TrimParityExtra\\Data'],
     extraExact: [
       join(HOME, 'Desktop'),
       join(HOME, 'Documents'),
@@ -135,6 +137,8 @@ export function buildParityFixture({ runPs = false } = {}) {
     `${WINDIR}\\System32\\config\\SAM`,
     join(APPDATA, 'Trim'),
     join(APPDATA, 'Trim', 'cleanup', 'custom', 'x.json'),
+    // T1g-L06：落在合成 extras 子树下的目标必须判拒（旧夹具没有这条覆盖）
+    'C:\\TrimParityExtra\\Data\\child.txt',
     HOME,
     join(HOME, 'Desktop'),
     join(HOME, 'Documents'),
@@ -169,6 +173,8 @@ export function buildParityFixture({ runPs = false } = {}) {
     '\\\\?\\UNC\\srv\\pub\\cache',
     '//srv/pub/Windows/System32',
     // 必须放行（清理工具的主力目标：系统根**之下**的缓存/日志）
+    // T1g-L06 近形对照：合成 extras 的兄弟目录不得被误判为受保护
+    'C:\\TrimParityExtra\\Other\\child.txt',
     `${WINDIR}\\Prefetch`,
     `${WINDIR}\\SoftwareDistribution\\Download`,
     `${WINDIR}\\Logs\\WindowsUpdate`,

@@ -61,8 +61,13 @@ function numericValue(raw) {
 }
 
 /** 键值层规则：段路径可选，when 指「写入值满足什么条件才叫降级」 */
+// 安全类服务白名单（T1f-M02）：禁用这些服务才算「禁用安全服务」。
+// 不含 CryptSvc/SENS 等基础服务——那条属于「批量禁用」风险，不是本规则的概念。
+const SECURITY_SERVICES = /^(WinDefend|WdNisSvc|SecurityHealthService|wscsvc|Sense|MsSense|SgrmBroker)$/i;
 const VALUE_RULES = [
   { id: 'uac-off', sectionRe: /\\Policies\\System$/i, nameRe: /^EnableLUA$/i, when: 'zero', why: '关闭 UAC（用户账户控制）' },
+  // T1f-M02：reg `Services\<安全服务> "Start"=4` 与 cmd 形态同语义。
+  { id: 'sec-svc-disable', sectionRe: /\\Services\\(WinDefend|WdNisSvc|SecurityHealthService|wscsvc|Sense|MsSense|SgrmBroker)$/i, nameRe: /^Start$/i, equals: 4, why: '停用安全服务（WinDefend / Sense 等）的启动' },
   { id: 'vbs-off', nameRe: /^EnableVirtualizationBasedSecurity$/i, when: 'zero', why: '关闭基于虚拟化的安全（VBS）' },
   { id: 'hvci-off', sectionRe: /HypervisorEnforcedCodeIntegrity/i, nameRe: /^Enabled$/i, when: 'zero', why: '关闭内存完整性（HVCI）' },
   { id: 'driver-blocklist-off', nameRe: /^VulnerableDriverBlocklistEnable$/i, when: 'zero', why: '关闭易受攻击驱动阻止列表' },
@@ -81,10 +86,29 @@ const CMD_RULES = [
   { id: 'defender-cmd', re: /Set-MpPreference[^\r\n]{0,120}-Disable\w+\s+\$?true\b/i, why: '关闭 Defender 防护（Set-MpPreference）' },
 ];
 
+/** 服务被改成禁用/启动值 4 的步骤 + 文本里出现的服务名（含变量数组形态）。 */
+function securityServiceDisableHit(step, text) {
+  const disable = /start\s*=\s*(?:4\b|disabled\b)|-StartupType\s+Disabled|\.StartupType\s*=\s*['"]?Disabled/i.test(text)
+    || step.disable === true
+    || /^disabled$/i.test(String(step.startType ?? ''));
+  if (!disable) return false;
+  const names = new Set();
+  for (const m of text.matchAll(/\bsc(?:\.exe)?\s+config\s+(?:"([^"]+)"|([^\s]+))/gi)) {
+    names.add((m[1] || m[2] || '').replace(/^["']|["']$/g, ''));
+  }
+  for (const m of text.matchAll(/Set-Service[^\n]*?-Name\s+["']?([\w.$-]+)/gi)) names.add(m[1]);
+  for (const m of text.matchAll(/\\Services\\([^\\\]"'\s]+)/gi)) names.add(m[1]);
+  // 变量形态：`$services = @("DiagTrack","Sense")` + 循环里统一禁
+  for (const m of text.matchAll(/["']([^"']+)["']/g)) names.add(m[1]);
+  if (typeof step.service === 'string') names.add(step.service);
+  return [...names].some((n) => SECURITY_SERVICES.test(String(n).replace(/^["']|["']$/g, '')));
+}
+
 /** 对一个优化项分类，返回命中的规则 id 列表（去重、稳定序） */
 function classify(opt) {
   const hit = new Set();
-  for (const step of opt.steps || []) {
+  // T1f-M02：restore 步同样可能写入降级值（同文件 BCD 白名单块早就包含 restore）。
+  for (const step of [...(opt.steps || []), ...(opt.restore || [])]) {
     if (typeof step.reg === 'string') {
       for (const sec of regSections(step.reg)) {
         for (const p of sec.pairs) {
@@ -95,6 +119,7 @@ function classify(opt) {
             if (r.sectionRe && !r.sectionRe.test(sec.section)) continue;
             if (r.when === 'zero' && v !== 0) continue;
             if (r.when === 'nonzero' && v === 0) continue;
+            if (r.equals !== undefined && v !== r.equals) continue;
             hit.add(r.id);
           }
         }
@@ -102,6 +127,9 @@ function classify(opt) {
     }
     const cmdText = [step.pwsh, step.cmd].filter((x) => typeof x === 'string').join('\n');
     for (const r of CMD_RULES) if (cmdText && r.re.test(cmdText)) hit.add(r.id);
+    // T1f-M02：sc disabled / Set-Service / 变量数组 / 结构化 service 步的统一判据。
+    // 结构化步没有 cmd 文本，仍须判（service/startType/disable 字段本身就是证据）。
+    if (securityServiceDisableHit(step, cmdText)) hit.add('sec-svc-disable');
   }
   return [...hit].sort();
 }
@@ -175,6 +203,12 @@ function whyOffTopic(meta) {
     { id: 'restore-off', hit: () => fake('HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore', '"DisableSR"=dword:00000001'), miss: () => fake('HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore', '"DisableSR"=dword:00000000') },
     { id: 'bcdedit-integrity', hit: () => fakeCmd('bcdedit /set nointegritychecks on'), miss: () => fakeCmd('bcdedit /set nointegritychecks off') },
     { id: 'sec-svc-disable', hit: () => fakeCmd('sc config WinDefend start= 4'), miss: () => fakeCmd('sc config WinDefend start= 2') },
+    // T1f-M02：其余同语义形态逐条给正反样本（探针的全部形态收成对照）。
+    { id: 'sec-svc-disable', hit: () => fake('HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\WinDefend', '"Start"=dword:00000004'), miss: () => fake('HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\WinDefend', '"Start"=dword:00000002') },
+    { id: 'sec-svc-disable', hit: () => fakeCmd('sc.exe config $s start= disabled\n$svc = @("DiagTrack","Sense")'), miss: () => fakeCmd('sc.exe config $s start= disabled\n$svc = @("DiagTrack","WpnService")') },
+    { id: 'sec-svc-disable', hit: () => fakeCmd('Set-Service -Name Sense -StartupType Disabled'), miss: () => fakeCmd('Set-Service -Name Sense -StartupType Manual') },
+    { id: 'sec-svc-disable', hit: () => classify({ steps: [{ service: 'WinDefend', startType: 'Disabled' }] }), miss: () => classify({ steps: [{ service: 'WinDefend', startType: 'Manual' }] }) },
+    { id: 'sec-svc-disable', hit: () => classify({ restore: [{ service: 'Sense', disable: true }] }), miss: () => classify({ restore: [{ service: 'Sense', startType: 'Manual' }] }) },
     { id: 'restore-off-cmd', hit: () => fakeCmd('Disable-ComputerRestore -Drive C:\\'), miss: () => fakeCmd('Enable-ComputerRestore -Drive C:\\') },
     { id: 'defender-cmd', hit: () => fakeCmd('Set-MpPreference -DisableRealtimeMonitoring $true'), miss: () => fakeCmd('Set-MpPreference -DisableRealtimeMonitoring $false') },
   ];

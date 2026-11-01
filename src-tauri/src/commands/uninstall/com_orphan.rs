@@ -287,7 +287,7 @@ pub(super) fn com_findings(raws: &[ComRaw], present: &dyn Fn(&str) -> bool, cap:
             "reason": format!("{reason}（{path}）"),
             // 只读阶段一律 low：这不是「危险项」，是「指向已消失文件的登记项」
             "confidence": "low", "risk": "low",
-            "readonly": true, "defaultChecked": false,
+            "defaultChecked": false,
             "details": json!({
                 "clsid": raw.clsid,
                 "view": raw.view.label(),
@@ -448,7 +448,7 @@ pub(super) fn filetype_findings(raws: &[FileTypeRaw], progid_exists: &dyn Fn(&st
             "class": "fileext_progid_missing",
             "reason": format!("扩展名 {} 的默认 ProgID「{}」在 Classes 下已不存在（悬空的打开方式登记）", raw.ext, raw.progid),
             "confidence": "low", "risk": "low",
-            "readonly": true, "defaultChecked": false,
+            "defaultChecked": false,
             "details": json!({
                 "ext": raw.ext,
                 "progid": raw.progid,
@@ -493,7 +493,7 @@ pub(super) fn app_reg_findings(raws: &[AppRegRaw], exe_present: &dyn Fn(&str) ->
             "class": "appreg_exe_missing",
             "reason": format!("Applications 登记的 {} 在本机常规落点找不到", raw.name),
             "confidence": "low", "risk": "low",
-            "readonly": true, "defaultChecked": false,
+            "defaultChecked": false,
             "details": json!({
                 "appName": raw.name,
                 "hive": raw.hive.hive_label(),
@@ -577,7 +577,6 @@ mod tests {
         let (items, notes) = com_findings(&raws, &|p: &str| p.starts_with(r"C:\Live"), 10);
         assert_eq!(items.len(), 1, "只有指向已消失文件的那条该报: {items:?}");
         assert_eq!(items[0]["class"], "com_inproc_missing");
-        assert_eq!(items[0]["readonly"], true);
         assert_eq!(items[0]["defaultChecked"], false);
         assert!(items[0]["target"].as_str().unwrap().ends_with("}") , "target 必须带完整视图根与 GUID");
         assert!(notes.iter().any(|n| n.contains("没有可取出的服务器路径")), "不可判定的条数要如实说明: {notes:?}");
@@ -636,7 +635,6 @@ mod tests {
         let (items, _) = filetype_findings(&raws, &|p: &str| p == "Live.Doc", 10);
         assert_eq!(items.len(), 1, "只报 ProgID 键已不存在的那条: {items:?}");
         assert_eq!(items[0]["class"], "fileext_progid_missing");
-        assert_eq!(items[0]["readonly"], true);
         assert!(items[0]["target"].as_str().unwrap().contains(r"\Classes\.acme"));
     }
 
@@ -664,7 +662,6 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert!(notes.iter().any(|n| n.contains("已达上限")));
         for it in &items {
-            assert_eq!(it["readonly"], true);
             assert_eq!(it["defaultChecked"], false);
             assert_eq!(it["kind"], "reg_key");
         }

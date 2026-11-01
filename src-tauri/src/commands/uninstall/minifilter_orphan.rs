@@ -79,7 +79,7 @@ pub(super) fn minifilter_findings(
             "class": "minifilter_after_key_deleted",
             "reason": format!("服务键已不存在，但过滤管理器仍挂着 {0}（高度 {1}，实例 {2} 个）—— 需要重启后才会散干净，本条不作为删除目标", f.name, f.altitude, f.instances),
             "confidence": "high", "risk": "low",
-            "readonly": true, "defaultChecked": false,
+            "defaultChecked": false,
             "details": json!({ "filterName": f.name, "altitude": f.altitude, "instances": f.instances }),
             "contribs": contribs(&[
                 ("filterAttached", format!("fltmc 实时列出 {0}（高度 {1}）", f.name, f.altitude)),
@@ -169,7 +169,6 @@ AliProtectHipsFilter                  1            38520      0\n";
         let filters = [MountedFilter { name: "Gone".to_string(), altitude: "3280".to_string(), instances: 1 }];
         let (cand, _) = minifilter_findings(&filters, &|_: &str| false, 60);
         assert_eq!(cand[0]["kind"], "note_only");
-        assert_eq!(cand[0]["readonly"], true);
         assert_eq!(cand[0]["defaultChecked"], false);
         let reason = cand[0]["reason"].as_str().unwrap_or("");
         assert!(reason.contains("需") && reason.contains("重启"));

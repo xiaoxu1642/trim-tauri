@@ -326,7 +326,7 @@ pub(super) fn run_findings(
             "class": class,
             "reason": reason,
             "confidence": "low", "risk": "low",
-            "readonly": true, "defaultChecked": false,
+            "defaultChecked": false,
             "details": json!({
                 "hive": hive,
                 "subkey": raw.subkey,
@@ -724,7 +724,6 @@ mod tests {
             "三种原因的措辞必须互不相同（混成一句用户分不清是写错了还是程序没了）: {reasons:?}"
         );
         for it in &items {
-            assert_eq!(it["readonly"], true);
             assert_eq!(it["defaultChecked"], false);
             assert_eq!(it["kind"], "reg_value");
             // 原始键路径 / 值名 / 原始数据 / 判定理由四样都要带给渲染层

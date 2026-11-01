@@ -43,7 +43,9 @@ const RETIRED = path.join(ROOT, 'src-tauri', 'data', 'retired-optimizations.json
 // devmgr_show_hidden_default）。方案 §3.5 D 批 1-4 里"键路径有把握 + 不与既有语义重叠"
 // 的项已全部落地；TcpAckFrequency / DisableAIFeatures / 蓝牙策略键 / UserPreferencesMask
 // 明确不做的理由写在 OPTIONS 里（红线依据-竞品反例 §9.3 纪律 ①）。
-const TIPS_BASELINE = 59;
+// 2026-11-02 T1f-M05：按现值抬升基线。旧基线远低于实际 tips 数，
+// 大量 tips 可被「顺手清理」而门禁仍 ✓ —— 棘轮必须贴着现值。
+const TIPS_BASELINE = 78;
 
 let fail = 0;
 function check(ok, name, detail) {
@@ -152,7 +154,7 @@ const tipsCount = tipsCountOf(byId);
 const tipsDeficit = ratchetDeficit(tipsCount, TIPS_BASELINE);
 check(tipsDeficit === 0,
   `④ tips 覆盖率棘轮（当前 ${tipsCount} / 基线 ${TIPS_BASELINE}，只增不减）`,
-  tipsDeficit ? `比基线少 ${tipsDeficit} —— 补回来或明确 --bump-baseline 降基线（须书面理由）` : '');
+  tipsDeficit ? `比基线少 ${tipsDeficit} —— 补回来，或按书面理由手动上调 TIPS_BASELINE（本门禁没有降基线开关）` : '');
 
 // ⑤ 其他 scope 保持"键 → string"，别乱改形状（这几块本轮 §3.4 不动）
 for (const scope of ['startup', 'contextmenu', 'memoryclean', 'residue']) {

@@ -97,10 +97,15 @@ for (const f of targets) {
   if (!byBase.has(b)) byBase.set(b, []);
   byBase.get(b).push(f);
 }
-/** 坐标里的文件名 ⇒ 唯一跟踪文件；同名多份或解析不出返回 null */
+/** 坐标里的文件名 ⇒ 唯一跟踪文件；同名多份或解析不出返回 null。
+ * T1b-M06：带目录前缀的坐标必须从仓根**字面**解析。旧实现对 `src/engine/protect.rs`
+ * 这类写错树的路径也回落到 basename，只要同名唯一就判绿 —— 读者按注释路径找不到文件。
+ * 裸文件名（无分隔符）才允许走唯一 basename 索引。 */
 function resolveTarget(t) {
-  if (tracked.has(t)) return t;
-  const c = byBase.get(basename(t)) || [];
+  const norm = String(t).replace(/\\/g, '/');
+  if (norm.includes('/')) return tracked.has(norm) ? norm : null;
+  if (tracked.has(norm)) return norm;
+  const c = byBase.get(basename(norm)) || [];
   return c.length === 1 ? c[0] : null;
 }
 
@@ -119,6 +124,11 @@ const CONTROLS = [
   {
     label: 'C2 对照：行号越界 ⇒ 必须判红',
     code: '// 见 `src-tauri/src/engine/protect.rs:999999`\nfn a() {}',
+    expect: 1,
+  },
+  {
+    label: 'C3 对照：带错误目录前缀但 basename 唯一 ⇒ 必须判红（T1b-M06）',
+    code: '// 见 `src/engine/protect.rs:1`\nfn a() {}',
     expect: 1,
   },
 ];

@@ -1,7 +1,8 @@
 {
   "extras": {
     "extraSubtree": [
-      "C:\\Users\\Administrator\\AppData\\Roaming\\Trim"
+      "C:\\Users\\Administrator\\AppData\\Roaming\\Trim",
+      "C:\\TrimParityExtra\\Data"
     ],
     "extraExact": [
       "C:\\Users\\Administrator\\Desktop",
@@ -9,11 +10,12 @@
       "C:\\Users\\Administrator\\Downloads"
     ]
   },
-  "rootsJson": "{\"subtree\":[\"c:\\\\users\\\\administrator\\\\appdata\\\\roaming\\\\trim\",\"c:\\\\windows\\\\system32\\\\config\"],\"exact\":[\"c:\\\\windows\",\"c:\\\\program files\",\"c:\\\\program files (x86)\",\"c:\\\\programdata\",\"c:\\\\users\\\\administrator\",\"c:\\\\users\\\\administrator\\\\desktop\",\"c:\\\\users\\\\administrator\\\\documents\",\"c:\\\\users\\\\administrator\\\\downloads\",\"c:\\\\users\\\\administrator\\\\appdata\\\\roaming\",\"c:\\\\users\\\\administrator\\\\appdata\\\\local\"],\"anyDrive\":[\"system volume information\"],\"neverNames\":[\".env\",\".env.*\",\"*.env\",\"id_rsa\",\"id_rsa_sk\",\"id_dsa\",\"id_ecdsa\",\"id_ed25519\",\"id_ed25519_sk\",\"id_ed448\",\"id_x25519\",\"*.pem\",\"*.pfx\",\"*.p12\",\"*.key\",\"*.keystore\",\"*.jks\",\"*.pgp\",\"*.gpg\",\"*.asc\",\"*.kdb\",\"*.kdbx\",\"*.ovpn\",\".htpasswd\",\".netrc\",\".npmrc\",\".pypirc\",\"credentials\",\"credentials.json\",\"authorized_user.json\",\"service_account*.json\",\"*azureprofile.json\",\"terraform.tfstate\",\"terraform.tfstate.*\"]}",
+  "rootsJson": "{\"subtree\":[\"c:\\\\users\\\\administrator\\\\appdata\\\\roaming\\\\trim\",\"c:\\\\windows\\\\system32\\\\config\",\"c:\\\\trimparityextra\\\\data\"],\"exact\":[\"c:\\\\windows\",\"c:\\\\program files\",\"c:\\\\program files (x86)\",\"c:\\\\programdata\",\"c:\\\\users\\\\administrator\",\"c:\\\\users\\\\administrator\\\\desktop\",\"c:\\\\users\\\\administrator\\\\documents\",\"c:\\\\users\\\\administrator\\\\downloads\",\"c:\\\\users\\\\administrator\\\\appdata\\\\roaming\",\"c:\\\\users\\\\administrator\\\\appdata\\\\local\"],\"anyDrive\":[\"system volume information\"],\"neverNames\":[\".env\",\".env.*\",\"*.env\",\"id_rsa\",\"id_rsa_sk\",\"id_dsa\",\"id_ecdsa\",\"id_ed25519\",\"id_ed25519_sk\",\"id_ed448\",\"id_x25519\",\"*.pem\",\"*.pfx\",\"*.p12\",\"*.key\",\"*.keystore\",\"*.jks\",\"*.pgp\",\"*.gpg\",\"*.asc\",\"*.kdb\",\"*.kdbx\",\"*.ovpn\",\".htpasswd\",\".netrc\",\".npmrc\",\".pypirc\",\"credentials\",\"credentials.json\",\"authorized_user.json\",\"service_account*.json\",\"*azureprofile.json\",\"terraform.tfstate\",\"terraform.tfstate.*\"]}",
   "roots": {
     "subtree": [
       "c:\\users\\administrator\\appdata\\roaming\\trim",
-      "c:\\windows\\system32\\config"
+      "c:\\windows\\system32\\config",
+      "c:\\trimparityextra\\data"
     ],
     "exact": [
       "c:\\windows",
@@ -114,6 +116,10 @@
     },
     {
       "p": "C:\\Users\\Administrator\\AppData\\Roaming\\Trim\\cleanup\\custom\\x.json",
+      "protected": true
+    },
+    {
+      "p": "C:\\TrimParityExtra\\Data\\child.txt",
       "protected": true
     },
     {
@@ -225,6 +231,10 @@
       "protected": false
     },
     {
+      "p": "C:\\TrimParityExtra\\Other\\child.txt",
+      "protected": false
+    },
+    {
       "p": "C:\\Windows\\Prefetch",
       "protected": false
     },
@@ -309,6 +319,8 @@
     true,
     true,
     true,
+    true,
+    false,
     false,
     false,
     false,

@@ -44,8 +44,18 @@ const REQUIRED = ['tf_svc_bulk', 'tf_drv_disable', 'tf_appx', 'tf_dev_disable'];
 // 清单本身的地板：四项是本仓的既有产品面，被整段删掉时下方逐项对拍会全部空转。
 const REQUIRED_FLOOR = 4;
 
-// labels 覆盖率棘轮（已登记解释文案的目标数 / 清单总数，取下界）
-const LABEL_COVERAGE_FLOOR = 0.6;
+// labels 覆盖率棘轮（已登记解释文案的目标数 / 清单总数）。
+// T1f-M04：2026-11-02 四项均满覆盖（现算命令：node tools/check-optimizer-subitem-contract.mjs），
+// 旧地板允许静默删掉大量解释文案；同时只数键不看值，`"TapiSrv": 5` 这类
+// 非字符串 label 会让 Rust 侧丢弃该目标，门禁仍报满覆盖。现改为 1.0 + 值校验。
+const LABEL_COVERAGE_FLOOR = 1.0;
+
+/** 覆盖率只收「targets 内且值为非空字符串」的 label（与 Rust `as_str()?` 同口径）。 */
+function labelCoverage(targets, labels) {
+  if (!targets.length) return 0;
+  const valid = targets.filter((t) => typeof labels[t] === 'string' && labels[t].trim() !== '');
+  return valid.length / targets.length;
+}
 
 let fail = 0;
 const check = (ok, label, detail = '') => {
@@ -97,9 +107,17 @@ for (const id of REQUIRED) {
 }
 
 // ---- 2~4. 逐项对拍 ----
+let checkedRows = 0;
 for (const id of REQUIRED) {
   const row = items[id];
-  if (!row) continue;
+  // T1f-M03：键存在但值为 null/数组/标量时，旧实现 `if (!row) continue` 会把
+  // 2/3/4/6/7/8 六组断言整段跳过，门禁仍打印「全部通过」；Rust 侧则下发空清单。
+  if (!row || typeof row !== 'object' || Array.isArray(row)) {
+    check(false, `1. ${id} 必须是非空对象`,
+      row === null ? '值为 null（键在、对象没了）' : Array.isArray(row) ? '值是数组' : `值是 ${typeof row}`);
+    continue;
+  }
+  checkedRows++;
   const opt = byId.get(id);
   if (!check(!!opt, `2. ${id} 在 optimizer-runtime.json 里存在`)) continue;
 
@@ -133,6 +151,10 @@ for (const id of REQUIRED) {
   const labelKeys = Object.keys(labels);
   const ghost = labelKeys.filter((k) => !full.includes(k));
   check(ghost.length === 0, `3. ${id} 的 labels 无幽灵键`, ghost.length ? `不在 targets 里：${ghost.join('、')}` : `${labelKeys.length} 条`);
+  const badLabelVals = labelKeys.filter((k) => full.includes(k)
+    && !(typeof labels[k] === 'string' && labels[k].trim() !== ''));
+  check(badLabelVals.length === 0, `3b. ${id} 的 labels 值都是非空字符串`,
+    badLabelVals.length ? `非法值：${badLabelVals.slice(0, 5).map((k) => `${k}=${JSON.stringify(labels[k])}`).join('、')}` : '');
   if (VERBOSE) labelKeys.forEach((k) => console.log(`     · ${k} → ${labels[k]}`));
 
   // ---- 4. extras id 不与 full 冲突 ----
@@ -145,10 +167,17 @@ for (const id of REQUIRED) {
   check(badExtra.length === 0, `4. ${id} 的 extras 每条都有 id/label/note`, `${extras.length} 条`);
 
   // ---- 6. labels 覆盖率棘轮 ----
-  const cov = full.length ? labelKeys.filter((k) => full.includes(k)).length / full.length : 0;
+  const cov = labelCoverage(full, labels);
   check(cov >= LABEL_COVERAGE_FLOOR, `6. ${id} 的解释文案覆盖率 ≥ ${LABEL_COVERAGE_FLOOR}`,
-    `${labelKeys.length}/${full.length} = ${(cov * 100).toFixed(0)}%`);
+    `${Math.round(cov * full.length)}/${full.length} = ${(cov * 100).toFixed(0)}%`);
 }
+// T1f-M03：逐项循环的实际覆盖数必须等于 REQUIRED（防对象为 null 时整段静默跳过）。
+check(checkedRows === REQUIRED.length, `2. 已检查 ${checkedRows}/${REQUIRED.length} 项（对象为 null 的项不得跳过）`);
+// T1f-M04 对照：非字符串 / 空白 label 不得计入覆盖率。
+check(labelCoverage(['A', 'B'], { A: 'ok', B: 5 }) === 0.5,
+  '6 对照：非字符串 label 只按 1/2 覆盖计（与 Rust as_str()? 同口径）');
+check(labelCoverage(['A', 'B'], { A: 'ok', B: '   ' }) === 0.5,
+  '6 对照：空白 label 不计入覆盖率');
 
 // ---- 7. 标题：数字不许写死（2026-10-05 用户裁定）----
 // 数据层标题此前带写死数字，与侧表实数已经不符，而且清单每增补一次就再谎报一次。
