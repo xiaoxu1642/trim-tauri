@@ -39,7 +39,7 @@ use serde_json::json;
 fn cleanup_rules_success() {
     let w = main_window();
     let res = invoke(&w, "cleanup_rules", json!({}));
-    assert_ne!(res["success"], json!(false), "规则库验签加载链不应失败: {res}");
+    assert_eq!(res["success"], json!(true), "规则库验签加载链不应失败: {res}");
 }
 
 /// settings:load 密钥掩码语义：**在场密钥必须被掩码**，且返回体里**不得**出现 `dpapi:v1:` 密文。

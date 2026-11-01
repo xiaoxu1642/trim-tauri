@@ -20,8 +20,8 @@
 ///
 /// 用法（保持变量名与原来一致，用例正文零改动）：
 /// ```ignore
-/// let _sb = crate::testutil::sandbox(&format!("a2-multistar-{}", std::process::id()));
-/// let base = _sb.path().to_path_buf();
+/// let _sb = crate::testutil::Sandbox::new(&format!("a2-multistar-{}", std::process::id()));
+/// let base = _sb.to_path_buf();
 /// ```
 pub struct Sandbox(std::path::PathBuf);
 

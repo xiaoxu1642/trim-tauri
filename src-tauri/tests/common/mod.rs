@@ -21,8 +21,8 @@
 //!
 //! C08（v7.2 X1-M02）口径订正：「共用 generate_handler!」只保证**漏注册会 panic**，
 //! 不保证**被调用**——两个是不变量强度不同的事实，此前这条注释把前者写成了后者。
-//! 「哪些命令在 tests/ 里有调用方」以现算为准（工具：`tools/check-tests-helper-parity.mjs`
-//! 的调用面清单段，数字不写进注释，防止下次漂移又骗人）。
+//! 「哪些命令在 tests/ 里有调用方」需要现算；`tools/check-tests-helper-parity.mjs`
+//! 目前**不输出调用面清单**（X1-L03 实测 0 命中），本段不再声称它提供该数字。
 //!
 //! C08（v7.2 R6b-M01🔴）数据根隔离：每个测试进程首次建窗前注入
 //! `TRIM_TEST_DATA_ROOT`（按测试二进制名分根），`paths::app_data_dir()` 据此
@@ -127,7 +127,10 @@ pub fn ensure_test_data_root() -> &'static std::path::PathBuf {
 #[must_use = "探针必须自己声明隔离根（helper 里替它定根，门禁看不见这条探针有没有定过）"]
 pub fn probe_guard() -> TestDataGuard {
     let g = ensure_test_data_root();
-    TestDataGuard { root: g.clone() }
+    let guard = TestDataGuard { root: g.clone() };
+    // X1-L02：探针自证不再靠调用方记得 —— 建守卫即对拍生产读侧。
+    guard.assert_isolated();
+    guard
 }
 
 /// [`probe_guard`] 的持有物：测试数据根的**实际落点**。
@@ -140,11 +143,19 @@ pub struct TestDataGuard {
 }
 
 impl TestDataGuard {
-    /// 断言这个根在 `target` 下而不是用户目录（探针写盘前的一眼自检）。
+    /// 断言这个根与**生产读侧**解析结果一致（探针写盘前的一眼自检）。
+    ///
+    /// X1-L02：只校验 helper 自己拼出的字符串抓不到「DATA_DIR 已被别的根定死」
+    /// （OnceLock 首次 init 之后 `set_var` 不再生效），必须与 `paths::app_data_dir()` 对拍。
     pub fn assert_isolated(&self) {
+        let live = trim_tauri_lib::engine::paths::app_data_dir();
+        assert_eq!(
+            live, &self.root,
+            "探针数据根与 paths::app_data_dir() 不一致（DATA_DIR 已被其它根定死）: live={live:?} guard={:?}",
+            self.root
+        );
         let s = self.root.to_string_lossy().replace('\\', "/");
         assert!(s.contains("test-data-root"), "测试数据根不在 target/test-data-root 下: {s}");
-        assert!(!s.to_uppercase().contains(r"APPDATA"), "测试数据根指向用户目录: {s}");
     }
 }
 
@@ -181,11 +192,16 @@ pub fn skip_and_record(what: &str) -> bool {
 /// 单一真源在 guard.rs，新增子窗时这里自动跟随，不会和守卫清单漂移。
 /// ipc_smoke 的「子窗口来源校验档位」组与新的子窗档位测试都用它。
 pub fn sub_windows() -> Vec<&'static str> {
-    trim_tauri_lib::engine::guard::APP_WINDOWS
+    let list: Vec<&'static str> = trim_tauri_lib::engine::guard::APP_WINDOWS
         .iter()
         .copied()
         .filter(|l| *l != "main")
-        .collect()
+        .collect();
+    // X1-L05：清单塌成空表时，基于它的「子窗必须被拒」循环会 0 次迭代、0 断言全绿。
+    // 断言放在唯一真源处，一处覆盖全部调用点（module_smoke 的全局元断言只在另一个
+    // 二进制里生效，单独 `cargo test --test ipc_smoke` 时无兜底）。
+    assert!(!list.is_empty(), "APP_WINDOWS 里没有任何子窗 —— 子窗档位断言会退化成 0 对象假绿");
+    list
 }
 
 /// 经真实 IPC 调用链发一条命令（**不取回执**——只用于「别被拒杀」的档位场景）。
@@ -211,7 +227,7 @@ pub fn ipc_fire_no_assert(window: &WebviewWindow<MockRuntime>, cmd: &str, args: 
 pub fn invoke(window: &WebviewWindow<MockRuntime>, cmd: &str, args: Value) -> Value {
     match get_ipc_response(window, ipc_request(cmd, args)) {
         Ok(body) => body.deserialize::<Value>().expect("命令返回体不是合法 JSON"),
-        Err(e) => panic!("{cmd} 被 IPC 层拒绝（命令未注册或 invoke_key 不符）: {e}"),
+        Err(e) => panic!("{cmd} 被 IPC 层拒绝（未注册 / invoke_key 不符 / 命令体回 Err）: {e}"),
     }
 }
 

@@ -53,8 +53,11 @@ fn decrypts_electron44_oscrypt_and_dotnet_dpapi() {
     let _data = common::probe_guard();
     let sample_path =
         std::env::var("TRIM_DPAPI_SAMPLE").expect("需设置 TRIM_DPAPI_SAMPLE 指向样本 JSON");
-    let json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&sample_path).unwrap()).unwrap();
+    let json: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&sample_path)
+            .unwrap_or_else(|e| panic!("TRIM_DPAPI_SAMPLE={sample_path} 读不到: {e}")),
+    )
+    .unwrap();
 
     // 1) 主密钥：样本里存的是 encrypted_key 原文，套一层 Local State JSON 走正式解析路径
     let encrypted_key_b64 = json["encryptedKeyB64"].as_str().unwrap();
