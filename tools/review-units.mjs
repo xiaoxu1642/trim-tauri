@@ -424,10 +424,17 @@ export const UNITS = [
     // 基线/契约快照，`generated` 逐件登记出处（U5c 会查生成器点名）；rule-schema 是
     // 手写契约表，必须进精读面。
     id: 'T1g', owner: 'sub', name: '契约表与门禁夹具（生成物只查出处）',
-    files: ['tools/rule-schema.json'],
+    // 2026-11-01：本单元 `generated` 摘掉 cleanup-contract.json（手写规格进精读面），同时把
+    // check-rule-schema-sync 从 T1b 兜底位点名进来 —— T1b 在 HEAD 已经贴着 U2 上限（现算
+    // `node tools/check-review-units.mjs`），任何新增都会越线；上限不放宽，按主题点名
+    // （T1d/T1e/T1f 同一处置）。
+    files: ['tools/rule-schema.json', 'tools/check-rule-schema-sync.mjs'],
     dirs: [{ dir: 'tools/fixtures', depth: 2 }],
+    // 2026-11-01（T1g-L03）：`cleanup-contract.json` 从本表移出 —— 全仓没有任何脚本写该路径，
+    // 它是**手写的规格夹具**（A15/ifDeleted 等历次均是手改）。标 `generated` 等于给它发了一张
+    // 免检通行证，既躲开精读面也躲开新鲜度面。移出后归 `dirs` 的精读面。
     generated: ['tools/fixtures/artifact-size-baseline.json',
-      'tools/fixtures/cleanup-contract.json', 'tools/fixtures/cleanup-overlaps.json',
+      'tools/fixtures/cleanup-overlaps.json',
       'tools/fixtures/comment-number-baseline.json', 'tools/fixtures/delete-callsites-baseline.json',
       'tools/fixtures/finder-delete-modes.json', 'tools/fixtures/protect-parity.json',
       'tools/fixtures/residue-contract.json', 'tools/fixtures/rule-coverage-baseline.json',

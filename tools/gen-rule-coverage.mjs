@@ -25,6 +25,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { writeFileAtomic } from './lib/atomic-write.mjs';
+
 // T1c-M03：fileURLToPath 才能还原 %20/中文（pathname 原样保留百分号编码）。
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLEANUP = path.join(ROOT, 'src-tauri', 'data', 'cleanup-rules.json');
@@ -144,7 +146,7 @@ if (mdIdx >= 0 && argv[mdIdx + 1]) fs.writeFileSync(argv[mdIdx + 1], out + '\n')
 
 let fail = 0;
 if (WRITE) {
-  fs.writeFileSync(BASELINE, JSON.stringify({ rulesVersion: cleanup.rulesVersion, covered: coveredIds }, null, 2) + '\n');
+  writeFileAtomic(BASELINE, JSON.stringify({ rulesVersion: cleanup.rulesVersion, covered: coveredIds }, null, 2) + '\n');
   console.log(`\n↻ 基线已刷新：${coveredIds.length} 条覆盖项 → ${path.relative(ROOT, BASELINE)}`);
 } else if (!baseline) {
   console.error('\n✗ 没有基线文件，先跑 node tools/gen-rule-coverage.mjs --write 建立');

@@ -33,12 +33,14 @@
 // 用法：node tools/check-registry-delete-guard.mjs [--verbose]
 
 import { readFileSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { gate } from './lib/gate.mjs';
 import { blankNonCode, splitFunctions, skipBraces, lineAt } from './lib/src-scan.mjs';
 import { walkRs } from './lib/fs-walk.mjs';
 
-const ROOT = process.cwd();
+// 仓根一律由本文件位置推出：`process.cwd()` 会让「在 src-tauri/ 下单独跑一次」变成假红（T1b-L01）。
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(ROOT, 'src-tauri', 'src');
 
 // 删树原语名（`reg_key_remove` / `reg_key_remove_checked`）。

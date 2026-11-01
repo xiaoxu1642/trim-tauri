@@ -25,6 +25,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { writeFileAtomic } from './lib/atomic-write.mjs';
+import { nextRulesVersion } from './lib/next-rules-version.mjs';
+
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RULES_REL = path.join('src-tauri', 'data', 'cleanup-rules.json');
 
@@ -644,7 +647,8 @@ function build() {
   const { out } = candidates();
   const rules = loadRules();
   const seen = existingFingerprints(rules);
-  const rulesVersion = Number(new Date().toISOString().slice(0, 10).replace(/-/g, ''));
+  // T1c-L05：本地日期（不是 toISOString 的 UTC）且严格递增，与 new-residue-rule 同一口径。
+  const rulesVersion = nextRulesVersion(rules.rulesVersion);
   const rejected = new Map();
   const bumpR = (k) => rejected.set(k, (rejected.get(k) || 0) + 1);
 
@@ -764,6 +768,12 @@ function apply() {
     process.exit(1);
   }
   const rules = loadRules();
+  // T1c-L05：版本号不得倒退或原地盖章（nextRulesVersion 已保证递增，这里是对
+  // build/load 之间库被并发改写的兜底断言——两条路都读盘，写前必须以最新盘上值为准）。
+  if (!(rulesVersion > (Number(rules.rulesVersion) || 0))) {
+    console.error(`✗ rulesVersion ${rulesVersion} 未大于当前库 ${rules.rulesVersion}——拒绝写盘（版本倒序会让「哪一版判的」无从对齐）`);
+    process.exit(1);
+  }
   const before = rules.groups.reduce((n, g) => n + (g.subGroups || []).reduce((m, s) => m + (s.items || []).length, 0), 0);
   rules.rulesVersion = rulesVersion;
   // 每条 ver 必须等于顶层 rulesVersion（契约 A12）：整库统一重刷，不是只刷新增的
@@ -792,7 +802,7 @@ function apply() {
     process.exit(1);
   }
   const out = path.join(ROOT, RULES_REL);
-  fs.writeFileSync(out, `${JSON.stringify(rules, null, 2)}\n`, 'utf8');
+  writeFileAtomic(out, `${JSON.stringify(rules, null, 2)}\n`);
   const after = rules.groups.reduce((n, g) => n + (g.subGroups || []).reduce((m, s) => m + (s.items || []).length, 0), 0);
   console.log(`已写入 ${path.relative(ROOT, out)}`);
   console.log(`  条目 ${before} → ${after}（新增 ${placed}）  rulesVersion=${rulesVersion}`);

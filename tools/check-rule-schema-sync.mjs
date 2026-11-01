@@ -220,7 +220,11 @@ const TOOL_CONSUMED_SCOPE = {
   'cleanup.versionRatchetMin': 'check-cleanup-rule-contract 版本棘轮',
   'cleanup.frozenWinapp2Version': 'check-cleanup-rule-contract winapp2 冻结值',
   'residue.versionRatchetMin': 'check-residue-rule-contract 版本棘轮',
-  'residue.matchGroupsMinNonEmpty': 'rule_schema.rs 装载侧直接读取',
+  // 2026-11-01（T1g-L01）：原文写「装载侧直接读取」，实测不成立 —— `residue_update.rs` 的
+  // `hit_groups < 2` 是字面量，`rule_schema.rs` 只有取值测试读过本键。登记必须写事实，
+  // 否则反向断言会把一条「表值改了装载侧纹丝不动」的键算成有消费者。
+  'residue.matchGroupsMinNonEmpty':
+    'check-residue-rule-contract 的三条件组阈值 + rule_schema.rs 的取值测试（装载侧 hit_groups < 2 仍是字面量，本键还不是运行期真源）',
   'crossTrack.points': 'check-cleanup-rule-contract 跨轨登记',
   'crossTrack.notCovered': 'gen-rule-coverage 覆盖账',
   'optimizer.riskLevels': 'check-optimizer-schema-sync（RISK_TEXT 键集对拍）',

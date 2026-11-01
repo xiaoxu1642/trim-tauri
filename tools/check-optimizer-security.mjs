@@ -241,14 +241,17 @@ if (!table) {
   );
 
   // ③ 每条要带档位与理由（空理由 = 没写清楚为什么它算降级）
+  // T1f-L03：writes 的元素形状也要查 —— `writes: [123]` / `[""]` 旧实现能过（只查数组非空）。
+  // why 的内容语义（与真实 reg/cmd 文本有交集）需要词表，留给彻底方案，本批只钉类型。
   const bad = [];
   for (const [id, meta] of Object.entries(table)) {
     if (!meta || typeof meta !== 'object') { bad.push(`${id} 不是对象`); continue; }
     if (!['high', 'medium'].includes(meta.level)) bad.push(`${id} level 非法`);
     if (typeof meta.why !== 'string' || meta.why.trim().length < 6) bad.push(`${id} 缺 why`);
     if (!Array.isArray(meta.writes) || !meta.writes.length) bad.push(`${id} 缺 writes`);
+    else if (meta.writes.some((w) => typeof w !== 'string' || !w.trim())) bad.push(`${id} 的 writes 只许非空字符串`);
   }
-  check(bad.length === 0, '③ 每条带 level(high|medium) / why / writes', bad.join('；'));
+  check(bad.length === 0, '③ 每条带 level(high|medium) / why / writes（writes 元素限非空字符串）', bad.join('；'));
 
   // ④ 侧表声明的命中规则必须与重算一致（防止「写了条目的 why 但判据已经改了」）
   const ruleDrift = [];

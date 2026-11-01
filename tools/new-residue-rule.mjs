@@ -22,15 +22,20 @@
 // --residue 用竖线分三段：kind|target|note。target 里不要出现竖线。
 'use strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
+import { writeFileAtomic } from './lib/atomic-write.mjs';
+import { nextRulesVersion } from './lib/next-rules-version.mjs';
+import { resolveInsideRepo } from './lib/repo-path.mjs';
+
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RULES = path.join(ROOT, 'src-tauri', 'data', 'uninstall-residue-rules.json');
 const GATE = path.join(ROOT, 'tools', 'check-residue-rule-contract.mjs');
+// T1c-L09：候选包临时件落仓根 tmp/（.gitignore 已忽略），不落全局 %TEMP%。
+const TMP_DIR = path.join(ROOT, 'tmp');
 
 const { values: opt } = parseArgs({
   options: {
@@ -81,12 +86,8 @@ try {
 }
 
 const curVer = Number(base.rulesVersion) || 0;
-const today = (() => {
-  const d = new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  return Number(`${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`);
-})();
-const nextVer = opt.version ? Number(opt.version) : Math.max(today, curVer + 1);
+// T1c-L05：与 import-winapp2 同一份口径（本地日期与「当前+1」取大），不许再用 UTC 日期。
+const nextVer = opt.version ? Number(opt.version) : nextRulesVersion(curVer);
 if (!Number.isInteger(nextVer) || nextVer <= curVer) {
   die(`rulesVersion 必须大于当前值 ${curVer}（当前请求 ${opt.version ?? '自动'}）`);
 }
@@ -104,7 +105,18 @@ const candidate = {
 };
 
 // --preview 只跑装载侧同口径的语义校验 + 注册表硬否决，不验签（私钥在发布机）。
-const tmp = opt.out ? path.resolve(ROOT, opt.out) : path.join(os.tmpdir(), `trim-residue-cand-${process.pid}.json`);
+// T1c-L08：--out 解析后必须落在仓库内；缺省临时件进仓根 tmp/（T1c-L09）。
+let tmp;
+if (opt.out) {
+  try {
+    tmp = resolveInsideRepo(ROOT, opt.out, '--out');
+  } catch (e) {
+    die(e.message);
+  }
+} else {
+  fs.mkdirSync(TMP_DIR, { recursive: true });
+  tmp = path.join(TMP_DIR, `trim-residue-cand-${process.pid}.json`);
+}
 if (opt.out && fs.existsSync(tmp)) die(`--out 指向的文件已存在，拒绝覆盖: ${tmp}`);
 fs.writeFileSync(tmp, JSON.stringify(candidate, null, 2) + '\n', 'utf8');
 
@@ -131,7 +143,7 @@ if (!opt.apply) {
 // 语义不明的「验签失败」，不如现在就让它报「缺少 _sig」并给出重签命令。
 const merged = { ...candidate };
 delete merged._sig;
-fs.writeFileSync(RULES, JSON.stringify(merged, null, 2) + '\n', 'utf8');
+writeFileAtomic(RULES, JSON.stringify(merged, null, 2) + '\n');
 console.log('✓ 已合并进真库（签名已剥离，此时门禁的 D 组会判红，属预期）');
 console.log('下一步必做（私钥只在发布机，AGENTS §5.16）：');
 console.log('  node tools/sign-cleanup-rules.mjs sign --file src-tauri/data/uninstall-residue-rules.json');

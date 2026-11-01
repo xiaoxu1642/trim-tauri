@@ -181,7 +181,9 @@ else g.ok(`注释坐标引用 ${refs} 处，全部能在跟踪面内唯一定位
   const bad = [];
   let sites = 0;
   for (const f of files) {
-    const rel = relative(ROOT, f).replace(/\\/g, '/');
+    // `files` 里的键已经是仓根相对的；再 `relative(ROOT, …)` 相当于按 cwd 二次相对化，
+    // 在仓外单跑会 ENOENT 崩栈（T1b-L01）。
+    const rel = f;
     linesOf(rel).forEach((t, i) => {
       if (!t.includes('maintenance-tasks.json')) return;
       sites++;

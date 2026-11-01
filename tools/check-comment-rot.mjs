@@ -51,6 +51,8 @@ const IGNORE_DIR = (n) => n === 'target' || n === 'node_modules' || n === 'vendo
 const isRs = (n) => n.endsWith('.rs');
 
 let fail = 0;
+/** 显式 SKIP 的节数：不计入 ✓，末尾汇总必须带「N 节未校验」（T1b-L03）。 */
+let skipCount = 0;
 const check = (ok, label, detail = '') => {
   console.log(`${ok ? '✓' : '✗'} ${label}${detail ? ' — ' + detail : ''}`);
   if (!ok) fail++;
@@ -316,7 +318,7 @@ let bareSectionRefs = 0;
 let checkedSectionRefs = 0;
 
 if (!agentsPresent) {
-  console.log('⚠ AGENTS.md 缺席（未随仓库分发）：R2 章节号腐烂**未校验**');
+  // SKIP 文案只在下面的 ⊘ 行打一处（T1b-L03：同一节不许两种口径）
 } else {
   const agentsText = readFileSync(AGENTS_MD, 'utf8');
   const agentsLines = agentsText.split(/\r?\n/);
@@ -372,15 +374,18 @@ if (!agentsPresent) {
     }
   }
 }
-check(
-  !agentsPresent || rotSections.length === 0,
-  agentsPresent
-    ? `R2. 注释引用的 AGENTS 章节号全部存在（判 ${checkedSectionRefs} 处；另有 ${bareSectionRefs} 处裸 § 编号只统计）`
-    : 'R2. AGENTS 章节号检查 SKIP（AGENTS.md 缺席）',
-  agentsPresent
-    ? (rotSections.length ? rotSections.slice(0, 10).join('；') + (rotSections.length > 10 ? ` …共 ${rotSections.length} 处` : '') : '无腐烂')
-    : '本节未校验',
-);
+// R2 的 SKIP 走独立的 ⊘ 行、不经 check()：文件头承诺「显式 SKIP 不打 ✓ 冒充通过」，
+// 而原先用 check(!agentsPresent || …) 打出的正是 ✓，汇总行照旧写「全部通过」（T1b-L03）。
+if (!agentsPresent) {
+  skipCount++;
+  console.log('⊘ R2. AGENTS 章节号检查未校验（AGENTS.md 缺席，SKIP：不是通过）');
+} else {
+  check(
+    rotSections.length === 0,
+    `R2. 注释引用的 AGENTS 章节号全部存在（判 ${checkedSectionRefs} 处；另有 ${bareSectionRefs} 处裸 § 编号只统计）`,
+    rotSections.length ? rotSections.slice(0, 10).join('；') + (rotSections.length > 10 ? ` …共 ${rotSections.length} 处` : '') : '无腐烂',
+  );
+}
 
 // ────────────────────────────────────────────────────────────────────
 // R3 数字腐烂（历史叙述豁免）—— P3-5 扩到四种形态（T1-M01，2026-10-09）：
@@ -653,6 +658,13 @@ const R3_FORM_CONTROL_EXPECT = new Map([
     if (claimed.length === 0) {
       console.log('✓ K08 对账：residue_update.rs 无「已注册/已落地」声称（在线更新退役口径如实）');
     }
+  } else {
+    // K08 是「模块注释声称已注册/已落地必须对得上」的唯一机检。uninstall 域已按命令拆过一次
+    // 目录，再拆/改名会让 existsSync 为假、整节无声跳过，而末行照旧写「全部通过」——
+    // 判据对象消失不能既不出声也不判红（T1b-L02）。
+    console.error('✗ K08 未校验：src-tauri/src/commands/uninstall/residue_update.rs 不在盘上 ⇒ 本节没有判定对象，按失败处理'
+      + '（拆/改名后请把 K08 的判定面一起搬到新文件）');
+    fail++;
   }
 }
 
@@ -916,4 +928,5 @@ if (fail > 0) {
   process.exit(1);
 }
 
-console.log(`check-comment-rot: 全部通过（扫 ${commentsByFile.size} 个文件 / ${commentLineTotal} 行注释）`);
+const skipNote = skipCount ? `，另有 ${skipCount} 节未校验（不是通过）` : '';
+console.log(`check-comment-rot: 全部通过（扫 ${commentsByFile.size} 个文件 / ${commentLineTotal} 行注释${skipNote}）`);

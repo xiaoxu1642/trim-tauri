@@ -59,9 +59,11 @@ const REF_RE = /(?<![:\w/\\])(docs[\\/][A-Za-z0-9\u4e00-\u9fa5._\-\\/\s]+?\.(?:m
 // 1a. 源码 + 前端注释里引用的 docs/ 路径必须存在（docs/ 缺席时跳过，见上方说明）
 const refHits = [];
 const scanRoots = [SRC, FRONTEND];
+let refScanned = 0;
 if (docsPresent) {
   for (const base of scanRoots) {
     for (const fAbs of walkFiles(base)) {
+      refScanned++;
       const text = readFileSync(fAbs, 'utf8');
       const rel = relative(ROOT, fAbs).replace(/\\/g, '/');
       for (const m of text.matchAll(REF_RE)) {
@@ -80,6 +82,15 @@ check(
     : '1a. docs/ 引用检查 SKIP（本机未跟踪资料区不存在）',
   refHits.length ? refHits.join('；') : `${docsFiles.size} 个 docs 文件作为对照集`,
 );
+// T1a-L10：1a 没有扫描面地板 —— `src-tauri/src` 被搬走/改名时 0 引用仍打 ✓。
+// 现算扫描面文件数（命令：rg --files src-tauri/src src | wc -l），地板取一半：扫描根塌缩即红。
+if (docsPresent) {
+  check(
+    refScanned >= 100,
+    `1a-b. 引用扫描面地板（现算 ${refScanned} 个文件 ≥ 100；T1a-L10）`,
+    refScanned < 100 ? `只扫到 ${refScanned} 个文件 ⇒ 扫描根被搬走/改名，1a 断言已空转` : '',
+  );
+}
 
 // 1b. AGENTS.md 自身引用的 docs/ 路径必须存在
 if (agentsPresent && docsPresent) {
@@ -172,7 +183,11 @@ const LOCAL_DOC_TOKENS = {
   guiFan: 'docs规范',
   docsPath: /docs[\\\/][^\s`'")，。；]*\.(?:md|json|mjs|js|ps1|txt|html|css)/g,
 };
-const RE_LOCALDOC_HISTORICAL = /曾经|曾|历史|旧版|原来|此前|过后|退役|早期|过去|一度|之前|原本|旧|已删|原 /;
+// T1a-L10：豁免词此前含**单字**「旧」「曾」「原 」，一行里出现任意一个就整行豁免 ——
+// 「还原 docs/foo.md」「兼容旧格式，见 docs/…」这类真实引用可被一句历史叙述掩盖。
+// 现在只认短语（已删 / 已退役 / 曾经 / 此前 / 历史 / 旧版 / 原来），单字与「一度 / 早期 /
+// 过后 / 之前 / 原本」等弱词不再豁免。
+const RE_LOCALDOC_HISTORICAL = /已删|已退役|曾经|此前|历史|旧版|原来/;
 const LOCALDOC_SCAN_ROOTS = [
   ...KEY_SCAN_ROOTS,
   join(ROOT, 'native-scanner', 'src'),

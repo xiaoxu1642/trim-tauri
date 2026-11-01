@@ -262,7 +262,11 @@ for (const [file, text] of texts) {
       spawnScanned++;
       // T1a-M17：去掉引号紧邻要求（`\b` 锚定）—— 全路径字面量
       // `"C:\Windows\…\powershell.exe"` 与 `r#"…"#` 形态此前整类漏检。
-      if (/\b(?:r#)?"?(powershell|pwsh)\.exe/i.test(`${h.args} ${h.raw}`)) {
+      // T1a-L01：此前只认带 `.exe` 的字面量 ⇒ `quiet_cmd(system_tool("cmd.exe"))
+      // .args(["/c", "powershell", "-Command", …])` 这类无后缀形态全绿（system-bin 的
+      // B 组放行 cmd.exe，PS 入口却在 A 组看不见）。放宽到可省略 `.exe`；后缀有无
+      // 都不看引号紧邻，兼容 r#"…"# 与全路径。
+      if (/\b(?:r#)?"?(?:powershell|pwsh)(?:\.exe)?\b/i.test(`${h.args} ${h.raw}`)) {
         bareHits.push(`${file}:${h.line} ${cut(h.raw)}`);
       }
       for (const [aFile, alias] of aliasDefs) {
@@ -274,6 +278,13 @@ for (const [file, text] of texts) {
   }
 }
 const bareOutsideThroat = bareHits.filter((s) => !s.startsWith(`${THROAT}:`));
+// T1a-L01：扫描面地板 —— spawn token 改名/换入口后 spawnScanned 趋零，A 组「0 命中」
+// 与真合规同形（现算 76，取 30：改名一半即红）。
+check(
+  spawnScanned >= 30,
+  `A0. spawn 实参链扫描面地板（现算 ${spawnScanned} ≥ 30；T1a-L01）`,
+  spawnScanned >= 30 ? '' : `只扫到 ${spawnScanned} 处 spawn 实参链 ⇒ 入口 token 被改名/换入口，A 组断言已空转`,
+);
 check(
   bareOutsideThroat.length === 0,
   `A. 扫描 ${spawnScanned} 处 spawn 实参链，咽喉（${THROAT}）外三个字面量入口（直连 / 全路径 / 别名两跳）零命中`,

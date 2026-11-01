@@ -34,6 +34,7 @@ import { join, relative } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
 import { walkFiles } from './lib/fs-walk.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const dir = join(REPO_ROOT, 'src', 'scripts');
 // T1a-L04：递归（scripts 子目录里的 JS 也纳入确认框判据）。
@@ -50,6 +51,26 @@ if (files.length < 10) {
 // 剥离块注释（等长替换保偏移量与行号），行注释在命中处按行前缀判定
 function stripBlockComments(text) {
   return text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+}
+/**
+ * T1a-L03：命中点之前是否已进入**行注释**——必须跳过字符串字面量里的 `//`。
+ * 旧判据 `before.includes('//')` 在 `const u = 'https://x'; window.app.confirmDanger({…})`
+ * 这种同一行前缀含 URL 的真实调用上整条跳过（字符串里的 `//` 被当成注释起点）。
+ */
+function inLineComment(text, idx) {
+  const lineStart = text.lastIndexOf('\n', idx - 1) + 1;
+  let q = null;
+  for (let i = lineStart; i < idx; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '\\') { i++; continue; }
+      if (c === q) q = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') { q = c; continue; }
+    if (c === '/' && text[i + 1] === '/') return true;
+  }
+  return false;
 }
 
 // 注意必须带 g 标志：exec 循环依赖 lastIndex 推进，无 g 时同一首匹配永远返回 → 死循环
@@ -85,16 +106,19 @@ const RE_AWAIT_APP_CONFIRM = /\bawait\s+window\s*\.\s*app\s*\??\.\s*confirm(?:Da
  * 返回「不在 try 内」的命中下标。判定＝命中之前最近的 `try {` 与命中之间没有 catch 闭合，
  * 且命中之后能找到同一个 try 的 `} catch`。源码级近似（不做括号配对），对本仓写法足够；
  * 要精确必须上 AST —— 那会把这条门禁变成解析器工程，收益不成比例。
+ *
+ * T1a-L03：`try {` / `} catch` 的搜索改在**剥注释与字符串**之后的文本上做（等长抹除，
+ * 偏移与原文一一对应）。旧实现直接搜原文：`try {` 只出现在行注释里时会被当成真 try，
+ * 把「不在 try 内」误判成 inside —— 一条说明文字就能翻转 try 归属。
  */
-function confirmOutsideTry(text) {
+function confirmOutsideTry(text, clean = blankNonCode(text, 'js')) {
   const out = [];
   for (const m of text.matchAll(RE_AWAIT_APP_CONFIRM)) {
-    const pre = text.slice(0, m.index);
-    const t = pre.lastIndexOf('try {');
+    const t = clean.lastIndexOf('try {', m.index);
     let inside = false;
     if (t >= 0) {
-      const between = text.slice(t, m.index);
-      const after = text.slice(m.index);
+      const between = clean.slice(t, m.index);
+      const after = clean.slice(m.index);
       inside = !/\}\s*catch\b/.test(between) && /\}\s*catch\b/.test(after);
     }
     if (!inside) out.push(m.index);
@@ -121,9 +145,7 @@ for (const f of files) {
     re.lastIndex = 0;
     let m;
     while ((m = re.exec(text)) !== null) {
-      const lineStart = text.lastIndexOf('\n', m.index - 1) + 1;
-      const before = text.slice(lineStart, m.index);
-      if (before.includes('//')) {
+      if (inLineComment(text, m.index)) {
         // 行注释里的形似文本（整行注释或行尾注释），跳过
         re.lastIndex = m.index + m[0].length;
         continue;
@@ -137,8 +159,7 @@ for (const f of files) {
   RE_HARDCODED_CRED.lastIndex = 0;
   let h;
   while ((h = RE_HARDCODED_CRED.exec(text)) !== null) {
-    const lineStart = text.lastIndexOf('\n', h.index - 1) + 1;
-    if (text.slice(lineStart, h.index).includes('//')) continue;
+    if (inLineComment(text, h.index)) continue;
     hardcoded.push(`${f}:${text.slice(0, h.index).split('\n').length}`);
   }
   // B3-2/B3-3：确认件 await 的 try 归属（逐文件计数，与基线比）
@@ -156,8 +177,7 @@ for (const f of files) {
   RE_NATIVE_FALLBACK.lastIndex = 0;
   let nf;
   while ((nf = RE_NATIVE_FALLBACK.exec(text)) !== null) {
-    const lineStart = text.lastIndexOf('\n', nf.index - 1) + 1;
-    if (text.slice(lineStart, nf.index).includes('//')) continue;
+    if (inLineComment(text, nf.index)) continue;
     nativeFallback.push(`${f}:${text.slice(0, nf.index).split('\n').length}`);
   }
 }
@@ -189,14 +209,28 @@ for (const f of files) {
   const TRY_CONTROLS = {
     bad: "const ok = await window.app.confirm('x', 'y');\nif (!ok) return;",
     good: "try {\n  const ok = await window.app.confirm('x', 'y');\n  if (!ok) return;\n} catch (e) {\n  return;\n}",
+    // T1a-L03：`try {` 只出现在行注释里不得被当成真 try（旧实现整条误判 inside）
+    commentTry: "// try { 这里只是说明写法\nconst ok = await window.app.confirm('x', 'y');\n} catch (e) { return; }",
   };
   const tb = confirmOutsideTry(TRY_CONTROLS.bad).length;
   const tg = confirmOutsideTry(TRY_CONTROLS.good).length;
-  if (tb !== 1 || tg !== 0) {
-    console.error(`✗ 正向对照失败：确认件 try 归属样本命中 ${tb}（应 1）/ 合规样本命中 ${tg}（应 0）`);
+  const tc = confirmOutsideTry(TRY_CONTROLS.commentTry).length;
+  if (tb !== 1 || tg !== 0 || tc !== 1) {
+    console.error(`✗ 正向对照失败：确认件 try 归属样本命中 ${tb}（应 1）/ 合规样本命中 ${tg}（应 0）/ 注释 try 命中 ${tc}（应 1）`);
     process.exit(1);
   }
-  console.log('✓ 正向对照自检通过（凭据字面量判定器可判红、合规样本放行；原生兜底判定器可判红、合规样本放行；确认件 try 归属判定器可判红、合规样本放行）');
+  // T1a-L03：行注释判定器 —— 字符串里的 `//` 不得把真实调用洗成注释；真注释仍要跳过
+  const urlLine = "const u = 'https://x'; window.app.confirmDanger({ title: 'x' });";
+  const commentLine = "// window.app.confirmDanger({ title: 'x' });";
+  const urlAt = urlLine.indexOf('confirmDanger');
+  const commentAt = commentLine.indexOf('confirmDanger');
+  const lc = inLineComment(urlLine, urlAt);
+  const lcm = inLineComment(commentLine, commentAt);
+  if (lc || !lcm) {
+    console.error(`✗ 正向对照失败：行注释判定器把 URL 行判成注释=${lc}（应 false）/ 真注释行判成代码=${!lcm}（应 false）`);
+    process.exit(1);
+  }
+  console.log('✓ 正向对照自检通过（凭据字面量判定器可判红、合规样本放行；原生兜底判定器可判红、合规样本放行；确认件 try 归属判定器可判红、合规样本放行；行注释判定器 URL 不算注释、真注释跳过）');
 }
 
 console.log('=== app 确认入口门禁（调用形态 + 原生兜底）===\n');

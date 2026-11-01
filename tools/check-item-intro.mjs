@@ -69,46 +69,59 @@ if (!byId || typeof byId !== 'object') {
   process.exit(1);
 }
 
-// ① 结构：每条 byId 值合法
-const legacyStrings = [];
-const objNoDesc = [];
-const tipsPartial = [];
-for (const [id, v] of Object.entries(byId)) {
-  if (typeof v === 'string') {
-    // 允许**保留**旧 string（不阻断本次迁移），但新增会破坏 tips 判据 —— 由棘轮 ④ 与
-    // 迁移检查（④'：所有 tips 都在 obj 里）双保险。这里先记录不判红。
-    legacyStrings.push(id);
-    continue;
-  }
-  if (!v || typeof v !== 'object' || typeof v.desc !== 'string' || v.desc.length < 6) {
-    objNoDesc.push(id);
-    continue;
-  }
-  if (v.tips !== undefined) {
-    const t = v.tips;
-    if (!t || typeof t !== 'object' || typeof t.normal !== 'string' || typeof t.game !== 'string' || typeof t.office !== 'string') {
-      tipsPartial.push(id);
-    } else if (t.normal.length < 6 || t.game.length < 6 || t.office.length < 6) {
-      tipsPartial.push(id + '(短)');
+// ①② 的唯一实现（真仓与 ⑥ 合成样本共用 —— T1f-L01：自检不许再复刻一份判据）。
+function validateEntries(map) {
+  const legacyStrings = [];
+  const objNoDesc = [];
+  const tipsPartial = [];
+  for (const [id, v] of Object.entries(map)) {
+    if (typeof v === 'string') {
+      // T1f-L02：迁移已完成（150/150 对象、legacyStrings=0），兼容窗口关闭；
+      // 新增 string 会绕过 tips 判据，直接判红（旧注释声称由「④' 迁移检查」兜底，
+      // 但 ④' 从未存在）。要重开窗口必须显式登记而不是默认放行。
+      legacyStrings.push(id);
+      continue;
+    }
+    if (!v || typeof v !== 'object' || typeof v.desc !== 'string' || v.desc.length < 6) {
+      objNoDesc.push(id);
+      continue;
+    }
+    if (v.tips !== undefined) {
+      const t = v.tips;
+      if (!t || typeof t !== 'object' || typeof t.normal !== 'string' || typeof t.game !== 'string' || typeof t.office !== 'string') {
+        tipsPartial.push(id);
+      } else if (t.normal.length < 6 || t.game.length < 6 || t.office.length < 6) {
+        tipsPartial.push(id + '(短)');
+      }
     }
   }
+  return { legacyStrings, objNoDesc, tipsPartial };
 }
-// 迁移完成后 legacyStrings 应当为空；非空不判红，只在报告里出现一次，提醒"仍有旧形状未迁"
+// ③ 的唯一实现：catalog/retired 集合对拍（缺失 = 目录项没简介；孤儿 = intro 有而两边都没有）。
+function coverageProblems(catIds, retIds, ids) {
+  return {
+    missing: [...catIds].filter((id) => !ids.includes(id)),
+    orphans: ids.filter((id) => !catIds.has(id) && !retIds.has(id)),
+  };
+}
+
+const { legacyStrings, objNoDesc, tipsPartial } = validateEntries(byId);
 check(objNoDesc.length === 0,
   `① 每条 object 值都有非空 desc（当前 object=${Object.values(byId).filter((v) => v && typeof v === 'object').length}）`,
   objNoDesc.length ? `缺 desc：${objNoDesc.slice(0, 5).join(',')}` : '');
 check(tipsPartial.length === 0,
   '② tips 三档齐全（有 tips 就必须 normal/game/office 都在，且各 ≥ 6 字）',
   tipsPartial.length ? `半空壳：${tipsPartial.slice(0, 5).join(',')}` : '');
-if (legacyStrings.length) {
-  console.log(`  · 提示：仍有 ${legacyStrings.length} 条 byId 是旧 string 形状（未来新增请用 {desc}）：${legacyStrings.slice(0, 3).join(',')}`);
-}
+// T1f-L02：迁移窗口已关闭 —— 新增 legacy string 必须红（前端 normalizeIntro 能容忍它，
+// 所以这不是用户面故障，而是契约漂移；旧实现只打印一行「提示」，等于永远放行）。
+check(legacyStrings.length === 0,
+  '① 不许新增 legacy string（迁移已完成，byId 必须全是 {desc, tips?}）',
+  legacyStrings.length ? `仍有 string 形状：${legacyStrings.slice(0, 5).join(',')}` : '');
 
 // ③ 集合对拍
 const catIds = new Set(catalog.map((c) => c.id));
 const retIds = new Set((retired.items || []).map((r) => r.id));
-const missing = [...catIds].filter((id) => !(id in byId));
-const orphans = Object.keys(byId).filter((id) => !catIds.has(id) && !retIds.has(id));
+const { missing, orphans } = coverageProblems(catIds, retIds, Object.keys(byId));
 check(missing.length === 0,
   `③ catalog ⇄ intro 双向覆盖：目录 ${catIds.size} 项都能在 intro 里查到`,
   missing.length ? `缺失：${missing.slice(0, 5).join(',')}` : '');
@@ -138,24 +151,27 @@ for (const scope of ['startup', 'contextmenu', 'memoryclean', 'residue']) {
     badShape.length ? `漂了 ${badShape.length} 条：${badShape.slice(0, 3).join(',')}` : '');
 }
 
-// ⑥ 判据正向自检：伪造一份违规数据，validate 必须报错
+// ⑥ 判据正向自检：伪造一份违规数据，**调用真实判据**（①②③ 与真仓共用同一函数对象）。
+// T1f-L01：旧自检把 ①② 的判据复刻了一遍、③④ 没有任何样本，注释却写「复刻 ①②③④」——
+// 真实判据被改坏时自检照样绿，给出的是「判据活着」的假保证。
 {
-  // 复刻本文件 ①②③④ 的核心判据成一次内存运算（不重复调用 check、只统计"应判红"数）
   const fake = {
     'A_no_desc': { notDesc: 'x' },
     'B_tips_partial': { desc: '有 desc', tips: { normal: '正常场景', game: '游戏场景' } }, // 缺 office
     'C_ok_plain': { desc: '完整 desc 但没有 tips' },
-    'D_ok_tips': { desc: '完整 desc + tips 三档', tips: { normal: '日常', game: '游戏', office: '办公' } },
+    'D_ok_tips': { desc: '完整 desc + tips 三档', tips: { normal: '日常使用场景', game: '游戏运行场景', office: '办公使用场景' } },
+    'E_legacy': '旧 string 形状',
   };
-  let caught = 0;
-  for (const [id, v] of Object.entries(fake)) {
-    if (typeof v.desc !== 'string' || v.desc.length < 6) caught++;
-    else if (v.tips && !(typeof v.tips.normal === 'string' && typeof v.tips.game === 'string' && typeof v.tips.office === 'string')) caught++;
-  }
-  // A 无 desc（1 处）+ B tips 缺 office（1 处）= 2
-  check(caught === 2,
-    `⑥ 判据正向自检（伪造 4 条、期望抓到 2 条 → 实际 ${caught}）`,
-    caught !== 2 ? '判据疑似坏成永远放行或过度误伤 —— 修 check 逻辑' : '');
+  const v = validateEntries(fake);
+  const c1 = v.objNoDesc.length === 1 && v.tipsPartial.length === 1 && v.legacyStrings.length === 1;
+  // ③ 对照：catalog {x,y} / retired {r} / intro [x,z,r] ⇒ 缺 y、孤儿 z
+  const cov = coverageProblems(new Set(['x', 'y']), new Set(['r']), ['x', 'z', 'r']);
+  const c3 = cov.missing.length === 1 && cov.missing[0] === 'y' && cov.orphans.length === 1 && cov.orphans[0] === 'z';
+  check(c1 && c3,
+    `⑥ 判据正向自检（①②：伪造 5 条抓到 3 条 → 实际 ${v.objNoDesc.length + v.tipsPartial.length + v.legacyStrings.length}；③：缺 ${cov.missing.length}/孤儿 ${cov.orphans.length}）`,
+    c1 && c3 ? ''
+      : !c1 ? '①②（validateEntries）行为漂移'
+        : '③（coverageProblems）行为漂移');
 }
 
 // ---- ⑦ scope 三表对拍（v0.7.0）----

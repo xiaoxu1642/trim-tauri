@@ -722,6 +722,9 @@ const camelToSnake = (s) => s.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase());
 
 const d6Bad = [];       // 前端传了但 Rust 没有（硬断言 = 0）
 const d6RustOnly = [];  // Rust 有但前端没传且未登记白名单
+// T1a-L12：两个静默 continue（无泛型签名 / 无载荷方法）此前没有任何计数 —— 新增一条
+// 无泛型的命令或箭头/async 包装方法时，D6 只是少比一条，地板 D6a 只数 jsParams 挡不住。
+let d6Compared = 0;
 for (const { rel, abs } of cmdFiles) {
   const text = readFileSync(abs, 'utf8');
   const lines = text.split('\n');
@@ -743,7 +746,8 @@ for (const { rel, abs } of cmdFiles) {
     // 字符起切，把任意一行拦腰截断 —— K4 实测抓 app.rs 时 fnBody 从字符 60 起切，
     // 找到的是别的函数）。改用行拼接保证从 #[tauri::command] 那行开始。
     const fnBody = lines.slice(i, i + 30).join('\n');
-    const fnAt = fnBody.search(/fn\s+\w+\s*</);
+    // T1a-L12：`fn name<…>` 只认泛型签名 —— 无泛型命令（`fn name(`）整条静默跳过。
+    const fnAt = fnBody.search(/fn\s+\w+\s*[<(]/);
     if (fnAt < 0) continue;
     const openParen = fnBody.indexOf('(', fnAt);
     if (openParen < 0) continue;
@@ -786,6 +790,7 @@ for (const { rel, abs } of cmdFiles) {
       if (nm[1] === 'window' || nm[1] === 'app') continue;
       rustNames.push(nm[1]);
     }
+    d6Compared++;
     // 前端有 / Rust 无
     for (const k of jsKeys) {
       const sn = camelToSnake(k);
@@ -811,6 +816,13 @@ check(
   jsParams.size >= 40,
   `D6a. 带参通道扫描面地板（${jsParams.size} ≥ 40）`,
   jsParams.size >= 40 ? '' : '带参通道解析塌缩——JS_METHOD_RE 或前端写法已漂移',
+);
+// T1a-L12：逐命令比对条数地板（现算 93）。jsParams 地板挡不住「个别命令掉队」——
+// 少一条只让分子小 1，只有逐命令计数能暴露签名解析失明。
+check(
+  d6Compared >= 90,
+  `D6b. 逐命令参数对拍条数地板（${d6Compared} ≥ 90；T1a-L12）`,
+  d6Compared >= 90 ? '' : `只比对了 ${d6Compared} 条命令 ⇒ 签名解析（fn 泛型/形参）或通道映射失明`,
 );
 check(
   d6Bad.length === 0 && d6RustOnly.length === 0,

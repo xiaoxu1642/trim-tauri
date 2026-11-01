@@ -282,7 +282,6 @@ if (settingsRs && uninstallJs) {
   }
 }
 
-console.log(`\ncheck-appearance-prefs: 命中断言 ${hits.length} 条，失败 ${failures} 条`);
 // ---- C 组：外观域键表 ⇄ 渲染层键表对拍 + 迁移口径 + 四处同步（v7.2 P1 · F4a2-M01）----
 // 来源：单元代理片段 uF4a2m1-gate.snippet.mjs 的 S2，主 agent 2026-10-22 合并。
 // 抓什么：外观域 10 个键的真源从 localStorage 迁到后端 appearance.json 之后，键表在两侧各有一份
@@ -374,6 +373,9 @@ console.log('\n[C] 外观域真源迁后端（键表对拍 / 迁移口径 / 四�
   if (libRegistered && mapHasBoth) ok('C7 四处同步落点齐备：Rust 命令 / lib.rs 注册 / CHANNEL_MAP / 档位表（后者由 check-guard-tiers 管）');
 }
 
+// 汇总必须排在**全部**判定组之后：原先打在这里（C 组之前），C 组判红时会先报「零失败」
+// 再跟一串 ✗，读日志的人有概率被第一行误导（T1b-L06）。
+console.log(`\ncheck-appearance-prefs: 命中断言 ${hits.length} 条，失败 ${failures} 条`);
 if (failures) { console.error('check-appearance-prefs: 判红'); process.exit(1); }
 console.log('check-appearance-prefs: 全部通过');
 process.exit(0);

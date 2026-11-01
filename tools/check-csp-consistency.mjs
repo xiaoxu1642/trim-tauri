@@ -79,23 +79,63 @@ check(
 );
 
 // T1a-M24：指令内容地板 —— 「N 份逐字相等」的基准取 values[0]，**五份同步放宽照样绿**
-//（探针实测：没有一条断言在读指令内容）。关键指令的最小集合在此钉死；确需放宽必须
-// 逐条来本表改（放宽=显式动作，与 FRAME_SRC_BASELINE 同纪律）。
-const CSP_INSTRUCTION_FLOOR = [
-  ["script-src 'self'", 'script-src 只认同源（内联脚本与外线全禁）'],
-  ["object-src 'none'", 'object-src 全禁（插件面归零）'],
-  ["base-uri 'self'", 'base-uri 只认同源（防 base 标签劫持相对路径）'],
-  ["style-src 'self' 'unsafe-inline'", 'style-src 现状形态（token 化样式表需要内联样式）'],
-  ['default-src \'self\'', 'default-src 在场（未列指令的兜底必须显式）'],
-  ['connect-src \'self\' ipc: http://ipc.localhost', 'connect-src 的 IPC 通道形状'],
-];
+//（探针实测：没有一条断言在读指令内容）。
+//
+// T1a-L04：地板从逐字串 includes 改成「指令 → 允许值集」。旧判据两个方向都错：
+//   ① 放宽：五窗同步放宽未列指令（img-src / font-src / worker-src / frame-ancestors /
+//      form-action）全绿 —— 没有任何断言在读这些指令的值；
+//   ② 误红：反向的安全收紧（例如去掉 style-src 的 'unsafe-inline'）反而因 includes
+//      不满足被判红 —— 地板没有区分「放宽」与「收紧」。
+// 新口径：值不在允许集 = 放宽 ⇒ 红；只删值 = 收紧 ⇒ 放行；未登记的新指令或关键指令
+// 整体缺位 ⇒ 红（放宽/搬移必须是显式动作，先来本表登记）。
+const CSP_DIRECTIVE_ALLOWED = new Map([
+  ['default-src', new Set(["'self'"])],
+  ['connect-src', new Set(["'self'", 'ipc:', 'http://ipc.localhost'])],
+  ['style-src', new Set(["'self'", "'unsafe-inline'"])],
+  ['script-src', new Set(["'self'"])],
+  ['img-src', new Set(["'self'", 'data:', 'file:', 'asset:', 'http://asset.localhost'])],
+  ['font-src', new Set(["'self'", 'file:', 'asset:', 'http://asset.localhost'])],
+  ['object-src', new Set(["'none'"])],
+  ['base-uri', new Set(["'self'"])],
+]);
+const CSP_REQUIRED = [...CSP_DIRECTIVE_ALLOWED.keys()];
+/** 把 CSP 串解析成「指令 → 值数组」。 */
+const parseCsp = (s) =>
+  new Map(
+    s
+      .split(';')
+      .map((d) => d.trim())
+      .filter(Boolean)
+      .map((d) => {
+        const [name, ...vals] = d.split(/\s+/);
+        return [name.toLowerCase(), vals];
+      }),
+  );
+/** 返回指令级漂移：未登记指令 / 关键指令缺位 / 值集被放宽。 */
+function cspDirectiveDrift(stripped) {
+  const dirs = parseCsp(stripped);
+  const issues = [];
+  for (const name of CSP_REQUIRED) {
+    if (!dirs.has(name)) issues.push(`关键指令 ${name} 整体缺位（收紧也要保留指令本体，避免回落到 default-src 之外的口径）`);
+  }
+  for (const [name, vals] of dirs) {
+    const allowed = CSP_DIRECTIVE_ALLOWED.get(name);
+    if (!allowed) {
+      issues.push(`指令 ${name} 未登记允许值集（新指令先来本表登记）`);
+      continue;
+    }
+    const extra = vals.filter((v) => !allowed.has(v));
+    if (extra.length) issues.push(`${name} 值集被放宽：${extra.join(' ')}`);
+  }
+  return issues;
+}
 {
   const baseline = values[0]?.stripped ?? '';
-  const floorBad = CSP_INSTRUCTION_FLOOR.filter(([expr]) => !baseline.includes(expr));
+  const issues = cspDirectiveDrift(baseline);
   check(
-    floorBad.length === 0,
-    `CSP 指令内容地板（关键指令 ${CSP_INSTRUCTION_FLOOR.length} 条在场；T1a-M24）`,
-    floorBad.length ? `同步放宽被抓：${floorBad.map(([e, why]) => `${e}（${why}）`).join('；')}` : '',
+    issues.length === 0,
+    `CSP 指令值集地板（${CSP_REQUIRED.length} 条指令登记在表；放宽才红、收紧放行；T1a-M24/L04）`,
+    issues.length ? issues.join('；') : '',
   );
 }
 

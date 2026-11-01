@@ -84,6 +84,7 @@ const REGISTRY = [
   // P1-a（2026-10-27 全仓重审 P1 · D1-M08）：用户可见文案的禁语判据与真仓扫描共用同一
   // violations()；退役 id / 退役标题 / 轮次术语三类命中都必须报红并点名条目与字段。
   { file: 'check-user-copy-policy.mjs', reason: 'P1-a 用户文案纪律：合规样本放行、指向退役项 + 夹带轮次术语的样本必红（对照块每次运行都跑）；真仓扫描走同一判据，命中即点名条目与字段；判定只作用在活跃目录（item-intro.json 故意保留已退役项介绍，不在判据面内）' },
+  { file: 'check-treemap-layout.mjs', reason: 'T1d-L07：squarified 布局数学性质带内置对照（面积和/包含关系/最坏长宽比三组，破坏判据即红）；2026-11-01 从 PENDING 迁入' },
 ];
 
 // MUST_RUN 里尚未配「内置正向对照自检」的存量门禁（T1-M05，2026-10-09 现算 33 条）。
@@ -105,7 +106,6 @@ const PENDING_CONTROLS = [
   // check-css-tokens 已于 2026-10-18 v6 P2 配好三组判定器自检并迁入 REGISTRY（本表只减不增）。
   { name: 'check-assets-used', reason: '找违规型：src/assets 零引用文件即红，缺违规样本自检' },
   // check-asset-size 已于 2026-10-14 v3 P2-I 配好内置正向对照并迁入 REGISTRY（本表只减不增）。
-  { name: 'check-treemap-layout', reason: '性质型：squarified 布局数学性质（面积和/包含关系），缺「人为破坏性质必须红」样本' },
   // check-item-intro / check-optimizer-security / check-optimizer-groups-sidecar
   // 已于 2026-10-20（T1b-M02）证实各自带对照块，迁入 REGISTRY（本表只减不增）。
   { name: 'check-desktop-entry', reason: '对拍型：桌面入口 ⇄ 发布暂存目录合并状态，缺合成样本' },
@@ -171,8 +171,14 @@ for (const e of REGISTRY) {
     missingSelfTest.push(`${e.file}（${e.reason}）—— 剥注释后无任何 check/fail 型对照断言行`);
     continue;
   }
-  const r = spawnSync(process.execPath, [p, ...(e.selfTestArgs || [])], { cwd: ROOT, encoding: 'utf8' });
-  if (r.status !== 0) brokenRun.push(`${e.file} 执行 exit ${r.status}`);
+  // T1a-L09：spawn 无 timeout ⇒ 任一登记门禁挂住（等子进程/网络）会让本管辖门禁
+  // 无限挂起。5 分钟是单条门禁的宽限上界；超时按「执行失败」记（status=null + error）。
+  const r = spawnSync(process.execPath, [p, ...(e.selfTestArgs || [])], {
+    cwd: ROOT, encoding: 'utf8', timeout: 5 * 60 * 1000,
+  });
+  if (r.status !== 0) {
+    brokenRun.push(`${e.file} 执行 exit ${r.status ?? 'null'}${r.error ? `（${r.error.code}）` : ''}`);
+  }
   // T1a-M02：flag-gated 门禁必须按登记参数跑，并真的打印对照组行；
   // 只 spawn 无参版本等于把「自检存在」当成「自检执行过」。
   if (e.selfTestArgs && !/对照|自检|正向/.test(r.stdout || '')) {

@@ -336,23 +336,23 @@ const PREVIEW_WINDOW_BASE = '#000000';
  *   - `.splash-badge` / `.splash-enter`：开屏一次性走场（AGENTS §2 明令豁免动效的同一节），
  *     且 splash 覆盖层是**独立局部调色板**（--splash-* 定义在 .splash-overlay 内，
  *     刻意固定浅色不随主题联动），与主题 token 表无继承关系。
- *   - `.maint-admin-tag` / `.maint-status-warn`：前景写成 color-mix(...80%, #000)，
- *     门禁的 parseBg 只解 var() 起手的形态；这两条的对比度已由 B 组（正文前景 × 页面底）覆盖。
+ *   - `.maint-admin-tag` / `.maint-status-warn`：曾登记在此，理由是「前景写成 color-mix(...80%, #000)，
+ *     门禁只解 var() 起手、对比度已由 B 组覆盖」。T1d-L01 核实：B 组只测三个正文 token，
+ *     不是覆盖；F1c-L05 已把 `.maint-admin-tag` 的前景改成 `var(--warning)`（现盘可解析），
+ *     该登记随之失效 —— 它已被移出本表并进 A 组实际计算（E 组新棘轮会拦住同类死登记）。
  *   （2026-10-25 D 轮撤掉 `.ctx-apply-bar` 的豁免：它的底写 `var(--warning-soft, rgba(…))`，
  *     而 parseColor 第 248 行**先查主题表、查不到才取兜底**，所以两主题都能真算——
  *     现算 --fg-primary #292536 压在 warning-soft 与 --bg-app 的合成底上 = 11.54:1，
  *     远高于正文 4.5:1。豁免理由「静态按兜底算不出主题相关结果」是 parseColor 修好之前的旧话。）
  */
 const UNKNOWN_BASE_ALLOW = [
-  '.btn > .btn-ripple',
   '.splash-badge',
-  '.splash-enter',
-  '.maint-admin-tag',
-  'body.theme-light .nav-subdot',
   // 审查 L-28 连带：--splash-* 是开屏覆盖层的独立局部调色板（刻意固定、不随主题
   // 联动，见 UNKNOWN_BASE_ALLOW 上方说明），主主题变量表里根本没有这些 token。
   // 收口 SOLID_SKIP 盲区后 .splash-enter:hover 的 --splash-brand-hover 落进 E 组，
   // 按「未登记 = 失明 = 红」的规矩必须显式登记理由（与 .splash-enter 同一个理由）。
+  // （T1d-L01：`.splash-enter` 本体、`.btn > .btn-ripple`、`body.theme-light .nav-subdot`
+  //  经现算已不再产生任何解析跳过；死登记已移出，理由保留在此供下一任对照。）
   '.splash-enter:hover',
 ];
 // 这些选择器的半透明底一律按 PREVIEW_WINDOW_BASE 合成（窗内白控件的真实底）。
@@ -524,6 +524,11 @@ const solidRows = [];
 // 但任何新增都必须在下面显式登记理由，不许默默进来。
 const SKIPPED_MAX = 4;
 const SKIPPED = [];
+// T1d-L01：「已登记 = 免检」不是本表的语义 —— 登记项的**唯一合法状态**是「解析仍然失明」。
+// 记录每个选择器是否真的产生过解析跳过；一条登记若已能算，就成了掩盖真实判定面的死登记
+//（`.maint-admin-tag` 在 F1c-L05 把前景改成 token 后就处于这个状态，旧理由却仍写着
+// color-mix/「B 组已覆盖」）。E 组据此做双向棘轮。
+const skippedBySelector = new Set();
 for (const r of rules) {
   if (!r.bgRaw.length) continue;
   // T1d-K03：opacity:0 = 隐藏态（可见性语义等同 display:none），不可见内容不适用
@@ -546,6 +551,7 @@ for (const r of rules) {
         const fFlat = f && f.a < 1 ? flattenBg(f, t.vars, r.selector) : f;
         if (!b || !fFlat || fFlat.a < 1) {
           // 已登记的「合成底不可知」不计棘轮；未登记的必须让 E 组判红
+          skippedBySelector.add(r.selector);
           if (!UNKNOWN_BASE_ALLOW.includes(r.selector)) SKIPPED.push(`${r.selector} :: ${raw} / ${fg}`);
           continue;
         }
@@ -559,6 +565,7 @@ for (const r of rules) {
           bEff = flattenBg({ ...b, a: r.opacity }, t.vars, r.selector);
           fEff = flattenBg({ ...fFlat, a: r.opacity }, t.vars, r.selector);
           if (!bEff || !fEff) {
+            skippedBySelector.add(r.selector);
             if (!UNKNOWN_BASE_ALLOW.includes(r.selector)) SKIPPED.push(`${r.selector} :: opacity=${r.opacity} / ${raw} / ${fg}`);
             continue;
           }
@@ -625,14 +632,19 @@ check(
   THEME_INCOMPLETE.join("；"),
 );
 const unknownStale = UNKNOWN_BASE_ALLOW.filter((s) => !rules.some((r) => r.selector === s));
+// T1d-L01：登记项必须仍然「解析失明」。已被解析出来（含 F1c-L05 那种把前景换成 token 的
+// 修法）还留在表里，等于用一条失效理由把该组合挪出判据视野，必须回收。
+const allowNoSkip = UNKNOWN_BASE_ALLOW.filter((s) => rules.some((r) => r.selector === s) && !skippedBySelector.has(s));
 check(
-  SKIPPED.length <= SKIPPED_MAX && unknownStale.length === 0,
+  SKIPPED.length <= SKIPPED_MAX && unknownStale.length === 0 && allowNoSkip.length === 0,
   `E. 解析跳过数不超棘轮（实算 ${SKIPPED.length} / 上限 ${SKIPPED_MAX}）`,
   unknownStale.length
     ? `登记已失效（这些选择器已不存在）：${JSON.stringify(unknownStale)}`
-    : SKIPPED.length
-      ? `新增失明组合：${[...new Set(SKIPPED)].slice(0, 6).join("；")}`
-      : "",
+    : allowNoSkip.length
+      ? `登记已失效（这些选择器没有任何解析失明组合，应移出 UNKNOWN_BASE_ALLOW）：${JSON.stringify(allowNoSkip)}`
+      : SKIPPED.length
+        ? `新增失明组合：${[...new Set(SKIPPED)].slice(0, 6).join("；")}`
+        : "",
 );
 const weak = solidRows.filter((r) => r.ratio < AA_NORMAL);
 // 审查 L-28：纯图标/图形控件走 WCAG **1.4.11 非文本对比度 = 3:1**，不是 1.4.3 的 4.5:1。

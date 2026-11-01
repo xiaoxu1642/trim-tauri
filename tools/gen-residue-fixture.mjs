@@ -12,6 +12,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { writeFileAtomic } from './lib/atomic-write.mjs';
+
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = path.join(ROOT, 'tools', 'fixtures', 'residue-contract.json');
 
@@ -267,7 +269,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     console.log(`✓ residue-contract.json 与生成器输出逐字节一致（packages ${packages.length} / regVectors ${regVectors.length}）`);
     process.exit(0);
   }
-  fs.writeFileSync(OUT, docText, 'utf8');
+  writeFileAtomic(OUT, docText);
   console.log(
     `已生成 ${path.relative(ROOT, OUT)}：regVectors ${regVectors.length} 条（拒绝 ${regVectors.filter((v) => v.blocked).length} / 放行 ${regVectors.filter((v) => !v.blocked).length}），runValueVectors ${runValueVectors.length} 条（放行 ${runValueVectors.filter((v) => v.gate === 'allowed').length} / 拒绝 ${runValueVectors.filter((v) => v.gate === 'denied').length} / 不管辖 ${runValueVectors.filter((v) => v.gate === 'not-governed').length}），packages ${packages.length} 条（拒绝 ${packages.filter((c) => !c.ok).length} / 放行 ${packages.filter((c) => c.ok).length}）`,
   );

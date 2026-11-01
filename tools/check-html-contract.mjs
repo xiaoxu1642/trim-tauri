@@ -23,6 +23,10 @@ const check = (ok, label, detail = '') => {
 };
 
 const htmlFiles = readdirSync(SRC).filter((f) => f.endsWith('.html'));
+// T1d-L09：窗口 HTML 数量地板。`src/*.html` 全删时内联/挂载/id 三组全成空集，
+// 判据会打印「0 份全部通过」—— 0 对象的绿不算通过（与 check-a11y 的 windowCount < 4 同口径）。
+check(htmlFiles.length >= 4, `0. src/*.html 输入面 ${htmlFiles.length} 份（≥ 4，主窗 + 三个子窗）`,
+  htmlFiles.length >= 4 ? '' : 'HTML 全丢 ⇒ 后续每条断言都成空集，拒绝判绿');
 // T1d-M08：内联 script 判据的唯一实现（真仓扫描与对照共用）。
 const stripHtmlComments = (text) => text.replace(/<!--[\s\S]*?-->/g, ' ');
 const hasInlineScript = (text) => /<script(?![^>]*\bsrc=)[^>]*>/i.test(stripHtmlComments(text));

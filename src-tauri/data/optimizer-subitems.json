@@ -1,5 +1,5 @@
 {
-  "_comment": "批量优化项的**可自选目标清单**（2026-10-03 用户裁定：这三项不该只能一键全选/全还原）。设计取舍三条：① `targets` 不手抄 —— 它必须与 optimizer-runtime.json 里该项 pwsh 脚本的 @(\"...\") 数组逐字相等，由 tools/check-optimizer-subitem-contract.mjs 判红；手抄就是第二份真源，漂了没有任何门禁会响。② 界面只展示 `labels` 里登记过的条目；未登记的仍会被全选路径执行到，但不单独列出来（避免给 70 个服务编 70 段不确定的收益描述）。③ `extras` 是与清单**不同形状**的附带写入（不是 Start=4 的服务），单独给开关 —— 混进清单单选会让用户拼出「只禁 wuauserv 手动启动」这种无意义组合。**本表是单源展示数据，不进 check-data-parity 双源体系**（理由同 optimizer-writes.json：真源始终是 optimizer-runtime.json 的 pwsh 文本，本表只是它的索引与解释层）。",
+  "_comment": "批量优化项的**可自选目标清单**（2026-10-03 用户裁定：这三项不该只能一键全选/全还原）。设计取舍三条：① `targets` 不手抄 —— 它必须与 optimizer-runtime.json 里该项 pwsh 脚本的 @(\"...\") 数组逐字相等，由 tools/check-optimizer-subitem-contract.mjs 判红；手抄就是第二份真源，漂了没有任何门禁会响。② 界面只展示 `labels` 里登记过的条目；未登记的仍会被全选路径执行到，但不单独列出来（避免给 70 个服务编 70 段不确定的收益描述）。③ `extras` 是与清单**不同形状**的附带写入（不是 Start=4 的服务），单独给开关 —— 混进清单单选会让用户拼出「只禁 wuauserv 手动启动」这种无意义组合。**本表是单源展示数据，不进 check-data-parity 双源体系**（理由同 optimizer-writes.json：真源始终是 optimizer-runtime.json 的 pwsh 文本，本表只是它的索引与解释层）。`schemaVer` 只被 check-optimizer-subitem-contract / check-optimizer-schema-sync 与契约表对拍，运行期装载与渲染层都不读。",
   "schemaVer": 1,
   "items": {
     "tf_svc_bulk": {

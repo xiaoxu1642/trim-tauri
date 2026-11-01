@@ -382,6 +382,36 @@ if (g.skipUnlessPresent(LIVE_MOUNT_FILE, 'src/scripts/a11y-live.js（A3-M01 挂�
   }
 }
 
+// ---- ⑨ reduced-motion 必须实时求值（T1d-L11） ----
+// ds.js 的正确姿势是**缓存 MQL 对象**、每次读 `.matches`（src/scripts/ds.js:31-44）；一旦写成
+// `const RM = matchMedia(...).matches`，值在加载时固化，用户中途切换系统偏好不再生效。
+// 静态归零段（④）只能证明「RM 下有归零规则」，证明不了「判定还在听系统」。
+function frozenRmConstants(code) {
+  // 媒体查询串里自带括号（`(prefers-reduced-motion: reduce)`），所以参数段用惰性跨括号，
+  // 由 `\)\s*\.matches` 反向锚定到 matchMedia 的外层右括号。
+  return [...code.matchAll(/(?:const|let|var)\s+([\w$]+)\s*=\s*(?:window\.)?matchMedia\([\s\S]*?\)\s*\.matches/g)]
+    .map((m) => m[1]);
+}
+{
+  const scriptFiles = jsFiles.filter((p) => rel(p).startsWith('src/scripts/'));
+  // 本块在 ⑤ 的 strip 之前执行，自带一份等价剥注释（只用于本判据，不跨节复用）。
+  const stripComments = (t) => t.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:\w])\/\/.*$/gm, '$1');
+  for (const p of scriptFiles) {
+    const clean = stripComments(read(p));
+    for (const name of frozenRmConstants(clean)) {
+      g.fail(`${rel(p)}：${name} = matchMedia(...).matches 在加载时固化了 RM 判定 —— 系统偏好切换后不再生效，改为缓存 MQL 对象并每次读 .matches`);
+    }
+  }
+  // 正向对照：固化样本必须命中；ds.js 的对象缓存姿势必须放行（判据不是恒红也非失明）。
+  const frozenSample = frozenRmConstants("const RM = window.matchMedia('(prefers-reduced-motion: reduce)').matches;");
+  const mqlSample = frozenRmConstants("const MQ = window.matchMedia('(prefers-reduced-motion: reduce)'); if (MQ.matches) {}");
+  if (frozenSample.length !== 1 || mqlSample.length !== 0) {
+    g.fail('⑨ 判据正向对照失败：固化常量样本未命中或 MQL 对象缓存样本被误伤');
+  } else {
+    g.ok(`⑨ reduced-motion 实时求值：${scriptFiles.length} 个脚本无加载时固化的 .matches 常量（对照：固化样本命中 / MQL 缓存放行）`);
+  }
+}
+
 // ---- 扫描面地板（低于粗下界 ⇒ 疑似正则/目录失明，判红） ----
 if (checkboxSites < 4) g.fail(`勾选框模板命中 ${checkboxSites} 处（< 4）⇒ 扫描面疑似失明`);
 if (liveHosts < 4) g.fail(`异步提示宿主命中 ${liveHosts} 处（< 4）⇒ 扫描面疑似失明`);

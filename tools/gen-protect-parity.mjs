@@ -27,13 +27,17 @@
 //    必须重跑一次生成器；`check-data-parity.mjs` 的 P4 按这个口径给了显式提示。
 
 import { createRequire } from 'node:module';
-import { writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 
 import { ORIGIN, REPO_ROOT } from './ps-origin.mjs';
+import { writeFileAtomic } from './lib/atomic-write.mjs';
+
+// T1c-L09：PS 探针脚本落仓根 tmp/（.gitignore 已忽略），不落全局 %TEMP% ——
+// 后者被 check-test-sandbox 当「trim-* 残留」观测，崩溃一次就给该观测项喂一条残渣。
+const PSV_TMP_ROOT = join(REPO_ROOT, 'tmp');
 
 /**
  * 真实执行 PS 端 Test-PathProtected（P1-05/S1 根治）：把权威模块的 PS 函数落临时
@@ -58,7 +62,8 @@ function runPsVectors(PROTECT, vectors) {
     '  Write-Output ($hit.ToString())',
     '}',
   ].join('\n');
-  const dir = mkdtempSync(join(tmpdir(), 'trim-psv-'));
+  mkdirSync(PSV_TMP_ROOT, { recursive: true });
+  const dir = mkdtempSync(join(PSV_TMP_ROOT, 'trim-psv-'));
   const file = join(dir, 'probe.ps1');
   // 关键：Windows PowerShell 5.1 tokenizer 在 **LF-only** 文件的 # 注释里会跨行
   // 吞噬后续代码（实测：纯 LF 时注释把 function/if 吞并报 Unexpected '}'）。
@@ -211,7 +216,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   // 直跑 = 显式重生成路径：这一档才允许 spawn PS 产 psVectors（T1c-M07 的开关意义）
   const result = buildParityFixture({ runPs: true });
   mkdirSync(join(FIXTURE_PATH, '..'), { recursive: true });
-  writeFileSync(FIXTURE_PATH, JSON.stringify(result, null, 2), 'utf8');
+  writeFileAtomic(FIXTURE_PATH, JSON.stringify(result, null, 2));
   const denied = result.vectors.filter(v => v.protected).length;
   const psMatch = Array.isArray(result.psVectors)
     && result.psVectors.every((h, i) => h === result.vectors[i].protected);

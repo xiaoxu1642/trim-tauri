@@ -24,6 +24,7 @@ import { join, relative } from 'node:path';
 import { REPO_ROOT } from './ps-origin.mjs';
 import { walkRs } from './lib/fs-walk.mjs';
 import { gate } from './lib/gate.mjs';
+import { splitFunctions } from './lib/src-scan.mjs';
 
 const SRC = join(REPO_ROOT, 'src-tauri', 'src');
 
@@ -289,6 +290,7 @@ function extractHitsFromText(text) {
         if (lit || wrapped || ident) {
           out.push({
             line: ln + 1,
+            offset: idx,
             raw: lineText.trim(),
             name,
             wrapped,
@@ -365,21 +367,42 @@ check(
 //   3) 绑定不可静态收敛（函数参数 / 复杂表达式）→ 必须在 SITE_EXEMPT 登记
 //      file:line 与理由，漏登记即红 —— 注册制保证每个盲区都被「有意识放过」。
 
-/** 绑定扫描：返回 ident 的绑定判定 'resolved' | 'literal-unwrapped' | 'unknown' */
-function resolveBinding(file, ident) {
-  const text = fileTexts.get(file);
-  if (!text) return 'unknown';
+/** 绑定扫描：返回 ident 的绑定判定 'resolved' | 'literal-unwrapped' | 'unknown'
+ *
+ * T1a-L07：旧判据按**整文件**找同名 `let <id> =`，只看 RHS、不看函数归属与先后 ——
+ * `fn f(exe: &str) { quiet_cmd(exe) }` 只要同文件别处有一句
+ * `let exe = system_tool(...)`（哪怕在另一个函数、哪怕在调用之后）就被判 resolved，
+ * 真正不可收敛的参数形态随即静默闭合。现在限定到**所在函数体**且绑定在调用之前。
+ */
+function judgeBindingInText(text, ident, callOffset) {
+  const fn = splitFunctions(text).find((f) => callOffset >= f.start && callOffset < f.end);
+  if (!fn) return 'unknown';
+  const scope = text.slice(fn.start, callOffset);
   let verdict = 'unknown';
   const letRe = /\blet\b([^=;]{0,160}?)=/g;
   let m;
-  while ((m = letRe.exec(text)) !== null) {
+  while ((m = letRe.exec(scope)) !== null) {
     const pattern = m[1];
     if (!new RegExp(`\\b${ident}\\b`).test(pattern)) continue;
-    const rhs = text.slice(m.index + m[0].length, text.indexOf(';', m.index + m[0].length));
+    const semi = scope.indexOf(';', m.index + m[0].length);
+    const rhs = scope.slice(m.index + m[0].length, semi < 0 ? scope.length : semi);
     if (/system_tool\(/.test(rhs)) return 'resolved';
     if (PINNED.some((p) => rhs.includes(`"${p}"`))) verdict = 'literal-unwrapped';
   }
+  // match 臂绑定：`match system_tool("x") { Ok(exe) => quiet_cmd(exe, …) }` —— exe 由
+  // 解析结果本身绑定，是**已解析**形态（不是 let，旧判据靠同文件别处的 let 碰巧过）。
+  const armRe = new RegExp(`Ok\\(\\s*${ident}\\s*\\)\\s*=>`, 'g');
+  let a;
+  while ((a = armRe.exec(scope)) !== null) {
+    if (/system_tool\(/.test(scope.slice(Math.max(0, a.index - 240), a.index))) return 'resolved';
+  }
   return verdict;
+}
+
+function resolveBinding(file, ident, callOffset) {
+  const text = fileTexts.get(file);
+  if (!text) return 'unknown';
+  return judgeBindingInText(text, ident, callOffset);
 }
 
 /**
@@ -387,19 +410,43 @@ function resolveBinding(file, ident) {
  * 是拆 API 后的标准形态——exe 是闭包参数不是 let 绑定，resolveBinding 找不到；
  * 判据 = 该 ident 是某个 `.and_then(|ident|` 的参数，且链头上游 400 字符内含 system_tool(。
  */
-function resolveClosureBinding(file, ident) {
+function resolveClosureBinding(file, ident, callOffset) {
   const text = fileTexts.get(file);
   if (!text) return false;
+  // T1a-L07 同口径：闭包参数链也限定在调用点所在函数体内（别处的 .and_then 不算数）。
+  const fn = splitFunctions(text).find((f) => callOffset >= f.start && callOffset < f.end);
+  const start = fn ? fn.start : 0;
+  const scope = text.slice(start, callOffset);
   const re = new RegExp(`\\.and_then\\(\\s*\\|&?\\s*${ident}\\b`);
   let m;
-  while ((m = re.exec(text)) !== null) {
-    const head = text.slice(Math.max(0, m.index - 400), m.index);
+  while ((m = re.exec(scope)) !== null) {
+    const head = scope.slice(Math.max(0, m.index - 400), m.index);
     if (/system_tool\(/.test(head)) return true;
   }
   return false;
 }
 
 const identSites = quiet.filter((h) => !h.wrapped && h.ident);
+// T1a-L07 正向对照：同函数内先绑定 → resolved；绑定在别的函数 → unknown；
+// 绑定在调用之后 → unknown。三条样本与真仓扫描共用 judgeBindingInText。
+{
+  const same = 'fn g() { let exe = system_tool("reg.exe")?; let _ = quiet_cmd(exe); }';
+  const otherFn = 'fn f(exe: &str) { let _ = quiet_cmd(exe); }\nfn g() { let exe = system_tool("reg.exe")?; }';
+  const after = 'fn f(exe: &str) { let _ = quiet_cmd(exe); let exe = system_tool("reg.exe")?; }';
+  const arm = 'fn g() { match system_tool("reg.exe") { Ok(exe) => { let _ = quiet_cmd(exe); }, Err(_) => {} } }';
+  const sameV = judgeBindingInText(same, 'exe', same.indexOf('quiet_cmd'));
+  const otherV = judgeBindingInText(otherFn, 'exe', otherFn.indexOf('quiet_cmd'));
+  const afterV = judgeBindingInText(after, 'exe', after.indexOf('quiet_cmd'));
+  const armV = judgeBindingInText(arm, 'exe', arm.indexOf('quiet_cmd'));
+  if (sameV !== 'resolved' || otherV !== 'unknown' || afterV !== 'unknown' || armV !== 'resolved') {
+    g.fail(
+      `C 组绑定判定器自检失败：同函数先绑定=${sameV}（应 resolved） 异函数绑定=${otherV}（应 unknown） ` +
+        `调用后绑定=${afterV}（应 unknown） match 臂绑定=${armV}（应 resolved）——整文件同名 let 不得再给参数形态背书（T1a-L07）`,
+    );
+  } else {
+    console.log('✓ 判定器自检：C 组绑定按所在函数体 + 先后判定（同函数 let / match 臂 resolved，异函数与调用后 unknown）');
+  }
+}
 // 先把锚点解析成"覆盖了哪个调用点"，再做双向核对：
 //   登记侧失效/歧义 → 红；调用点侧没被任何登记覆盖 → 红
 const siteResolutions = SITE_EXEMPT.map((e) => ({ entry: e, ...resolveExemption(e, identSites) }));
@@ -409,10 +456,10 @@ const siteCovered = new Set(
 const cFailures = [];
 for (const h of identSites) {
   const key = `${h.file}:${h.line}`;
-  const verdict = resolveBinding(h.file, h.ident);
+  const verdict = resolveBinding(h.file, h.ident, h.offset);
   if (verdict === 'literal-unwrapped') {
     cFailures.push(`${key} 绑定到 PINNED 字面量且未经 system_tool 解析（ident=${h.ident}）`);
-  } else if (verdict === 'unknown' && !resolveClosureBinding(h.file, h.ident) && !siteCovered.has(key)) {
+  } else if (verdict === 'unknown' && !resolveClosureBinding(h.file, h.ident, h.offset) && !siteCovered.has(key)) {
     cFailures.push(`${key} 变量形态无法静态收敛（ident=${h.ident}），必须在 SITE_EXEMPT 用唯一锚文本登记理由`);
   }
 }

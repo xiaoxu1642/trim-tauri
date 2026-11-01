@@ -19,7 +19,9 @@
 //   2. `targets` 与 optimizer-runtime.json 里该项 pwsh 的 @("...") 数组**逐项同序相等**
 //   3. `labels` 的键必须 ⊆ `targets`（不许有登记了但清单里没有的幽灵项）
 //   4. `extras[].id` 不得与 `targets` 里的服务名冲突
-//   5. 三项必须全部登记（新增同类批量项时忘了登记会红）
+//   5. REQUIRED 清单里的批量项必须全部登记（**手工清单**，不是自动发现：新增同类批量项
+//      必须同时加进 REQUIRED —— T1f-L04 更正旧注释的「忘了登记会红」口径，实际只有
+//      显式登记在 REQUIRED 里的项才会被逐项对拍）
 //   6. labels 覆盖率棘轮：登记率不得低于基线（防止悄悄删掉解释文案）
 //   7. 标题数字不许写死（2026-10-05 裁定）：数据层无数字，侧表必须逐字跟随
 //   8. 简介里的总数声明必须等于 targets 长度（2026-10-26 双源账补）
@@ -34,10 +36,13 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 const VERBOSE = process.argv.includes('--verbose');
 
-// 必须登记的批量项（新增同类项时追加；忘了登记 = 界面上仍是一键全选）
+// 必须登记的批量项（**手工清单**：新增同类项时追加；忘了登记 = 界面上仍是一键全选，
+// 而门禁发现不了 —— T1f-L04 已确认运行时没有可自动识别的 bulk 标记）。
 // tf_dev_disable 是 2026-10-05 补的：用户反馈「禁用冗余板载设备」只能一键全禁，
 // 而它根本没进侧表 ⇒ `rebuild_steps` 走 `_ => None` ⇒ 界面上连勾选弹窗都不会出现。
 const REQUIRED = ['tf_svc_bulk', 'tf_drv_disable', 'tf_appx', 'tf_dev_disable'];
+// 清单本身的地板：四项是本仓的既有产品面，被整段删掉时下方逐项对拍会全部空转。
+const REQUIRED_FLOOR = 4;
 
 // labels 覆盖率棘轮（已登记解释文案的目标数 / 清单总数，取下界）
 const LABEL_COVERAGE_FLOOR = 0.6;
@@ -86,6 +91,7 @@ function extractArrays(pwsh) {
 const items = sub.items ?? {};
 const SIDE_SCHEMA_VER = loadSchema().optimizer?.sideTableSchemaVer;
 check(sub.schemaVer === SIDE_SCHEMA_VER, `1. schemaVer = ${SIDE_SCHEMA_VER}（契约表 optimizer.sideTableSchemaVer）`, `实际 ${sub.schemaVer}`);
+check(REQUIRED.length >= REQUIRED_FLOOR, `1. REQUIRED 清单对象数 ${REQUIRED.length}（≥ ${REQUIRED_FLOOR}，防整段删除后逐项对拍空转）`);
 for (const id of REQUIRED) {
   check(Object.prototype.hasOwnProperty.call(items, id), `1. 已登记批量项 ${id}`);
 }

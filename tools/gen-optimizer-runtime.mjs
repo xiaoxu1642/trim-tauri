@@ -23,6 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { REPO_ROOT, ORIGIN } from './ps-origin.mjs';
+import { writeFileAtomic } from './lib/atomic-write.mjs';
 
 const OUT = path.join(REPO_ROOT, 'src-tauri', 'data', 'optimizer-runtime.json');
 const SRC = path.join(ORIGIN, 'src', 'scripts-powershell', 'optimizer-scripts.js');
@@ -65,7 +66,7 @@ const rel = path.relative(REPO_ROOT, OUT).replace(/\\/g, '/');
 
 if (WRITE) {
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
-  fs.writeFileSync(OUT, want, 'utf8');
+  writeFileAtomic(OUT, want);
   console.log(`✓ 已生成 ${rel}（${OPTIONS.length} 项）`);
   console.log('  下一步（§5.21）：node tools/sign-cleanup-rules.mjs sign --file src-tauri/data/optimizer-runtime.json');
   process.exit(0);

@@ -15,11 +15,12 @@
 // 投影函数导出（T1c-M05）：check-fixture-freshness.mjs import 同一份实现做逐字节对拍，
 // 「投影口径」不再允许在门禁里抄第二份。
 
-import { writeFileSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { WINERROR_CODES } from './winerror-codes.source.mjs';
+import { writeFileAtomic } from './lib/atomic-write.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = join(ROOT, 'src-tauri', 'data', 'winerror-codes.json');
@@ -71,6 +72,6 @@ if (IS_MAIN && process.argv.includes('--check')) {
 }
 
 if (IS_MAIN) {
-  writeFileSync(OUT, projectWinerrorDoc(), 'utf8');
+  writeFileAtomic(OUT, projectWinerrorDoc());
   console.log(`✓ 已落盘 ${OUT}（${JSON.parse(projectWinerrorDoc()).codes.length} 个错误码）`);
 }

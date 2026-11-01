@@ -31,11 +31,15 @@
 'use strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { writeFileAtomic } from './lib/atomic-write.mjs';
+
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+// T1c-L09：临时件落仓根 tmp/（.gitignore 已忽略），不落全局 %TEMP%——
+// 后者被 check-test-sandbox 当「trim-* 残留」观测，崩溃一次就给该观测项喂一条残渣。
+const TMP_DIR = path.join(ROOT, 'tmp');
 const RULES = path.join(ROOT, 'src-tauri', 'data', 'uninstall-residue-rules.json');
 
 // 与 rule-schema.json residue 段对齐的上限（草案逐条预检；改 schema 后这里要人工同步）
@@ -404,9 +408,10 @@ const UNINSTALL_ROOTS = [
 
 // 中文系统上 reg query 的管道输出是 GBK，Node 零依赖解不了（乱码 displayName 会污染草案）。
 // 改走 reg export：.reg 文件是 UTF-16LE，Node 原生 utf16le 解码；每根一次导出，快且无编码坑。
-// 临时文件写在 os.tmpdir()，读完即删（dev 工具自清理，不在用户数据目录留痕）。
+// 临时文件写在仓根 tmp/，读完即删（dev 工具自清理，不碰全局 %TEMP%，见 TMP_DIR 注释）。
 function exportRoot(root) {
-  const tmp = path.join(os.tmpdir(), `trim-residue-probe-${process.pid}-${Math.random().toString(36).slice(2)}.reg`);
+  fs.mkdirSync(TMP_DIR, { recursive: true });
+  const tmp = path.join(TMP_DIR, `trim-residue-probe-${process.pid}-${Math.random().toString(36).slice(2)}.reg`);
   try {
     execFileSync('reg', ['export', root, tmp, '/y'], { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'ignore'] });
     const text = fs.readFileSync(tmp, 'utf16le');
@@ -762,8 +767,10 @@ function main() {
     });
   }
   rules.sort((a, b) => a.id.localeCompare(b.id, 'en'));
-  const normalized = rules.map((r) => ({ ...normalizeRule(r), _mode: r._mode, residue: undefined }))
-    .map((r, i) => ({ ...r, residue: rules[i].residue }));
+  // T1c-L03：normalizeRule 的排序与 maxResiduePerRule 截断曾经被下一行 `residue: undefined`
+  // 整个丢掉、再用原始 residue 覆盖回来（归一化是死代码）。草案的 residue 必须带着归一化
+  // 结果出去，否则超过契约上限的候选会原样写进草案。
+  const normalized = rules.map((r) => ({ ...normalizeRule(r), _mode: r._mode }));
   const totalRules = normalized.filter((r) => r._mode === 'new').length + existing.rules.length;
   const overLimit = totalRules > LIMITS.maxRules ? `⚠ 并库后规则数 ${totalRules} 超 maxRules=${LIMITS.maxRules}，需人工取舍` : '';
 
@@ -784,7 +791,7 @@ function main() {
   };
   const text = JSON.stringify(doc, null, 2) + '\n';
   if (outIdx >= 0 && argv[outIdx + 1]) {
-    fs.writeFileSync(argv[outIdx + 1], text, 'utf8');
+    writeFileAtomic(argv[outIdx + 1], text);
     console.log(`草案已写 ${argv[outIdx + 1]}`);
   } else {
     process.stdout.write(text);

@@ -17,12 +17,13 @@
 //
 // 用法：node tools/check-fail-closed.mjs
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
 import { walkRs } from './lib/fs-walk.mjs';
 import { gate } from './lib/gate.mjs';
+import { splitFunctions } from './lib/src-scan.mjs';
 
 const SRC = join(REPO_ROOT, 'src-tauri', 'src');
 // N2（2026-09-29）：老根棘轮必须把原生扫描器一起扫。它在仓库里是 path 依赖、不是
@@ -204,30 +205,108 @@ check(
 // （排除名单 / 空目录忽略名单），而扫描器不在 workspace 内，只扫 `src-tauri/src`
 // 的话这类拼法永远不会被判红 —— 便携模式的标准实例与便携实例共写同一份名单就是这么漏的。
 // 允许拼老根的两个文件：主 crate 的数据根唯一真源，和扫描器里 CLI 专用的那一个助手。
+//
+// T1a-L06：旧判据三个口子 —— ① 只认 `.join("Trim")`，`.push("Trim")` 与 `"\\Trim"`
+// 字面量（format!/字面串形态）都不判；② 只在回看窗口内找 appdata，中间隔超过窗口的
+// `.join("Trim")` 被判成「与数据根无关」；③ 反过来，appdata 不在回看窗口里的手拼
+// 老根（哪怕函数头就是 `appdata_dir()`）同样漏判。
+// 现在：令牌扩成 join/push 与独立 `"\\Trim"` 字面量，窗口扩到**所在函数体**，
+// 唯一豁免是函数体内出现 `temp_dir()`（TEMP 遗留清扫槽，与数据根无关）。
 const ROOT_OWNERS = [
   'src-tauri/src/engine/paths.rs',
   'native-scanner/src/util.rs',
 ];
+const TRIM_ROOT_TOKENS = [
+  /\.(?:join|push)\s*\(\s*"Trim"\s*\)/,
+  // `"\\Trim"` 与 `format!("{}\\Trim", …)` 两种字面拼接形态。两条锚定避免误伤：
+  // `{`/`}`/引号必须紧贴 `\\Trim`，且 Trim 后只能是 `\` 或字符串收尾 ——
+  // `Software\\Trim\\…`（注册表）、`…Roaming\\Trim\\fonts`（URL 夹具）、
+  // `{base}\\Trim-DiskBench`（自产基准目录）都不判。
+  /[{}"']\\\\Trim(?=\\\\|\s*")/,
+];
+/**
+ * C 组豁免（{file, anchor, why}，anchor 必须在文件里命中恰好 1 行）。
+ * 只收「同一个老根、但语义是防御性登记而非数据根构造」的两处：protect roots 把老根
+ * 列为不可删子树（只读保护面），少列一项 = 保护面变小，所以它必须独立硬编码、
+ * 不能随 paths.rs 的改名一起漂走。
+ */
+const TRIM_ROOT_EXEMPT = [
+  {
+    file: 'src-tauri/src/engine/protect.rs',
+    anchor: 'subtree: norm(vec![format!("{}\\\\Trim", appdata)',
+    why: 'protect roots 把老根登记为不可删子树（只读保护面，非数据根构造）；硬编码是刻意的——跟着 paths.rs 漂走等于保护面缩小',
+  },
+  {
+    file: 'native-scanner/src/scan.rs',
+    anchor: 'norm(format!("{}\\\\Trim", appdata)),',
+    why: '扫描器 CLI 兜底 ProtectRoots 同口径：老根只作不可删子树，不读不写',
+  },
+];
+/** C 组判定器（纯函数）：返回手拼老根的行坐标。 */
+function trimRootHits(text, rel, exemptAnchors = []) {
+  const lines = text.split(/\r?\n/);
+  const starts = [0];
+  for (let i = 0; i < text.length; i++) if (text[i] === '\n') starts.push(i + 1);
+  const fns = splitFunctions(text);
+  const hits = [];
+  lines.forEach((line, i) => {
+    if (line.trimStart().startsWith('//')) return;
+    if (!TRIM_ROOT_TOKENS.some((re) => re.test(line))) return;
+    if (exemptAnchors.some((a) => line.includes(a))) return;
+    const off = starts[i];
+    const fn = fns.find((f) => off >= f.start && off < f.end);
+    const window = fn ? text.slice(fn.start, fn.end) : lines.slice(Math.max(0, i - 3), i + 1).join('\n');
+    // `%TEMP%\Trim` 是 pwsh 遗留清扫槽，与数据根无关（见 pwsh/mod.rs 的清理槽候选）
+    if (/temp_dir\(\)/.test(window)) return;
+    hits.push(`${rel}:${i + 1}`);
+  });
+  return hits;
+}
+{
+  // 正向对照五项：join/push 两形态必中；旧实现漏掉的跨行形态必中；temp_dir 槽放行；
+  // 干净样本放行。
+  const cJoin = trimRootHits('fn f(base: PathBuf) { let p = base.join("Trim"); }', 'fake.rs');
+  const cPush = trimRootHits('fn f(dirs: &mut Vec<PathBuf>, appdata: String) { dirs.push("Trim"); }', 'fake.rs');
+  const cFmt = trimRootHits('fn f(appdata: String) { let p = format!("{}\\\\Trim", appdata); }', 'fake.rs');
+  const cTemp = trimRootHits(
+    'fn f() {\n  let base = std::env::temp_dir();\n  let a = 1;\n  let b = 2;\n  let c = 3;\n  let p = base.join("Trim");\n}',
+    'fake.rs',
+  );
+  const cClean = trimRootHits('fn f(base: PathBuf) { let p = base.join("TrimCache"); }', 'fake.rs');
+  if (cJoin.length !== 1 || cPush.length !== 1 || cFmt.length !== 1 || cTemp.length !== 0 || cClean.length !== 0) {
+    g.fail(
+      `C 组判定器自检失败：join=${cJoin.length}（应 1） push=${cPush.length}（应 1） format-literal=${cFmt.length}（应 1） ` +
+        `temp_dir 槽=${cTemp.length}（应 0，窗口需扩到函数体） 干净=${cClean.length}（应 0）`,
+    );
+  } else {
+    console.log('✓ 判定器自检：C 组 join/push/字面量三形态必中、temp_dir 槽与干净样本放行（五样本）');
+  }
+}
 const cFiles = [...files, ...walkRs(SCANNER)];
 const cHits = [];
+// 豁免锚点必须真命中恰好一行，否则是死条目/歧义条目（与 A/B 的 EXEMPT 同纪律）。
+for (const e of TRIM_ROOT_EXEMPT) {
+  const p = join(REPO_ROOT, e.file);
+  const n = existsSync(p) ? readFileSync(p, 'utf8').split(/\r?\n/).filter((l) => l.includes(e.anchor)).length : -1;
+  if (n !== 1) g.fail(`C 组豁免条目 ${e.file} 的 anchor 命中 ${n} 行（应恰好 1）：${e.anchor}`);
+}
 for (const f of cFiles) {
   const rel = relative(REPO_ROOT, f).replace(/\\/g, '/');
   if (ROOT_OWNERS.includes(rel)) continue;
-  const lines = readFileSync(f, 'utf8').split(/\r?\n/);
-  lines.forEach((line, i) => {
-    if (line.trimStart().startsWith('//')) return;
-    if (!/\.join\(\s*"Trim"\s*\)/.test(line)) return;
-    // 往上再看 3 行：`PathBuf::from(appdata)\n    .join("Trim")` 这种换行拼法也要抓到
-    const window = lines.slice(Math.max(0, i - 3), i + 1).join('\n');
-    // `%TEMP%\Trim` 是 pwsh 遗留清扫槽，与数据根无关（见 pwsh/mod.rs 的清理槽候选）
-    if (/temp_dir\(\)/.test(window)) return;
-    if (/appdata/i.test(window)) cHits.push(`${rel}:${i + 1}`);
-  });
+  const exemptAnchors = TRIM_ROOT_EXEMPT.filter((e) => e.file === rel).map((e) => e.anchor);
+  cHits.push(...trimRootHits(readFileSync(f, 'utf8'), rel, exemptAnchors));
 }
 check(
   cHits.length === 0,
   `C. 老根 %APPDATA%\\Trim 只许在 ${ROOT_OWNERS.join(' / ')} 里拼（备份与名单根唯一真源，v2-M19 / N2）`,
   cHits.length ? `违规 ${JSON.stringify(cHits)}` : '',
+);
+// T1a-L06：A/B/C 三组的扫描面地板 —— `src-tauri/src` 被搬走/改名时 A/B 以 0 命中打 ✓，
+// C 只剩 scanner 一支也照样绿（现算 .rs 文件数：命令 rg --files src-tauri/src -g "*.rs" | wc -l，地板取一半）。
+check(
+  files.length >= 50,
+  `A/B/C 扫描面地板（src-tauri/src 现算 ${files.length} 个 .rs ≥ 50；T1a-L06）`,
+  files.length < 50 ? `只扫到 ${files.length} 个 .rs ⇒ 扫描根被搬走/改名，A/B 断言已空转` : '',
 );
 
 // D. 扫描器名单根必须由主 crate 注入（N2）

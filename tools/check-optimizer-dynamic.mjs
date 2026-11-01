@@ -278,6 +278,10 @@ check(
     const known = new Set(opts.map((o) => o.id));
     const recomputed = new Map();
     for (const o of opts) {
+      // T1f-L05：规则**刻意**只认 cmd/reg/service 三个字段（`pwsh` 步骤不参与重算）：
+      // 把 `s.pwsh` 纳入后 telemetry_optimize / tf_nvidia_telemetry 会从 none 变 reboot，
+      // 而侧表要同步重签 —— 那是数据批次的事。这里把口径写明，避免下一位把「同语义不同判」
+      // 当成 bug 顺手改掉，也避免手工标 reboot 时被 :292 误判为「表里多标」。
       const hay = [...(o.steps || []), ...(o.restore || [])]
         .map((s) => `${s.cmd || ''} ${s.reg || ''} ${s.service || ''}`)
         .join(' ; ');
@@ -400,10 +404,11 @@ check(
     `A8.1 D0 契约锚点存在（overview.rs 头部三侧矩阵）`,
     hasContract ? '' : `${CONTRACT_ANCHOR} 缺失 —— 三侧覆盖契约被整体删除`);
 
-  // ② 数据层实际用到的 step 字段全集
+  // ② 数据层实际用到的 step 字段全集（T1f-L09：restore 与 steps 同样被执行/检测/备份
+  //    三侧消费；旧实现只扫 steps，restore-only 的新字段不会进三侧覆盖矩阵）
   const STEP_FIELDS = new Set();
   for (const o of options) {
-    for (const s of (o.steps || [])) {
+    for (const s of [...(o.steps || []), ...(o.restore || [])]) {
       for (const k of Object.keys(s)) STEP_FIELDS.add(k);
     }
   }

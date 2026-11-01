@@ -25,12 +25,24 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { writeFileAtomic } from './lib/atomic-write.mjs';
+import { resolveInsideRepo } from './lib/repo-path.mjs';
+
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 // --file <相对路径>：U-1 起签名工具泛化为「规则文件签名器」（同一密钥、同一规范化），
 // 默认仍是 cleanup-rules.json，存量用法零改动
 const argv = process.argv.slice(2);
 const fileArg = argv.includes('--file') ? argv[argv.indexOf('--file') + 1] : null;
-const RULES = fileArg ? path.join(ROOT, fileArg) : path.join(ROOT, 'src-tauri', 'data', 'cleanup-rules.json');
+// T1c-L08：--file 解析后必须落在仓库内（写穿到仓外没有 git 恢复面）。
+// 惰性求值：check-data-signatures import 本文件借验签实现，import 不得因 argv 抛错退出。
+let rulesCache = null;
+function rulesPath() {
+  if (rulesCache) return rulesCache;
+  rulesCache = fileArg
+    ? resolveInsideRepo(ROOT, fileArg, '--file')
+    : path.join(ROOT, 'src-tauri', 'data', 'cleanup-rules.json');
+  return rulesCache;
+}
 const FALLBACK = path.join(ROOT, 'src', 'scripts', 'cleanup-fallback.generated.js');
 // T1c-L04：发布机密钥可挪位置（与 publish-atomgit 的环境变量口径对齐）；
 // 默认值保持现状，缺文件仍 fail-loud。
@@ -69,18 +81,17 @@ export function canonicalBodyText(parsed) {
  */
 function attachSig(parsed, sigObj) {
   if (Array.isArray(parsed)) {
-    const sidecar = `${RULES}.sig.json`;
-    fs.writeFileSync(
+    const sidecar = `${rulesPath()}.sig.json`;
+    writeFileAtomic(
       sidecar,
-      `${JSON.stringify({ alg: 'ed25519', sig: sigObj.sig, covers: path.basename(RULES) }, null, 2)}\n`,
-      'utf8',
+      `${JSON.stringify({ alg: 'ed25519', sig: sigObj.sig, covers: path.basename(rulesPath()) }, null, 2)}\n`,
     );
     return sidecar;
   }
   delete parsed._sig;
   parsed._sig = sigObj;
-  fs.writeFileSync(RULES, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8');
-  return RULES;
+  writeFileAtomic(rulesPath(), `${JSON.stringify(parsed, null, 2)}\n`);
+  return rulesPath();
 }
 
 function sign() {
@@ -88,11 +99,17 @@ function sign() {
     console.error(`未找到私钥: ${PRIV_KEY}（签名私钥只存在于发布机）`);
     process.exit(1);
   }
-  const parsed = JSON.parse(fs.readFileSync(RULES, 'utf8'));
+  const parsed = JSON.parse(fs.readFileSync(rulesPath(), 'utf8'));
   const bodyText = canonicalBodyText(parsed);
   const sig = crypto
     .sign(null, Buffer.from(bodyText, 'utf8'), crypto.createPrivateKey(fs.readFileSync(PRIV_KEY, 'utf8')))
     .toString('base64');
+  // T1c-L01：写盘前用仓内公钥回读验签。钥匙拿错时旧实现照样打印「已签名」并落盘，
+  // 产物直到 cargo test / check-data-signatures 才判红——失败必须停在这一步、不落盘。
+  if (!verifyBody(bodyText, sig)) {
+    console.error('✗ 签名自检失败：刚生成的签名过不了 rules_signature.rs 的公钥（私钥与公钥不配对？）——未写盘');
+    process.exit(1);
+  }
   // _sig 追加在键序末尾（与旧签名文件形态一致）；整体重写为 2 空格缩进 + 末尾换行。
   // 顶层是数组时改走 sidecar（见 attachSig 的注释）——`arr._sig = …` 静默无效，
   // 那是「打印了已签名但文件没变」的假绿。
@@ -107,7 +124,7 @@ function genFallback() {
     console.error('✗ gen-fallback 不接受 --file：前端兜底真源固定绑定 cleanup-rules.json');
     process.exit(1);
   }
-  const raw = fs.readFileSync(RULES, 'utf8');
+  const raw = fs.readFileSync(rulesPath(), 'utf8');
   JSON.parse(raw); // 源必须是合法 JSON，坏源直接抛错终止
   // 以 JSON.parse(字符串字面量) 内联，而非对象字面量直拼——数据源经 JSON.stringify 转义后
   // 不再作为 JS 代码解析，未来数据引入不可信内容也不会注入执行（沿用 Electron 轨审查结论）
@@ -119,7 +136,7 @@ function genFallback() {
   root.CLEANUP_RULES_FALLBACK = JSON.parse(${JSON.stringify(raw.trim())});
 })(typeof window !== 'undefined' ? window : globalThis);
 `;
-  fs.writeFileSync(FALLBACK, out, 'utf8');
+  writeFileAtomic(FALLBACK, out);
   console.log(`已生成: ${FALLBACK}`);
 }
 
@@ -170,12 +187,12 @@ export function verifyRulesFile(fileAbs) {
 }
 
 function verify() {
-  const r = verifyRulesFile(RULES);
+  const r = verifyRulesFile(rulesPath());
   if (!r.ok) {
-    console.error(`✗ 验签失败：${path.relative(ROOT, RULES)} — ${r.why}`);
+    console.error(`✗ 验签失败：${path.relative(ROOT, rulesPath())} — ${r.why}`);
     process.exit(1);
   }
-  console.log(`✓ 验签通过：${path.relative(ROOT, RULES)}（公钥 = rules_signature.rs 真源）`);
+  console.log(`✓ 验签通过：${path.relative(ROOT, rulesPath())}（公钥 = rules_signature.rs 真源）`);
 }
 
 // 命令分发只在「被直接执行」时进行：check-data-signatures.mjs import 本文件的
@@ -183,11 +200,17 @@ function verify() {
 // 更不许把 import 方当成「未知命令」exit(1) 杀掉（首跑实踩）。
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const cmd = argv[0];
-  if (cmd === 'sign') sign();
-  else if (cmd === 'gen-fallback') genFallback();
-  else if (cmd === 'verify') verify();
-  else {
-    console.error('用法: node tools/sign-cleanup-rules.mjs <sign|gen-fallback|verify> [--file <相对路径>]');
+  try {
+    if (cmd === 'sign') sign();
+    else if (cmd === 'gen-fallback') genFallback();
+    else if (cmd === 'verify') verify();
+    else {
+      console.error('用法: node tools/sign-cleanup-rules.mjs <sign|gen-fallback|verify> [--file <相对路径>]');
+      process.exit(1);
+    }
+  } catch (e) {
+    // 路径 containment（resolveInsideRepo）与读写异常统一收口成非 0 退出
+    console.error(`✗ ${e.message}`);
     process.exit(1);
   }
 }

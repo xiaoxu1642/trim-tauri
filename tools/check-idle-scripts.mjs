@@ -22,6 +22,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const appJs = readFileSync(join(REPO_ROOT, 'src', 'scripts', 'app.js'), 'utf8');
 
@@ -56,18 +57,28 @@ console.log('=== 延迟加载脚本 DOMContentLoaded 守卫门禁 ===\n');
 check(files.length > 0, '延迟/按页加载清单非空（0 个 = 扫描面失效）', `解析得 ${files.length} 个脚本`);
 
 const bad = [];
+// T1h-L04：注册点计数地板。此前注册点只有个位数命中，写法一变（或清单解析塌陷）
+// 就归零，输出仍是「✓ 均带守卫（或未注册）」。
+// 地板 = 现盘基线（node tools/check-idle-scripts.mjs 现算），少于它说明扫描失明而不是代码变干净。
+const GUARD_SITE_FLOOR = 6;
+let sites = 0;
+let guardedSites = 0;
+const filesWithSite = new Set();
 for (const rel of files) {
   const text = readFileSync(join(REPO_ROOT, 'src', rel.replace(/^src\//, '')), 'utf8');
-  const lines = text.split('\n');
-  // 结构判定：注册点必须 ① 在含 readyState 的 if 块内（花括号深度 > 0 且向上
-  // 能找到守卫 if 行），或 ② 该行自带 readyState，或 ③ 紧随 readyState 行的 else。
-  // 其余（顶层裸注册）= M3 的静默失效形态，红。
-  const re = /addEventListener\(\s*['"]DOMContentLoaded['"]/;
-  for (let idx = 0; idx < lines.length; idx++) {
-    if (!re.test(lines[idx])) continue;
-    if (/document\.readyState/.test(lines[idx])) continue; // 单行守卫形态
+  // T1h-L04：先剥注释再判（保留字符串——`'DOMContentLoaded'` 本身是字符串字面量）。
+  // 抹除是等长的，行号仍对应原文；`\s*` 跨行，注册调用换行也认得出。
+  const code = blankNonCode(text, 'js', { keepStrings: true });
+  const lines = code.split('\n');
+  const re = /addEventListener\(\s*['"]DOMContentLoaded['"]/g;
+  let m;
+  while ((m = re.exec(code))) {
+    const idx = code.slice(0, m.index).split('\n').length - 1;
+    sites++;
+    filesWithSite.add(rel);
+    if (/document\.readyState/.test(lines[idx])) { guardedSites++; continue; } // 单行守卫形态
     const prev = idx > 0 ? lines[idx - 1] : '';
-    if (/document\.readyState/.test(prev) && /\belse\b/.test(lines[idx])) continue;
+    if (/document\.readyState/.test(prev) && /\belse\b/.test(lines[idx])) { guardedSites++; continue; }
     // 向上找所属块的开括号行（右→左扫字符：`}` 计入未进块，`{` 在深度 0 处
     // 即所属块的开括号），开括号行必须含 readyState 守卫
     let depth = 0;
@@ -86,16 +97,23 @@ for (const rel of files) {
         }
       }
     }
-    if (!guarded) {
+    if (guarded) {
+      guardedSites++;
+    } else {
       bad.push(`${rel}:${idx + 1}`);
       break;
     }
   }
 }
 check(
+  sites >= GUARD_SITE_FLOOR,
+  `DOMContentLoaded 注册点计数 ≥ ${GUARD_SITE_FLOOR}（少于地板 = 扫描失明，不是代码变干净）`,
+  `实到 ${sites} 处：${filesWithSite.size} 个脚本注册 / ${files.length - filesWithSite.size} 个未注册`,
+);
+check(
   bad.length === 0,
   `${files.length} 个延迟/按页加载脚本均带 readyState 守卫（或未注册 DOMContentLoaded）`,
-  bad.length ? `缺守卫 ${JSON.stringify(bad)} —— 注入时 DOMContentLoaded 已过，init 永不执行` : '',
+  bad.length ? `缺守卫 ${JSON.stringify(bad)} —— 注入时 DOMContentLoaded 已过，init 永不执行` : `带守卫 ${guardedSites} 处`,
 );
 
 // ---- 断言 2（v3 C 的 P0）：启动期 init 名单必须 ⊆ index.html 静态加载的脚本 ----
@@ -112,9 +130,20 @@ const staticNames = new Set(
   [...html.matchAll(/<script[^>]*\ssrc="([^"]+)"[^>]*><\/script>/g)].map((m) => m[1].split('/').pop()),
 );
 check(staticNames.size >= 10, 'index.html 静态脚本清单解析非空（过少 = 正则不认标签写法）', `解析得 ${staticNames.size} 个标签`);
-const startupBlock = appJs.match(/\/\/ 初始化各模块\n([\s\S]*?)\n\n/);
-if (!startupBlock) throw new Error('app.js 里找不到「// 初始化各模块」启动名单——锚点变了，请同步本门禁');
-const startupInits = [...startupBlock[1].matchAll(/initModuleByName\('([^']+)'\);/g)].map((m) => m[1]);
+// T1h-L03：锚点不能以「首个空行」收尾——在两条 initModuleByName 中间插一个空行属纯格式化，
+// 旧正则 `/\/\/ 初始化各模块\n([\s\S]*?)\n\n/` 会把空行之后的条目移出射程，门禁仍绿。
+// 改为逐行扫描：空行与注释不结束名单，遇到第一条其它语句才结束。
+const START_ANCHOR = '// 初始化各模块\n';
+const anchorIdx = appJs.indexOf(START_ANCHOR);
+if (anchorIdx < 0) throw new Error('app.js 里找不到「// 初始化各模块」启动名单——锚点变了，请同步本门禁');
+const startupInits = [];
+for (const line of appJs.slice(anchorIdx + START_ANCHOR.length).split('\n')) {
+  const t = line.trim();
+  if (!t || t.startsWith('//')) continue;
+  const m = /^initModuleByName\('([^']+)'\);$/.exec(t);
+  if (!m) break;
+  startupInits.push(m[1]);
+}
 const premature = startupInits.filter((n) => !staticNames.has(`${n}.js`));
 // 扫描面地板（P0-4）：锚点失配解析出 0 项时，旧输出「✓ 启动期 init 名单 0 项均已静态加载」
 // 是空集假绿。真出现「合法为空」的形态时改本门禁（fail-loud 好过静默）。

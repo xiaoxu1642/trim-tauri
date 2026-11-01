@@ -29,8 +29,13 @@ const check = (ok, label, detail = '') => {
 };
 
 // ---------- 纯判据（真仓与合成样本共用） ----------
+// ① 已定义 token 的 var() 带颜色字面兜底。兜底形态不止 hex/rgba：`color-mix(...)` 与
+// CSS 命名色同样是「第二套口径留在引用点」（T1d-L04；现盘归零，属未来漂移面）。
+const NAMED_COLOR = '(?:black|white|red|green|blue|yellow|orange|purple|gray|grey|silver|maroon|olive|lime|aqua|teal|navy|fuchsia|magenta|cyan|pink|brown|gold|transparent)';
+const FALLBACK_COLOR_SRC = `#[0-9A-Fa-f]{3,8}|rgba?\\([^)]*\\)|color-mix\\(|${NAMED_COLOR}(?![\\w-])`;
+const FALLBACK_COLOR = new RegExp(FALLBACK_COLOR_SRC);
 function colorFallbacks(text) {
-  return [...text.matchAll(/var\(--([a-zA-Z0-9-]+),\s*(#[0-9A-Fa-f]{3,8}|rgba?\([^)]*\))/g)]
+  return [...text.matchAll(new RegExp(`var\\(--([a-zA-Z0-9-]+),\\s*(?:${FALLBACK_COLOR_SRC})`, 'g'))]
     .map((m) => ({ token: m[1], raw: m[0] }));
 }
 function selfRefs(text) {
@@ -54,11 +59,19 @@ function ctxModalDecls(text) {
   const n = (re) => blocks.reduce((a, b) => a + (b.match(re) || []).length, 0);
   return { blocks: blocks.length, border: n(/(?:^|[\s;])border\s*:/g), radius: n(/border-radius\s*:/g), shadow: n(/box-shadow\s*:/g) };
 }
+// ⑥ 扫**全文件所有**同名规则块（T1d-L04：旧实现只读第一个块，后置同名块里的离表 hex
+// 完全不在射程内——同特异度多份声明靠源序定胜负，恰好是这条要防的形态）。
 function titlebarHex(text) {
-  const m = text.match(/\.titlebar-title\s*\{([\s\S]*?)\}/);
-  if (!m) return ['找不到 .titlebar-title 规则'];
-  const color = (m[1].match(/color\s*:\s*([^;]+)/) || [])[1] || '';
-  return /#[0-9A-Fa-f]{3,8}/.test(color) ? [`color: ${color.trim()} 是离表 hex`] : [];
+  const blocks = [...text.matchAll(/\.titlebar-title\s*\{([\s\S]*?)\}/g)].map((m) => m[1]);
+  if (!blocks.length) return ['找不到 .titlebar-title 规则'];
+  const out = [];
+  blocks.forEach((b, i) => {
+    const color = (b.match(/color\s*:\s*([^;]+)/) || [])[1] || '';
+    if (FALLBACK_COLOR.test(color) || /var\(--[a-zA-Z0-9-]+\s*,/.test(color)) {
+      out.push(`第 ${i + 1} 个同名块的 color: ${color.trim()} 是离表色值`);
+    }
+  });
+  return out;
 }
 
 // ---------- 正向对照 ----------
@@ -66,6 +79,9 @@ function titlebarHex(text) {
   check(colorFallbacks('a{color:var(--fg,#123456)}').length === 1, '对照①a：定义内 token 带颜色兜底必须判红');
   check(colorFallbacks('a{color:var(--fg)}').length === 0, '对照①b：无兜底必须放行');
   check(colorFallbacks('a{transform:translate(var(--lg-x, 0px))}').length === 0, '对照①c：数值兜底不误报');
+  check(colorFallbacks('a{color:var(--fg,red)}').length === 1, '对照①d：命名色兜底必须判红');
+  check(colorFallbacks('a{color:var(--fg,color-mix(in srgb, red 50%, blue))}').length === 1, '对照①e：color-mix 兜底必须判红');
+  check(colorFallbacks('a{color:var(--fg,currentColor)}').length === 0, '对照①f：currentColor 是继承关键字，不算字面兜底');
   check(selfRefs('a{color:var(--x, var(--x))}').length === 1, '对照②a：同名自引用必须判红');
   check(selfRefs('a{color:var(--x, var(--y))}').length === 0, '对照②b：改名过渡写法放行');
   check(residualCloseComments('/* a --d-*/--e-* */') === 1, '对照③a：注释提前终止必须判红');
@@ -77,6 +93,7 @@ function titlebarHex(text) {
   check(ctxModalDecls('.ctx-detail-modal{border-radius:8px}.ctx-detail-modal{border-radius:10px}').radius === 2, '对照⑤b：同属性两份必须能被数出');
   check(titlebarHex('.titlebar-title{color:#1C1C1C}').length === 1, '对照⑥a：离表 hex 必须判红');
   check(titlebarHex('.titlebar-title{color:var(--fg-primary)}').length === 0, '对照⑥b：token 放行');
+  check(titlebarHex('.titlebar-title{color:var(--fg-primary)}.titlebar-title{color:#fff}').length === 1, '对照⑥c：后置同名块里的离表 hex 必须判红（旧实现只读第一个块）');
 }
 
 // ---------- 真仓 ----------

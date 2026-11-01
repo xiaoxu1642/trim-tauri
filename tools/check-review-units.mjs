@@ -188,9 +188,12 @@ export function extractUnitIds(text) {
   const out = new Set();
   // 形状放宽到「任何像单元 ID 的记号」：只认现存 ID 的话，R9 / F4d 这类笔误根本不会被抽出来，
   // 也就永远不判红 —— 那正是本门禁要防的「恒绿断言」。
-  // 但 N/D/A 只收**精确 ID**：文档里 `N6`（耦合账编号）、`D4/D5/D6`（发现分级）、`A7/A9`（附录组）
-  // 与本仓的单元 ID 形状撞车，放宽就会把别套编号体系误判成单元。
-  const re = /\b(R\d[abc]?|F\d[abc]?|T1[abc]?|N1|D1|X0-\d+|A[1-6])\b/g;
+  //
+  // T1a-L11：旧正则逐族枚举（`T1[abc]?` / `N1` / `F\d[abc]?`）覆盖不到本轮在册的
+  // T1d–T1h / N1a,N1b / F4a1,F4a2 —— 文档点名这些 ID 时 U7 完全看不见。现在按
+  // 「大写字母 + 数字 + 可选小写 + 可选数字」的通用形状抽，已知/未知一律交
+  // isKnownUnitId 判（`X0-` 横切项单列，因为它带连字符）。
+  const re = /\b(X0-\d+|[A-Z]\d+[a-z]?\d?)\b/g;
   let m;
   while ((m = re.exec(text))) out.add(m[1]);
   return [...out];
@@ -349,12 +352,16 @@ const POSITIVE_CONTROLS = [
         '见 `tools/ghost.mjs` 与 `src-tauri/src/engine/guard.rs`\n' +
         '（原 `tools/dual-run-batchA.mjs` 已删）\n' +
         '磁盘 `tools/check-*.mjs` 排期实现');
-      const ids = extractUnitIds('单元 R2a / F4c / X0-7 / A5 / R9');
+      // T1a-L11：本轮在册的后缀 ID（T1d / N1a / F4a1）也必须抽得出来，
+      // 否则 U7 对它们整体失明（旧正则正是如此）。
+      const ids = extractUnitIds('单元 R2a / F4c / X0-7 / A5 / R9 / T1d / N1a / F4a1');
       const known = new Set(UNITS.map((u) => u.id));
+      const missedIds = ['T1d', 'N1a', 'F4a1'].filter((i) => !ids.includes(i));
       return paths.length === 2 && paths.includes('tools/ghost.mjs')
         && !paths.some((p) => p.includes('dual-run') || p.includes('*'))
         && isKnownUnitId('R2a', known) && isKnownUnitId('R6', known) === true
         && isKnownUnitId('F4', known) === true && !isKnownUnitId('R9', known)
+        && missedIds.length === 0
         && ids.filter((i) => !isKnownUnitId(i, known)).join() === 'R9';
     },
     expect: (v) => v === true,

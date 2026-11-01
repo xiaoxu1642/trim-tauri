@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // check-subwindow-css.mjs —— 「P0 子窗 CSS 按需」的不变量机检（2026-10-12）
 //
-// 背景：main.css 原本被 5 个窗口全量同步加载，其中主窗专属页面样式对 4 个子窗完全冗余。
+// 背景：main.css 原本被全部窗口同步加载，其中主窗专属页面样式对子窗完全冗余。
 // 拆分把这部分搬进 main-pages.css，只由 index.html 链接。搬动的正确性靠三条不变量撑着，
 // 这三条**必须**在后续每一次手改里继续成立 —— 否则症状是「子窗某块界面静默掉样式」，
 // 而 cargo / MockRuntime 都看不见（渲染层不在测试射程内，AGENTS §4.1）。
@@ -20,7 +20,7 @@
 //
 // 用法：node tools/check-subwindow-css.mjs [--self-test]
 'use strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -35,11 +35,18 @@ const EMIT_DS_PAIRS = process.argv.includes('--emit-ds-pairs');
 const g = gate(import.meta.url);
 
 const MAIN_HTML = 'src/index.html';
-const SUB_HTML = [
+// T1d-L10：子窗清单从盘上现算（`src/*.html` 去掉 index.html），下面这份是**冻结期望**：
+// 两侧双向对拍。旧实现只有硬编码三窗 —— 新增子窗既不进 S1b 也不进 S2，
+// 「少挂 ds.css / 子窗链了 main-pages.css」这类漂移当场静默。
+const SUB_HTML_EXPECT = [
   'src/models-window.html',
-  'src/residue-window.html',
   'src/process-manager-window.html',
+  'src/residue-window.html',
 ];
+const SUB_HTML = readdirSync(join(ROOT, 'src'))
+  .filter((f) => f.endsWith('.html') && f !== 'index.html')
+  .map((f) => `src/${f}`)
+  .sort();
 // 2026-10-13：尾接 styles/litebox.css —— vendor 图片灯箱样式（preview 子窗退役后主窗内嵌）。
 // 放最后是有意的：它只带 .litebox/.lightbox- 前缀的独立规则与缺省变量，不参与前三者的
 // token 层叠；登记进序列是防止未来有人在中间乱插改变前三者的相对顺序。
@@ -185,6 +192,15 @@ const hasTokenBlock = (css) => [...css.matchAll(/^(:root|\.theme-light)\s*\{/gm)
 
 // ---------- S1 链接面 ----------
 {
+  // S0（T1d-L10）：盘上子窗 ⇄ 冻结期望双向对拍。新增/改名子窗必须同步本门禁，
+  // 否则它只是「没被检查」而不是「检查通过」。
+  const missingExpected = SUB_HTML_EXPECT.filter((h) => !SUB_HTML.includes(h));
+  const newOnDisk = SUB_HTML.filter((h) => !SUB_HTML_EXPECT.includes(h));
+  g.ok(`S0. 子窗清单现算 ${SUB_HTML.length} 份：${SUB_HTML.map((h) => h.split('/').pop()).join(', ')}`);
+  if (missingExpected.length || newOnDisk.length) {
+    g.fail(`S0. 盘上子窗与冻结期望不一致（缺 ${JSON.stringify(missingExpected)} / 新 ${JSON.stringify(newOnDisk)}）` +
+      ' —— 新增或改名子窗必须同步 SUB_HTML_EXPECT，否则它不进 S1b/S2');
+  }
   const main = linksOf(MAIN_HTML);
   const ok = main.join(' → ') === EXPECT_MAIN.join(' → ');
   g.ok(`S1a. ${MAIN_HTML} 样式表序列 = ${main.join(' → ')}`);
@@ -270,7 +286,7 @@ if (mainRules.length < 500 || pagesRules.length < 100 || dsRules.length < 20) {
 const normSelKey = (prelude, prop) => `${prelude.replace(/\s+/g, ' ').trim()}|${prop}`;
 // 基线是**代码里的冻结清单**，不走环境变量：能从外部注入的基线等于没有基线（一注入就永久绿）。
 // 回填姿势：`node tools/check-subwindow-css.mjs --emit-ds-pairs` 现算输出，粘进下面数组。
-// 2026-10-22 现算回填（U-F1b-L02 删掉 main.css 那半之后）：37 条键，其中 .badge.off /
+// 2026-10-22 现算回填（U-F1b-L02 删掉 main.css 那半之后）：键表全量，其中 .badge.off /
 // .startup-badge.on|off / .ds-badge.warn|ok 四族正是该条目的成因形态，已随条目收敛。
 const DS_PAIR_BASELINE_RAW = [
   '.badge.off|background', '.badge.off|color',

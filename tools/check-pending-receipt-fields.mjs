@@ -13,10 +13,12 @@
 // 用法：node tools/check-pending-receipt-fields.mjs
 
 import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { gate } from './lib/gate.mjs';
 
-const ROOT = process.cwd();
+// 仓根由本文件位置推出，不用 `process.cwd()`：换目录单跑会假红（T1b-L01）。
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const g = gate(import.meta.url);
 
 const read = (rel) => {

@@ -40,7 +40,8 @@ const TRANSITION = [];
 
 const g = gate(import.meta.url);
 const exempt = new Map(TRANSITION.map((t) => [t.fn, t]));
-if (!g.skipUnlessPresent(TESTS, 'src-tauri/tests（本门禁的判定对象）')) g.finish();
+// T1e-L09：SKIP 必须短路（`g.finish()` 在 0 失败时不退出，随后 readdirSync 会 ENOENT 崩栈）。
+if (!g.skipUnlessPresent(TESTS, 'src-tauri/tests（本门禁的判定对象）')) { g.finish(); process.exit(0); }
 
 const files = readdirSync(TESTS, { withFileTypes: true }).flatMap((e) =>
   e.isFile() && e.name.endsWith('.rs') ? [join(TESTS, e.name)]

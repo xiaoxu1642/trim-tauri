@@ -13,9 +13,11 @@
 //                                                      # （T1c-M05：手改夹具即红）
 // 退出码：0 = 已落盘/一致；1 = 失败
 
-import { writeFileSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+
+import { writeFileAtomic } from './lib/atomic-write.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const OUT = join(ROOT, 'tools', 'fixtures', 'finder-delete-modes.json');
@@ -64,6 +66,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     console.log(`✓ finder-delete-modes.json 与构造逐字节一致（${MODES.length} 个 mode）`);
     process.exit(0);
   }
-  writeFileSync(OUT, buildDoc(), 'utf8');
+  writeFileAtomic(OUT, buildDoc());
   console.log(`✓ 已落盘 ${OUT}（${MODES.length} 个 mode）`);
 }

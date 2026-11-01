@@ -24,7 +24,10 @@ import { blankNonCode, skipBraces, splitFunctions, lineAt } from './lib/src-scan
 const ROOT = process.cwd();
 const SCRIPTS = join(ROOT, 'src', 'scripts');
 const BUSY = /\b([A-Za-z0-9_]*(?:busy|Busy|cleaning|Cleaning|running|Running|locked|Locked|inProgress|pending|Pending)[A-Za-z0-9_]*)\s*=\s*true\b/g;
-const MIN_OBJECTS = 6; // 对象地板：busy 赋值 + async handler 的合计站点数，低于此数说明判定失效
+const MIN_BUSY = 6; // busy 赋值对象地板（单腿）：低于此数说明 BUSY 正则失效
+const MIN_HANDLERS = 6; // async handler 对象地板（单腿）：低于此数说明 HPAT/抹白器失效
+// T1e-L08：旧实现把两条腿合并成一个地板（18 + 33 = 51），任一腿归零另一腿仍能过线。
+// 现在两桶各自计对象、各自判地板 —— 单腿失明必须能被看见。
 
 // 过渡基线。锚点 = 变量名 / handler 首句代码文本，**不写行号**（AGENTS 反模式「无坐标豁免」）。
 // 键串由本门禁在 `135301c` 上现算得到，不是照抄分报告的行号。
@@ -42,12 +45,20 @@ const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
   e.isDirectory() ? walk(join(dir, e.name)) : (e.name.endsWith('.js') ? [join(dir, e.name)] : []));
 
 const g = gate(import.meta.url);
-if (!g.skipUnlessPresent(SCRIPTS, 'src/scripts（本门禁的判定对象）')) g.finish();
+if (!g.skipUnlessPresent(SCRIPTS, 'src/scripts（本门禁的判定对象）')) { g.finish(); process.exit(0); }
 
 const keyOf = (rel, kind, where) => `${rel}#${kind}#${where}`;
 const exempt = new Map(TRANSITION.map((t) => [keyOf(t.file, t.kind, t.where), t]));
-let objects = 0;
+let busyObjects = 0;
+let handlerObjects = 0;
 const seen = new Map(); // key → 命中次数（锚点不唯一必须显式红，不能靠序号偷偷去重）
+
+/**
+ * `blankNonCode(code,'js')` 只抹双引号与模板串（单引号在 JS 分支被有意保留给 Rust 字符
+ * 字面量口径），于是 `'try'` / `'await'` 这类单引号串会顶账（T1e-L07）。这里补一层
+ * 等长抹白，保证两条判据都作用在「无字符串」的文本上。
+ */
+const blankSingleQuoted = (text) => text.replace(/'(?:\\.|[^'\\\n])*'/g, (m) => ' '.repeat(m.length));
 
 /**
  * 锚点：不写行号（AGENTS 反模式「无坐标豁免：插行即漂移」）。
@@ -89,7 +100,12 @@ function findBusyViolations(blanked, fns) {
       .filter((x) => m.index >= x.bodyStart && m.index < x.end)
       .sort((a, b) => (a.end - a.start) - (b.end - b.start))[0];
     const bound = enclosing ? enclosing.end - 1 : blanked.length;
-    const tryAt = blanked.indexOf('try', from);
+    // T1e-L07：旧实现 `indexOf('try', from)` 是**子串**搜索 —— `entry` / `retry` /
+    // `country` 里的 try 会把窗口提前截断，其后的 await 就此隐形。改词边界正则。
+    const tryRe = /\btry\b/g;
+    tryRe.lastIndex = from;
+    const tryM = tryRe.exec(blanked);
+    const tryAt = tryM ? tryM.index : -1;
     const stop = tryAt < 0 || tryAt >= bound ? bound : tryAt;
     out.push({ index: m.index, name: m[1], bad: /\bawait\b/.test(blanked.slice(from, stop)) });
   }
@@ -99,9 +115,15 @@ function findBusyViolations(blanked, fns) {
 /**
  * 裸 async 事件处理器判据（同样抽成纯函数，真仓与合成对照共用）。
  * handler 体内必须有 try / catch / `.catch(` / 仓内既有护栏之一。
+ *
+ * T1e-L06：`confirmViaModal` 已从护栏词删除 —— 它是确认框（本身也是 async），不是
+ * reject 接收者，能把它当出口等于放行一整类裸 handler。
+ * T1e-L07：判据作用在**已抹字符串**的文本上，事件名（不论单双引号）都成了空白，所以
+ * 第一参数用 `[^,()]*` 匹配（旧 `['"]…['"]` 在双引号被抹白后永远不命中）；handler 形
+ * 状限定 `async` + 箭头函数（与原口径一致）。
  */
-const HPAT = /addEventListener\(\s*['"][^'"]+['"]\s*,\s*(async\s*)?\s*\(?[^)]*\)?\s*=>\s*\{/g;
-const GUARD_TOKENS = /\btry\b|\bcatch\b|\.catch\s*\(|guardAsync|guardBatch|withPowerBusy|confirmViaModal/;
+const HPAT = /addEventListener\(\s*[^,()]*\s*,\s*(async\s+)?\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/g;
+const GUARD_TOKENS = /\btry\b|\bcatch\b|\.catch\s*\(|guardAsync|guardBatch|withPowerBusy/;
 function findHandlerViolations(blanked) {
   const out = [];
   for (const m of [...blanked.matchAll(HPAT)]) {
@@ -117,21 +139,23 @@ function findHandlerViolations(blanked) {
 
 function analyze(rel, code) {
   const blanked = blankNonCode(code, 'js');
+  // T1e-L07：两条判据都吃「无字符串」文本（单引号串里的 try/await 不顶账）。
+  const noStrings = blankSingleQuoted(blanked);
   const fns = splitFunctions(code, 'js');
   const note = (k) => seen.set(k, (seen.get(k) || 0) + 1);
   // ① busy 窗口：见 findBusyViolations
-  for (const v of findBusyViolations(blanked, fns)) {
-    objects++;
+  for (const v of findBusyViolations(noStrings, fns)) {
+    busyObjects++;
     if (!v.bad) continue;
     const k = keyOf(rel, 'busy-window', v.name);
     note(k);
     if (!exempt.has(k)) g.fail(`${rel}:${lineAt(code, v.index)} [${k}] 置 ${v.name} = true 之后、同一函数内的下一个 try 之前存在 await ⇒ 一次 reject 就永久锁死；未登记在过渡豁免里`);
   }
   // ② 裸 async 事件处理器：见 findHandlerViolations
-  for (const v of findHandlerViolations(blanked)) {
-    objects++;
+  for (const v of findHandlerViolations(noStrings)) {
+    handlerObjects++;
     if (!v.bad) continue;
-    const k = keyOf(rel, 'bare-handler', `${anchorOf(code, v.index)}|${firstCodeLine(blanked, v.open, v.end)}`);
+    const k = keyOf(rel, 'bare-handler', `${anchorOf(code, v.index)}|${firstCodeLine(noStrings, v.open, v.end)}`);
     note(k);
     if (!exempt.has(k)) g.fail(`${rel}:${lineAt(code, v.index)} [${k}] 裸 async 事件处理器没有 try/catch 也没有 .catch 出口 ⇒ IPC reject 静默消失；未登记在过渡豁免里`);
   }
@@ -149,10 +173,13 @@ for (const [k, t] of exempt) {
 for (const [k, n] of seen) {
   if (n > 1) g.fail(`锚点不唯一：${k} 命中 ${n} 次 ⇒ 无法逐条登记豁免，请在该函数内改用更细的锚点（本门禁刻意不靠序号偷偷去重）`);
 }
-if (objects < MIN_OBJECTS) {
-  g.fail(`断言对象地板不成立：只扫到 ${objects} 个判定对象（地板 ${MIN_OBJECTS}）⇒ busy 正则或 handler 正则失效，不是仓库变干净`);
+if (busyObjects < MIN_BUSY) {
+  g.fail(`busy 腿对象地板不成立：只扫到 ${busyObjects} 个 busy 赋值（地板 ${MIN_BUSY}）⇒ BUSY 正则失效，不是仓库变干净`);
 }
-g.ok(`前端 await/出口对账：判定对象 ${objects} 个 / 命中 ${seen.size} 处（登记豁免 ${exempt.size} 条，待 B3 清零）`);
+if (handlerObjects < MIN_HANDLERS) {
+  g.fail(`handler 腿对象地板不成立：只扫到 ${handlerObjects} 个 async 事件处理器（地板 ${MIN_HANDLERS}）⇒ HPAT 或抹白器失效，不是仓库变干净`);
+}
+g.ok(`前端 await/出口对账：busy 对象 ${busyObjects} 个 / async handler 对象 ${handlerObjects} 个（命中 ${seen.size} 处，登记豁免 ${exempt.size} 条，待 B3 清零）`);
 
 // 合成样本正向对照（每次都跑）
 const mk = (body) => `const x = { addEventListener: () => {} };\nfunction run() {\n${body}\n}\n`;
@@ -174,8 +201,29 @@ const CONTROLS = [
     code: 'function holder() {\n  memBusy = true;\n  await go();\n}\n',
     want: 1,
   },
+  {
+    // T1e-L07：`entry` 里的 try 是子串，旧 indexOf 会把窗口截在 await 之前（漏报）。
+    kind: 'busy',
+    label: 'A6 变量名含 try 子串（entry）不得截断 busy 窗口 ⇒ 必须判红',
+    code: mk('  isCleaning = true;\n  const entry = pick();\n  await go();\n  try { x(); } finally { isCleaning = false; }'),
+    want: 1,
+  },
   { kind: 'handler', label: 'B1 普通 async handler 无出口 ⇒ 必须判红', code: mkH('  const r = await api.save();'), want: 1 },
   { kind: 'handler', label: 'B2 handler 里有 try ⇒ 不判红', code: mkH('  try { await api.save(); } catch (e) { log(e); }'), want: 0 },
+  {
+    // T1e-L07：双引号事件名在 blankNonCode 后整段变空白，旧 HPAT 的 ['"] 分支永不命中。
+    kind: 'handler',
+    label: 'B4 双引号事件名的裸 async handler ⇒ 必须判红（不得因抹白而失明）',
+    code: 'const el = { addEventListener: () => {} };\nel.addEventListener("click", async () => {\n  await api.save();\n});\n',
+    want: 1,
+  },
+  {
+    // T1e-L07：单引号串在 JS 模式不被 blankNonCode 抹白，'try' 会顶护栏词。
+    kind: 'handler',
+    label: 'B5 字符串字面量里的 try 不算出口 ⇒ 仍必须判红',
+    code: mkH("  log('try');\n  await api.save();"),
+    want: 1,
+  },
   {
     // 这一条钉的是 lib/src-scan 的抹白器：正则字面量 `/^https?:\/\//i` 里的 `//` 若被当成
     // 行注释，本行后半段（含结尾 `{`）一起抹掉 ⇒ 后面那个 `}` 变成多余闭合 ⇒
@@ -189,12 +237,12 @@ const CONTROLS = [
 ];
 let ctrlBad = 0;
 for (const c of CONTROLS) {
-  const blanked = blankNonCode(c.code, 'js');
+  const blanked = blankSingleQuoted(blankNonCode(c.code, 'js'));
   const hits = c.kind === 'busy'
     ? findBusyViolations(blanked, splitFunctions(c.code, 'js')).filter((v) => v.bad).length
     : findHandlerViolations(blanked).filter((h) => h.bad).length;
   if (hits !== c.want) { ctrlBad++; console.error(`✗ 正向对照失败：${c.label}（实得 ${hits}，应为 ${c.want}）`); }
 }
-if (ctrlBad === 0) g.ok(`正向对照 ${CONTROLS.length} 组通过（busy 三向 + 窗口不越函数体两向 + handler 三向，含「正则字面量不得被当注释」）`);
+if (ctrlBad === 0) g.ok(`正向对照 ${CONTROLS.length} 组通过（busy 三向 + 窗口不越函数体两向 + try 子串 + handler 三向 + 双引号事件名 + 字符串假出口，含「正则字面量不得被当注释」）`);
 
 g.finish('check-async-exits: 全部通过（过渡豁免 ' + exempt.size + ' 条，逐条见 TRANSITION）');

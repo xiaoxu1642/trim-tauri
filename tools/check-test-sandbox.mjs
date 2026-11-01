@@ -9,8 +9,9 @@
 // **测试垃圾反过来污染了被测对象看到的世界**，用户分不清扫到的是自己的临时文件还是 agent 的垃圾。
 //
 // 判据（四条，都能单独判红）：
-//   ① 建点必须走守卫：`temp_dir().join(format!("trim-…` 只允许出现在三个守卫实现文件里；
-//      其余每一处记进**按文件计数上限（只减不增的棘轮）**，新增文件或计数上升即红；
+//   ① 建点必须走守卫：`temp_dir()` 下构造 `trim-` 路径（链式 / `.join` 续写 / 两段式绑定
+//      三种同义写法都算）只允许出现在三个守卫实现文件里；其余每一处记进**按文件计数上限
+//      （只减不增的棘轮）**，新增文件或计数上升即红；
 //   ② 守卫本体必须活性：实现文件里 `impl Drop for` + `remove_dir_all` 缺一即红
 //      （掏空 Drop 会让所有已改造建点静默退回「失败即留残」，而①仍然全绿）；
 //   ③ %TEMP% 残留只做**观测**：读得到就打计数，读不到显式 SKIP —— 干净克隆/别的机器上
@@ -20,11 +21,13 @@
 // 用法：node tools/check-test-sandbox.mjs [--write]
 
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { gate } from './lib/gate.mjs';
 
 const g = gate(import.meta.url);
-const ROOT = process.cwd();
+// 仓根由本文件位置推出，不用 `process.cwd()`：换目录单跑会假红（T1b-L01）。
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const WRITE = process.argv.includes('--write');
 
 /** 守卫实现本体（唯一允许直接建沙箱的地方） */
@@ -36,14 +39,15 @@ const IMPL = [
 
 /**
  * 过渡基线：还没换守卫的建点，按文件计数，**只减不增**。
- * 键串由本门禁现算得到（不是照抄任何旧报告的行号或数字）。
- * 清完一处就把对应行删掉；全删光后本门禁退化成「只准在 IMPL 里建沙箱」。
+ * 2026-11-01（T1b-L05）：建点识别从「只认 `temp_dir().join(format!("trim-` 一种拼法」扩到
+ * 「链式 / `.join` 续写 / 两段式绑定」三种同义形态后，本表按当场现算回填 —— 旧表是窄判据下
+ * 的数，不是被抬高的上限；真实债务只多算不少算，方向仍是「不许再涨」。
  */
 const CEILING = {
-  'src-tauri/src/engine/native/cleanup.rs': 19,
-  'src-tauri/src/commands/fileclean.rs': 6,
-  'src-tauri/src/engine/native/startup.rs': 5,
-  'src-tauri/src/commands/uninstall/residue_trace_tests.rs': 4,
+  'src-tauri/src/engine/native/cleanup.rs': 20,
+  'src-tauri/src/commands/fileclean.rs': 7,
+  'src-tauri/src/engine/native/startup.rs': 8,
+  'src-tauri/src/commands/uninstall/residue_trace_tests.rs': 5,
   'src-tauri/src/commands/uninstall/pending_delete.rs': 4,
   'src-tauri/src/security/mod.rs': 3,
   'src-tauri/src/engine/shellicon.rs': 3,
@@ -51,12 +55,41 @@ const CEILING = {
   'src-tauri/src/engine/protect.rs': 2,
   'src-tauri/src/commands/updater.rs': 2,
   'src-tauri/src/commands/gameclean.rs': 2,
+  'src-tauri/src/commands/runtimes.rs': 2,
   'src-tauri/src/engine/native/peripheral.rs': 1,
   'src-tauri/src/engine/native/contextmenu.rs': 1,
   'src-tauri/src/commands/uninstall/list_run.rs': 1,
+  'src-tauri/src/commands/fonts.rs': 1,
+  'src-tauri/src/commands/uninstall/services_orphan.rs': 1,
+  'src-tauri/src/engine/restore_pack.rs': 1,
 };
 
-const SITE = /temp_dir\(\)\.join\(format!\("trim-/g;
+// 建点识别：认「%TEMP% 根 + trim- 前缀」这个**结构**，不认某一种文本拼法（T1b-L05）。
+// `temp_dir()` 之后既有 `.join(` 又有 `"trim-` 才算一处：链式一行、`.join` 换行续写、
+// `let td = temp_dir(); td.join(...)` 两段式绑定三种同义形态都命中 —— 旧判据只认第一种，
+// 新测试用两段式绑定建沙箱即可计数为 0、静默绕开守卫与棘轮。
+function countSites(text) {
+  const lines = text.split(/\r?\n/);
+  let n = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (!/temp_dir\(\)/.test(lines[i])) continue;
+    if (/\.join\(/.test(lines[i]) && /"trim-/.test(lines[i])) { n++; continue; }
+    for (let j = i + 1; j <= Math.min(i + 3, lines.length - 1); j++) {
+      if (/temp_dir\(\)/.test(lines[j])) break; // 另一处建点，交给它自己数
+      if (/\.join\(/.test(lines[j]) && /"trim-/.test(lines[j])) { n++; break; }
+    }
+  }
+  return n;
+}
+
+/** 建点识别的合成对照：四种同义写法 + 一条不该计数的（每处都必须与期望相等） */
+const SITE_SAMPLES = [
+  ['链式 format!', 'let p = std::env::temp_dir().join(format!("trim-x-{}", 1));', 1],
+  ['链式字面量（无 format!）', 'let p = temp_dir().join("trim-fixed");', 1],
+  ['.join 换行续写', 'let p = temp_dir()\n        .join(format!("trim-y"));', 1],
+  ['两段式绑定', 'let td = std::env::temp_dir();\n    let p = td.join(format!("trim-z"));', 1],
+  ['非 trim- 前缀不计数', 'let p = temp_dir().join("other-dir");', 0],
+];
 
 function walk(dir, out) {
   let entries;
@@ -105,7 +138,7 @@ for (const root of ['src-tauri/src', 'native-scanner/src', 'native-scanner/tests
 const counts = {};
 for (const abs of files) {
   const rel = relative(ROOT, abs).replace(/\\/g, '/');
-  const n = (readFileSync(abs, 'utf8').match(SITE) || []).length;
+  const n = countSites(readFileSync(abs, 'utf8'));
   if (n) counts[rel] = n;
 }
 
@@ -154,6 +187,16 @@ if (!TEMP || !existsSync(TEMP)) {
 
 // ④ 正向对照：判定器必须能红 —— 三种破坏形态各自判红才算数
 {
+  // ① 的判据本体（建点识别）先自检：同义写法被漏数，等于守卫与棘轮可以被绕过（T1b-L05）。
+  let sampleOk = 0;
+  for (const [name, text, want] of SITE_SAMPLES) {
+    const got = countSites(text);
+    if (got === want) sampleOk++;
+    else g.fail(`正向对照失效：建点识别「${name}」得 ${got} 处、期望 ${want} ⇒ 同义写法可绕过计数`);
+  }
+  if (sampleOk === SITE_SAMPLES.length) {
+    g.ok(`正向对照：建点识别 ${sampleOk}/${SITE_SAMPLES.length} 种形态计数符合预期（链式 / 续写 / 两段式 / 非 trim- 前缀）`);
+  }
   const worst = 'src-tauri/src/engine/native/cleanup.rs';
   const cases = [
     ['未登记的新建点文件', judge({ 'src-tauri/src/brand-new.rs': 1 }, CEILING, IMPL)],

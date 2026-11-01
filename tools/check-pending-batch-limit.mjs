@@ -29,7 +29,12 @@
 // 用法：node tools/check-pending-batch-limit.mjs
 //      node tools/check-pending-batch-limit.mjs --selftest   只跑合成样本对照
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// 仓根由本文件位置推出：默认走 `process.cwd()` 时，在仓外单跑会 walk-up 失败并打 SKIP +
+// exit 0（对象全是跟踪文件，本该判红）—— T1b-L01。
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const RS_REL = ['src-tauri', 'src', 'commands', 'uninstall', 'pending_delete.rs'].join('/');
 const API_REL = ['src', 'scripts', 'tauri-api.js'].join('/');
@@ -123,7 +128,7 @@ function main() {
   const controlBad = runControls();
   if (process.argv.includes('--selftest')) return controlBad ? 1 : 0;
   {
-    let d = process.argv[2] && !process.argv[2].startsWith('-') ? process.argv[2] : process.cwd();
+    let d = process.argv[2] && !process.argv[2].startsWith('-') ? process.argv[2] : REPO_ROOT;
     while (!existsSync(join(d, 'src-tauri', 'Cargo.toml')) && d !== join(d, '..')) d = join(d, '..');
     const pick = (p) => join(d, p);
     const [rsPath, apiPath, scriptsDir] = [pick(RS_REL), pick(API_REL), pick(SCRIPTS_REL)];

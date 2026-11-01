@@ -83,7 +83,10 @@ const APP_JS = join(SRC, 'scripts', 'app.js');
 // 731,928 B，余 72 B。**这条余量已经不容下一次追加**：往首屏 12 个脚本或 4 份 CSS 里再加
 // 任何内容之前，先做上面那句结构性建议（按页拆进按需清单），别再来改这个数字。
 const CAP_MAX = 732_000;
-const CAP_MIN = 400_000;
+// T1d-L05：下限从「大面积塌陷地板（400,000）」收紧成**棘轮**：现算 730,997 B，
+// 取 0.9× ≈ 657,897 → 660,000。它挡两种形态：真实脚本被摘出首屏躲预算；以及
+// 「只删不补」的静默瘦身（CSS/JS 大段蒸发而没人解释）。要下调必须带理由改这里。
+const CAP_MIN = 660_000;
 // 豁免清单：允许不带 defer 的脚本（必须尽早执行，加 defer 反而破坏语义）
 const EXEMPT_NOT_DEFER = ['scripts/theme-boot.js'];
 
@@ -140,6 +143,28 @@ export function judgeFirstPaintHandshake(apiCode, appCode) {
   return bad;
 }
 
+/**
+ * F6（T1d-L05）：主题引导脚本的位次。现状是 `<body>` 首子节点（不是 `<head>`——
+ * 报告里「应位于 head」的措辞与盘上实现不符，按现行正确形态钉）：
+ *   ① theme-boot.js 必须是**全文第一个 script**（前面出现任何外链脚本都意味着先跑了别的）；
+ *   ② 必须早于标题栏等**吃主题 token** 的首个可见标记（挪到 body 末尾 = 默认主题闪一帧）。
+ *      开屏覆盖层是独立固定浅色调色板、不随主题联动，故不作为位次标记。
+ *   ③ 不得带 defer / async（带 defer 等于放弃「首帧前同步」）。
+ * 合成样本在 selfCheck 里双向驱动。
+ */
+export function judgeThemeBootOrder(html) {
+  const bad = [];
+  const tagRe = /<script\b[^>]*\bsrc="([^"]+)"[^>]*>/gi;
+  const tags = [...html.matchAll(tagRe)].map((m) => ({ tag: m[0], rel: m[1].split('/').pop(), index: m.index }));
+  const boot = tags.find((t) => t.rel === 'theme-boot.js');
+  if (!boot) return ['theme-boot.js 不在 index.html 的静态脚本里（主题引导被摘掉 = 首帧默认主题闪一下）'];
+  if (tags[0] !== boot) bad.push(`theme-boot.js 不是第一个外链脚本（它前面还有 ${tags[0].rel}）`);
+  if (/\bdefer\b|\basync\b/i.test(boot.tag)) bad.push('theme-boot.js 带了 defer/async —— 引导必须首帧前同步执行');
+  const firstVisible = html.search(/<header\b/i);
+  if (firstVisible >= 0 && boot.index > firstVisible) bad.push('theme-boot.js 晚于标题栏（挪到内容之后 = 默认主题先闪一帧）');
+  return bad;
+}
+
 // ---------- 解析 ----------
 function parseHtml() {
   const html = readFileSync(HTML, 'utf8');
@@ -160,25 +185,36 @@ function parseHtml() {
   return { scripts, css, htmlSize: statSync(HTML).size };
 }
 
-/** app.js 的 PAGE_SCRIPTS + IDLE_SCRIPTS 清单（现场提取，不手抄） */
+/** app.js 的 PAGE_SCRIPTS + IDLE_SCRIPTS 清单（现场提取，不手抄）。
+ *  T1d-L06：定界符按块类型分开——PAGE_SCRIPTS 是对象（花括号配对），IDLE_SCRIPTS 是
+ *  数组（方括号配对）。旧实现一律从「名字后第一个 `{`」起配花括号，数组形态实际靠
+ *  其后第一个对象的 `}` 收尾（注释里出现 `{` 还会截断/扩界）。 */
+export function extractBlock(js, blockName, openCh) {
+  const at = js.indexOf(blockName);
+  if (at < 0) return '';
+  const open = js.indexOf(openCh, at);
+  if (open < 0) return '';
+  const closeCh = openCh === '{' ? '}' : openCh === '[' ? ']' : '';
+  if (!closeCh) return '';
+  let d = 0;
+  for (let i = open; i < js.length; i++) {
+    const c = js[i];
+    if (c === openCh) d++;
+    else if (c === closeCh) { d--; if (d === 0) return js.slice(open, i + 1); }
+  }
+  return '';
+}
 function parseOnDemand() {
   const js = readFileSync(APP_JS, 'utf8');
   const out = new Set();
-  const grab = (blockName) => {
-    const at = js.indexOf(blockName);
-    if (at < 0) return false;
-    let d = 0, end = -1;
-    for (let i = js.indexOf('{', at); i < js.length; i++) {
-      const c = js[i];
-      if (c === '{') d++;
-      else if (c === '}') { d--; if (d === 0) { end = i; break; } }
-    }
-    if (end < 0) return false;
-    for (const m of js.slice(at, end).matchAll(/['"`]([\w./-]+\.js)['"`]/g)) out.add(m[1]);
+  const grab = (blockName, openCh) => {
+    const block = extractBlock(js, blockName, openCh);
+    if (!block) return false;
+    for (const m of block.matchAll(/['"`]([\w./-]+\.js)['"`]/g)) out.add(m[1]);
     return true;
   };
-  const okPage = grab('PAGE_SCRIPTS');
-  const okIdle = grab('IDLE_SCRIPTS');
+  const okPage = grab('PAGE_SCRIPTS', '{');
+  const okIdle = grab('IDLE_SCRIPTS', '[');
   return { set: out, okPage, okIdle };
 }
 
@@ -226,6 +262,42 @@ function selfCheck() {
   );
   expect('F5 app.js 残留调用未命中', judgeFirstPaintHandshake(okApi, 'notifyFirstPaint();').length > 0, true);
 
+  // F6（T1d-L05）：主题引导位次 —— 合规放行；前置了别的脚本 / 带 defer / 挪到可见标记之后
+  // 三种漂移必须各自被抓到。
+  expect(
+    'F6 合规样本误报',
+    judgeThemeBootOrder('<body><script src="scripts/theme-boot.js"></script><header id="titlebar"></header><div id="splash"></div></body>'),
+    [],
+  );
+  expect(
+    'F6 前置了别的脚本未命中',
+    judgeThemeBootOrder('<script src="scripts/ds.js"></script><script src="scripts/theme-boot.js"></script><header></header>').length > 0,
+    true,
+  );
+  expect(
+    'F6 带 defer 未命中',
+    judgeThemeBootOrder('<script src="scripts/theme-boot.js" defer></script><header></header>').length > 0,
+    true,
+  );
+  expect(
+    'F6 晚于可见内容未命中',
+    judgeThemeBootOrder('<header></header><div id="splash"></div><script src="scripts/theme-boot.js"></script>').length > 0,
+    true,
+  );
+
+  // F4 提取器（T1d-L06）：IDLE_SCRIPTS 是数组且注释里带 `{` —— 旧实现从注释的 `{` 起
+  // 配花括号，永远收不到口；新实现按方括号定界必须照常取到。
+  expect(
+    'F4 数组定界失明（注释里带花括号）',
+    extractBlock('const IDLE_SCRIPTS = [ // 说明: {\n  \'scripts/a.js\',\n];', 'IDLE_SCRIPTS', '[').includes("'scripts/a.js'"),
+    true,
+  );
+  expect(
+    'F4 对象定界失明',
+    extractBlock("const PAGE_SCRIPTS = { a: ['scripts/b.js'] };", 'PAGE_SCRIPTS', '{').includes("'scripts/b.js'"),
+    true,
+  );
+
   if (problems.length) {
     g.fail(`正向对照自检失效（本门禁的断言不可信）：\n  ${problems.join('\n  ')}`);
     g.finish();
@@ -242,7 +314,7 @@ if (!g.skipUnlessPresent(HTML, 'src/index.html')) {
   process.exit(0);
 }
 const { groups: selfGroups } = selfCheck();
-g.ok(`正向对照自检 ${selfGroups} 组全部命中（F2 违例必红 + 合规必放行、F1 超上限 + 跌破下限 + 干净放行、F4 重叠必红 + 无重叠放行、F5 合规放行 + 双调用/假幂等/残留调用必红）`);
+g.ok(`正向对照自检 ${selfGroups} 组全部命中（F2 违例必红 + 合规必放行、F1 超上限 + 跌破下限 + 干净放行、F4 重叠必红 + 无重叠放行、F5 合规放行 + 双调用/假幂等/残留调用必红、F6 主题引导四种漂移、F4 提取器数组/对象定界）`);
 
 const { scripts, css, htmlSize } = parseHtml();
 
@@ -298,6 +370,13 @@ if (!od.okPage || !od.okIdle) {
   );
   if (fpBad.length) g.fail(`F5 首帧握手唯一性破坏：${fpBad.join('；')}`);
   else g.ok('F5 首帧握手触发点唯一（tauri-api.js 末尾 1 处）、守卫 firstPaintSent 在模块作用域、app.js 无残留调用');
+}
+
+// F6（T1d-L05）：主题引导脚本位次（首个外链脚本、早于可见内容、无 defer/async）
+{
+  const bootBad = judgeThemeBootOrder(readFileSync(HTML, 'utf8'));
+  if (bootBad.length) g.fail(`F6 主题引导位次破坏：${bootBad.join('；')}`);
+  else g.ok('F6 theme-boot.js 是首个外链脚本、早于标题栏、无 defer/async');
 }
 
 g.finish('首屏门禁全部通过');

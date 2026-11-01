@@ -8,7 +8,8 @@
 //     （`src/scripts/cleanup.js` 里直接吃 FALLBACK 的位置）；
 //   · 优化项只改了前端 OPTIONS ⇒ JSON 停在旧字段，Rust 侧按旧值下发步骤；
 //   · 受保护路径基线重拷了 vendor 却没重跑夹具 ⇒ Rust 测的是过期期望值，看着绿其实在测旧口径。
-// 本门禁把附录 G 的四条对拍固化下来，四条都是**纯内存重算**（不写盘、不起 pwsh、不开窗口）。
+// 本门禁把附录 G 的对拍组固化下来：组与条数以本文件的实际断言为准（P1/P2/P3/P3b/P4/P4b/P7
+// 与末尾的四组不变量），其中多组读盘现算（不写盘、不起 pwsh、不开窗口）。
 // v0.4.9 RAINZ 对标 §3.1 曾加 P5：蓝屏码库 `tools/bugcheck-codes.source.mjs` ⇄ `data/*.json`；
 // 2026-10-12 随「体检结论」全链路退役移除（bsod.rs / 生成器 / data json 一并拆除）。
 //
@@ -349,8 +350,22 @@ const NO_COMMENT_REGISTRY = [
   for (const r of NO_COMMENT_REGISTRY) {
     if (!existsSync(join(dataDir, r.file))) problems.push(`登记件 ${r.file} 不在盘上（删了没走处置）`);
   }
-  const retired = JSON.parse(readFileSync(join(dataDir, 'retired-optimizations.json'), 'utf8'));
-  const runtime = JSON.parse(readFileSync(join(dataDir, 'optimizer-runtime.json'), 'utf8'));
+  // 缺件/损坏必须点名判红，不许拿 node 堆栈当失败输出（与「缺件点名」那条同一口径，T1b-L08）。
+  const readDataJson = (name) => {
+    const p = join(dataDir, name);
+    if (!existsSync(p)) return { err: `${name} 不在 src-tauri/data/ ⇒ 本节**未校验**，按失败处理` };
+    try {
+      return { j: JSON.parse(readFileSync(p, 'utf8')) };
+    } catch (e) {
+      return { err: `${name} JSON 损坏（${e.message.slice(0, 60)}）⇒ 本节**未校验**，按失败处理` };
+    }
+  };
+  const retiredRead = readDataJson('retired-optimizations.json');
+  const runtimeRead = readDataJson('optimizer-runtime.json');
+  if (retiredRead.err) problems.push(retiredRead.err);
+  if (runtimeRead.err) problems.push(runtimeRead.err);
+  const retired = retiredRead.j ?? {};
+  const runtime = runtimeRead.j ?? [];
   const items = Array.isArray(retired.items) ? retired.items : [];
   const catalog = new Set((Array.isArray(runtime) ? runtime : []).map((x) => x.id));
   if (!Array.isArray(runtime) || runtime.length < 100) {
@@ -483,29 +498,38 @@ const NO_COMMENT_REGISTRY = [
 
 // ---- P7（R1a-L06）：paths:save 的 Rust 白名单 ⇄ 渲染层 GROUPS 键集 ----
 {
-  const rustSrc = readFileSync(join(REPO_ROOT, 'src-tauri', 'src', 'commands', 'paths.rs'), 'utf8');
-  const rustBlock = rustSrc.match(/const ALLOWED_KEYS: &\[&str\] = &\[([\s\S]*?)\];/);
-  const rustKeys = rustBlock ? [...rustBlock[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort() : [];
-  const jsSrc = readFileSync(join(REPO_ROOT, 'src', 'scripts', 'pathbinding.js'), 'utf8');
-  const start = jsSrc.indexOf('const GROUPS = [');
-  let i = start >= 0 ? jsSrc.indexOf('[', start) : -1;
-  let depth = 0;
-  let end = -1;
-  for (; i >= 0 && i < jsSrc.length; i++) {
-    if (jsSrc[i] === '[') depth++;
-    else if (jsSrc[i] === ']') {
-      depth--;
-      if (depth === 0) { end = i; break; }
+  // 两个源文件缺席时点名判红，而不是让 readFileSync 抛栈（T1b-L08）。
+  const RS_P7 = 'src-tauri/src/commands/paths.rs';
+  const JS_P7 = 'src/scripts/pathbinding.js';
+  const missing = [RS_P7, JS_P7].filter((rel) => !existsSync(join(REPO_ROOT, rel)));
+  if (missing.length) {
+    fail++;
+    console.error(`✗ P7. 源文件缺席：${missing.join('、')} ⇒ 键白名单对拍**未校验**，按失败处理`);
+  } else {
+    const rustSrc = readFileSync(join(REPO_ROOT, RS_P7), 'utf8');
+    const rustBlock = rustSrc.match(/const ALLOWED_KEYS: &\[&str\] = &\[([\s\S]*?)\];/);
+    const rustKeys = rustBlock ? [...rustBlock[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort() : [];
+    const jsSrc = readFileSync(join(REPO_ROOT, JS_P7), 'utf8');
+    const start = jsSrc.indexOf('const GROUPS = [');
+    let i = start >= 0 ? jsSrc.indexOf('[', start) : -1;
+    let depth = 0;
+    let end = -1;
+    for (; i >= 0 && i < jsSrc.length; i++) {
+      if (jsSrc[i] === '[') depth++;
+      else if (jsSrc[i] === ']') {
+        depth--;
+        if (depth === 0) { end = i; break; }
+      }
     }
+    const jsKeys = end > start ? [...jsSrc.slice(start, end).matchAll(/key:\s*'([^']+)'/g)].map((m) => m[1]).sort() : [];
+    check(
+      rustKeys.length >= 5 && jsKeys.length >= 5 && JSON.stringify(rustKeys) === JSON.stringify(jsKeys),
+      `P7. paths:save 键白名单 ⇄ 渲染层 GROUPS（${rustKeys.length} / ${jsKeys.length}）`,
+      rustKeys.length < 5 || jsKeys.length < 5
+        ? '一侧键集趋零 ⇒ 解析失明'
+        : `差集：Rust 独有 ${rustKeys.filter((k) => !jsKeys.includes(k)).join(',') || '无'}；JS 独有 ${jsKeys.filter((k) => !rustKeys.includes(k)).join(',') || '无'}`,
+    );
   }
-  const jsKeys = end > start ? [...jsSrc.slice(start, end).matchAll(/key:\s*'([^']+)'/g)].map((m) => m[1]).sort() : [];
-  check(
-    rustKeys.length >= 5 && jsKeys.length >= 5 && JSON.stringify(rustKeys) === JSON.stringify(jsKeys),
-    `P7. paths:save 键白名单 ⇄ 渲染层 GROUPS（${rustKeys.length} / ${jsKeys.length}）`,
-    rustKeys.length < 5 || jsKeys.length < 5
-      ? '一侧键集趋零 ⇒ 解析失明'
-      : `差集：Rust 独有 ${rustKeys.filter((k) => !jsKeys.includes(k)).join(',') || '无'}；JS 独有 ${jsKeys.filter((k) => !rustKeys.includes(k)).join(',') || '无'}`,
-  );
 }
 
 // T1b-M01：汇总行必须在**全部判定组之后**（旧实现在第 5/6 组之前就打「全部一致」，

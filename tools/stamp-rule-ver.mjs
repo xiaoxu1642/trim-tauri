@@ -24,6 +24,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { writeFileAtomic } from './lib/atomic-write.mjs';
+
 // T1c-M03：fileURLToPath 才能还原 %20/中文（pathname 原样保留百分号编码）。
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLEANUP = path.join(ROOT, 'src-tauri', 'data', 'cleanup-rules.json');
@@ -64,7 +66,7 @@ function apply(r) {
   if (!r.stale.length && r.pkg.rulesVersion === r.target) return false;
   if (BUMP) r.pkg.rulesVersion = BUMP;
   for (const it of r.items) it.ver = r.target;
-  fs.writeFileSync(r.file, JSON.stringify(r.pkg, null, 2) + '\n', 'utf8');
+  writeFileAtomic(r.file, JSON.stringify(r.pkg, null, 2) + '\n');
   return true;
 }
 

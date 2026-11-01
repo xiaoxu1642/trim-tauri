@@ -1,5 +1,5 @@
 {
-  "_comment": "优化项「出厂默认值 / 产品建议」正交分离（C1 · 借 Winhance RegistrySetting 的两个正交字段）。**为什么不写进 optimizer-runtime.json**：那份与 vendor/upstream-js 的 OPTIONS 是双源逐字段对拍（check-data-parity P2），往里加字段必判红。姿势同 optimizer-scope.json / optimizer-provenance.json。  defaultKnown 语义：true=defaultValue 有可机械复核的依据；false=unknown，**不用猜的值填坑**。  **本表刻意不含「Windows 出厂默认值」**：那个值没有权威来源、本机也验不了（键已被改过），而门禁只能校验「与数据一致」、校验不了「与 Windows 真实出厂一致」—— 编一个默认值恰好废掉 C1 的全部价值（价值就在「依据可判定」）。  真正的「原值」来源是值级备份 optimizer-backups.json 里执行前的实测值，但那**因机而异**。",
+  "_comment": "优化项「出厂默认值 / 产品建议」正交分离（C1 · 借 Winhance RegistrySetting 的两个正交字段）。**为什么不写进 optimizer-runtime.json**：那份与 vendor/upstream-js 的 OPTIONS 是双源逐字段对拍（check-data-parity P2），往里加字段必判红。姿势同 optimizer-scope.json / optimizer-provenance.json。  defaultKnown 语义：true=defaultValue 有可机械复核的依据；false=unknown，**不用猜的值填坑**。  **本表刻意不含「Windows 出厂默认值」**：那个值没有权威来源、本机也验不了（键已被改过），而门禁只能校验「与数据一致」、校验不了「与 Windows 真实出厂一致」—— 编一个默认值恰好废掉 C1 的全部价值（价值就在「依据可判定」）。  真正的「原值」来源是值级备份 optimizer-backups.json 里执行前的实测值，但那**因机而异**。`schemaVer` 只是标注：运行期装载与渲染层都不读它，改语义不触发任何判定。",
   "schemaVer": 1,
   "items": {
     "tf_ntfs": {

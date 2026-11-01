@@ -74,6 +74,14 @@ const cssFiles = listFiles(join(REPO_ROOT, 'src', 'styles'), (f) => f.endsWith('
 const htmlFiles = listFiles(join(REPO_ROOT, 'src'), (f) => f.endsWith('.html'));
 const jsFiles = listFiles(join(REPO_ROOT, 'src', 'scripts'), (f) => f.endsWith('.js'));
 
+// T1d-L03：扫描面地板。`src/styles` 少一份 CSS 时，定义面塌缩会让「引用−定义」整片变红
+// （方向对但不是本门禁想说的话），而圆角/曲线两段会静默打印 ✓ —— 0 对象的绿不算通过。
+const CSS_FLOOR = 4;
+if (cssFiles.length !== CSS_FLOOR) {
+  console.error(`✗ 输入面：src/styles 只找到 ${cssFiles.length} 份 CSS（应 ${CSS_FLOOR}）⇒ token/圆角/曲线判据失明，先修输入面再谈合规`);
+  process.exit(1);
+}
+
 /** 把 CSS 块注释替换成等长空白：偏移量不变，报出来的行号才对得上原文件 */
 function blankComments(text) {
   return text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
@@ -228,10 +236,12 @@ for (const file of [...jsFiles, ...htmlFiles]) {
 for (const file of [...cssFiles, ...htmlFiles, ...jsFiles]) {
   const raw = readFileSync(file, 'utf8');
   const rel = file.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
-  // CSS 里的引用要去注释；JS/HTML 注释里出现 var(--x) 不构成真引用，但 JS 块注释与
-  // 正则字面量的 `/*` 语义不同，去注释反而会误伤 —— 故只对 .css 去注释。
+  // 引用面同样只认可执行代码（T1d-L02/L03）：CSS 去块注释；JS 复用定义面的 blankJsComments
+  // （它与「写名面注释行不算证据」同一口径，正则字面量的 `\/\/` 有前导反斜杠保护）；
+  // HTML 去 `<!-- -->`。此前 JS/HTML 注释里的 var(--x) 会被算作真实引用，反向棘轮
+  // 于是可被一行注释喂活 —— 与定义面的口径自相矛盾。
   const isCss = rel.endsWith('.css');
-  const text = isCss ? blankComments(raw) : raw;
+  const text = isCss ? blankComments(raw) : rel.endsWith('.js') ? blankJsComments(raw) : blankHtmlComments(raw);
   for (const m of text.matchAll(RE_VAR)) {
     // var() 的 fallback 判据：紧跟名字之后的第一个分隔符是逗号（不是括号）才算有兜底
     const hasFallback = /^\s*,/.test(text.slice(m.index + m[0].length));

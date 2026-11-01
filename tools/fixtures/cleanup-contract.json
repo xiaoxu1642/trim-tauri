@@ -5,7 +5,7 @@
     "    并按 mustTrigger 断言「到底是哪条判的红」；",
     "  · Rust 侧 commands/cleanup/rules.rs::清理语义校验与夹具一致 断言 ok/拒绝方向一致。",
     "任何一侧放宽判定，另一侧立刻判红；不跨语言调用（方案 §4.3 第三步 / 残留库同姿势）。",
-    "A8（父子路径重叠）是人工复核清单、非致命，故不出现在本文件的 assertionIds 里。",
+    "父子路径重叠（原 A8 的人工复核清单口径）已由 check-cleanup-rule-contract 升格为判红棘轮管辖（见该文件的 A16 五处判定），不在本夹具的 assertionIds 里。",
     "G-1（2026-10-07）ageAxis 四类样本由本夹具钉住：缺省轴（只声明 minAge* 不写轴，合法）、",
     "合法单轴（ageAxis=ctime，合法）、脱离 minAge*（非法）、非法枚举与双轴数组（非法）；",
     "两侧运行期口径（缺省按 mtime、单轴判定、fail-closed）由 native-scanner 的共享函数钉，不在这里。"

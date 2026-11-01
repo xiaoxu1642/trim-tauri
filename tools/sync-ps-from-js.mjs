@@ -13,11 +13,12 @@
 //     —— 重写后必须逐字节核对 CR/BOM 未被吃掉（`*.ps1` 是 `-text`，AGENTS.md §5.1）。
 
 import { createRequire } from 'node:module';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { MAPPING, withProvenance, stripProvenance, loadBody } from './ps-mapping.mjs';
+import { writeFileAtomic } from './lib/atomic-write.mjs';
 
 const require = createRequire(import.meta.url);
 // T1c-M03：URL.pathname 不做百分号解码，路径含空格/中文即错位；统一 fileURLToPath。
@@ -33,19 +34,21 @@ for (const entry of MAPPING) {
   const current = existsSync(target) ? readFileSync(target, 'utf8') : null;
   // 只比较正文与来源行（来源说明文案改动不必重写文件）
   const same = current !== null && stripProvenance(current).body === stripProvenance(desired).body;
-  if (same && !REFRESH_HEADERS) {
-    console.log(`✓ ${entry.ps1} 已同步（正文一致，${body.length} 字符）`);
-    continue;
-  }
+  // T1c-L04：--check 也要能看见来源头漂移。旧顺序先命中 same 就 continue，
+  // 头与期望不一致也打印「已同步」——门禁档对 PROVENANCE 头失明。
   if (same && current === desired) {
     console.log(`✓ ${entry.ps1} 已同步（含来源头，${body.length} 字符）`);
+    continue;
+  }
+  if (same && !CHECK_ONLY && !REFRESH_HEADERS) {
+    console.log(`✓ ${entry.ps1} 已同步（正文一致，${body.length} 字符）`);
     continue;
   }
   changed++;
   if (CHECK_ONLY) {
     console.log(`✗ ${entry.ps1} 与 JS 运行时值不一致${same ? '（仅来源头待刷新）' : ''}`);
   } else {
-    writeFileSync(target, desired, 'utf8');
+    writeFileAtomic(target, desired);
     console.log(`↻ ${entry.ps1} 已按 JS 运行时值重写（${body.length} 字符${same ? '，仅来源头' : ''}）`);
   }
 }

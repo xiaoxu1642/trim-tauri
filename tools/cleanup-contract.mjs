@@ -379,9 +379,16 @@ export function validateCleanupPackage(pkg) {
         say('A7', `规则 ${id}: fileKeys.recurse 必须是布尔`);
       }
       const pat = fk.pattern ?? '*';
-      const stars = (pat.match(/\*/g) ?? []).length;
-      if (typeof pat !== 'string' || (pat !== '*' && (stars !== 1 || pat.includes('?')))) {
-        say('A2', `规则 ${id}: pattern「${pat}」超出执行侧 glob_match 的单星能力（只支持 * / 前缀* / *后缀 / 前缀*后缀）`);
+      // T1c-L02：先判类型再算 stars。此前 `pat.match` 在 typeof 判定之前，
+      // 非字符串 pattern（如 5）让判定器抛 TypeError 而不是返回 [A2] ——
+      // 异常穿透会让整包校验中断，调用方拿不到错误数组，等于该包从未被判定。
+      if (typeof pat !== 'string') {
+        say('A2', `规则 ${id}: pattern 必须是字符串（当前 ${JSON.stringify(pat)}）`);
+      } else {
+        const stars = (pat.match(/\*/g) ?? []).length;
+        if (pat !== '*' && (stars !== 1 || pat.includes('?'))) {
+          say('A2', `规则 ${id}: pattern「${pat}」超出执行侧 glob_match 的单星能力（只支持 * / 前缀* / *后缀 / 前缀*后缀）`);
+        }
       }
     }
     // A2 regKeys
@@ -611,5 +618,18 @@ export function selfTest(validate) {
   blankConsequence.groups[0].items[0].risk = 'medium';
   blankConsequence.groups[0].items[0].ifDeleted = '   ';
   if (!validate(blankConsequence).some((e) => e.startsWith('[A15]'))) problems.push('medium 的空白 ifDeleted 未被 A15 判红（占位空串绕过扩档）');
+  // T1c-L02：非字符串 pattern 必须走错误数组（[A2]），不许让判定器抛异常。
+  // 抛异常时调用方拿不到任何结论，夹具/门禁会把「判定器崩了」误读成「这批包没跑」。
+  const badPattern = JSON.parse(JSON.stringify(goodPkg));
+  badPattern.groups[0].items[0].fileKeys[0].pattern = 5;
+  let badPatternErrs = null;
+  try {
+    badPatternErrs = validate(badPattern);
+  } catch (e) {
+    problems.push(`非字符串 pattern 让判定器抛异常（${e.message}）而不是返回 [A2]`);
+  }
+  if (badPatternErrs && !badPatternErrs.some((e) => e.startsWith('[A2]'))) {
+    problems.push('非字符串 pattern 未被 A2 判红（类型闸失明）');
+  }
   return problems;
 }

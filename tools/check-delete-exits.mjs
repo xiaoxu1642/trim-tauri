@@ -45,26 +45,33 @@ const check = (ok, label, detail = '') => {
 // （首跑 2026-10-01 发现网抓到 realtime/fonts 四条自有数据目录出口，逐一核实后在此
 //   登记；optimizer_apply 为矩阵旧称——真命令 optimizer_run 体内无删除标记，无需豁免；
 //   prune_quarantined 是启动期内部函数非命令，命令级门禁罩不住，由 security 自检管。）
+//
+// T1a-L13：豁免此前是**命令级**的 —— 已豁免命令体里再长出删除调用（新文件面）不会红。
+// 现在每条豁免同时登记**删除 API 的现算计数**（`apis`），与命令体逐 API 对拍：加一处、
+// 换 API、删一处都要回来改计数（棘轮方向：只许同步台账，不许静默扩面）。
+// PS 文本删除（`Remove-Item` / `reg delete` / `cmd del`）不在本网：`pssteps::compile` 只接受
+// 注册表路径（pssteps.rs），内联脚本的文件删除归属 check-ps-callsites 的调用点登记表
+// （run_inbox_script 逐点登记）+ 人工评审，不在这里重复造网。
 const EXEMPTS = new Map([
   // 注册表/启动项出口：注册表无文件路径语义，闸门是注册表禁删面与白名单目标
-  ['startup_delete', '注册表项/启动文件夹快捷方式删除，闸门=native::startup_delete 白名单目标，非文件 protect'],
+  ['startup_delete', { apis: { send_to_trash_os: 1, startup_delete: 2 }, why: '注册表项/启动文件夹快捷方式删除，闸门=native::startup_delete 白名单目标，非文件 protect' }],
   // 自有报告目录：report_path() 已做 basename 化 + .json 后缀白名单防路径穿越；
   // protect 清单整含 app_data_dir，对自有数据目录恒拒、无判定意义
-  ['realtime_report_delete', '删 Trim 自有网速报告（app_data_dir/report），basename+.json 白名单防穿越，非用户内容'],
-  ['realtime_report_clear', '同上——清空自有报告目录内 *.json，目录固定+后缀白名单'],
+  ['realtime_report_delete', { apis: { remove_file: 1 }, why: '删 Trim 自有网速报告（app_data_dir/report），basename+.json 白名单防穿越，非用户内容' }],
+  ['realtime_report_clear', { apis: { remove_file: 1 }, why: '同上——清空自有报告目录内 *.json，目录固定+后缀白名单' }],
   // 自有字体副本：只动 Trim 导入时生成的副本，绝不触用户原始字体文件
-  ['fonts_import', 'remove_file 只删自有字体副本目录内「上一份导入副本」（替换语义）'],
-  ['fonts_remove_imported', '移除记录 + 删 settings.fontImported 登记的自有副本，不触用户原始文件'],
+  ['fonts_import', { apis: { remove_owned_font_copy: 1 }, why: 'remove_file 只删自有字体副本目录内「上一份导入副本」（替换语义）' }],
+  ['fonts_remove_imported', { apis: { remove_owned_font_copy: 1 }, why: '移除记录 + 删 settings.fontImported 登记的自有副本，不触用户原始文件' }],
   // v2-L4P-12（B-1）：backgrounds 住在 app_data_dir() 里，而 configure_from_app 把
-  // app_data_dir() 整棵登记为 subtree ⇒ is_path_protected 恒拒，功能 100% 不可用。
+  // app_data_dir() 整棵登记为 subtree ⇒ is_path_protected 恒拒，功能完全不可用。
   // 闸门收口为四件套（见命令体注释），故从 MUST_PROTECT 挪入豁免并写明依据：
-  ['appearance_bg_delete', '仅删 backgrounds 直接子项：父目录归属校验 + 扩展名白名单 + is_reparse 拒 + 回收站 _os；文件面 protect 对自有数据目录恒拒无判定意义'],
+  ['appearance_bg_delete', { apis: { send_to_trash_os: 1 }, why: '仅删 backgrounds 直接子项：父目录归属校验 + 扩展名白名单 + is_reparse 拒 + 回收站 _os；文件面 protect 对自有数据目录恒拒无判定意义' }],
   // S3（2026-10-05）更新完成标记：路径是 `paths::join_data("update-applied.json")` ——
   // 一个 Trim 自己写的单文件标记名，既不是用户内容也不接受任何外部输入（命令体里没有
-  // 路径参数），protect 对它恒拒（app_data_dir 整棵是 subtree）反而会让功能 100% 不可用，
+  // 路径参数），protect 对它恒拒（app_data_dir 整棵是 subtree）反而会让功能完全不可用，
   // 所以按 realtime_report_delete 那条例外姿势登记，不套一层无意义的闸门。
-  ['updater_install', '安装失败时清掉 Trim 自写的 update-applied.json 标记（文件名常量，无外部输入）；protect 对自有数据目录恒拒无判定意义'],
-  ['updater_completion', '读后即删同一份 update-applied.json 标记（防「更新已完成」提示反复弹）；另经 clean_installer 删**下载目录里我们自己存的那份安装包**——路径取自标记，删除前过「文件名必须是 Trim_<版本>_x64-setup.exe 形状 + 父目录必须等于 %USERPROFILE%\\Downloads」双闸，不合形状直接不碰文件'],
+  ['updater_install', { apis: { remove_file: 1 }, why: '安装失败时清掉 Trim 自写的 update-applied.json 标记（文件名常量，无外部输入）；protect 对自有数据目录恒拒无判定意义' }],
+  ['updater_completion', { apis: { remove_file: 1 }, why: '读后即删同一份 update-applied.json 标记（防「更新已完成」提示反复弹）；另经 clean_installer 删**下载目录里我们自己存的那份安装包**——路径取自标记，删除前过「文件名必须是 Trim_<版本>_x64-setup.exe 形状 + 父目录必须等于 %USERPROFILE%\\Downloads」双闸，不合形状直接不碰文件' }],
   // v2-L4P-27（B-5）：fonts_import 旧副本删除补齐归属校验后的口径说明由代码兑现；
   // 豁免理由不变（只删自有副本目录内目标）。
   // G-4（2026-10-07）：清空回收站走系统 Shell API（SHEmptyRecycleBinW），**没有路径参数**
@@ -74,17 +81,17 @@ const EXEMPTS = new Map([
   //   ② 渲染层红色高危确认 `confirmDanger`，且确认文案里带**清空前的条目数与体积**
   //      （cleanup:recycle-stats 现查，不是扫描占位行的 0）；
   //   ③ 条目 `domain == "special"` ⇒ 永不默认勾选（cleanup.js 的默认勾选分支显式跳过）。
-  ['cleanup_empty_recycle_bin', '清空回收站（SHEmptyRecycleBinW）作用于系统回收站整体、无路径参数，protect 不适用；闸门=主窗档 + 渲染层红色高危确认（含条目数/体积）+ special 域默认不勾选'],
+  ['cleanup_empty_recycle_bin', { apis: { SHEmptyRecycleBinW: 1 }, why: '清空回收站（SHEmptyRecycleBinW）作用于系统回收站整体、无路径参数，protect 不适用；闸门=主窗档 + 渲染层红色高危确认（含条目数/体积）+ special 域默认不勾选' }],
   // T1a-M07：`reg_import_apply` 并入统一名单后暴露的两条还原命令——它们写回的是
   // 已过四道闸的注册表 sections（严格解析 / 受保护面 / 封条核对 / HKLM 提权），
   // 文件面 is_path_protected 对注册表键没有判定语义。
-  ['uninstall_reg_backup_restore', '注册表备份还原：reg_backup_restore_guards 四道闸，执行臂吃同一份 sections；文件面 protect 不适用'],
-  ['cleanup_reg_backup_restore', '同上——清理域与卸载域共用同一 reg_backup_restore_guards 公共件'],
+  ['uninstall_reg_backup_restore', { apis: {}, why: '注册表备份还原：reg_backup_restore_guards 四道闸，执行臂吃同一份 sections；文件面 protect 不适用' }],
+  ['cleanup_reg_backup_restore', { apis: {}, why: '同上——清理域与卸载域共用同一 reg_backup_restore_guards 公共件' }],
 ]);
 
 // ---- 正向清单：审查矩阵逐列核过的文件型删除出口，protect 判定不许掉 ----
 // 审查 L-4（2026-10-03）补入 optimizer_run：@@RECYCLE@@ 回收站出口的 protect 调用就在
-// apply.rs 命令体内（714 行），此前只靠第 3 组「恰好 includes is_path_protected」放行
+// apply.rs 命令体内（现算行号：rg -n "is_path_protected" src-tauri/src/commands/optimizer/apply.rs），此前只靠第 3 组「恰好 includes is_path_protected」放行
 // ——谁删掉那行，门禁不会红。进正向清单后「掉闸即红」。
 const MUST_PROTECT = [
   'fileclean_delete_file',
@@ -116,11 +123,11 @@ const bodyHasProtect = (body) => PROTECT_MARKERS.some((m) => body.includes(m));
 // ⚠️ 第三段 `file` 是 2026-10-04 磁盘清理审计 §2.1 补的，且**不是可选的锦上添花**：
 //
 //   cleanup_execute 此前登记在 MUST_PROTECT（命令体口径）。但命令体
-//   （commands/cleanup/scan_execute.rs）里唯一的 is_path_protected 在 384 行，位于
+//   （commands/cleanup/scan_execute.rs）里唯一的 is_path_protected 在扫描执行函数内（现算：rg -n "is_path_protected" src-tauri/src/commands/cleanup/scan_execute.rs），位于
 //   `if to_recycle && …` 分支内 —— v3.3.0 用户裁定「常规清理 toRecycle 恒 false」
 //   之后**产品语义上不可达**。真正执行永久删除的闸门在
 //   `engine/native/cleanup.rs::cleanup_execute:680`，那个文件不在本门禁扫描网内。
-//   判红实验：把 680 行改成 `else if false`，本门禁四组断言**全部照绿**（已实测）。
+//   判红实验：把该判定改成 `else if false`，本门禁四组断言**全部照绿**（已实测）。
 //   也就是说「删掉全仓唯一永久删除链的保护判定」是零告警的。
 //
 //   修法两条，缺一不可：
@@ -128,7 +135,7 @@ const bodyHasProtect = (body) => PROTECT_MARKERS.some((m) => body.includes(m));
 //      `extractBody` 只按函数名搜索，而命令体与引擎函数**同名**
 //      （scan_execute.rs / engine/native/cleanup.rs 都是 `cleanup_execute`），
 //      不指名就会解析到命令体那个，等于什么都没修。
-//   ② 指名文件后本组判的是引擎函数；命令体那处 384 行不再能满足任何一条棘轮，
+//   ② 指名文件后本组判的是引擎函数；命令体那处不再能满足任何一条棘轮，
 //      也就回到报告里要求的「384 单独不足以满足正向棘轮」。
 //
 //   第三段 file 是**相对 src-tauri** 的（ROOT 就是 src-tauri，见 :28）。
@@ -343,6 +350,36 @@ for (const name of EXEMPTS.keys()) {
 }
 check(unknownExits.length === 0, '3. 无未注册的删除出口（新出口默认红，放行须在 EXEMPTS 带理由登记）',
   unknownExits.length ? unknownExits.join('；') : `${[...bodies.values()].filter((b) => DELETE_MARKERS.some((mk) => b.body.includes(mk))).length} 条命中删除标记的命令全部受控`);
+
+// T1a-L13：豁免计数棘轮 —— 每条豁免登记它认领的删除 API 及次数，与命令体实际调用逐项对拍。
+// 长 API 名先匹配并抹掉，避免 `remove_dir_all` 被 `remove_dir` 重复计数。
+function apiCounts(body) {
+  let rest = body;
+  const out = {};
+  for (const mk of [...DELETE_MARKERS].sort((a, b) => b.length - a.length)) {
+    const re = new RegExp(`\\b${mk}\\b`, 'g');
+    const n = (rest.match(re) ?? []).length;
+    if (n) out[mk] = n;
+    rest = rest.replace(re, ' ');
+  }
+  return out;
+}
+const exemptDrift = [];
+let exemptTotal = 0;
+for (const [name, entry] of EXEMPTS) {
+  const b = bodies.get(name);
+  if (!b) continue; // 命令未定位由 5 组单独判红
+  const got = apiCounts(b.body);
+  exemptTotal += Object.values(got).reduce((a, n) => a + n, 0);
+  const want = entry.apis ?? {};
+  for (const k of new Set([...Object.keys(got), ...Object.keys(want)])) {
+    const g = got[k] ?? 0;
+    const w = want[k] ?? 0;
+    if (g !== w) exemptDrift.push(`${name}(${b.file}) 的 ${k}：现算 ${g} 处 ≠ 登记 ${w} 处——豁免只覆盖登记过的调用点/次数，扩面须先复核`);
+  }
+}
+check(exemptDrift.length === 0, '4b. 豁免条目的删除 API 计数 ⇄ 命令体逐项一致（T1a-L13）',
+  exemptDrift.length ? exemptDrift.join('；') : `${EXEMPTS.size} 条豁免共 ${exemptTotal} 处删除调用，全部在账`);
 check(exemptMissing.length === 0, '4. 豁免条目与函数体现状一致', exemptMissing.join('；') || '无漂移');
 
 // v2-L4P-16（E-5）：定位失败从「ℹ 放行」改为判红。函数改名/搬出 src-tauri/src 会让

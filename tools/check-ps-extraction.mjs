@@ -20,7 +20,7 @@
 // 需要把「未验证」也当失败的场景（发布前验收）加 `--strict`。
 //
 // 用法：node tools/check-ps-extraction.mjs [--run [--only a,b]] [--strict] [--no-run]
-//   --run         执行行为层（真起 pwsh，只跑不带 noRun 的映射；现 MAPPING 仅 1 项且带 noRun ⇒ 可跑 0 条）；缺 pwsh 即判红
+//   --run         执行行为层（真起 pwsh，只跑不带 noRun 的映射；现 MAPPING 仅一项且带 noRun ⇒ 无可跑对象）；缺 pwsh 即判红
 //   --only        配合 --run，只跑名字匹配的映射（排障用）
 //   --strict      把「行为层未验证」也算作失败（退出码 1）——发布前验收用这条
 //   --no-run      历史姿势，现为默认行为的显式写法（保留兼容，不判错）
@@ -241,19 +241,27 @@ console.log(
 );
 if (!runCompare) {
   console.log(STRICT
-    ? '✗ --strict 要求行为层已验证，本次未执行（发布前验收：加 --run 真跑，或去掉 --strict 只当静态门禁）'
+    ? (behIdle
+        ? '※ --strict：行为层无对象（现存 .ps1 全部登记豁免）⇒ 按零对象 SKIP，不判失败；文本层仍逐条判死。'
+        : '✗ --strict 要求行为层已验证，本次未执行（发布前验收：加 --run 真跑）')
     : behIdle
       ? '※ 本次只做了文本层对拍：行为层候选集为空（全部登记豁免），已无从失效可查——豁免理由变动时须重新评估。'
       : '※ 本次只做了文本层对拍：行为层未验证，不代表 .ps1 与 JS 在真实 pwsh 下等价。');
 }
+// T1a-L02：`--strict` 的「行为层已验证」在**零可跑对象**时结构性不可达（现 MAPPING 仅一项
+// 且带 noRun ⇒ behRunnable 恒 0）。旧判据让发布前验收加 --strict 必红，实践上只能去掉
+// --strict，「行为层未验证」再次隐形。现在零对象按 SKIP 单列、不算失败；文本层仍逐条判死。
 const textFail = fail;
-const ok = textFail === 0 && (!STRICT || behCovered);
+const strictUnmet = STRICT && !behCovered && !behIdle;
+const ok = textFail === 0 && !strictUnmet;
 const verdict = ok
   ? (behCovered
       ? '✓ 全部门禁通过（文本层 + 行为层均已验证）'
-      : behIdle && runCompare
-        ? 'SKIP（文本层通过；行为层无对象：0 条断言可跑，不算验证）'
+      : behIdle
+        ? `SKIP（文本层通过；行为层无对象：0 条断言可跑，不算验证${STRICT ? '。--strict 已按零对象放行' : ''}）`
         : '✓ 文本层门禁通过（行为层未验证，见上）')
-  : `✗ ${textFail} 项未通过${STRICT && !behCovered ? '（另：--strict 要求行为层已验证，本次未达成）' : ''}`;
+  : textFail > 0
+    ? `✗ ${textFail} 项未通过${strictUnmet ? '（另：--strict 要求行为层已验证，本次未达成）' : ''}`
+    : '✗ 行为层未覆盖（--strict 要求行为层已验证：加 --run 真跑）';
 console.log(`\n${verdict}`);
 process.exit(ok ? 0 : 1);

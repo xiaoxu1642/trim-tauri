@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // check-gate-roster.mjs —— 门禁运行集合台账（v2-L4P-01，2026-10-02）
 // 抓什么：磁盘 check-*.mjs 集合 ⇄ 脚本内 MUST_RUN 注册表 ⇄ OPTIONAL/RETIRED 注册表 三方漂移。
-// 背景：L4 审查报告把「24 条可跑」写成「22 条」且无法回算（RPT-04）；本门禁让
+// 背景：L4 审查报告把可跑条数被写错且无法回算（RPT-04）；本门禁让
 // 「磁盘上有哪些门禁、哪些必跑、哪些刻意可选/退役」永远可机器对拍，报告里不得再手写这类总数。
 //
 // 2026-10-07 分层整理：AGENTS.md 不再逐条列门禁清单（常驻手册只留入口），必跑清单的唯一真源
@@ -182,6 +182,14 @@ const diskAll = walkMjs(TOOLS, []);
 const diskCheck = diskAll.filter((f) => /^check-.*\.mjs$/.test(f)).map((f) => f.replace(/\.mjs$/, ''));
 const optionalNames = OPTIONAL.map((o) => o.name);
 const retiredNames = RETIRED.map((o) => o.name);
+// T1a-L08：`^check-` 是**相对路径**前缀，只认 tools/ 顶层 —— 放进 tools/lib/ 的门禁
+// 既不进三方对拍、也不会被 --run 跑到（静默退出台账）。注册表按文件名登记、不认子目录，
+// 所以这里的判据是「子目录里不许有门禁」而不是「子目录门禁也要入册」：出现即红，
+// 让它搬到顶层后再登记（放宽登记形态需要另一次拍板，不在本门禁里顺手改）。
+const subdirChecks = diskAll.filter((f) => f.includes('/') && /(?:^|\/)check-.*\.mjs$/.test(f));
+for (const f of subdirChecks) {
+  fail(`tools/${f} 位于子目录：MUST_RUN/OPTIONAL/RETIRED 只按 tools/ 顶层文件名登记，子目录门禁不会入册也不会被 --run 跑到 —— 搬到 tools/ 顶层再登记`);
+}
 for (const key of SIDE_EFFECT.keys()) {
   if (!MUST_RUN.includes(key) && !optionalNames.includes(key)) fail(`SIDE_EFFECT 登记的 ${key} 不在 MUST_RUN / OPTIONAL 里`);
 }
@@ -222,6 +230,37 @@ for (const f of diskCheck) {
 for (const { name, reason } of [...OPTIONAL, ...RETIRED]) {
   if (!reason || reason.trim().length < 8) fail(`注册表条目 ${name} 缺少理由（OPTIONAL/RETIRED 必须带书面 scope）`);
   if (!existsSync(join(TOOLS, `${name}.mjs`))) fail(`注册表登记的 tools/${name}.mjs 磁盘上不存在`);
+}
+
+// 2d. RETIRED 条目必须仍以「退役形态」活着（T1a-L08）：旧实现只打印名单，不执行、不核文案 ——
+// 谁把 check-ps-substitution 改回真跑或判红，台账仍显示「已退役」。现在真跑一次，要求
+// exit 0 且输出带 RETIRED/SKIP 自报；判红或输出无标记都说明「已退役」这句话不成立。
+for (const { name } of RETIRED) {
+  const p = join(TOOLS, `${name}.mjs`);
+  if (!existsSync(p)) continue; // 2c 已判红
+  const r = spawnSync(process.execPath, [p], { cwd: ROOT, encoding: 'utf8', timeout: 5 * 60 * 1000 });
+  if (r.status !== 0) {
+    fail(`RETIRED 条目 ${name} 实跑 exit ${r.status ?? 'null'}${r.error ? `（${r.error.code}）` : ''} —— 退役门禁必须自报 RETIRED/SKIP 且 exit 0；判红说明「已退役」不成立`);
+  } else if (!/RETIRED|SKIP/.test(`${r.stdout || ''}\n${r.stderr || ''}`)) {
+    fail(`RETIRED 条目 ${name} 输出里没有 RETIRED/SKIP 自报标记 —— 退役状态无法从输出确认（不是通过）`);
+  } else {
+    console.log(`✓ RETIRED ${name} 实跑自报退役（exit 0）`);
+  }
+}
+
+// 2e. §1.7：OPTIONAL/RETIRED 禁止被必做门禁 import（T1a-L08）。
+// import 是静态耦合：必跑门禁引了可选门禁，可选那条就随必跑一起执行（副作用档与
+// 「可选=人工触发」的语义全失效）。判据按 import/from/re-export 的字符串形态匹配。
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+for (const name of MUST_RUN) {
+  const p = join(TOOLS, `${name}.mjs`);
+  if (!existsSync(p)) continue; // 2a 已判红
+  const src = readFileSync(p, 'utf8');
+  for (const o of [...optionalNames, ...retiredNames]) {
+    if (new RegExp(`(?:from|import)\\s*\\(?\\s*['"][^'"]*${escRe(o)}\\.mjs['"]`).test(src)) {
+      fail(`必跑门禁 ${name} import 了 ${o}（OPTIONAL/RETIRED）—— §1.7 禁止：可选门禁不得被必做门禁静态耦合`);
+    }
+  }
 }
 
 // ── 3. AGENTS.md 只做轻量引用校验（必跑清单已不在这里，不再解析 §4 全表）──
@@ -267,7 +306,11 @@ for (const name of MUST_RUN) {
     continue;
   }
   const args = [join(TOOLS, `${name}.mjs`), ...(GATE_ARGS[name] || [])];
-  const res = spawnSync(process.execPath, args, { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  // T1a-L09：spawn 无 timeout ⇒ 任一子门禁挂住（等子进程/网络）会让整个 --run 无限挂起。
+  // 5 分钟是单条门禁的宽限上界（最慢的 check-tests-helper-parity 也在分钟级）；超时按失败记。
+  const res = spawnSync(process.execPath, args, {
+    cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 5 * 60 * 1000,
+  });
   if (res.status === 0) {
     ok(`run ${name}`);
     // T1-M06（v4-K07）：exit 0 ≠ 无失败断言 —— 子门禁可能自报 ✗（短路 bug / 未修完的断言），
@@ -275,6 +318,15 @@ for (const name of MUST_RUN) {
     // skip 的判据收紧到独立词形态（`skipped_reparse`/「跳过块」这类代码术语不算，否则满是误报）。
     const out = `${res.stdout || ''}\n${res.stderr || ''}`;
     const count = (re) => (out.match(re) || []).length;
+    // T1a-L09：零值词表会把**目标型零**算成「零对象、不是通过」——例如
+    // 「外部 PowerShell 7 通道计数为零（R1 归零目标）」 是断言目标达成，不是扫描面空转。
+    // 带「归零目标 / 零命中即通过 / 零暴露」上下文的行不计入。
+    const ZERO_OK_CONTEXT = /归零目标|零命中即通过|零暴露/;
+    const countZero = (text) =>
+      text
+        .split('\n')
+        .filter((l) => !ZERO_OK_CONTEXT.test(l))
+        .reduce((n, l) => n + (l.match(/(?:^|[^\w])0\s*(?:个|条|处)(?![\w])/g) || []).length, 0);
     const marks = {
       x: count(/✗/g),
       // T1a-M06（v7.2 C09）：词表补「未验证 / RETIRED（ / 不算验证」——check-ps-extraction
@@ -282,12 +334,12 @@ for (const name of MUST_RUN) {
       // RETIRED 带（ 全角括号锚定：只认「RETIRED（未执行任何断言）」这类自报形态，
       // 不把本门禁自己打印的注册表成员名单（`RETIRED: 名字`）误计进去。
       skip: count(/(?:^|[^\w])SKIP(?![A-Za-z0-9_])|未校验|未验证|RETIRED（|不算验证/g),
-      zero: count(/(?:^|[^\w])0\s*(?:个|条|处)(?![\w])/g),
+      zero: countZero(out),
     };
     if (marks.x + marks.skip + marks.zero > 0) selfReported.push({ name, ...marks });
   } else {
     runFailed++;
-    console.error(`✗ run ${name}（exit ${res.status ?? 'null'}）`);
+    console.error(`✗ run ${name}（exit ${res.status ?? 'null'}${res.error ? `，${res.error.code}` : ''}${res.signal ? `，signal ${res.signal}` : ''}）`);
     if (res.stdout) process.stderr.write(res.stdout);
     if (res.stderr) process.stderr.write(res.stderr);
     if (res.error) process.stderr.write(`${res.error}\n`);

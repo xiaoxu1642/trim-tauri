@@ -19,11 +19,11 @@
 // 正向对照（AGENTS §4.1）：每个页面都再跑一遍「人为注入一行指向不存在元素的绑定」，
 // 必须能被判红。注入后仍然全绿 ⇒ 判定器已经失效，本门禁自己判红。
 //
-// v5 批次 9（门禁候选 5）：从只跑 residue 一窗扩到 **4 子窗全覆盖**（页数地板钉住），
-// 另三窗的桩形状见各自 PAGES 条目注释。
+// v5 批次 9（门禁候选 5）：从只跑 residue 一窗扩到页数地板覆盖全部子窗（现为 3 窗），
+// 另两窗的桩形状见各自 PAGES 条目注释。
 //
 // 用法：node tools/check-subwindow-init.mjs [--verbose]
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
@@ -43,6 +43,9 @@ const PAGES = [
     search: '?app=' + encodeURIComponent('HKLM|SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\TrimProbe'),
     // 注入点：该页 DOMContentLoaded 里的第一行真实语句
     poisonAnchor: "state.appId = targetFromSearch();",
+    // T1h-L02：注入语句必须用**本页自己的取元素助手**（本页是 el(id)），
+    // 用错助手抛的是 ReferenceError，正向对照照样红，但没走「缺件 → null」通道。
+    poisonCall: "el('notAnElementForControl')",
     dropIdProbe: 'rsBackupToggle',
     // 绑定走 on() 降级 warn 机制 ⇒ 抽件对照（断言 6）有 warn 通道可断
     expectDropWarn: true,
@@ -56,14 +59,16 @@ const PAGES = [
       'residueWindow.onTarget': () => undefined,
     }),
   },
-  // v5 批次 9（门禁候选 5）：页数地板（4 子窗全覆盖）——此前只跑 residue 一窗，
-  // 另外 3 窗的「初始化不崩 + 首屏真的会发请求」完全没人管。
+  // v5 批次 9（门禁候选 5）：页数地板——此前只跑 residue 一窗，其余窗的
+  // 「初始化不崩 + 首屏真的会发请求」完全没人管。
   {
     html: 'models-window.html',
     script: 'scripts/models-window.js',
     expectCalls: ['settings.load'],
     expectHosts: [],
     poisonAnchor: "function init() {",
+    // 本页助手是 $(id)（models-window.js 顶部），不是 el()
+    poisonCall: "$('notAnElementForControl')",
     dropIdProbe: 'mwBody',
     api: () => ({
       'settings.load': async () => ({ success: true, data: { models: {}, modelDefaults: {} } }),
@@ -79,6 +84,7 @@ const PAGES = [
     expectCalls: ['ProcessTools.fetchProcesses'],
     expectHosts: [],
     poisonAnchor: "function init() {",
+    poisonCall: "el('notAnElementForControl')",
     dropIdProbe: 'pmBody',
     api: () => ({
       'processManager.report': (a) => a,
@@ -162,7 +168,10 @@ function buildCtx(page, poison, dropId) {
       return nodes.get(id);
     },
     addEventListener(type, fn) {
-      (doc._handlers ||= {})[type] = fn;
+      // T1h-L06：按 type 收集为数组（真机同一事件可注册多个处理器）。
+      // 旧写法 `(doc._handlers ||= {})[type] = fn` 是覆盖式登记：一个脚本注册两个
+      // DOMContentLoaded 时只有最后一个会跑，第一个抛错也看不见。
+      ((doc._handlers ||= {})[type] ||= []).push(fn);
       bound.push(`document:${type}`);
     },
     removeEventListener: () => {},
@@ -256,7 +265,8 @@ function buildCtx(page, poison, dropId) {
   let text = readFileSync(join(ROOT, 'src', page.script), 'utf8');
   if (poison) {
     if (!text.includes(poison)) throw new Error(`正向对照锚点没命中：${poison}`);
-    text = text.replace(poison, `${poison}\n    el('notAnElementForControl').addEventListener('click', function () {});`);
+    const call = page.poisonCall || "el('notAnElementForControl')";
+    text = text.replace(poison, `${poison}\n    ${call}.addEventListener('click', function () {});`);
   }
   return { ctx, doc, calls, bound, warns, text };
 }
@@ -267,9 +277,11 @@ async function runInit(page, poison, dropId) {
   let threw = null;
   try {
     vm.runInContext(text, ctx, { filename: page.script });
-    const h = doc._handlers && doc._handlers.DOMContentLoaded;
-    if (typeof h !== 'function') threw = '脚本没有注册 DOMContentLoaded 处理器';
-    else await h();
+    // T1h-L06：同一脚本可能注册多个 DOMContentLoaded（真机全部会跑）。
+    // 旧实现按 type 覆盖登记，只有最后一个执行，第一个抛错也看不见。
+    const hs = (doc._handlers && doc._handlers.DOMContentLoaded) || [];
+    if (hs.length === 0) threw = '脚本没有注册 DOMContentLoaded 处理器';
+    else for (const h of hs) await h();
   } catch (e) {
     threw = `${e && e.constructor ? e.constructor.name : 'Error'}: ${(e && e.message) || e}`;
   }
@@ -283,11 +295,32 @@ console.log('=== 副窗初始化与首屏请求门禁 ===\n');
 {
   const sub = JSON.parse(readFileSync(join(ROOT, 'src-tauri', 'capabilities', 'subwindows.json'), 'utf8'));
   const labels = sub.windows || [];
+  // T1h-L01：`windows` 缺失/改键/置空时 labels=[]，下面那条 missing 检查是零对象绿。
+  check(
+    labels.length > 0,
+    '0a. subwindows.json 的 windows 清单非空（0 个 = 页数地板没有对照集）',
+    `解析得 ${labels.length} 个 label`,
+  );
   const missing = labels.filter((l) => !LABEL_HTML[l] || !PAGES.some((p) => p.html === LABEL_HTML[l]));
   check(
     missing.length === 0,
     `0. 页数地板：PAGES 覆盖 subwindows.json 的全部 ${labels.length} 个子窗`,
     missing.length ? `缺：${missing.join('、')}` : PAGES.map((p) => p.html).join(', '),
+  );
+  // T1h-L01 反向：磁盘上的子窗页面必须都有 PAGES 条目（新增 html 而漏登记 = 无人看守）
+  const diskWindows = readdirSync(join(ROOT, 'src')).filter((n) => /-window\.html$/.test(n));
+  const unlisted = diskWindows.filter((n) => !PAGES.some((p) => p.html === n));
+  check(
+    unlisted.length === 0,
+    `0b. src/*-window.html 全部有 PAGES 条目（${diskWindows.length} 个页面文件）`,
+    unlisted.length ? `未登记：${unlisted.join('、')}` : diskWindows.join(', '),
+  );
+  // T1h-L01：expectCalls 为空时断言 3 的 `missing.length === 0` 也是零对象绿
+  const noExpect = PAGES.filter((p) => !p.expectCalls.length).map((p) => p.html);
+  check(
+    noExpect.length === 0,
+    '0c. 每页都登记了首屏请求（expectCalls 为空 = 断言 3 零对象绿）',
+    noExpect.length ? `未登记：${noExpect.join('、')}` : PAGES.map((p) => p.expectCalls.join('+')).join(' | '),
   );
 }
 
@@ -313,7 +346,7 @@ for (const page of PAGES) {
   check(
     controlWorks,
     `5. ${tag} 的正向对照能判红（注入 #notAnElementForControl 绑定后仍全绿 = 本门禁失效）`,
-    controlWorks ? `抛错=${p.threw ? 'yes' : 'no'} · 告警=${p.warns.length} · 少发请求=${page.expectCalls.filter((c) => !p.calls.includes(c)).length}` : '注入后依然全绿',
+    controlWorks ? `抛错=${p.threw ? p.threw.slice(0, 80) : 'no'} · 告警=${p.warns.length} · 少发请求=${page.expectCalls.filter((c) => !p.calls.includes(c)).length}` : '注入后依然全绿',
   );
 
   // ---- 正向对照 2：抽掉一个真实存在的 id，断言 2 的 warn 通道必须看得见 ----

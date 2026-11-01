@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // publish-atomgit.mjs —— AtomGit 线路发版：清单生成 + 建 release + 传附件 + 回读校验
 //
-// 用法（发版顺序见 §7；本工具只碰 AtomGit API。GitHub 侧上传仍归 gh CLI，不在这里）：
+// 用法（发版顺序见发版手册 §7；本工具只碰 AtomGit API。GitHub 侧上传仍归 gh CLI，不在这里）：
 //   node tools/publish-atomgit.mjs --dry-run         # 本地预检 + 打印计划，不写文件不联网
 //   node tools/publish-atomgit.mjs --offline         # 只生成三份清单（产物区两份 + 仓根 latest-atomgit.json）
 //   node tools/publish-atomgit.mjs --token-file <p>  # 全流程：等 tag 就位 → 建 release → 传三件 → 匿名回读验 sha256
@@ -23,13 +23,15 @@
 // gitcode.com 网页直链匿名 418 反爬、releases/latest/download 同形别名不存在。
 // 这个 attach 下载端点是匿名可用的（302 到 CDN 后 200，46MB 完整下载实测过）。
 'use strict';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 
+import { writeFileAtomic } from './lib/atomic-write.mjs';
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-// 发布暂存区（未跟踪）约定见 §7.3；本工具只在发版时刻跑，缺目录 = 还没构建，报错并指路
+// 发布暂存区（未跟踪）约定见发版手册 §7.3；本工具只在发版时刻跑，缺目录 = 还没构建，报错并指路
 const OUT = join(ROOT, 'build-release');
 const MANIFEST_NAME = 'latest-atomgit.json';
 
@@ -82,19 +84,19 @@ const sigName = `${setupName}.sig`;
 const portableName = `Trim_${ver}_x64-portable.zip`;
 
 function preflight() {
-  if (!existsSync(OUT)) die(`发布暂存区不存在：${OUT}（先按 §7.3 构建并签名）`);
+  if (!existsSync(OUT)) die(`发布暂存区不存在：${OUT}（先按发版手册 §7.3 构建并签名）`);
   const files = {
     setup: join(OUT, setupName),
     sig: join(OUT, sigName),
     portable: join(OUT, portableName),
   };
   for (const [kind, p] of Object.entries(files)) {
-    if (!existsSync(p)) die(`缺产物（${kind}）：${p}（先按 §7.3 构建并签名）`);
+    if (!existsSync(p)) die(`缺产物（${kind}）：${p}（先按发版手册 §7.3 构建并签名）`);
   }
   ok(`产物三件齐（${ver}）：setup ${(readFileSync(files.setup).length / 1048576).toFixed(1)}MB / portable / sig`);
 
   // 签名形状 + 版本钉死：--app-version 漏传时 trusted comment 缺 `version:`，
-  // 客户端 requireSignedVersion 会把整批更新判 MissingSignedVersion（§7.4 的坑）
+  // 客户端 requireSignedVersion 会把整批更新判 MissingSignedVersion（发版手册 §7.4 的坑）
   const sigText = read(files.sig);
   const lines = Buffer.from(sigText.replace(/\s+/g, ''), 'base64').toString('utf8').split('\n');
   const sigOk =
@@ -149,7 +151,7 @@ function writeManifests(notes, sigText, setupSha) {
     [join(ROOT, MANIFEST_NAME), manifestFor(notes, sigText, setupSha, attachUrl)],
   ];
   for (const [p, obj] of targets) {
-    writeFileSync(p, json(obj));
+    writeFileAtomic(p, json(obj));
     ok(`写入 ${p.replace(ROOT + '\\', '').replace(ROOT + '/', '')}`);
   }
 }
@@ -164,7 +166,7 @@ function loadToken() {
   }
   const env = process.env.ATOMGIT_TOKEN;
   if (env && env.trim()) return env.trim();
-  die('缺少 AtomGit 令牌：用环境变量 ATOMGIT_TOKEN 或 --token-file 传入（仓库外的本机密钥材料，以 §7.4 为准）');
+  die('缺少 AtomGit 令牌：用环境变量 ATOMGIT_TOKEN 或 --token-file 传入（仓库外的本机密钥材料，以发版手册 §7.4 为准）');
 }
 
 async function api(path, { method = 'GET', token, body, timeout = 60_000 } = {}) {
@@ -336,7 +338,7 @@ try {
       await ensureAsset(token, sigName, files.sig);
       console.log('');
       console.log('附件已全部上线。下一步（顺序不能反）：');
-      console.log(`  git add ${MANIFEST_NAME} && git commit && git push   # 推仓根清单；镜像已停用，AtomGit 须直推（§7.4）`);
+      console.log(`  git add ${MANIFEST_NAME} && git commit && git push   # 推仓根清单；镜像已停用，AtomGit 须直推（发版手册 §7.4）`);
       console.log('  AtomGit 收到后：node tools/publish-atomgit.mjs --verify-feed');
     }
   }

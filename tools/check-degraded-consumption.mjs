@@ -26,14 +26,18 @@ const SRC_RS = join(ROOT, 'src-tauri', 'src');
 const MIN_EMITTERS = 5; // 对象地板：低于此数说明命令解析失效，不是「大家都接好了」
 
 // ⚠ 命令名与发射点是**盘上现算**得到的（首版按 v1 方案里猜的名字写表，7 条全部对不上）：
-//   实际发射 `degraded` 的是这 7 条，其中 `appearance_*` 有两条、`startup`/`overview`/`syspanel`
-//   并不发这个位。consumed 行必须给可核锚点；pending 行只标批次与理由，不许凭空写锚点。
+//   本判据（标识符形态）射程内是这 7 条（`appearance_*` 两条）。T1e-L01 更正旧注释：
+//   `startup_scan`（startup.rs）、`overview_hardware`（overview.rs）与 helper 形态的
+//   `power_plan_state` **也发射 degraded**，但它们是 `"degraded": true` 字面量 / helper
+//   形态，落在本判据射程外（根因与修法见 T1e-M01，该条属中危、本批未修）。
+//   consumed 行必须给可核锚点；pending 行给「修好后会出现的消费点文本」作锚点 ——
+//   锚点一旦命中即判红，逼回收条目（T1e-L02：无锚点 pending 会让这条腿对它们永久失效）。
 const TABLE = [
   { cmd: 'paths_load', status: 'consumed', anchor: { file: 'src/scripts/pathbinding.js', text: 'resp.degraded === true' } },
   { cmd: 'settings_load', status: 'consumed', anchor: { file: 'src/scripts/models-window.js', text: 'resp.degraded === true' } },
-  { cmd: 'fileclean_scan', status: 'pending', batch: 'B3/P1-6', reason: 'A1 命中：未接（展示层假绿族）' },
-  { cmd: 'appearance_get_material', status: 'pending', batch: 'B3/P1-6', reason: '材质面未见消费方：window-material.js 现算无 degraded' },
-  { cmd: 'optimizer_state_overview', status: 'pending', batch: 'B3/P1-6A', reason: '与 R3b-M10 同一条链（目录不可用 vs 空目录）' },
+  { cmd: 'fileclean_scan', status: 'pending', batch: 'B3/P1-6', anchor: { file: 'src/scripts/cleanup.js', text: 'degraded === true' }, reason: 'A1 命中：未接（展示层假绿族）' },
+  { cmd: 'appearance_get_material', status: 'pending', batch: 'B3/P1-6', anchor: { file: 'src/scripts/window-material.js', text: 'degraded === true' }, reason: '材质面未见消费方：window-material.js 现算无 degraded' },
+  { cmd: 'optimizer_state_overview', status: 'pending', batch: 'B3/P1-6A', anchor: { file: 'src/scripts/optimizer.js', text: 'degraded === true' }, reason: '与 R3b-M10 同一条链（目录不可用 vs 空目录）' },
   { cmd: 'appearance_get_prefs', status: 'consumed', anchor: { file: 'src/scripts/pathbinding-appearance.js', text: 'resp.degraded === true' } },
   { cmd: 'uninstall_pending_list', status: 'consumed', anchor: { file: 'src/scripts/residue-window.js', text: 'data.degraded' } },
 ];
@@ -42,26 +46,39 @@ const walkRs = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
   e.isDirectory() ? walkRs(join(dir, e.name)) : (e.name.endsWith('.rs') ? [join(dir, e.name)] : []));
 
 /**
- * 锚点命中判定（不走 blankNonCode）。
+ * 锚点命中判定：只认**可执行代码**（T1e-L10）。
  *
- * 原因：`blankNonCode` 的模板分支对「模板里套 ${…} 再套模板」这种嵌套失准 —— 实测
- * `src/scripts/models-window.js` 从第一个 `return \`` 之后起整段被当成字符串抹掉，
- * 于是该文件后部的任何真实代码在 blanked 文本里都不存在（锚点永远判红）。
- * 工具层修法属 P2-a（门禁判据强度），本门禁先走保守口径：逐行剔除行注释与块注释行，
- * 不抹字符串（现有锚点文字都不在字符串字面量里）。
+ * 为什么不用 `blankNonCode`：它的模板分支对「模板里套 ${…} 再套模板」失准 —— 实测
+ * `src/scripts/models-window.js` 从第一个 `return \`` 之后整段被当成字符串抹掉，该文件的
+ * consumed 锚点会永远判红（假红比漏报更糟）。所以本件自带一份保守剥除：
+ *   块注释（含不以 `*` 开头的中间行）、行注释、单/双引号字符串；
+ * 模板字符串不抹 —— 现有锚点都不在模板字面量里，保守方向是「宁可判红」（见下方对照）。
+ * 旧实现只剥整行注释：`console.log('resp.degraded === true')` 或块注释中间行都能顶账。
  */
-const anchorHit = (abs, text) => {
-  if (!existsSync(abs)) return false;
-  const lines = readFileSync(abs, 'utf8').split('\n').map(l => {
-    const t = l.trim();
-    if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) return '';
-    return l.replace(/\/\/.*$/, '');
-  });
-  return lines.join('\n').includes(text);
-};
+const codeOnly = (src) => src
+  .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+  .replace(/(^|[^:"'])\/\/[^\n]*/g, (m, keep) => keep + ' '.repeat(m.length - keep.length))
+  .replace(/'(?:\\.|[^'\\\n])*'/g, (m) => ' '.repeat(m.length))
+  .replace(/"(?:\\.|[^"\\\n])*"/g, (m) => ' '.repeat(m.length));
+const anchorHitIn = (src, text) => codeOnly(src).includes(text);
+const anchorHit = (abs, text) => existsSync(abs) && anchorHitIn(readFileSync(abs, 'utf8'), text);
 
 const g = gate(import.meta.url);
-if (!g.skipUnlessPresent(join(SRC_RS, 'engine', 'protect.rs'), 'src-tauri/src（本门禁的判定对象）')) g.finish();
+{
+  // 正向对照：真实代码命中；块注释中间行 / 字符串字面量顶账必须拒绝。
+  const real = 'if (resp && resp.degraded === true) { recover(); }';
+  const comment = '/* 说明：\n   resp.degraded === true\n*/\nconst x = 1;';
+  const logString = 'console.log("resp.degraded === true");';
+  const ok = anchorHitIn(real, 'resp.degraded === true')
+    && !anchorHitIn(comment, 'resp.degraded === true')
+    && !anchorHitIn(logString, 'resp.degraded === true');
+  if (!ok) g.fail('锚点判定器正向对照失败：真实代码未命中，或注释/字符串顶账未被拒绝');
+  else g.ok('锚点判定器对照：真实代码命中；块注释中间行与字符串字面量不顶账');
+}
+
+// T1e-L09：SKIP 必须**短路** —— `g.finish()` 在 0 失败时不退出，继续 walkRs 会抛 ENOENT
+// 栈，把「显式 SKIP」退化成崩溃（AGENTS §5 要求缺输入给 SKIP，不许 ENOENT 崩）。
+if (!g.skipUnlessPresent(join(SRC_RS, 'engine', 'protect.rs'), 'src-tauri/src（本门禁的判定对象）')) { g.finish(); process.exit(0); }
 
 const emitters = new Map(); // cmd → {rel, line}
 for (const abs of walkRs(SRC_RS)) {
@@ -82,26 +99,58 @@ for (const abs of walkRs(SRC_RS)) {
 }
 
 const table = new Map(TABLE.map((t) => [t.cmd, t]));
-for (const [cmd, where] of emitters) {
-  const t = table.get(cmd);
-  if (!t) { g.fail(`${where.rel}:${where.line} 命令 ${cmd} 回传 degraded，但登记表里没有它 ⇒ 新增分态必须显式回答「前端接不接」`); continue; }
-  if (t.status === 'consumed' && (!t.anchor || !t.anchor.file || !t.anchor.text)) { g.fail(`${cmd} 登记为 consumed 却没给可核锚点（等于免检）`); continue; }
-  if (t.status !== 'consumed' && !t.batch) { g.fail(`${cmd} 是 ${t.status} 但缺批次归属`); }
-  if (t.status === 'consumed') {
-    const abs = join(ROOT, t.anchor.file);
-    const hit = anchorHit(abs, t.anchor.text);
-    if (!hit) g.fail(`${cmd} 登记为 consumed，但 ${t.anchor.file} 里找不到锚点「${t.anchor.text}」⇒ 消费点被删了或锚点写错`);
-  } else if (t.anchor) {
-    const abs = join(ROOT, t.anchor.file);
-    if (anchorHit(abs, t.anchor.text)) {
-      g.fail(`${cmd} 仍登记为 ${t.status}（${t.batch}），但锚点已在盘上命中 ⇒ 修完要回收条目`);
+
+/**
+ * 纯判据：发射面 ⇄ 登记表双向对账（T1e-L01）。
+ * 真仓与合成样本共用同一实现 —— 旧「正向对照」只对一个字面量数组做 filter，
+ * 删掉整个扫描逻辑它照样绿，等于没有对照。
+ * @param {Map<string,{rel:string,line:number}>} emitterMap 盘上发射面
+ * @param {Map<string,object>} tableMap 登记表
+ * @param {(anchor:{file:string,text:string})=>boolean} anchorHitFn 锚点判定（合成样本传桩）
+ */
+export function judgeReconciliation(emitterMap, tableMap, anchorHitFn) {
+  const out = [];
+  const STATUSES = ['consumed', 'pending', 'exempt'];
+  for (const [cmd, where] of emitterMap) {
+    const t = tableMap.get(cmd);
+    if (!t) {
+      out.push(`${where.rel}:${where.line} 命令 ${cmd} 回传 degraded，但登记表里没有它 ⇒ 新增分态必须显式回答「前端接不接」`);
+      continue;
+    }
+    if (!STATUSES.includes(t.status)) {
+      out.push(`${cmd} 的 status 非法：${t.status}`);
+      continue;
+    }
+    if (t.status === 'consumed') {
+      if (!t.anchor || !t.anchor.file || !t.anchor.text) {
+        out.push(`${cmd} 登记为 consumed 却没给可核锚点（等于免检）`);
+        continue;
+      }
+      if (!anchorHitFn(t.anchor)) {
+        out.push(`${cmd} 登记为 consumed，但 ${t.anchor.file} 里找不到锚点「${t.anchor.text}」⇒ 消费点被删了或锚点写错`);
+      }
+      continue;
+    }
+    if (!t.batch) out.push(`${cmd} 是 ${t.status} 但缺批次归属`);
+    if (!t.reason || t.reason.trim().length < 8) out.push(`${cmd} 是 ${t.status} 但缺理由（≥8 字）`);
+    if (t.anchor) {
+      if (!t.anchor.file || !t.anchor.text) out.push(`${cmd} 的 ${t.status} 锚点不完整（file/text 都要有）`);
+      else if (anchorHitFn(t.anchor)) {
+        out.push(`${cmd} 仍登记为 ${t.status}（${t.batch}），但锚点已在盘上命中 ⇒ 修完要回收条目`);
+      }
+    } else if (t.status === 'pending') {
+      out.push(`${cmd} 是 pending 却没给消费点锚点 ⇒ 「兑现即回收」这条腿对它永久失效（补 anchor，或写成书面 exempt）`);
     }
   }
-  if (!['consumed', 'pending', 'exempt'].includes(t.status)) g.fail(`${cmd} 的 status 非法：${t.status}`);
+  for (const [cmd, t] of tableMap) {
+    if (!emitterMap.has(cmd)) {
+      out.push(`登记表条目失效：盘上已无命令 ${cmd} 发射 degraded（${t.status === 'pending' ? t.batch : 'consumed'}）`);
+    }
+  }
+  return out;
 }
-for (const [cmd, t] of table) {
-  if (!emitters.has(cmd)) g.fail(`登记表条目失效：盘上已无命令 ${cmd} 发射 degraded（${t.status === 'pending' ? t.batch : 'consumed'}）`);
-}
+
+for (const p of judgeReconciliation(emitters, table, (a) => anchorHit(join(ROOT, a.file), a.text))) g.fail(p);
 
 if (emitters.size < MIN_EMITTERS) {
   g.fail(`断言对象地板不成立：只认出 ${emitters.size} 个 degraded 发射命令（地板 ${MIN_EMITTERS}）⇒ 命令解析或属性判定失效`);
@@ -109,12 +158,38 @@ if (emitters.size < MIN_EMITTERS) {
 const consumed = [...emitters.keys()].filter((c) => table.get(c)?.status === 'consumed').length;
 g.ok(`degraded 消费契约对账：发射 ${emitters.size} 条 / 前端已接 ${consumed} 条 / 过渡 pending ${[...emitters.keys()].filter((c) => table.get(c)?.status === 'pending').length} 条（B0 落地时的缺口，逐条带批次）`);
 
-// 合成样本正向对照：证明「新增发射不登记必红」与「pending 兑现后不回收必红」两条腿都在
-const STATES = ['consumed', 'pending', 'exempt'];
-const badState = STATES.concat(['bogus']).filter((s) => !['consumed', 'pending', 'exempt'].includes(s));
-const ctrlOk = badState.length === 1 && STATES.every((s) => !badState.includes(s));
-if (!ctrlOk) g.fail('正向对照失败：status 白名单判定本身失真（非法值必须恰好 1 个）');
-else g.ok('正向对照通过：status 白名单只认 consumed/pending/exempt，其它值必被拦');
+// 合成样本正向对照（T1e-L01）：两条主判据**各自**被样本驱动，不再对字面量数组做同义反复。
+//   ① 新增发射不登记必红；② pending 锚点命中（修好了没回收）必红；
+//   ③ consumed 缺锚点 / gone 命令反向咬合 / exempt 缺理由；④ 干净样本必须放行。
+{
+  const emitOf = (cmd) => new Map([[cmd, { rel: 'sample.rs', line: 1 }]]);
+  const tblOf = (rows) => new Map(rows.map((r) => [r.cmd, r]));
+  const neverHit = () => false;
+  const cases = [
+    ['新增发射不登记未命中', judgeReconciliation(emitOf('new_cmd'), tblOf([]), neverHit).length],
+    ['pending 锚点命中未回收未命中', judgeReconciliation(
+      emitOf('p_cmd'),
+      tblOf([{ cmd: 'p_cmd', status: 'pending', batch: 'Bx', reason: '理由足够长的一句话', anchor: { file: 'f.js', text: 't' } }]),
+      () => true,
+    ).length],
+    ['pending 无锚点未命中', judgeReconciliation(
+      emitOf('p_cmd'),
+      tblOf([{ cmd: 'p_cmd', status: 'pending', batch: 'Bx', reason: '理由足够长的一句话' }]),
+      neverHit,
+    ).length],
+    ['consumed 缺锚点未命中', judgeReconciliation(emitOf('c_cmd'), tblOf([{ cmd: 'c_cmd', status: 'consumed' }]), neverHit).length],
+    ['exempt 缺理由未命中', judgeReconciliation(emitOf('e_cmd'), tblOf([{ cmd: 'e_cmd', status: 'exempt', batch: 'Bx' }]), neverHit).length],
+    ['登记表多出命令未命中', judgeReconciliation(new Map(), tblOf([{ cmd: 'gone', status: 'consumed', anchor: { file: 'f', text: 't' } }]), neverHit).length],
+    ['干净样本误报', judgeReconciliation(
+      emitOf('c_cmd'),
+      tblOf([{ cmd: 'c_cmd', status: 'consumed', anchor: { file: 'f.js', text: 't' } }]),
+      () => true,
+    ).length],
+  ];
+  const bad = cases.filter(([, got], i) => got !== (i === cases.length - 1 ? 0 : 1));
+  if (bad.length) g.fail(`正向对照失效：${bad.map(([n, got]) => `${n}（实得 ${got}）`).join('、')}`);
+  else g.ok(`正向对照 ${cases.length} 组命中（新增发射必红 / pending 锚点回收必红 / 无锚点 pending 必红 / 缺锚点必红 / 缺理由必红 / 表多出必红 / 干净放行）`);
+}
 
 // ---------- B3-4（2026-10-27）：时序前提 ——「还没读到配置」不得与「配置就绪」同形 ----------
 // 病根：`pathConfigState` 初值是 'ok'，于是 load 未完成时也自称就绪；补扫定时器窗口内点

@@ -12,8 +12,12 @@
 // 普通字符串、Rust 原始字符串 r#"…"#、JS 模板字符串（含 `${}` 内插递归）、Rust 字符字面量。
 // Rust 生命周期 `'a` 不算字符字面量：只在「同一段内闭合且长度合理」时才抹，避免把整行误抹。
 
-/** 把注释与字符串字面量抹成空格（等长）。@param {string} text @param {'rs'|'js'} lang */
-export function blankNonCode(text, lang = 'rs') {
+/** 把注释与字符串字面量抹成空格（等长）。
+ * `keepStrings: true` 只抹注释、保留字符串原文 —— 供「判定对象就是字符串字面量」的门禁用
+ * （T1h-L04：check-idle-scripts 必须看见 `'DOMContentLoaded'` 事件名）。仍按字符串状态机跳过
+ * 其内容，因此字符串里的 `//` 不会被误当行注释。
+ * @param {string} text @param {'rs'|'js'} lang @param {{keepStrings?: boolean}} [opts] */
+export function blankNonCode(text, lang = 'rs', { keepStrings = false } = {}) {
   const out = text.split('');
   const blank = (from, to) => {
     for (let i = from; i < to && i < out.length; i++) if (out[i] !== '\n' && out[i] !== '\r') out[i] = ' ';
@@ -52,7 +56,7 @@ export function blankNonCode(text, lang = 'rs') {
       }
       if (closed) {
         while (j < n && /[dgimsuyv]/.test(text[j])) j++; // 标志位
-        blank(i, j); i = j; prev = '/'; continue;
+        if (!keepStrings) blank(i, j); i = j; prev = '/'; continue;
       }
     }
     if (c === '/' && d === '/') {
@@ -76,13 +80,13 @@ export function blankNonCode(text, lang = 'rs') {
         const close = '"' + '#'.repeat(hashes);
         const at = text.indexOf(close, k + 1);
         const end = at < 0 ? n : at + close.length;
-        blank(i, end); i = end; prev = '"'; continue;
+        if (!keepStrings) blank(i, end); i = end; prev = '"'; continue;
       }
     }
     if (c === '"') {
       let j = i + 1;
       while (j < n) { if (text[j] === '\\') { j += 2; continue; } if (text[j] === '"') { j++; break; } if (text[j] === '\n' && !isRs) break; j++; }
-      blank(i, j); i = j; prev = '"'; continue;
+      if (!keepStrings) blank(i, j); i = j; prev = '"'; continue;
     }
     if (!isRs && c === '`') {
       let j = i + 1;
@@ -92,11 +96,11 @@ export function blankNonCode(text, lang = 'rs') {
         if (text[j] === '`') { j++; break; }
         j++;
       }
-      blank(i, j); i = j; prev = '`'; continue;
+      if (!keepStrings) blank(i, j); i = j; prev = '`'; continue;
     }
     if (isRs && c === "'") {
       const m = /^'(?:\\.|[^'\\\n]){1,2}'/.exec(text.slice(i, i + 8));
-      if (m) { blank(i, i + m[0].length); i += m[0].length; prev = "'"; continue; }
+      if (m) { if (!keepStrings) blank(i, i + m[0].length); i += m[0].length; prev = "'"; continue; }
     }
     if (!/\s/.test(c)) prev = c;
     i++;
