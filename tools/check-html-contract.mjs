@@ -124,22 +124,45 @@ check(
   spotOrderViolations('<script src="scripts/spotlight.js" defer></script>', 't').length === 0,
   '3a 对照c：只有 spotlight 没有 liquid-glass 的样本不得误报',
 );
+// P1（2026-11-02）：液态玻璃移出首屏后，两者都在 IDLE_SCRIPTS 里 —— 原「按需注入支」的
+// 前提（index.html 有 liquid-glass）不再成立，改为直接比对 IDLE_SCRIPTS 内的先后。
+function idlePairOrderViolation(list) {
+  const g = list.indexOf("'scripts/liquid-glass.js'");
+  const s = list.indexOf("'scripts/spotlight.js'");
+  return g >= 0 && s >= 0 && s < g;
+}
+check(
+  idlePairOrderViolation("'scripts/spotlight.js',\n'scripts/liquid-glass.js'"),
+  '3a 对照d：IDLE_SCRIPTS 内序反的样本必须判红',
+);
+check(
+  !idlePairOrderViolation("'scripts/liquid-glass.js',\n'scripts/spotlight.js'"),
+  '3a 对照e：IDLE_SCRIPTS 内序正的样本必须放行',
+);
+check(
+  !idlePairOrderViolation("'scripts/spotlight.js',"),
+  '3a 对照f：IDLE_SCRIPTS 里只有 spotlight 不得误报',
+);
 let appJs = '';
 try { appJs = readFileSync(join(SRC, 'scripts', 'app.js'), 'utf8'); } catch { /* 下面按未校验处理 */ }
 let indexHtml = '';
 try { indexHtml = readFileSync(join(SRC, 'index.html'), 'utf8'); } catch { /* 同上 */ }
 const idleList = (appJs.match(/const IDLE_SCRIPTS\s*=\s*\[([\s\S]*?)\]/) || ['', ''])[1];
-const spotInIdle = /'scripts\/spotlight\.js'/.test(appJs) && /spotlight\.js/.test(idleList);
-const liquidStatic = /scripts\/liquid-glass\.js/.test(indexHtml);
-const spotObjects = spotPairs + (spotInIdle && liquidStatic ? 1 : 0);
+const spotInIdle = /'scripts\/spotlight\.js'/.test(idleList);
+const liquidInIdle = /'scripts\/liquid-glass\.js'/.test(idleList);
+const liquidStatic = /src="[^"]*scripts\/liquid-glass\.js"/.test(indexHtml);
+const idlePair = spotInIdle && liquidInIdle;
+const idleOrderBad = idlePair && idlePairOrderViolation(idleList);
+const spotObjects = spotPairs + (idlePair ? 1 : 0) + (spotInIdle && liquidStatic ? 1 : 0);
 check(
-  !!appJs && spotOrderHits.length === 0 && spotObjects >= 1,
-  `3a. spotlight 在 liquid-glass 之后（静态可比对 ${spotPairs} 对；按需注入支 ${spotInIdle && liquidStatic ? 1 : 0} = 存在性代理，前提「IDLE 晚于首帧」由 check-idle-scripts 钉）`,
+  !!appJs && spotOrderHits.length === 0 && !idleOrderBad && spotObjects >= 1,
+  `3a. spotlight 在 liquid-glass 之后（静态可比对 ${spotPairs} 对；IDLE_SCRIPTS 内成对 ${idlePair ? 1 : 0}；按需注入支 ${spotInIdle && liquidStatic ? 1 : 0}）`,
   !appJs ? 'app.js 读不到 ⇒ 本节未校验（按失败处理，不冒充通过）'
     : spotOrderHits.length ? spotOrderHits.join('；')
-      : spotObjects === 0
-        ? '0 个可判对象：spotlight.js 既不在 IDLE_SCRIPTS、也没有静态对 ⇒ 判据已失明（摘掉按需入口正是这个形状），不是仓库变干净'
-        : '',
+      : idleOrderBad ? 'IDLE_SCRIPTS 里 spotlight.js 排在 liquid-glass.js 之前'
+        : spotObjects === 0
+          ? '0 个可判对象：spotlight.js 既不在 IDLE_SCRIPTS、也没有静态对 ⇒ 判据已失明（摘掉按需入口正是这个形状），不是仓库变干净'
+          : '',
 );
 check(
   dsOrderHits.length === 0,

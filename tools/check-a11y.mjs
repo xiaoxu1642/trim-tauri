@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// check-a11y.mjs —— 可达性四断言（P3-1/P3-3，2026-10-09）
+// check-a11y.mjs —— 可达性断言（P3-1/P3-3，2026-10-09；假绿 #7 收紧 2026-11-02）
 //
-// 四条「找违规型」断言，各配**内置正向对照自检**（违例样本必须判红；只打印 ✓
+// 每条「找违规型」断言都配**内置正向对照自检**（违例样本必须判红；只打印 ✓
 // 的恒绿断言视同没写，AGENTS §4.1）：
 //   ① 勾选框模板三属性：`class="checkbox"` 的元素必须同现
 //      `role="checkbox"` / `tabindex="0"` / `aria-checked`（自绘控件三件套，
@@ -13,8 +13,16 @@
 //   ④ prefers-reduced-motion 归零覆盖面（v4 F1）：main.css 的 RM 归零段必须
 //      点名 **body 自身**（三子窗 body fadeIn 挂在 body 上，`body > *` 漏掉它）
 //      且覆盖 `::-webkit-slider-thumb`（厂商伪元素，::before/::after 式管不到）。
+//   ⑩ 表单控件可访问名（T1d-M03 / F4a2-M05/M06）：input/select/textarea 必须有
+//      aria-label / aria-labelledby（非空）、关联 <label for> 或隐式 <label> 文本；
+//      role="button" 自绘控件必须有 aria-label / aria-labelledby / 元素内文本。
+//      placeholder / data-tip / 兄弟 span 文案不是可访问名。收紧当日的存量违例
+//      逐条登记在 NAME_TRANSITION（file#selector + 理由），只减不增；整文件跳过不算。
+//   ⑪ 焦点三断言（T1d-M04）：默认焦点可见（逐交互面自选择器 + 弹窗 initialFocus）、
+//      焦点陷阱（ds.focusTrap 的 Tab 圈闭 / focusin 外逃拉回）、关闭归还
+//      （trap.release 与 prevFocus.focus）；不再用「合并 CSS 里存在任意 :focus-visible」。
 //
-// 扫描面地板：三类命中数低于粗下界即判红（防「正则过时 ⇒ 0 命中恒绿」）。
+// 扫描面地板：命中数低于粗下界即判红（防「正则过时 ⇒ 0 命中恒绿」）。
 //
 // 用法：node tools/check-a11y.mjs
 'use strict';
@@ -97,8 +105,6 @@ function titleViolations(text, isJs) {
 // v4 F1 红线：归零通配从 `body > *` 起算会漏掉 **body 自身**（三子窗 body fadeIn
 // 就挂在 body 上）；滑块拇指 `::-webkit-slider-thumb` 是厂商伪元素，归零表的
 // ::before/::after 两式覆盖不到 —— 两处各配断言，漏一处即红（点名 `body` 自身）。
-// T1d-M08：焦点环判据的唯一实现（自检与真仓扫描共用，不许各写一份正则）。
-const focusVisibleMissing = (css) => !/:focus-visible/.test(css);
 function rmViolations(css) {  const out = [];
   const blocks = [...css.matchAll(/@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{([\s\S]*?)\n\}/g)]
     .map((m) => m[1])
@@ -143,6 +149,335 @@ function windowAppViolations(text) {
   return out;
 }
 
+// ---------- ⑩ 表单控件 / role=button 可访问名（假绿 #7，T1d-M03 / F4a2-M05/M06） ----------
+// 判据只认「读屏能读出的名字」：aria-label / aria-labelledby（非空）、关联
+// <label for>（label 内必须有文本）、隐式 <label> 包裹（label 内必须有文本）。
+// placeholder / data-tip / title / 兄弟 span 文案都不算 —— 它们不是可访问名。
+// role="button" 自绘控件允许由元素内文本命名（原生 accname 规则），纯图标/空壳必红。
+// 过渡表：收紧当日的存量违例逐条登记（file#selector + 理由），只减不增；
+// 新增违例不在表内即红，表内条目已修复/改名也红（要求同步删条目）。
+const NAME_GENERIC_CLASSES = new Set([
+  'field-input', 'syspanel-pf-input', 'syspanel-pwr-input', 'input-style', 'startup-check',
+]);
+// 上限固定在收紧当日条数（30）；每修复一条应同步下调，禁止借「换一条」维持总数。
+const NAME_DEBT_CAP = 30;
+const NAME_TRANSITION = [
+  ['src/index.html#lockQueryPath', '「查询路径」是兄弟 span 文本，未与输入框关联'],
+  ['src/index.html#startupDefendToggle', '开关 label 内无文字，标题「防恢复自动删除」是兄弟 div'],
+  ['src/index.html#qcSearch', '只有 placeholder；placeholder 不是可访问名'],
+  ['src/index.html#cleanupAgePolicy', '「全局门槛」在兄弟 span.skin-row-label'],
+  ['src/index.html#presetBgSelect', '「预设壁纸」在兄弟 span.skin-row-label'],
+  ['src/index.html#bgOpacity', '「雾化度」在兄弟 span.bg-opacity-label'],
+  ['src/index.html#bgPosX', '「水平位置」在兄弟 span.bg-opacity-label'],
+  ['src/index.html#bgPosY', '「垂直位置」在兄弟 span.bg-opacity-label'],
+  ['src/index.html#wallpaperRotateToggle', '开关 label 内无文字，「自动轮换」在兄弟 span'],
+  ['src/index.html#wallpaperIntervalSelect', '「轮换间隔」在兄弟 span.skin-row-label'],
+  ['src/index.html#bgBlur', '「磨砂强度」在兄弟 span.bg-opacity-label'],
+  ['src/index.html#mouseTrailToggle', '开关 label 内无文字，「启用鼠标拖尾」在兄弟 span'],
+  ['src/index.html#liquidMotionSelect', '「效果」在兄弟 span.skin-row-label'],
+  ['src/index.html#cdpToggle', '开关 label 内无文字，「远程调试 (CDP)」在兄弟 span'],
+  ['src/process-manager-window.html#pmSearch', '只有 placeholder；placeholder 不是可访问名'],
+  ['src/residue-window.html#rsSearch', '只有 placeholder；placeholder 不是可访问名'],
+  ['src/scripts/memoryclean.js#input[data-check=${r.id}]', 'label.mem-check 内只有 CSS 方框，区域名挂在行 role=group 上'],
+  ['src/scripts/models-window.js#input[data-role=enabled]', '开关 label 内只有轨道，字段名在兄弟 span.mw-field-label'],
+  ['src/scripts/models-window.js#input[data-role=apiUrl]', '字段名在兄弟 span.mw-field-label，输入框无 id/aria-label'],
+  ['src/scripts/models-window.js#input[data-role=apiKey]', '字段名在兄弟 span.mw-field-label，输入框无 id/aria-label'],
+  ['src/scripts/models-window.js#select[data-role=model]', '字段名在兄弟 span.mw-field-label，下拉框无 id/aria-label'],
+  ['src/scripts/models-window.js#input[data-role=model]', '字段名在兄弟 span.mw-field-label，输入框无 id/aria-label'],
+  ['src/scripts/models-window.js#input[data-role=customName]', '字段名在兄弟 span.mw-field-label，输入框无 id/aria-label'],
+  ['src/scripts/models-window.js#input[data-role=timeout]', '字段名在兄弟 span.mw-field-label，输入框无 id/aria-label'],
+  ['src/scripts/optimizer.js#select.optimizer-mem-select', '动态档位下拉只有 data-tip，无 label/aria-label'],
+  ['src/scripts/syspanel.js#syspanelPwrNameInput', '弹窗正文只有说明 p，输入框无 label/aria-label'],
+  ['src/scripts/syspanel.js#syspanelPwrSearch', '只有 placeholder；placeholder 不是可访问名'],
+  ['src/scripts/syspanel.js#input.syspanel-pf-drive', '表格列头「盘符」未与单元格输入框关联'],
+  ['src/scripts/syspanel.js#input[data-field=initialMb]', '表格列头「初始 (MB)」未与单元格输入框关联'],
+  ['src/scripts/syspanel.js#input[data-field=maxMb]', '表格列头「最大 (MB)」未与单元格输入框关联'],
+];
+const NAME_TRANSITION_MAP = new Map(NAME_TRANSITION);
+
+function stripMarkupComments(text, isJs) {
+  if (!isJs) return text.replace(/<!--[\s\S]*?-->/g, ' ');
+  // 与 ⑤ 的剥注释同口径：`://` 前的冒号保护 URL，避免把协议头当行注释。
+  return text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:\w])\/\/.*$/gm, '$1');
+}
+// 标签窗口必须走到引号外的 `>` 为止（属性值里可能有空格/模板表达式），
+// 不能像旧实现那样直接 indexOf('>')。
+function readTag(text, start) {
+  let quote = null;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) { if (ch === quote) quote = null; continue; }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === '>') return text.slice(start, i + 1);
+  }
+  return text.slice(start, start + 600);
+}
+// 属性解析只服务可访问名判定：支持双/单引号、布尔属性与模板表达式。
+function parseTagAttrs(tag) {
+  const attrs = {};
+  let i = 0;
+  while (i < tag.length && !/\s/.test(tag[i]) && tag[i] !== '>') i++;
+  while (i < tag.length) {
+    while (i < tag.length && /\s/.test(tag[i])) i++;
+    if (i >= tag.length || tag[i] === '>' || tag[i] === '/') break;
+    let name = '';
+    while (i < tag.length && !/[\s=/>]/.test(tag[i])) name += tag[i++];
+    while (i < tag.length && /\s/.test(tag[i])) i++;
+    if (!name) { i++; continue; }
+    if (tag[i] === '=') {
+      i++;
+      while (i < tag.length && /\s/.test(tag[i])) i++;
+      const quote = tag[i];
+      if (quote === '"' || quote === "'") {
+        i++;
+        let value = '';
+        while (i < tag.length && tag[i] !== quote) value += tag[i++];
+        i++;
+        attrs[name.toLowerCase()] = value;
+      } else {
+        let value = '';
+        while (i < tag.length && !/[\s>]/.test(tag[i])) value += tag[i++];
+        attrs[name.toLowerCase()] = value;
+      }
+    } else {
+      attrs[name.toLowerCase()] = '';
+    }
+  }
+  return attrs;
+}
+// 去标签取文本：按 readTag 跳过整段标签，避免属性值里的 `>` 截断。
+function markupText(markup) {
+  let out = '';
+  let i = 0;
+  while (i < markup.length) {
+    const lt = markup.indexOf('<', i);
+    if (lt < 0) { out += markup.slice(i); break; }
+    out += markup.slice(i, lt);
+    i = lt + readTag(markup, lt).length;
+  }
+  return out;
+}
+const hasReadableText = (s) => !!s && markupText(s).replace(/\s+/g, '').length > 0;
+function labelEntries(source) {
+  const out = [];
+  for (const m of source.matchAll(/<label\b/gi)) {
+    const tag = readTag(source, m.index);
+    const openEnd = m.index + tag.length;
+    const close = source.indexOf('</label>', openEnd);
+    if (close < 0) continue;
+    const attrs = parseTagAttrs(tag);
+    out.push({
+      start: m.index,
+      end: close,
+      forAttr: (attrs.for || '').trim(),
+      content: source.slice(openEnd, close),
+    });
+  }
+  return out;
+}
+function enclosingLabel(entries, start) {
+  let found = null;
+  for (const entry of entries) {
+    if (entry.start < start && start < entry.end && (!found || entry.start > found.start)) found = entry;
+  }
+  return found;
+}
+function controlSelectorKey(file, tag, attrs) {
+  const tagName = (tag.match(/^<\s*([a-zA-Z][\w-]*)/) || [])[1] || 'control';
+  if (attrs.id) return `${file}#${attrs.id}`;
+  for (const name of ['data-role', 'data-field', 'data-check', 'data-keys', 'name']) {
+    if (attrs[name]) return `${file}#${tagName}[${name}=${attrs[name]}]`;
+  }
+  const classes = (attrs.class || '').trim().split(/\s+/).filter(Boolean);
+  const cls = classes.find((c) => !NAME_GENERIC_CLASSES.has(c)) || classes[0];
+  return cls ? `${file}#${tagName}.${cls}` : `${file}#${tagName}`;
+}
+function elementInner(text, openEnd, tagName) {
+  let depth = 1;
+  const re = new RegExp('<(/?)' + tagName + '\\b[^>]*>', 'gi');
+  re.lastIndex = openEnd;
+  let m;
+  while ((m = re.exec(text))) {
+    if (m[1]) depth--; else depth++;
+    if (depth === 0) return text.slice(openEnd, m.index);
+  }
+  return '';
+}
+function analyzeAccessibleNames(rawText, file, isJs) {
+  const text = stripMarkupComments(rawText, isJs);
+  const labels = labelEntries(text);
+  const violations = [];
+  let controlCount = 0;
+  let namedCount = 0;
+  for (const m of text.matchAll(/<(input|select|textarea)\b/gi)) {
+    const tag = readTag(text, m.index);
+    const attrs = parseTagAttrs(tag);
+    if ((attrs.type || '').toLowerCase() === 'hidden') continue;
+    if ((attrs['aria-hidden'] || '').toLowerCase() === 'true') continue;
+    controlCount++;
+    let named = hasReadableText(attrs['aria-label'] || '') ||
+      hasReadableText(attrs['aria-labelledby'] || '');
+    const type = (attrs.type || '').toLowerCase();
+    if (!named && ['button', 'submit', 'reset'].includes(type)) named = hasReadableText(attrs.value || '');
+    if (!named && type === 'image') named = hasReadableText(attrs.alt || '');
+    if (!named && attrs.id) {
+      const explicit = labels.find((l) => l.forAttr === attrs.id && hasReadableText(l.content));
+      if (explicit) named = true;
+    }
+    if (!named) {
+      const implicit = enclosingLabel(labels, m.index);
+      if (implicit && hasReadableText(implicit.content)) named = true;
+    }
+    if (named) namedCount++;
+    else {
+      violations.push({
+        key: controlSelectorKey(file, tag, attrs),
+        why: '表单控件没有可访问名（aria-label / aria-labelledby / label for / 隐式 label 四者皆无）',
+      });
+    }
+  }
+  let roleButtonCount = 0;
+  let roleButtonNamed = 0;
+  // 逐标签扫 role="button"：标签窗口交给 readTag，属性值里的 `>` 不会截断。
+  for (const m of text.matchAll(/<[a-zA-Z][\w-]*\b/g)) {
+    const tag = readTag(text, m.index);
+    const attrs = parseTagAttrs(tag);
+    if ((attrs.role || '').toLowerCase() !== 'button') continue;
+    roleButtonCount++;
+    const tagName = (tag.match(/^<\s*([a-zA-Z][\w-]*)/) || [])[1] || 'div';
+    const named = hasReadableText(attrs['aria-label'] || '') ||
+      hasReadableText(attrs['aria-labelledby'] || '') ||
+      hasReadableText(elementInner(text, m.index + tag.length, tagName));
+    if (named) roleButtonNamed++;
+    else {
+      const cls = ((attrs.class || '').trim().split(/\s+/)[0] || 'anon');
+      violations.push({
+        key: `${file}#role=button:${tagName}.${cls}`,
+        why: 'role=button 自绘控件没有可访问名（aria-label / aria-labelledby / 元素内文本皆无）',
+      });
+    }
+  }
+  return { violations, controlCount, namedCount, roleButtonCount, roleButtonNamed };
+}
+
+// ---------- ⑪ 焦点三断言（T1d-M04） ----------
+// 旧判据「合并 CSS 里存在任意一条 :focus-visible」在 main.css 有 27 处时恒过。
+// 新判据分三层，每一层都能被合成样本判红：
+//   a 默认焦点可见：每个交互面在**该窗**合并 CSS 里必须解析出可见焦点指示
+//     （自选择器或裸 :focus-visible 均可，但 outline:none 且无替代指示 ⇒ 红）；
+//     弹窗必须显式给 initialFocus（确认框落主按钮，update.md 2026-10-03 裁定）。
+//   b 焦点陷阱：modal/静态说明框/子窗确认框都走 ds.focusTrap；ds.js 的
+//     focusTrap 必须有 Tab 圈闭、focusin 外逃拉回与初始焦点。
+//   c 关闭归还：各弹窗关闭路径必须调用 trap.release()，release 内必须
+//     prevFocus.focus() 把焦点还给触发元素。
+const FOCUS_SURFACES = [
+  { sel: '.btn', why: '按钮' },
+  { sel: '.filter-tab', why: '分段标签' },
+  { sel: '.checkbox', why: '自绘勾选框' },
+  { sel: '.ds-menu-item', why: '菜单项' },
+  { sel: '.nav-item', why: '侧边导航项' },
+  { sel: '.nav-subitem', why: '侧边子导航项' },
+  { sel: '.category-item', why: '分类项' },
+  { sel: '.context-item', why: '右键菜单项' },
+  { sel: '.toggle-switch input', why: '开关' },
+  { sel: '.opt-row', why: '优化看板行' },
+  { sel: '.mem-group-row', why: '进程树分组行' },
+  { sel: '.mw-group-head', why: '模型分组头' },
+  { sel: '.an-tm-cell', why: 'Treemap 格子' },
+  { sel: '.syspanel-pwr-item', why: '电源项' },
+  { sel: '.syspanel-pwr-input', why: '电源输入' },
+  { sel: '.syspanel-pf-input', why: '分页文件输入' },
+  { sel: '.mem-check input', why: '内存区域勾选' },
+  { sel: '.mt-switch', why: '材质总开关' },
+  { sel: '.sidebar-toggle-btn', why: '侧边栏折叠按钮' },
+  { sel: '.usage-close', why: '弹窗关闭按钮' },
+  { sel: '.tauri-caption-btn', why: '自绘标题栏按钮' },
+];
+function cssFocusRules(css) {
+  const clean = css.replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const out = [];
+  for (const m of clean.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const selectorText = m[1].trim();
+    if (!selectorText.includes(':focus-visible')) continue;
+    out.push({
+      selectors: selectorText.split(',').map((s) => s.trim()).filter(Boolean),
+      decls: m[2],
+    });
+  }
+  return out;
+}
+function selectorHasSurface(selector, surface) {
+  if (selector === ':focus-visible') return true;
+  let idx = selector.indexOf(surface);
+  while (idx >= 0) {
+    const before = idx === 0 ? '' : selector[idx - 1];
+    const after = selector[idx + surface.length] || '';
+    const beforeOk = idx === 0 || ' >+~,('.includes(before) ||
+      ((surface[0] === '.' || surface[0] === '#') && /[A-Za-z0-9_*-]/.test(before));
+    const afterOk = !after || ' :.#[>+~'.includes(after);
+    if (beforeOk && afterOk) return true;
+    idx = selector.indexOf(surface, idx + 1);
+  }
+  return false;
+}
+function declarationValue(decls, prop) {
+  const m = decls.match(new RegExp('(?:^|;)\\s*' + prop + '\\s*:\\s*([^;]+)', 'i'));
+  return m ? m[1].trim() : null;
+}
+function hasFocusAlternative(decls) {
+  const boxShadow = declarationValue(decls, 'box-shadow');
+  if (boxShadow && !/^none(?:\s|$)/i.test(boxShadow)) return true;
+  for (const prop of ['background', 'background-color']) {
+    const value = declarationValue(decls, prop);
+    if (value && !/^(none|transparent)(?:\s|$)/i.test(value)) return true;
+  }
+  for (const prop of ['border', 'border-color', 'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color']) {
+    const value = declarationValue(decls, prop);
+    if (value && !/^(none|transparent|0)(?:\s|$)/i.test(value)) return true;
+  }
+  const color = declarationValue(decls, 'color');
+  if (color && !/^(transparent|inherit)(?:\s|$)/i.test(color)) return true;
+  const decoration = declarationValue(decls, 'text-decoration');
+  if (decoration && !/^none(?:\s|$)/i.test(decoration)) return true;
+  return false;
+}
+function focusVisibleFor(css, surface) {
+  let outlineVisible = false;
+  let alternativeVisible = false;
+  let matched = 0;
+  for (const rule of cssFocusRules(css)) {
+    if (!rule.selectors.some((selector) => selectorHasSurface(selector, surface))) continue;
+    matched++;
+    const outline = declarationValue(rule.decls, 'outline');
+    if (outline) outlineVisible = !/^(none|0(?:px)?)(?:\s|$)/i.test(outline);
+    if (hasFocusAlternative(rule.decls)) alternativeVisible = true;
+  }
+  return { visible: outlineVisible || alternativeVisible, matched };
+}
+function sliceBetween(text, startNeedle, endNeedle) {
+  const start = text.indexOf(startNeedle);
+  if (start < 0) return null;
+  const end = text.indexOf(endNeedle, start + startNeedle.length);
+  return text.slice(start, end > start ? end : Math.min(text.length, start + 6000));
+}
+function focusTrapMissing(code) {
+  const out = [];
+  if (!code.includes("e.key !== 'Tab'")) out.push('没有 Tab 键判定');
+  if (!code.includes('preventDefault')) out.push('没有 Tab 默认行为拦截');
+  if (!code.includes("addEventListener('focusin'")) out.push('没有 focusin 监听');
+  if (!code.includes('container.contains(document.activeElement)')) out.push('没有容器归属判定');
+  if (!code.includes('target.focus()')) out.push('没有初始焦点');
+  if (!code.includes('prevFocus.focus()')) out.push('没有关闭归还');
+  return out;
+}
+function modalFocusMissing(code) {
+  const out = [];
+  if (!code.includes('ds.focusTrap(')) out.push('未接 ds.focusTrap');
+  if (!code.includes('initialFocus: \'[data-confirm="ok"]\'')) out.push('确认框默认焦点未落主按钮');
+  if (!code.includes('trap.release()') && !code.includes('trap?.release()')) out.push('关闭未调用 trap.release');
+  return out;
+}
+
 let fail = 0;
 const check = (ok, label, detail = '') => {
   console.log(`${ok ? '✓' : '✗'} ${label}${detail ? ' — ' + detail : ''}`);
@@ -163,6 +498,9 @@ const COLLAPSE_SITES = [
   { file: 'src/scripts/pathbinding-background.js', needle: 'bgListToggle', why: '已导入图片列表折叠头' },
   { file: 'src/scripts/memoryclean.js', needle: '.mem-region-row', why: '内存清理区域行（点击查看简介是唯一入口）' },
   { file: 'src/scripts/processes.js', needle: 'mem-group-row', why: '进程树分组行（aria-expanded 的展开/收起）' },
+  { file: 'src/scripts/optimizer.js', needle: 'opt-row', why: '优化看板行（点击查看详情/还原是唯一入口）' },
+  { file: 'src/scripts/models-window.js', needle: 'mw-group-head', why: '大模型管理分组头折叠' },
+  { file: 'src/scripts/finder.js', needle: 'an-tm-cell', why: 'Treemap 格子下钻（role=button）' },
 ];
 function collapseKeyWiring(text) {
   return /addEventListener\(\s*['"]keydown['"]/.test(text) && /['"]Enter['"]/.test(text);
@@ -252,7 +590,7 @@ function liveCoverageProblems(table, baseline, findTag) {
   return out;
 }
 
-console.log('=== 可达性门禁（勾选框三属性 / aria-live 宿主 / data-tip 反 title）===\n');
+console.log('=== 可达性门禁（勾选框三属性 / aria-live 宿主 / data-tip 反 title / 可访问名 / 焦点管理）===\n');
 
 // ---- 正向对照自检：判定器必须能对违例样本判红、对合规样本放行 ----
 {
@@ -280,11 +618,6 @@ console.log('=== 可达性门禁（勾选框三属性 / aria-live 宿主 / data-
   check(rmViolations(badRmNoBody).some((v) => v.includes('body 自身')), '对照④a：归零表漏 body 自身的样本必须判红');
   check(rmViolations(badRmNoThumb).some((v) => v.includes('slider-thumb')), '对照④b：拇指未归零的样本必须判红');
   check(rmViolations(goodRm).length === 0, '对照④c：body 自身 + 拇指都归零的样本必须放行');
-  // 焦点环（v5-K05 批次 8 补，门禁候选「6 条断言 0 处管焦点环」）：判据 = 该窗加载的
-  // CSS 合并集存在 :focus-visible 规则（A3 裁决：src/styles/ds.css 里 :focus-visible 规则以 bg+color 作替代
-  // 指示，存在性判据即可，不规定实现形态）。
-  check(focusVisibleMissing('body { color: red; }'), '对照④d：无 :focus-visible 规则的样本必须判红');
-  check(!focusVisibleMissing(':focus-visible { outline: 2px solid; }'), '对照④e：有焦点环的样本必须放行');
 
   const badDup = "a?.addEventListener('click', f1);\na?.addEventListener('click', f2);";
   const goodDup = "a?.addEventListener('click', f1);\nb.addEventListener('click', f2);\nrows.forEach(el => el.addEventListener('click', f3));";
@@ -308,6 +641,57 @@ console.log('=== 可达性门禁（勾选框三属性 / aria-live 宿主 / data-
   check(liveCoverageProblems({ polite: ['a', 'x'], off: ['c'] }, base, goodTag).some((v) => v.includes('x ')), '对照⑧e：表里多出未登记 id 必须判红');
   check(liveCoverageProblems({ polite: ['a'], off: ['c', 'a'] }, base, goodTag).some((v) => v.includes('两档')), '对照⑧f：同 id 挂两档必须判红');
   check(liveCoverageProblems(null, base, goodTag).length > 0, '对照⑧g：挂载表解析不到必须判红');
+
+  // ⑩ 可访问名：四组必测（无名字 / label for / aria-label / 仅注释）+ 隐式 label、
+  // 空 label、aria-labelledby、role=button 文本命名。
+  const nameNone = '<input type="text" id="a" />';
+  const nameLabelFor = '<label for="a">名称</label><input type="text" id="a" />';
+  const nameAria = '<input type="text" aria-label="名称" />';
+  const nameCommented = '<!-- <input type="text" aria-label="注释里的名字" /> --><input type="text" id="b" />';
+  const nameImplicit = '<label>名称<input type="text" /></label>';
+  const nameEmptyLabel = '<label for="a"></label><input type="text" id="a" />';
+  const nameLabelledby = '<span id="t">名称</span><input type="text" aria-labelledby="t" />';
+  const roleEmpty = '<div role="button" tabindex="0"><svg></svg></div>';
+  const roleText = '<div role="button" tabindex="0">关闭</div>';
+  check(analyzeAccessibleNames(nameNone, 'sample.html', false).violations.length === 1, '对照⑩a：无名字的表单控件必须判红');
+  check(analyzeAccessibleNames(nameLabelFor, 'sample.html', false).violations.length === 0, '对照⑩b：label for 关联必须放行');
+  check(analyzeAccessibleNames(nameAria, 'sample.html', false).violations.length === 0, '对照⑩c：aria-label 必须放行');
+  check(analyzeAccessibleNames(nameCommented, 'sample.html', false).violations.length === 1, '对照⑩d：只在注释里出现的名字不算');
+  check(analyzeAccessibleNames(nameImplicit, 'sample.html', false).violations.length === 0, '对照⑩e：隐式 label 文本必须放行');
+  check(analyzeAccessibleNames(nameEmptyLabel, 'sample.html', false).violations.length === 1, '对照⑩f：空 label 不算名字');
+  check(analyzeAccessibleNames(nameLabelledby, 'sample.html', false).violations.length === 0, '对照⑩g：aria-labelledby 必须放行');
+  check(analyzeAccessibleNames(roleEmpty, 'sample.html', false).violations.length === 1, '对照⑩h：无名字的 role=button 必须判红');
+  check(analyzeAccessibleNames(roleText, 'sample.html', false).violations.length === 0, '对照⑩i：元素内文本命名 role=button 必须放行');
+
+  // ⑪ 焦点：逐面可见 / 焦点陷阱 / 关闭归还，各配判红与放行样本。
+  check(!focusVisibleFor('', '.btn').visible, '对照⑪a1：没有任何焦点规则的样本必须判红');
+  check(
+    focusVisibleFor('.btn:focus-visible { outline: 2px solid red; }', '.btn').visible &&
+      !focusVisibleFor('.btn:focus-visible { outline: 2px solid red; }', '.filter-tab').visible,
+    '对照⑪a2：只给 .btn 规则时 .filter-tab 必须判红（逐面判定）',
+  );
+  check(!focusVisibleFor('.btn:focus-visible { outline: none; }', '.btn').visible, '对照⑪a3：outline:none 且无替代指示必须判红');
+  check(focusVisibleFor('.btn:focus-visible { outline: none; background: var(--accent-soft); }', '.btn').visible, '对照⑪a4：outline:none + 背景替代必须放行');
+  check(focusVisibleFor(':focus-visible { outline: 2px solid red; }', '.filter-tab').visible, '对照⑪a5：裸 :focus-visible 全局规则必须放行');
+
+  const goodTrap = [
+    "const t = window.ds.focusTrap(el, { initialFocus: '#ok' });",
+    "function onKey(e) { if (e.key !== 'Tab') return; e.preventDefault(); }",
+    "document.addEventListener('focusin', onFocusIn);",
+    'if (!container.contains(document.activeElement)) target.focus();',
+    'target.focus();',
+    'prevFocus.focus();',
+  ].join('\n');
+  check(focusTrapMissing('').length >= 4, '对照⑪b1：缺 Tab 圈闭/归属判定/归还的陷阱样本必须判红');
+  check(focusTrapMissing(goodTrap).length === 0, '对照⑪b2：三件齐全的焦点陷阱样本必须放行');
+
+  const goodModal = [
+    'const trap = window.ds.focusTrap(modalEl, { initialFocus: opts.initialFocus });',
+    `const confirmOpts = { initialFocus: '[data-confirm="ok"]' };`,
+    'function close() { trap.release(); }',
+  ].join('\n');
+  check(modalFocusMissing('').length === 3, '对照⑪c1：默认焦点/陷阱/归还三缺的弹窗样本必须判红');
+  check(modalFocusMissing(goodModal).length === 0, '对照⑪c2：三件齐全的弹窗样本必须放行');
 }
 
 // ---- 真仓扫描 ----
@@ -412,16 +796,127 @@ function frozenRmConstants(code) {
   }
 }
 
+// ---- ⑩ 真仓扫描：表单控件 / role=button 可访问名（假绿 #7） ----
+{
+  const before = g.failed;
+  let controls = 0;
+  let named = 0;
+  let roleButtons = 0;
+  let roleNamed = 0;
+  const violations = [];
+  for (const [p, text, isJs] of sources) {
+    const report = analyzeAccessibleNames(text, rel(p), isJs);
+    controls += report.controlCount;
+    named += report.namedCount;
+    roleButtons += report.roleButtonCount;
+    roleNamed += report.roleButtonNamed;
+    violations.push(...report.violations);
+  }
+  // 语料/判据地板：正则失明时 violations=0 会假绿，必须用命中数兜底。
+  if (controls < 40) g.fail(`⑩ 表单控件只扫到 ${controls} 个（< 40）⇒ 扫描面疑似失明`);
+  if (named < 20) g.fail(`⑩ 可访问名只认出 ${named} 个（< 20）⇒ 判据疑似失明`);
+  if (roleButtons < 8) g.fail(`⑩ role=button 只扫到 ${roleButtons} 个（< 8）⇒ 扫描面疑似失明`);
+  const seen = new Set();
+  let duplicate = false;
+  for (const v of violations) {
+    if (seen.has(v.key)) {
+      duplicate = true;
+      g.fail(`⑩ 过渡表键不唯一：${v.key} 命中多条，无法逐条核销`);
+    }
+    seen.add(v.key);
+    if (!NAME_TRANSITION_MAP.has(v.key)) {
+      g.fail(`⑩ ${v.key}：${v.why}（新增违例必须修产品代码；过渡表只减不增）`);
+    }
+  }
+  for (const [key] of NAME_TRANSITION) {
+    if (!seen.has(key)) {
+      g.fail(`⑩ 过渡表条目 ${key} 已不再命中（违例已修复或选择器改名）⇒ 从 NAME_TRANSITION 删除该条（只减不增）`);
+    }
+  }
+  if (NAME_TRANSITION.length > NAME_DEBT_CAP) {
+    g.fail(`⑩ 过渡表 ${NAME_TRANSITION.length} 条 > 上限 ${NAME_DEBT_CAP}（只减不增）`);
+  }
+  if (g.failed === before && !duplicate) {
+    g.ok(`⑩ 可访问名：表单控件 ${controls} 个（已命名 ${named}）+ role=button ${roleButtons} 个（已命名 ${roleNamed}）；过渡表 ${NAME_TRANSITION.length}/${NAME_DEBT_CAP} 条，当前命中 ${violations.length} 条`);
+  }
+}
+
+// ---- ⑪ 真仓扫描：焦点陷阱 / 默认焦点 / 关闭归还（T1d-M04） ----
+{
+  const before = g.failed;
+  const readScript = (name) => {
+    const p = join(SRC, 'scripts', name);
+    return existsSync(p) ? read(p) : null;
+  };
+  const modalText = readScript('modal.js');
+  const dsText = readScript('ds.js');
+  const appText = readScript('app.js');
+  const pmText = readScript('process-manager-window.js');
+  for (const [name, text] of [
+    ['modal.js', modalText], ['ds.js', dsText], ['app.js', appText], ['process-manager-window.js', pmText],
+  ]) {
+    if (!text) g.fail(`⑪ 缺少 src/scripts/${name} ⇒ 焦点判据失明（不接受跳过）`);
+  }
+
+  if (modalText) {
+    const create = sliceBetween(modalText, 'function create(opts', '// 便捷确认框');
+    const confirm = sliceBetween(modalText, 'function confirm({', '// 关闭当前全部弹窗');
+    const close = sliceBetween(modalText, 'close(reason) {', 'liveCtrls.add(ctrl)');
+    if (!create) g.fail('⑪ modal.js create() 切片锚点失效，焦点陷阱/默认焦点无法判定');
+    if (!confirm) g.fail('⑪ modal.js confirm() 切片锚点失效，默认焦点无法判定');
+    if (!close) g.fail('⑪ modal.js close() 切片锚点失效，关闭归还无法判定');
+    if (create && !create.includes('initialFocus: opts.initialFocus')) {
+      g.fail('⑪ modal.js create() 未把 opts.initialFocus 传给 ds.focusTrap（默认焦点不可配）');
+    }
+    if (create && confirm && close) {
+      for (const m of modalFocusMissing([create, confirm, close].join('\n'))) g.fail(`⑪ modal.js：${m}`);
+    }
+  }
+
+  if (dsText) {
+    const trap = sliceBetween(dsText, 'function focusTrap(', 'ds.focusTrap = focusTrap');
+    const release = trap ? sliceBetween(trap, 'function release() {', 'if (active) {') : null;
+    if (!trap) g.fail('⑪ ds.js focusTrap 切片锚点失效，Tab 圈闭/外逃拉回无法判定');
+    if (!release) g.fail('⑪ ds.js focusTrap.release 切片锚点失效，关闭归还无法判定');
+    if (trap && release) {
+      for (const m of focusTrapMissing([trap, release].join('\n'))) g.fail(`⑪ ds.focusTrap：${m}`);
+    }
+  }
+
+  if (appText) {
+    const usage = sliceBetween(appText, 'async function showUsageGuide()', 'function closeUsageGuide()');
+    const usageClose = sliceBetween(appText, 'function closeUsageGuide()', 'function escapeHtml');
+    if (!usage || !usage.includes('ds.focusTrap(')) g.fail('⑪ app.js 使用说明弹窗未接 ds.focusTrap（焦点陷阱缺失）');
+    if (!usage || !usage.includes("initialFocus: '#btnUsageClose'")) g.fail('⑪ app.js 使用说明弹窗未显式落初始焦点');
+    if (!usageClose || !usageClose.includes('usageTrap.release()')) g.fail('⑪ app.js 使用说明弹窗关闭未归还焦点');
+  }
+
+  if (pmText) {
+    const pmConfirm = sliceBetween(pmText, 'function confirmDialog(', 'let currentProcesses');
+    const pmCleanup = sliceBetween(pmText, 'function cleanup(result) {', 'function escHandler');
+    if (!pmConfirm || !pmConfirm.includes('ds.focusTrap(')) g.fail('⑪ process-manager-window.js 确认框未接 ds.focusTrap（焦点陷阱缺失）');
+    if (!pmConfirm || !pmConfirm.includes("initialFocus: '#pmConfirmOk'")) g.fail('⑪ process-manager-window.js 确认框默认焦点未落主按钮');
+    if (!pmCleanup || !pmCleanup.includes('trap?.release()')) g.fail('⑪ process-manager-window.js 确认框关闭未归还焦点');
+  }
+
+  if (g.failed === before) {
+    g.ok('⑪ 焦点管理：modal.js / 使用说明弹窗 / 进程确认框三处均把默认焦点、焦点陷阱、关闭归还接在 ds.focusTrap 上');
+  }
+}
+
 // ---- 扫描面地板（低于粗下界 ⇒ 疑似正则/目录失明，判红） ----
 if (checkboxSites < 4) g.fail(`勾选框模板命中 ${checkboxSites} 处（< 4）⇒ 扫描面疑似失明`);
 if (liveHosts < 4) g.fail(`异步提示宿主命中 ${liveHosts} 处（< 4）⇒ 扫描面疑似失明`);
 if (tipSites < 10) g.fail(`data-tip 命中 ${tipSites} 处（< 10）⇒ 扫描面疑似失明`);
 
-// ---- ④ 真仓扫描：**逐窗** RM 归零覆盖 + 焦点环（v5-K05 批次 8 改回能判红） ----
+// ---- ④⑪a 真仓扫描：**逐窗** RM 归零覆盖 + 逐交互面焦点可见（T1d-M04） ----
 // P0 子窗 CSS 按需（6a8f02b）曾把全窗 RM 归零段搬进只主窗加载的 main-pages.css，
 // 四子窗动效归零整段失效（可达动效 32/19/14/16 条照播），而旧判据「main+pages 合并判」
 // 照绿——合并集把「搬错文件」读成「已覆盖」。归零覆盖面是**每扇窗**的属性：
 // 逐窗解析各自 <link> 的 CSS 合并集判，「归零段搬错文件 / 子窗漏挂 CSS」都会红。
+// 焦点同理：旧判据只要合并集里存在任一条 :focus-visible 就恒过；现在每个交互面
+// 都要在该窗合并 CSS 里解析出可见指示（自选择器或裸 :focus-visible，outline:none
+// 且无替代指示不算），少一个面就红。
 {
   const cssCache = new Map();
   const loadCss = (f) => {
@@ -429,6 +924,8 @@ if (tipSites < 10) g.fail(`data-tip 命中 ${tipSites} 处（< 10）⇒ 扫描�
     return cssCache.get(f);
   };
   let windowCount = 0;
+  let focusSurfaceChecks = 0;
+  let focusSurfaceProblems = 0;
   for (const p of htmlFiles) {
     const html = read(p);
     const links = styleLinks(html).map((h) => h.split('/').pop());
@@ -441,12 +938,20 @@ if (tipSites < 10) g.fail(`data-tip 命中 ${tipSites} 处（< 10）⇒ 扫描�
     for (const v of rmViolations(merged)) {
       g.fail(`${rel(p)}：${v}（该窗加载 ${links.join(', ')}）`);
     }
-    if (focusVisibleMissing(merged)) {
-      g.fail(`${rel(p)}：该窗加载的 CSS（${links.join(', ')}）无 :focus-visible 规则（键盘焦点不可见）`);
+    for (const surface of FOCUS_SURFACES) {
+      focusSurfaceChecks++;
+      if (!focusVisibleFor(merged, surface.sel).visible) {
+        focusSurfaceProblems++;
+        g.fail(`${rel(p)}：交互面 ${surface.sel}（${surface.why}）在合并 CSS（${links.join(', ')}）里没有可判红的焦点指示`);
+      }
     }
   }
   // preview 子窗退役后主窗+3 子窗 = 4 份（2026-10-13）
   if (windowCount < 4) g.fail(`逐窗 RM 判定只覆盖 ${windowCount} 份 HTML（< 4）⇒ 语料失明`);
+  if (focusSurfaceChecks < 60) g.fail(`逐交互面焦点判定只覆盖 ${focusSurfaceChecks} 面（< 60）⇒ 语料失明`);
+  if (focusSurfaceProblems === 0 && focusSurfaceChecks >= 60) {
+    g.ok(`⑪a 逐交互面焦点可见：${windowCount} 扇窗 × ${FOCUS_SURFACES.length} 面 = ${focusSurfaceChecks} 面全部解析出可见焦点指示`);
+  }
 }
 
 // ---- ⑤⑥ 真仓扫描 ----
@@ -485,7 +990,7 @@ if (jsFiles.length < JS_CORPUS_FLOOR) {
 }
 
 console.log(
-  `\n扫描：${sources.length} 个源文件（js 语料 ${jsFiles.length} 个） · 勾选框模板 ${checkboxSites} 处 · 提示宿主 ${liveHosts} 处 · data-tip ${tipSites} 处`,
+  `\n扫描：${sources.length} 个源文件（js 语料 ${jsFiles.length} 个） · 勾选框模板 ${checkboxSites} 处 · 提示宿主 ${liveHosts} 处 · data-tip ${tipSites} 处 · 可访问名过渡表 ${NAME_TRANSITION.length}/${NAME_DEBT_CAP} 条`,
 );
 if (fail > 0) {
   console.error(`check-a11y: 正向对照自检 ${fail} 处失败（判定器失效，本门禁不可信）`);

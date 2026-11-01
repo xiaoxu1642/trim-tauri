@@ -36,6 +36,15 @@
 //     见 A 组内注释，G 组同款。`opacity: var(--x)` 的变量形态解析不出数字，
 //     按不压暗处理（保守）—— 这是本判据的已知限界，不是「已覆盖」。
 //
+// 已覆盖（重审 2026-11-01 门禁假绿 #8 起，见 H / O 两组）：
+//   - 宿主栈：F1a-M01 的 `.filter-tabs` 宿主栈（floor + --bg-elevated）与 tooltip floor
+//     从此有独立工位。宿主 background 的层序与内容前景都从 CSS 现读，按 CSS 真实层序
+//     （第一条 background 在最上）与「渐变逐 stop 取最坏像素」合成，不再是 F6 那种
+//     把一条 165deg 渐变两端当两层叠的偏亮估算。
+//   - 容器级 / 继承级 opacity：祖先规则上的 opacity 与元素自身 opacity 相乘后压到页面底，
+//     F1c-M02 的电源忙态/锁定态由此进入模型；扫描面四份 CSS 里任何 0<n<1 的 opacity 声明
+//     必须进工位或逐条登记理由，未登记即红（杜绝「新加一处整块透明度没人看见」）。
+//
 // 用法：node tools/check-contrast.mjs
 
 import { readFileSync, readdirSync } from 'node:fs';
@@ -417,13 +426,16 @@ function readValues(body, prop) {
   return out;
 }
 const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
-const rules = [];
 // 审查 L-28：两份 CSS 各解析一遍，`file` 字段带上来源，行号是**文件内行号**
 // （各自 parse 自己的 text，所以不需要任何跨文件偏移量）。
-for (const part of CSS_PARTS) {
+// 重审 2026-11-01 假绿 #8：解析结果保留**全部**规则（含无底无字的纯状态块），
+// 因为容器级/继承级 opacity 恰好就写在「只有 opacity、没有 background/color」的块里；
+// A 组仍然只看 `rules`（有底或有字的子集），行为不变。
+function parseAllRules(text, file) {
+  const out = [];
+  const re2 = new RegExp(ruleRe.source, 'g');
   let mm;
-  const localRe = new RegExp(ruleRe.source, 'g');
-  while ((mm = localRe.exec(part.text))) {
+  while ((mm = re2.exec(text))) {
     const body = mm[2];
     // color-mix 里嵌套 var() 带括号，模式要允许一层嵌套
     const bgRaw = readValues(body, "background");
@@ -432,22 +444,26 @@ for (const part of CSS_PARTS) {
     // 改成记原始表达式，字面色交给 parseColor 走同一套字面量解析。
     const fgs = [...body.matchAll(/(?:^|;)\s*color\s*:\s*([^;]+)/g)].map((x) => x[1].trim())
       .filter((x) => x !== "inherit" && x !== "transparent");
-    if (!bgRaw.length && !fgs.length) continue;
     // T1d-K03：元素级 opacity 会把前景与底一起压暗（source-over 合成到父底），
     // 是对比度模型的一个独立维度。数值形态直接 parseFloat；var() 形态解析不出
     // 数字 ⇒ 按不压暗处理（保守，该限界在文件头清单里如实登记）。
     const opRaw = (body.match(/(?:^|;)\s*opacity\s*:\s*([^;]+)/) || [])[1];
     const opNum = opRaw !== undefined ? parseFloat(opRaw) : NaN;
-    rules.push({
+    out.push({
       selector: mm[1].trim().replace(/\s+/g, ' '),
-      file: part.label,
-      lineNo: part.text.slice(0, mm.index).split('\n').length,
+      file,
+      lineNo: text.slice(0, mm.index).split('\n').length,
+      body,
       bgRaw,
       fgs,
+      opRaw: opRaw !== undefined ? opRaw.trim() : null,
       opacity: Number.isFinite(opNum) ? opNum : 1,
     });
   }
+  return out;
 }
+const ALL_RULES = CSS_PARTS.flatMap((part) => parseAllRules(part.text, part.label));
+const rules = ALL_RULES.filter((r) => r.bgRaw.length || r.fgs.length);
 
 const baseOf = (sel) => sel.replace(/::?[\w-]+(\([^()]*\))?/g, '').replace(/\s+/g, ' ').trim();
 // 键是 `file|base`：审查 L-28 引入 ds.css 后，前景回溯**必须按文件分区**——
@@ -879,7 +895,9 @@ function readBgDecls(body) {
 }
 // 与主解析层共用 ruleRe 形状；注释已在 stripComments 阶段挖空，注释里的类名不会命中
 // （AGENTS §5.19②：门禁自己的文案也算语料）。
-const parseSurfaceRules = (text) => {
+// 重审 2026-11-01 假绿 #8：H/O 组要按选择器回取「这条规则真实的底/字/透明度」，
+// 所以额外带上 body / file / file 内行号；F1~F5 只读 selector/decls，行为不变。
+const parseSurfaceRules = (text, file) => {
   const out = [];
   const re = new RegExp(ruleRe.source, 'g');
   let mm;
@@ -887,11 +905,14 @@ const parseSurfaceRules = (text) => {
     out.push({
       selector: mm[1].trim().replace(/\s+/g, ' '),
       decls: readBgDecls(mm[2]),
+      body: mm[2],
+      file,
+      lineNo: text.slice(0, mm.index).split('\n').length,
     });
   }
   return out;
 };
-const SURFACE_RULES = CSS_PARTS.flatMap((p) => parseSurfaceRules(p.text));
+const SURFACE_RULES = CSS_PARTS.flatMap((p) => parseSurfaceRules(p.text, p.label));
 
 // 逗号分组选择器（`.a, .b {}`）的「主体」要按**每个分组各自的最右复合体**算，
 // 只取整串最后一段会把 `.opt-col-selectall, .ctx-col-selectall` 判成只有后者命中
@@ -1332,6 +1353,524 @@ function judgeNontext(css) {
   const ctrl2 = judgeNontext('.totally-other { background: var(--accent); }');
   check(ctrl2.bad.length > 0, 'G-c. 正向对照：规则改名/搬走时 G 组判红（失明必须可见）', ctrl2.bad.length ? '' : '零对象却放行 ⇒ 判定器失明');
 }
+
+// ============================================================================================
+// H / O 组（重审-2026-11-01 门禁假绿 #8）：宿主栈 + 容器级/继承级 opacity
+// ============================================================================================
+//
+// 证据：全仓重审 2026-11-01 总报告 §6.3 之门禁假绿第八项
+//   「只喂两档中性栈 × 两个前景；容器/继承 opacity 不进模型」（来源 T1d，F1a-M01 / F1c-M02）。
+// 本波已修的三处，在这里各有一个工位：
+//   ① `.filter-tabs` 宿主栈（floor + tint-primary + --bg-elevated）—— H 组逐条现算；
+//   ② tooltip floor（`.ds-tooltip` 的 floor + --bg-elevated 与 data-material="none" 实底）—— H 组；
+//   ③ 电源面板忙态/锁定态—— O 组容器级/元素级工位。
+//
+// H 的合成口径与 F6 刻意不同（F6 保留原判据不动）：F6 把一条
+// `linear-gradient(165deg, A, B)` 的两个 stop 当**两层**叠（floor + secondary + tertiary
+// 算出 212 灰），而 CSS 任一像素只取 A→B 之间的一个 alpha；对「floor + 单条双档渐变」
+// 那一族，F6 是偏亮的估算。H 按 CSS 层序（第一条 background 在最上）逐层 source-over，
+// 渐变两端各算一次取最坏像素。
+//
+// 底取 #000（导入近黑壁纸最坏档，与 F6 同口径）。壁纸/增强对比把 floor 抬到 0.58/0.62；
+// H 刻意用主题表里的基准 0.45 —— 更低的 floor 对深色字更不利，才是真正的最坏档。
+const AA_LARGE = 3.0;
+
+// 顶层逗号切分（css 值分层）。splitTopLevel 只切第一个逗号，这里要全切。
+function splitLayers(raw) {
+  const out = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (c === '(') depth++;
+    else if (c === ')') depth--;
+    else if (c === ',' && depth === 0) {
+      out.push(raw.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  out.push(raw.slice(start).trim());
+  return out.filter(Boolean);
+}
+// 一层 background 展开成候选色：`var(--x)` 一个；`linear-gradient(a, b)` 每个 stop 各一个。
+// 渐变两端在真实像素上都会出现（165deg 斜穿整块），逐端算、取最低即最坏像素。
+function layerCandidates(layer, vars) {
+  const s = layer.trim();
+  const g = s.match(/^linear-gradient\(([\s\S]*)\)$/);
+  if (!g) {
+    const c = parseColor(s, vars);
+    return c ? [{ c, expr: s }] : [];
+  }
+  const out = [];
+  for (const arg of splitLayers(g[1])) {
+    const stop = arg.replace(/^-?[\d.]+deg$/i, '').replace(/\s+[\d.]+%\s*$/, '').trim();
+    if (!stop) continue;
+    const c = parseColor(stop, vars);
+    if (c) out.push({ c, expr: stop });
+  }
+  return out;
+}
+const mixColor = (top, under, alpha) => ({
+  r: top.r * alpha + under.r * (1 - alpha),
+  g: top.g * alpha + under.g * (1 - alpha),
+  b: top.b * alpha + under.b * (1 - alpha),
+  a: 1,
+});
+const overColor = (top, under) => (top.a >= 1 ? { ...top, a: 1 } : mixColor(top, under, top.a));
+// 按声明序合成：layers[0] 是最上层，从最后一层（最底）开始往上叠。
+function compositeLayers(page, layers, vars) {
+  const cands = layers.map((l) => layerCandidates(l, vars));
+  if (!cands.length || cands.some((c) => !c.length)) return null;
+  const combos = [];
+  const apply = (acc, idx) => {
+    if (idx < 0) {
+      combos.push(acc);
+      return;
+    }
+    for (const cand of cands[idx]) apply(mixColor(cand.c, acc, cand.c.a), idx - 1);
+  };
+  apply(page, cands.length - 1);
+  // 组合上限保护：本仓现状层数与 stop 数都有限；超过组合上限说明解析形态失控，宁可判红
+  return combos.length > 16 ? null : combos;
+}
+// 一个宿主栈在「页面底 + 层序 + 内容前景」下的最坏比值。
+// opacity 非 1 时把整组按 source-over 压回页面底（与 A 组元素级压暗同一模型）。
+function evalStack(vars, pageExpr, layers, fgExpr, minRatio, opacity = 1) {
+  const page = parseColor(pageExpr, vars);
+  if (!page) return { error: `底 ${pageExpr} 解析失败` };
+  const fg = parseColor(fgExpr, vars);
+  if (!fg) return { error: `前景 ${fgExpr} 解析失败` };
+  const combos = compositeLayers(page, layers, vars);
+  if (!combos) return { error: `栈 ${layers.join(' + ')} 解析失败` };
+  let worst = null;
+  for (const bg0 of combos) {
+    const bg = opacity < 1 ? mixColor(bg0, page, opacity) : bg0;
+    const f = opacity < 1 ? mixColor(fg, page, opacity) : fg;
+    const ratio = contrast(bg, f);
+    if (!worst || ratio < worst.ratio) worst = { ratio, bgHex: hex(bg) };
+  }
+  return { ...worst, ok: worst.ratio >= minRatio, minRatio };
+}
+
+const normSel = (s) => s.trim().replace(/\s+/g, ' ');
+// 选择器分组必须按**顶层**逗号切（`:is(.a, .b)` 里的逗号不是分组），
+// 否则 `:is(...)` 会被切碎，ruleFor 与 opacity 枚举都会认错规则。
+const selParts = (s) => splitLayers(s).map(normSel).filter(Boolean);
+// 按选择器回取规则：后者覆盖前者（与加载序一致；ds.css 在 main.css 之后）。
+// need='bg' / 'color' 时跳过「同名但没该声明」的规则——同一选择器在本仓有多条规则
+// （基础规则 + 后置几何/降级覆写），只按名字取最后一条会拿到没有底/没有字的空壳。
+function ruleFor(sel, need) {
+  const want = normSel(sel);
+  for (let i = ALL_RULES.length - 1; i >= 0; i--) {
+    const r = ALL_RULES[i];
+    if (!selParts(r.selector).includes(want)) continue;
+    if (need === 'bg' && !readBgDecls(r.body).some((d) => !/^(transparent|none)$/i.test(d))) continue;
+    if (need === 'color' && !declOf(r.body, 'color')) continue;
+    return r;
+  }
+  return null;
+}
+function bgLayersOf(rule) {
+  const decls = rule ? readBgDecls(rule.body).filter((d) => !/^(transparent|none)$/i.test(d)) : [];
+  return decls.length ? splitLayers(decls[decls.length - 1]) : null;
+}
+const colorDeclOf = (rule) => (rule ? declOf(rule.body, 'color') : null);
+// 前景继承：元素自己的 color 优先，其次祖先规则（选择器前缀），最后才是工位声明的兜底 token。
+function colorExprOf(sel) {
+  const parts = normSel(sel).split(' ').filter(Boolean);
+  for (let i = parts.length; i > 0; i--) {
+    const c = colorDeclOf(ruleFor(parts.slice(0, i).join(' '), 'color'));
+    if (c) return c;
+  }
+  return null;
+}
+const noBgRule = (rule) => {
+  const decls = rule ? readBgDecls(rule.body).filter((d) => !/^(transparent|none)$/i.test(d)) : [];
+  return decls.length ? decls[decls.length - 1] : null;
+};
+
+// ---------- H. 宿主栈矩阵 ----------
+// 每个条目是一个真实宿主（不是手填色值）：底栈从宿主自己的 background 现读，
+// 内容前景从内容规则现读。`why` 写它守的是哪条既有结论/修复面。
+const HOST_STACK_SITES = [
+  { host: '.filter-tabs', fgFrom: '.filter-tab', why: 'F1a-M01 修复面：轨道 floor + tint + elevated' },
+  { host: '.filter-tab:hover', fgFrom: '.filter-tab', why: '分段标签 hover 自铺 floor + 双档渐变' },
+  { host: '.filter-tab.active', fgFrom: '.filter-tab.active', why: '分段标签选中态' },
+  { host: '.maint-tab', fgFrom: '.maint-tab', why: '维护页 pill（A 类独立操作面）' },
+  { host: '.ds-tooltip', fgFrom: '.ds-tooltip', why: 'tooltip floor：floor + --bg-elevated' },
+  { host: 'body[data-material="none"] .ds-tooltip', fgFrom: '.ds-tooltip', why: '材质无档 tooltip 实底（F3c 的数值面）' },
+  { host: '.ds-menu', fgFrom: '.ds-menu-item', why: '菜单宿主 floor + elevated' },
+  { host: 'body.electron-mica .ds-menu', fgFrom: '.ds-menu-item', why: 'mica 菜单路径' },
+  { host: 'body.electron-mica .ds-tooltip', fgFrom: '.ds-tooltip', why: 'mica tooltip 路径' },
+  { host: '.btn', fgFrom: '.btn', why: '中性按钮常态（F6 同族，按真实层序复算）' },
+  { host: '.btn:hover:not(:disabled)', fgFrom: '.btn', why: '中性按钮 hover（R2 同栈加深一档）' },
+];
+// 台账条数下限：删登记项等于放开判据（与 F1a/LEDGER_MIN 同一条纪律）。
+const HOST_STACK_MIN = 10;
+// 只取亮色档：本仓玻璃 tint/floor 是「固定浅色」产品决策（main.css 液态玻璃 token 段），
+// 暗色档对应 token 已随 v2.8.0 删除，应用也恒挂 theme-light。拿暗色 fg（浅灰字）
+// 去配这套浅色玻璃会算出 1.1:1 的渲染不到假违规 —— 与 F6 同一条射程说明。
+const hostTheme = THEMES.find((t) => t.name.includes('亮色'));
+const hostRows = [];
+const hostIssues = [];
+for (const site of HOST_STACK_SITES) {
+  const hostRule = ruleFor(site.host, 'bg');
+  if (!hostRule) {
+    hostIssues.push(`${site.host}（${site.why}）在扫描面零命中（台账过期或选择器改名）`);
+    continue;
+  }
+  const layers = bgLayersOf(hostRule);
+  if (!layers) {
+    hostIssues.push(`${site.host}（${site.why}）没有可解析的底栈（写法变了？）`);
+    continue;
+  }
+  const fgRule = ruleFor(site.fgFrom, 'color');
+  const fgExpr = colorDeclOf(fgRule);
+  if (!fgExpr) {
+    hostIssues.push(`${site.host}（${site.why}）的内容前景 ${site.fgFrom} 解析不到 color`);
+    continue;
+  }
+  if (!hostTheme) {
+    hostIssues.push('亮色主题表缺失');
+    continue;
+  }
+  for (const t of [hostTheme]) {
+    const res = evalStack(t.vars, WORST_BASE, layers, fgExpr, AA_NORMAL);
+    if (res.error) {
+      hostIssues.push(`${site.host} [${t.name}] ${res.error}`);
+      continue;
+    }
+    hostRows.push({
+      key: `${hostRule.file}#${site.host}`,
+      file: hostRule.file,
+      selector: site.host,
+      theme: t.name,
+      ratio: res.ratio,
+    });
+  }
+}
+check(
+  hostIssues.length === 0 && HOST_STACK_SITES.length >= HOST_STACK_MIN,
+  `H. 宿主栈工位：${HOST_STACK_SITES.length} 个真实宿主全部命中（亮色档/近黑壁纸最坏档，实算最低 ${hostRows.length ? Math.min(...hostRows.map((r) => r.ratio)).toFixed(2) : 'n/a'}:1；低于 ${AA_NORMAL} 的逐条由 T 过渡表把关）`,
+  hostIssues.length
+    ? hostIssues.join('；')
+    : HOST_STACK_SITES.length < HOST_STACK_MIN
+      ? '登记宿主少于下限（删条目就等于放开判据）'
+      : '',
+);
+{
+  // 正向对照五件（§4.1：每条断言都要能自己变红）：
+  // ① 正文字号 4.5 红线：旧宿主栈（floor + --bg-elevated）对 --fg-secondary 必须判红；
+  // ② 同一旧栈在「大字号 3:1」阈值下仍可能过线 —— 用它证明 3.0 分支真的生效，
+  //    而不是把阈值写死成 4.5 的假参数；
+  // ③ 容器 opacity 拉低必红：修复后的轨道栈 α=1 放行、α=0.7 必红；
+  // ④ 注释里写颜色不算：同一段声明放进注释必须零命中，放出来必须命中；
+  // ⑤ 渐变逐 stop 取最坏：线性渐变一端黑一端白，白字必须吃黑端判红。
+  const ctrl = [];
+  const curRule = ruleFor('.filter-tabs', 'bg');
+  const curLayers = bgLayersOf(curRule);
+  const OLD_HOST_STACK = [`var(${FLOOR_TOKEN})`, 'var(--bg-elevated)'];
+  const MID_STACK = [`var(${FLOOR_TOKEN})`, 'var(--lg-tint-secondary)'];
+  if (!lightVars || !curLayers) {
+    ctrl.push('亮色主题表或 .filter-tabs 底栈缺失，H 组对照无法构造');
+  } else {
+    const fixed = evalStack(lightVars, WORST_BASE, curLayers, 'var(--fg-secondary)', AA_NORMAL);
+    const old = evalStack(lightVars, WORST_BASE, OLD_HOST_STACK, 'var(--fg-secondary)', AA_NORMAL);
+    if (fixed.error || fixed.ok !== true) ctrl.push(`修复后的 .filter-tabs 宿主栈被误判红：${fixed.error || fixed.ratio}`);
+    if (old.error || old.ok !== false) ctrl.push(`旧宿主栈（floor + --bg-elevated）未判红：${old.error || old.ratio}`);
+    // 大字号分支：floor + 单档 tint 对 --fg-secondary 落在 3~4.5 之间
+    const large = evalStack(lightVars, WORST_BASE, MID_STACK, 'var(--fg-secondary)', AA_LARGE);
+    const largeAsNormal = evalStack(lightVars, WORST_BASE, MID_STACK, 'var(--fg-secondary)', AA_NORMAL);
+    if (large.error || large.ok !== true) ctrl.push(`大字号 3:1 样本被误判红：${large.error || large.ratio}`);
+    if (largeAsNormal.error || largeAsNormal.ok !== false) ctrl.push(`大字号样本在 4.5 红线下未判红：${largeAsNormal.error || largeAsNormal.ratio}`);
+    // 容器 opacity：修复后的轨道栈 α=1 与 α=0.7
+    const full = evalStack(lightVars, WORST_BASE, curLayers, 'var(--fg-secondary)', AA_NORMAL, 1);
+    const dimmed = evalStack(lightVars, WORST_BASE, curLayers, 'var(--fg-secondary)', AA_NORMAL, 0.7);
+    if (full.error || full.ok !== true) ctrl.push(`α=1 轨道栈被误判红：${full.error || full.ratio}`);
+    if (dimmed.error || dimmed.ok !== false) ctrl.push(`容器 opacity 0.7 未被判红：${dimmed.error || dimmed.ratio}`);
+  }
+  // 注释不算：同一个声明在注释内/外各解析一次，必须 0 / 1
+  const pair = 'background: var(--surface-solid); color: var(--fg-tertiary);';
+  const asComment = parseAllRules(stripComments(`/* .ghost { ${pair} } */`), 'ctrl');
+  const asRule = parseAllRules(stripComments(`.ghost { ${pair} }`), 'ctrl');
+  const nComment = asComment.filter((r) => r.bgRaw.length && r.fgs.length).length;
+  const nRule = asRule.filter((r) => r.bgRaw.length && r.fgs.length).length;
+  if (nComment !== 0) ctrl.push(`注释里的颜色声明被当成规则（实算 ${nComment} 条）`);
+  if (nRule !== 1) ctrl.push(`未注释的同一声明没被解析出来（实算 ${nRule} 条）`);
+  // 渐变最坏 stop：白到黑，白字必须吃黑端（1:1）
+  if (lightVars) {
+    const grad = evalStack(lightVars, WORST_BASE, ['linear-gradient(90deg, #ffffff, #000000)'], '#ffffff', AA_NORMAL);
+    const gradFlat = evalStack(lightVars, WORST_BASE, ['linear-gradient(90deg, #ffffff, #f0f0f0)'], '#000000', AA_NORMAL);
+    if (grad.error || grad.ok !== false) ctrl.push(`渐变黑端未被计入：${grad.error || grad.ratio}`);
+    if (gradFlat.error || gradFlat.ok !== true) ctrl.push(`浅色渐变被误判红：${gradFlat.error || gradFlat.ratio}`);
+  }
+  check(
+    ctrl.length === 0,
+    'H-b. 正向对照：旧宿主栈必红、修复后轨道栈放行、大字号 3:1 分支生效、容器 opacity 0.7 必红、注释里的颜色不算、渐变黑端计入',
+    ctrl.join('；'),
+  );
+}
+
+// ---------- O. 容器级 / 继承级 opacity 工位 ----------
+// 模型：祖先规则 opacity × 元素自身 opacity，把「底 + 字」作为一个整体压到页面底
+// （--bg-app；LiteBox 抽屉的页面底是纯黑看图层）。元素自身底色（如徽章 soft 底）
+// 也参与合成，不把底当成页面。
+// 这些工位的 opacity 数值同样现读：例如 F1c-M02 修复后 `.is-busy` 已无 opacity，
+// 工位按 1 计算并照样断言正文可读；谁再把 0.7 加回去，这里立刻红。
+const OPACITY_SITES = [
+  {
+    host: '.syspanel-pwr-tree.is-busy',
+    base: 'var(--bg-card-hover)',
+    contents: ['.syspanel-pwr-item', '.syspanel-pwr-group-meta', '.syspanel-pwr-item-sum'],
+    why: 'F1c-M02 容器级：忙态整树（.syspanel-pwr-tree 底色 --bg-card-hover）',
+  },
+  {
+    host: '.syspanel-pwr-detail.is-busy',
+    base: 'var(--bg-card-hover)',
+    contents: ['.syspanel-pwr-detail-name', '.syspanel-pwr-detail-desc', '.syspanel-pwr-detail-meta'],
+    why: 'F1c-M02 容器级：忙态详情区',
+  },
+  {
+    host: '.syspanel-pwr-item.is-locked',
+    base: 'var(--bg-card-hover)',
+    contents: ['.syspanel-pwr-item-name', '.syspanel-pwr-item-sum'],
+    why: 'F1c-M02 元素级：锁定项（前景由宿主规则 --fg-tertiary 继承）',
+  },
+  {
+    host: '.startup-item.disabled',
+    base: 'var(--bg-card)',
+    contents: ['.startup-item-title', '.startup-item-pub'],
+    why: '容器级 + 继承级：整块 0.62 × 发布者自身 0.85',
+  },
+  {
+    host: '.startup-item.ghost',
+    base: 'var(--bg-card)',
+    contents: ['.startup-item.ghost .startup-item-title'],
+    why: '容器级：幽灵项 0.62 + 子规则改 --fg-tertiary',
+  },
+  {
+    host: '.startup-item-pub',
+    base: 'var(--bg-card)',
+    contents: ['.startup-item-pub'],
+    why: '继承级：元素自身 0.85 压在卡片底上（无自有底）',
+  },
+  {
+    host: '.opt-row.optimized .category-risk',
+    base: 'var(--bg-card)',
+    contents: ['.category-risk.low', '.category-risk.medium', '.category-risk.high'],
+    why: '继承级：0.65 叠在 ds.css 的语义徽章（色彩与 soft 底都在另一条规则）',
+  },
+  {
+    host: '.nara-checkrow.is-optimized',
+    base: 'var(--bg-app)',
+    contents: ['.nara-checkrow__name'],
+    why: '容器级：已完成行整行 0.62',
+  },
+  {
+    host: '.xtable-row.protected',
+    base: 'var(--bg-card)',
+    contents: ['.xtable-cell-text'],
+    fg: 'var(--fg-primary)',
+    why: '容器级：受保护行 0.75（正文继承 body --fg-primary）',
+  },
+  {
+    host: '.litebox .lb-drawer-head',
+    base: '#000000',
+    page: '#000000',
+    contents: ['.litebox .lb-drawer-head'],
+    why: '看图层抽屉标题 0.72（纯黑底上的白字）',
+  },
+  {
+    host: '.litebox .lb-drawer-day',
+    base: '#000000',
+    page: '#000000',
+    contents: ['.litebox .lb-drawer-day'],
+    why: '看图层抽屉日期 0.62（纯黑底上的白字）',
+  },
+];
+const OPACITY_SITES_MIN = 10;
+const opacityRows = [];
+const opacityIssues = [];
+for (const site of OPACITY_SITES) {
+  const hostRule = ruleFor(site.host);
+  if (!hostRule) {
+    opacityIssues.push(`${site.host}（${site.why}）在扫描面零命中（台账过期或选择器改名）`);
+    continue;
+  }
+  const hostOp = hostRule.opRaw === null ? 1 : parseFloat(hostRule.opRaw);
+  if (!Number.isFinite(hostOp)) {
+    opacityIssues.push(`${site.host}（${site.why}）的 opacity 不是数值（${hostRule.opRaw}）⇒ 静态不可算`);
+    continue;
+  }
+  const hostColor = colorDeclOf(hostRule);
+  for (const sel of site.contents) {
+    const cRule = ruleFor(sel);
+    const cColor = ruleFor(sel, 'color');
+    const cBg = ruleFor(sel, 'bg');
+    const fgExpr = colorDeclOf(cColor) || hostColor || colorExprOf(sel) || site.fg;
+    if (!fgExpr) {
+      opacityIssues.push(`${site.host} 的内容 ${sel} 解析不到前景色`);
+      continue;
+    }
+    const contentOp = sel === site.host || !cRule || cRule.opRaw === null ? 1 : parseFloat(cRule.opRaw);
+    if (!Number.isFinite(contentOp)) {
+      opacityIssues.push(`${sel} 的 opacity 不是数值（${cRule.opRaw}）⇒ 静态不可算`);
+      continue;
+    }
+    const alpha = hostOp * contentOp;
+    const cbExpr = noBgRule(cBg);
+    for (const t of THEMES) {
+      const page = parseColor(site.page || 'var(--bg-app)', t.vars);
+      const baseC = parseColor(site.base, t.vars);
+      const fg = parseColor(fgExpr, t.vars);
+      const cb = cbExpr ? parseBg(cbExpr, t.vars) : null;
+      if (!page || !baseC || !fg || (cbExpr && !cb)) {
+        opacityIssues.push(`${site.host} / ${sel} [${t.name}] 底色或前景解析失败`);
+        continue;
+      }
+      let bg = overColor(baseC, page);
+      if (cb) bg = overColor(cb, bg);
+      const bgEff = alpha < 1 ? mixColor(bg, page, alpha) : bg;
+      const fgEff = alpha < 1 ? mixColor(fg, page, alpha) : fg;
+      const ratio = contrast(bgEff, fgEff);
+      opacityRows.push({
+        key: `${hostRule.file}#${site.host}`,
+        file: hostRule.file,
+        selector: site.host,
+        content: sel,
+        theme: t.name,
+        ratio,
+      });
+    }
+  }
+}
+check(
+  opacityIssues.length === 0 && OPACITY_SITES.length >= OPACITY_SITES_MIN,
+  `O. 容器级/继承级 opacity 工位：${OPACITY_SITES.length} 个宿主全部命中（实算最低 ${opacityRows.length ? Math.min(...opacityRows.map((r) => r.ratio)).toFixed(2) : 'n/a'}:1；低于 ${AA_NORMAL} 的逐条由 T 过渡表把关）`,
+  opacityIssues.length
+    ? opacityIssues.join('；')
+    : OPACITY_SITES.length < OPACITY_SITES_MIN
+      ? '登记工位少于下限（删工位就等于放开判据）'
+      : '',
+);
+
+// ---------- 过渡表：收紧后仍低于 4.5 的现存违例，逐条登记（只减不增） ----------
+// 键 = `文件#选择器`。登记项必须**仍然低于** 4.5（修好了就要删登记，stale 判红）；
+// 未登记的低于 4.5 一律判红（新增违例不许静默混进来）。
+// 这里只登记门槛值，不改产品代码；每条理由说明它为什么本波不动。
+const TRANSITION = [
+  {
+    key: 'main.css#.filter-tab:hover',
+    reason: 'hover 态标签前景 --fg-secondary 叠 floor + 单条双档渐变，近黑壁纸真栈本波实算 3.35:1；本波只修了常态轨道，hover 未纳入产品改动范围（登记待办）',
+  },
+  {
+    key: 'main.css#.maint-tab',
+    reason: '维护页 pill 前景 --fg-secondary 叠 floor + 单条双档渐变，近黑壁纸本波实算 3.09:1；与 .filter-tabs 同族，不在本波产品改动范围（登记待办）',
+  },
+  {
+    key: 'main.css#.startup-item.disabled',
+    reason: '非活动启动项整块 0.62 压暗：标题本波实算 4.20、发布者 2.11（后者再乘自身 0.85）；WCAG 1.4.3 对非活动组件豁免，弱化语义保留（登记）',
+  },
+  {
+    key: 'main.css#.startup-item.ghost',
+    reason: '已消失（ghost）项 0.62 + 标题 --fg-tertiary，本波实算 2.46:1；「幽灵项」弱化是刻意状态，图标与位置仍可辨识（登记）',
+  },
+  {
+    key: 'main.css#.startup-item-pub',
+    reason: '发布者元信息 0.85 把 --fg-tertiary 压到 3.75:1；与 F1c-M02 同族但本轮不在产品改动面（登记待办）',
+  },
+  {
+    key: 'main.css#.opt-row.optimized .category-risk',
+    reason: '已优化行风险徽章整枚 0.65 压暗（含徽章文字），本波实算最差 2.54:1；本波不动产品代码（登记待办）',
+  },
+  {
+    key: 'main.css#.nara-checkrow.is-optimized',
+    reason: '已完成行整行 0.62 把 --fg-primary 压到 4.20:1；与 .startup-item.disabled 同族（登记）',
+  },
+];
+const lowRows = [...hostRows, ...opacityRows].filter((r) => r.ratio < AA_NORMAL);
+const lowByKey = new Map();
+for (const r of lowRows) {
+  const cur = lowByKey.get(r.key);
+  if (!cur || r.ratio < cur.ratio) lowByKey.set(r.key, r);
+}
+const transKeys = new Set(TRANSITION.map((e) => e.key));
+const transNew = [...lowByKey.keys()].filter((k) => !transKeys.has(k)).sort();
+const transStale = TRANSITION.filter((e) => !lowByKey.has(e.key));
+const transNoReason = TRANSITION.filter((e) => !e.reason || !e.reason.trim());
+check(
+  transNew.length === 0 && transStale.length === 0 && transNoReason.length === 0,
+  `T. 过渡表：收紧后低于 ${AA_NORMAL}:1 的现存违例逐条登记（实算 ${lowByKey.size} 条 / 登记 ${TRANSITION.length} 条，只减不增）`,
+  transNew.length
+    ? `新增未登记违例 ${JSON.stringify(transNew)}：先修产品或写明理由登记`
+    : transStale.length
+      ? `登记已失效（这些键已不低于 ${AA_NORMAL}:1 或已消失，请移除）：${JSON.stringify(transStale.map((e) => e.key))}`
+      : transNoReason.length
+        ? `登记缺理由：${JSON.stringify(transNoReason.map((e) => e.key))}`
+        : '',
+);
+for (const e of TRANSITION) {
+  const hit = lowByKey.get(e.key);
+  if (hit) console.log(`   ${hit.ratio.toFixed(2)}:1 ${e.key}（${hit.theme} ${hit.content || ''}）— ${e.reason}`);
+}
+
+// ---------- opacity 分类棘轮：任何 0<n<1 的声明都必须进工位或逐条登记 ----------
+// 为什么需要：只补「已知三处」等于又造一个覆盖面盲区 —— 下一处整块透明度
+//（新面板/新弱化态）照样没人看见。这里枚举四份 CSS 里所有非常量 opacity 声明，
+// 每一处要么是本文件 O 组的工位宿主，要么在 OPACITY_UNMODELED 里逐条写明理由；
+// 未分类判红，登记失效（声明已删/已改 0/1）也判红。
+const OPACITY_UNMODELED = [
+  { sel: 'body[data-preset-bg] .app-wallpaper::before', reason: '壁纸图层本体（装饰，无文本）；calc 值静态不可算' },
+  { sel: 'body.bg-image-on .app-wallpaper::after', reason: '导入图涂层（装饰，无文本）；calc 值静态不可算' },
+  { sel: '.nav-submenu.expanded::before', reason: '导航竖线（::before 装饰，无文本）' },
+  { sel: '.btn:disabled', reason: '非活动组件（WCAG 1.4.3 豁免）' },
+  { sel: '.checkbox.disabled', reason: '非文本控件 + 非活动态' },
+  { sel: '.ctx-item-icon-placeholder', reason: '图标占位（SVG 图形，无文本）' },
+  { sel: '.btn-opt-ai:disabled', reason: '非活动组件（WCAG 1.4.3 豁免）' },
+  { sel: '.fileclean-preview-btn:disabled', reason: '非活动组件（WCAG 1.4.3 豁免）' },
+  { sel: '.xtable-row.disabled-row', reason: '非活动行（勾选禁用态）' },
+  { sel: '.ctx-reg-jump:active', reason: '按压瞬时态（:active 仅按下期间）' },
+  { sel: '.ctx-reg-jump.jumping', reason: '定位滚动动画的瞬时态' },
+  { sel: '.startup-item-pub::before', reason: '发布者分隔点（::before 装饰）' },
+  { sel: 'input[type="range"].fm-slider:disabled', reason: '非文本控件 + 非活动态' },
+  { sel: '.fm-slider-row input[type="range"]:disabled', reason: '非文本控件 + 非活动态' },
+  { sel: '.model-picker-item.unusable', reason: '不可用项（非活动组件）' },
+  { sel: '.nara-checkrow .checkbox.disabled', reason: '非文本控件 + 非活动态' },
+  { sel: '.ctx-kanban-row.disabled-row', reason: '非活动行（看板禁用态）' },
+  { sel: '.maint-detail-title::before', reason: '标题竖条（::before 装饰）' },
+  { sel: '.maint-batch-selall input:disabled', reason: '非文本控件 + 非活动态' },
+  { sel: '.maint-check input:disabled', reason: '非文本控件 + 非活动态' },
+  { sel: '.appearance-card.material-off .material-grid', reason: '总开关关闭时的非活动态（pointer-events:none，整块不可操作）' },
+  { sel: '.rt-sweep', reason: '扫描扫光（装饰动画）' },
+  { sel: '.mouse-trail-dot', reason: '鼠标拖尾（装饰）' },
+  { sel: '.an-tm-cell-size', reason: '树图尺寸元信息；宿主 .an-tm-cell 属语义染层族，按 v2 R3/F6 射程边界不在近黑底硬判（登记待办）' },
+  { sel: '.ds-menu-item[aria-disabled="true"]', reason: '非活动菜单项' },
+];
+const opacityDecls = [];
+for (const r of ALL_RULES) {
+  if (r.opRaw === null) continue;
+  const v = r.opRaw.trim();
+  const n = parseFloat(v);
+  // 0 / 1 是显隐与常态，不构成压暗；1 !important 同属常态
+  if (v === '' || n === 0 || (n === 1 && /^1(\s*!important)?$/i.test(v))) continue;
+  for (const sel of selParts(r.selector)) opacityDecls.push({ sel, file: r.file });
+}
+const stationHosts = new Set(OPACITY_SITES.map((s) => s.host));
+const unmodeledSel = new Set(OPACITY_UNMODELED.map((e) => e.sel));
+const unclassified = opacityDecls.filter((d) => !stationHosts.has(d.sel) && !unmodeledSel.has(d.sel));
+const staleUnmodeled = OPACITY_UNMODELED.filter((e) => !opacityDecls.some((d) => d.sel === e.sel));
+const unmodeledNoReason = OPACITY_UNMODELED.filter((e) => !e.reason || !e.reason.trim());
+check(
+  unclassified.length === 0 && staleUnmodeled.length === 0 && unmodeledNoReason.length === 0,
+  `O-c. opacity 分类棘轮：${opacityDecls.length} 处非 0/1 opacity 声明全部进工位或逐条登记（工位 ${OPACITY_SITES.length} / 登记 ${OPACITY_UNMODELED.length}）`,
+  unclassified.length
+    ? `未分类的 opacity 声明 ${JSON.stringify(unclassified.map((d) => `${d.file}#${d.sel}`))}：进 O 工位或登记理由`
+    : staleUnmodeled.length
+      ? `登记已失效（声明已删或已改 0/1）：${JSON.stringify(staleUnmodeled.map((e) => e.sel))}`
+      : unmodeledNoReason.length
+        ? `登记缺理由：${JSON.stringify(unmodeledNoReason.map((e) => e.sel))}`
+        : '',
+);
 
 const worst = [...solidRows, ...textRows].sort((a, b) => a.ratio - b.ratio)[0];
 if (worst) console.log(`\n最低一档：${worst.ratio.toFixed(2)}:1（${worst.theme} ${worst.selector || worst.fg + ' on ' + worst.bg}）`);

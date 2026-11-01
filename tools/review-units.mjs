@@ -351,7 +351,17 @@ export const UNITS = [
     gates: ['check-scan-rule-diff'],
   },
   {
-    id: 'N1b', owner: 'sub', name: '原生扫描器·目录体积扫描与系统度量',
+    // 2026-11-01 P1（N1b-M01..M04 句柄/路径/批次/回收站口径）后 N1b 整包越过 U2 的 8000
+    // 上限。按执行链把 perf.rs 的系统度量四子命令切出，上限不放宽；必须排在 N1b 之前
+    // —— N1b 是 native-scanner/src 的目录兜底认领位。
+    id: 'N1c', owner: 'sub', name: '原生扫描器·系统度量四子命令',
+    files: ['native-scanner/src/perf.rs'],
+    contract: 'ov-metrics / net-sample / mem-clean / diskbench 四个子命令与 FFI 句柄卫生',
+    boundary: '由 src-tauri 直调，与清理链路无关；目录体积扫描归 N1b',
+    gates: ['check-scan-rule-diff'],
+  },
+  {
+    id: 'N1b', owner: 'sub', name: '原生扫描器·目录体积扫描与其余',
     dirs: [{ dir: 'native-scanner/src', notPrefix: 'cleanup_scan' }, { dir: 'native-scanner/tests' }],
     contract: 'scan.rs（dir_size/walk/bigfiles/duplicates/empty + rayon 线程池）/ perf.rs 四子命令 / util.rs 的 FFI 集中处',
     boundary: 'perf.rs 的 ov-metrics、net-sample、mem-clean 由 src-tauri 直调，与清理链路无关；测试唯一自动入口仍是 check-scan-rule-diff',

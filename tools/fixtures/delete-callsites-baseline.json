@@ -14,7 +14,7 @@
     "src-tauri/src/engine/restore_pack.rs": 1,
     "src-tauri/src/engine/shellicon.rs": 1,
     "src-tauri/src/pwsh/mod.rs": 1,
-    "native-scanner/src/scan.rs": 2
+    "native-scanner/src/scan.rs": 3
   },
   "SHEmptyRecycleBinW": {
     "src-tauri/src/commands/cleanup/recycle_bin.rs": 2
@@ -66,7 +66,7 @@
     "src-tauri/src/pwsh/mod.rs": 3,
     "src-tauri/src/security/mod.rs": 3,
     "native-scanner/src/perf.rs": 1,
-    "native-scanner/src/scan.rs": 1
+    "native-scanner/src/scan.rs": 2
   },
   "remove_owned_font_copy": {
     "src-tauri/src/commands/fonts.rs": 3
