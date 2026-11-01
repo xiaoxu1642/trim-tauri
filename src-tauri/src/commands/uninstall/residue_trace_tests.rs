@@ -809,11 +809,27 @@ use super::residue_update::*;
     #[test]
     fn 断链_junction_的_folder_候选放行_活链仍拒() {
         use std::process::Command;
+
+        // 守卫只在 Drop 收尾：panic 也要先拆 junction（只删链接本体、不跟随），再删临时根。
+        // 经 link 建目录会落到 target 一侧；断链或目标刚重建的瞬间，create_dir_all 会在
+        // 父级 junction 上拿到 AlreadyExists（TEST-J12-1），所以实际目录一律落到 target\inner。
+        struct Clean {
+            dir: std::path::PathBuf,
+            link: std::path::PathBuf,
+        }
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir(&self.link);
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
         let dir = std::env::temp_dir().join(format!("trim-res-j12-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("target");
         let link = dir.join("link");
+        let _clean = Clean { dir: dir.clone(), link: link.clone() };
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("keep.txt"), b"x").unwrap();
         let st = Command::new("cmd")
@@ -825,7 +841,6 @@ use super::residue_update::*;
             .output();
         if !matches!(st, Ok(o) if o.status.success()) {
             eprintln!("[J12] 建 junction 失败（需管理员/开发者模式），本用例跳过（未校验）");
-            let _ = std::fs::remove_dir_all(&dir);
             return;
         }
         let link_s = link.to_string_lossy().to_string();
@@ -844,19 +859,16 @@ use super::residue_update::*;
         );
 
         // ③ 上级是链接的目标仍拒：link 复活为活链，候选取 link\inner（自身不是链接，
-        //    但上级 link 是）——借目录树删别处的形态必须原样拦住
-        std::fs::create_dir_all(&target).unwrap();
+        //    但上级 link 是）——借目录树删别处的形态必须原样拦住。
+        //    实际目录建在 target\inner：经 link 落盘会依赖链接解析，断链时 create_dir_all
+        //    会在父级 junction 上拿到 AlreadyExists（TEST-J12-1）。
+        std::fs::create_dir_all(target.join("inner")).unwrap();
         let inner = link.join("inner");
-        std::fs::create_dir_all(&inner).unwrap();
         let inner_s = inner.to_string_lossy().to_string();
         assert!(
             matches!(classify_residue_op_in("folder", &inner_s, None), OpVerdict::Skip(_)),
             "上级是链接的目标必须仍拒: {inner_s}"
         );
-
-        // 收尾：先拆 junction 再清目录（remove_dir_all 对 junction 子项的行为不作依赖）
-        let _ = std::fs::remove_dir(&link);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ==================== M2 静默知识（B1 构造闸 / B2 分档 / B4 第二证据） ====================

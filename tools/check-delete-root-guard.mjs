@@ -11,10 +11,24 @@
 //   ① 判定作用在 `blankNonCode` 之后的文本上 ⇒ 注释/字符串里写 `inspect_root(` 不顶账；
 //   ② 作用在**函数体**上 ⇒ 同文件另一个函数里判过不算这个函数判过；
 //   ③ 破坏性枚举允许跨一层调用（`prune_temp_scripts_in` → `collect_temp_files` 才是真 read_dir），
-//      所以做同文件 1 跳可达；调用方在把根传下去之前判过也算（guard 必须在根上，位置不限函数）。
+//      所以做同文件 2 跳可达。
+//
+// G0.2（2026-11-01 重审）：旧实现的覆盖判据是「本函数 / 删除链任一中间层 / **同文件任一 caller**
+// 判过 ⇒ 整条根算绿」——最后一条是「任一即洗白」：`realtime_report_save` 自己没判根，只因同文件
+// 另一个入口 `prune_reports` 判过就被算绿（R1d-K01）。现在改为**逐调用点**：
+//   · 自判点 `file#fn`：根在 f 体内取用/删除，且 f 的调用方不全带实参 —— 体内必须判；
+//   · 调用点 `file#fn@caller`：caller 带实参把根交给 f、f 在 2 跳内到达删除原语 ——
+//     每个 caller 各自成立：caller 体内判过，或 f 向下到删除原语之前每一条删除路径都判过
+//     （C7 中间层放行；some/any 式「有一条判过」会漏掉同层另一条未判删除路径）；
+//     共享执行体不再被「某一个 caller 判过」代表，**每个带参调用方各算一条**；
+//   · 调用方直接删的采集器（R7-K01 形状）同样按 caller 拆点，不再「任一 caller 判过即可」。
+// 「判过」仍是 T1e-L05 口径：同一函数体内 `inspect_root(` 与 `is_trusted()` 都出现。
+// 粒度声明：「调用点所在分支」按**函数体**判定（text-level，不做控制流/语句序分析）——
+// 与既有 T1e-L05 同粒度；守卫写在 call 之后同函数体也算过，这是本门禁已知的精度上限。
 //
 // 过渡基线：本门禁随 B0 落地、随 B2 兑现。B2（2026-10-25）已把 15 条里的 14 条接进
-// `protect::inspect_root`，剩下的 1 条是**已裁定不补**并写明理由的枚举工具（不是待办）。
+// `protect::inspect_root`。G0.2（2026-11-01）后盘上只剩两条：已裁定不补的枚举工具
+// （附书面理由）+ P0-4 待修复的 `realtime_report_save` 调用点（补守卫后必须删条目）。
 // `TRANSITION` 里每条都要 `{file, fn, batch, reason}`，
 // 且**双向咬合**：代码补上判定后若豁免表还留着 ⇒ 判红（防「修完了台账还挂着」的第二类假绿）。
 //
@@ -32,11 +46,13 @@ const READ = 'read_dir(';
 const DESTRUCTIVE = ['remove_file(', 'remove_dir_all(', 'send_to_trash_os(', 'delete_file_with_panic('];
 const MIN_DESTRUCTIVE_ROOTS = 5; // 对象地板：低于此数说明判定正则失明，不说明仓库变安全
 
-// B2（2026-10-25）清零：原 15 条已逐条接入 `protect::inspect_root`，本表只留**裁定为不补**
-// 的那一条（有书面理由，不是「还没做」）。新根入口漏判即红，不许再往本表塞新条目 ——
+// B2（2026-10-25）清零：原 15 条已逐条接入 `protect::inspect_root`。G0.2（2026-11-01）把判据
+// 收到逐调用点后，盘上只剩两条：① 已裁定不补的枚举工具（key 由函数名改为它唯一删除调用点）；
+// ② `realtime_report_save` 未判根（R1d-K01），**带明确回收条件**——P0-4 补守卫后必须删条目，
+// 双向咬合会当场判红。除此之外新根入口/新调用点漏判即红，不许再往本表塞新条目 ——
 // 要塞必须先答「为什么不接判据」，答不出就接判据。
 const TRANSITION = [
-  { file: 'src-tauri/src/engine/native/cleanup.rs', fn: 'expand_glob_dirs', batch: 'B2/已裁定不补', reason: '通配展开的**枚举工具**，不是删除根：真正的删除发生在执行链，而 `cleanup_execute` 的逐 victim 段对每个 victim 调 `reparse_ancestor_memoized` → `trim_finder::scan::reparse_ancestor`，命中即 `reparse_blocked += 1` 并在回执汇总处计数点名。根是 junction 时该祖先链判定当场就拒 ⇒ 在这里补根判定只会把「可见的逐项拒因 + 计数」换成「静默 0 命中」，正撞方案 P1-6「失败不得伪装成空结果」。活性由 native-scanner 的 `p0_2c_祖先复检深度到文件系统根不设第二上限` 与 `s2_*` 删除链用例（断言 mode=reparse-ancestor 且真实内容完好）钉住，不是靠这条理由自证。坐标按函数/段落锚定，不写行号（T1e-L04：旧理由里的行号已漂移，且门禁不校验它）' },
+  { file: 'src-tauri/src/engine/native/cleanup.rs', fn: 'expand_glob_dirs@cleanup_execute_with_backup_root', batch: 'B2/已裁定不补', reason: '通配展开的**枚举工具**，不是删除根：`expand_glob_dirs` 自己只 read_dir 拼候选，真正的删除发生在 `cleanup_execute_with_backup_root`（`cleanup_execute` 的实现体，本调用点所在函数）的逐 victim 段——对每个 victim 调 `reparse_ancestor_memoized` → `trim_finder::scan::reparse_ancestor`，命中即 `reparse_blocked += 1` 并在回执汇总处计数点名。根是 junction 时该祖先链判定当场就拒 ⇒ 在展开器或入口补根判定只会把「可见的逐项拒因 + 计数」换成「静默 0 命中」，正撞方案 P1-6「失败不得伪装成空结果」。活性由 native-scanner 的 `p0_2c_祖先复检深度到文件系统根不设第二上限` 与 `s2_*` 删除链用例（断言 mode=reparse-ancestor 且真实内容完好）钉住，不是靠这条理由自证。坐标按函数/段落锚定，不写行号（T1e-L04：旧理由里的行号已漂移，且门禁不校验它）' },
 ];
 
 const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
@@ -59,35 +75,71 @@ function testModRanges(code) {
  * 旧实现只算「本函数 / 1 跳 callee / 1 跳 caller」，`f → g → h(remove_file)` 整条链
  * 不进射程（现盘唯一实例 `realtime_report_list → prune_reports → prune_reports_in`
  * 的中间层自带判定，是安全形状；但判据看不见它就无法在下一处重演时报警）。
- * 守卫覆盖：根在传下去之前判过即可 —— 本函数、任一 caller，或删除链上的任一中间层。
+ *
+ * 覆盖改为**逐调用点**（G0.2）：每个「把根交进删除链」的调用点各出一条记录，
+ * 键 = `file#fn`（自判点）或 `file#fn@caller`（带参调用点），任一未判即整条根判红。
+ * 旧实现的 `callerGuarded = 同文件任一 caller 判过` 已删除 —— 它就是「sibling caller 洗白」。
  */
 function judgeRoots(fns) {
   const byName = new Map(fns.map((f) => [f.name, f]));
-  const deletesWithin = (f, depth) => {
-    if (f.deletes) return { hit: true, guarded: f.guards };
-    if (depth <= 0) return { hit: false, guarded: false };
-    for (const c of f.calls) {
+  // f 自身或 2 跳带参调用链上是否真有删除原语。零参调用不算「把根传下去」
+  // （`app_data_dir()` 这类零参路径取用不是「把根交给删除方」，现盘反例见
+  // migrate_legacy_once → app_data_dir → 测试夹具 lib_test_data_root 的 remove_dir_all）。
+  const reachesDelete = (f, depth) => {
+    if (f.deletes) return true;
+    if (depth <= 0) return false;
+    for (const c of f.argCalls) {
       const callee = byName.get(c);
-      if (!callee) continue;
-      // 只有**真把东西传下去**的调用才算链上的一环（`app_data_dir()` 这种零参路径取用
-      // 不是「把根交给删除方」；现盘反例：migrate_legacy_once → app_data_dir → 测试夹具
-      // lib_test_data_root 的 remove_dir_all，纯属同文件可达性的假阳性）。
-      if (!f.argCalls.includes(c)) continue;
-      const sub = deletesWithin(callee, depth - 1);
-      if (sub.hit) return { hit: true, guarded: f.guards || callee.guards || sub.guarded };
+      if (callee && reachesDelete(callee, depth - 1)) return true;
     }
-    return { hit: false, guarded: false };
+    return false;
+  };
+  // 从 f 往下到删除原语之前，**每一条**会真的删的路径上是否都有人判过根。
+  // 用 every 而不是 some：f 同时有「判过的删除路径」和「没判的删除路径」时，
+  // 后者照样能把根带进 remove_*，some 会把它洗白（「任一即洗白」的另一个面）。
+  // C7 的「守卫可落在中间层」仍然是 every 的特例（只有一条删除路径）。
+  const chainGuarded = (f, depth) => {
+    if (f.guards) return true;
+    if (f.deletes || depth <= 0) return false;
+    const next = f.argCalls.map((n) => byName.get(n)).filter((g) => g && reachesDelete(g, depth - 1));
+    return next.length > 0 && next.every((g) => chainGuarded(g, depth - 1));
   };
   const out = [];
   for (const f of fns) {
     if (!f.reads) continue;
-    const del = deletesWithin(f, 2);
+    const callers = fns.filter((c) => c.calls.includes(f.name));
+    const argCallers = callers.filter((c) => c.argCalls.includes(f.name));
+    const deletingCallers = callers.filter((c) => c.deletes);
+    const delReachable = reachesDelete(f, 2);
+    const sites = [];
+    // 自判点：根在 f 体内被取用。所有调用方都带实参时根来自调用方（共享执行体），
+    // 自判点让位给逐调用方 —— 执行体自身不必重复判，但每个调用方**各自**要判。
+    // 只要存在零参调用方，根也可能在 f 内自取，自判点保留。
+    const allCallersPassArgs = callers.length > 0 && callers.every((c) => c.argCalls.includes(f.name));
+    if (delReachable && !allCallersPassArgs) {
+      sites.push({ key: 'self', line: f.line, guarded: chainGuarded(f, 2) });
+    }
+    if (delReachable) {
+      for (const c of argCallers) {
+        sites.push({ key: c.name, line: c.line, guarded: c.guards || chainGuarded(f, 2) });
+      }
+    }
     // 调用方直接删也算（`collect_temp_files` 只枚举、`prune_temp_scripts_in` 才 remove_file
     // —— R7-K01 的真实形状），这一腿不属于「往下传根」，不受 argCalls 限制。
-    const callerDeletes = fns.some((c) => c.calls.includes(f.name) && c.deletes);
-    if (!del.hit && !callerDeletes) continue;
-    const callerGuarded = fns.some((c) => c.calls.includes(f.name) && c.guards);
-    out.push({ fn: f, guarded: del.guarded || f.guards || callerGuarded });
+    // 逐调用方：每个「调用 f 且自己删」的 caller 各自要判（c.guards 或采集器 f 判过）。
+    for (const c of deletingCallers) {
+      sites.push({ key: c.name, line: c.line, guarded: c.guards || f.guards });
+    }
+    if (sites.length === 0) continue; // 只 read_dir、本文件不删 ⇒ 不是删除根，不判红
+    // 同一 caller 可能两条腿都命中：同键取「与」—— 一个调用点只允许一条成立路径，
+    // 两条腿的判据都以 c.guards 为主，取「与」不会互相洗白。
+    const merged = new Map();
+    for (const s of sites) {
+      const prev = merged.get(s.key);
+      merged.set(s.key, { key: s.key, line: s.line, guarded: prev ? prev.guarded && s.guarded : s.guarded });
+    }
+    const list = [...merged.values()];
+    out.push({ fn: f, sites: list, guarded: list.every((s) => s.guarded) });
   }
   return out;
 }
@@ -123,9 +175,12 @@ const g = gate(import.meta.url);
 const exemptKey = (rel, fn) => `${rel}#${fn}`;
 const exempt = new Map(TRANSITION.map((t) => [exemptKey(t.file, t.fn), t]));
 
-let hitCount = 0;
+let hitCount = 0; // 根入口（根读取函数）个数：地板按对象算，防止「站点拆分后地板自适应」
+let siteCount = 0;
 let guardedCount = 0;
+let unregistered = 0; // 未判且未登记的调用点：>0 时 summary 不许写成「未判的全部在豁免里」
 const found = new Set();
+const VERBOSE = process.argv.includes('--verbose');
 
 // T1e-L09：SKIP 必须短路（`g.finish()` 在 0 失败时不退出，随后 walk 会 ENOENT 崩栈）。
 if (!g.skipUnlessPresent(join(SRC, 'engine', 'protect.rs'), 'src-tauri/src（本门禁的判定对象）')) {
@@ -138,26 +193,32 @@ for (const abs of walk(SRC)) {
   const code = readFileSync(abs, 'utf8');
   if (!code.includes(READ)) continue;
   const fns = build(code);
-  for (const { fn: f, guarded } of judgeRoots(fns)) {
+  for (const { fn: f, sites } of judgeRoots(fns)) {
     hitCount++;
-    const key = exemptKey(rel, f.name);
-    if (guarded) {
-      guardedCount++;
-      if (exempt.has(key)) {
-        g.fail(`${rel}:${f.line} ${f.name}() 已调用 ${GUARD.replace('(', '')}，但 TRANSITION 仍挂着它（豁免未回收 = 第二类假绿）`);
+    for (const s of sites) {
+      siteCount++;
+      const key = s.key === 'self' ? exemptKey(rel, f.name) : exemptKey(rel, `${f.name}@${s.key}`);
+      found.add(key);
+      const siteLabel = s.key === 'self' ? '自判点' : `调用点 ← ${s.key}()`;
+      if (VERBOSE) console.log(`${s.guarded ? '✓' : '✗'} ${key}（${rel}:${s.line}）`);
+      if (s.guarded) {
+        guardedCount++;
+        if (exempt.has(key)) {
+          g.fail(`${rel}:${s.line} ${f.name}() 的${siteLabel} 已调用 ${GUARD.replace('(', '')}，但 TRANSITION 仍挂着它（豁免未回收 = 第二类假绿）`);
+        }
+        continue;
       }
-      continue;
-    }
-    found.add(key);
-    if (!exempt.has(key)) {
-      g.fail(`${rel}:${f.line} ${f.name}() 是「自己 read_dir + 2 跳内删除」的根入口，本函数、caller 与删除链中间层都没有 ${GUARD} 判定，也不在过渡豁免里`);
+      if (!exempt.has(key)) {
+        unregistered++;
+        g.fail(`${rel}:${s.line} ${f.name}() 的${siteLabel} 是「read_dir + 2 跳内删除」的根入口/移交点，该调用点所在函数与删除链上游都没有 ${GUARD} 判定，也不在过渡豁免里`);
+      }
     }
   }
 }
 
-// 已登记但盘上找不到的豁免（改名/搬文件/删函数都会走到这里）
+// 已登记但盘上找不到的豁免（改名/搬文件/删函数/调用点消失都会走到这里）
 for (const [k, t] of exempt) {
-  if (!found.has(k)) g.fail(`TRANSITION 条目已失效（盘上找不到同名函数）：${t.file}:${t.fn}（${t.batch}）`);
+  if (!found.has(k)) g.fail(`TRANSITION 条目已失效（盘上找不到同名函数或调用点）：${t.file}:${t.fn}（${t.batch}）`);
 }
 for (const t of TRANSITION) {
   if (!t.reason || t.reason.length < 8) g.fail(`TRANSITION 条目缺理由：${t.file}#${t.fn}`);
@@ -172,7 +233,7 @@ for (const t of TRANSITION) {
 if (hitCount < MIN_DESTRUCTIVE_ROOTS) {
   g.fail(`断言对象地板不成立：只认出 ${hitCount} 个「枚举+删除」根入口（地板 ${MIN_DESTRUCTIVE_ROOTS}）⇒ 判定正则或目录根失效，不是仓库变安全`);
 }
-g.ok(`删除根守卫对账：识别「自己 read_dir + 本函数或 2 跳内删除」的根入口 ${hitCount} 个，其中已判根 ${guardedCount} 个、未判 ${hitCount - guardedCount} 个（未判的全部在过渡豁免里，逐条见 TRANSITION）`);
+g.ok(`删除根守卫对账（逐调用点）：根入口 ${hitCount} 个、调用点 ${siteCount} 个，已判 ${guardedCount} 个、未判 ${siteCount - guardedCount} 个（其中未登记 ${unregistered} 个；其余在过渡豁免里，逐条见 TRANSITION；--verbose 列全部键）`);
 
 // ── 合成样本正向对照：每次运行都跑（判红能力必须被看见，`check-pending-batch-limit` 先例）──
 const CONTROLS = [
@@ -217,11 +278,25 @@ const CONTROLS = [
     code: 'fn top(p: &Path) { let _ = crate::engine::protect::inspect_root(p, None); let _ = std::fs::read_dir(p); let _ = std::fs::remove_file(p); }',
     expectViolation: true,
   },
+  {
+    // G0.2 的存在理由：旧判据 `some(caller.guards)` 在这一条上会放行（兄弟入口判过即洗白）
+    label: 'C9 共享执行体两个 caller，一个判过、另一个没判 ⇒ 必须判红（逐调用点，任一洗白不算）',
+    code: 'fn a(p: &Path) { let _ = std::fs::read_dir(p); let _ = std::fs::remove_file(p); }\nfn good(p: &Path) { if crate::engine::protect::inspect_root(p, None).is_trusted() { a(p); } }\nfn bad(p: &Path) { a(p); }',
+    expectViolation: true,
+  },
+  {
+    // 防「过紧」假红：每个调用方都判过时，共享执行体体内不重复判也必须放行。
+    label: 'C10 同形状但两个 caller 都判过 ⇒ 不判红（逐调用点全部成立即可，不要求执行体自判）',
+    code: 'fn a(p: &Path) { let _ = std::fs::read_dir(p); let _ = std::fs::remove_file(p); }\nfn good1(p: &Path) { if crate::engine::protect::inspect_root(p, None).is_trusted() { a(p); } }\nfn good2(p: &Path) { if crate::engine::protect::inspect_root(p, None).is_trusted() { a(p); } }',
+    expectViolation: false,
+  },
 ];
 let ctrlBad = 0;
 for (const c of CONTROLS) {
   const viol = judgeRoots(build(c.code)).some((r) => !r.guarded);
-  if (viol !== c.expectViolation) { ctrlBad++; console.error(`✗ 正向对照失败：${c.label}（实得 viol=${viol}）`); }
+  // G0.2：对照失败必须进 g.fail（旧写法只 console.error ⇒ 真仓干净时 exit 仍是 0，
+  // 「判红能力坏掉」被冒充成通过 —— 对照组必须自己也能把门禁判红）。
+  if (viol !== c.expectViolation) { ctrlBad++; g.fail(`正向对照失败：${c.label}（实得 viol=${viol}）`); }
 }
 if (ctrlBad === 0) g.ok(`正向对照 ${CONTROLS.length} 组通过（含「注释里写判定不算通过」「1/2 跳穿透必判红」「2 跳链中间层判过放行」「调了不读判定仍红」）`);
 
@@ -255,4 +330,5 @@ if (existsSync(WRITE_CHAIN_FILE)) {
   g.warn(`未校验：${relative(ROOT, WRITE_CHAIN_FILE).split('\\').join('/')} 不在盘上，W 组本节未验证（不算通过）`);
 }
 
-g.finish('check-delete-root-guard: 全部通过（TRANSITION 剩 ' + exempt.size + ' 条，均为已裁定的「不补」并附书面理由，非待办）');
+const pendingTransition = TRANSITION.filter((t) => /^P\d/.test(t.batch)).length;
+g.finish(`check-delete-root-guard: 全部通过（TRANSITION 剩 ${exempt.size} 条：已裁定不补 ${exempt.size - pendingTransition} 条 + 待修复 ${pendingTransition} 条（守卫补齐后必须回收条目），无其它待办）`);

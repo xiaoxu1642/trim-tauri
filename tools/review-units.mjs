@@ -348,9 +348,18 @@ export const UNITS = [
     gates: ['check-scan-rule-diff'],
   },
   {
+    // 2026-11-01 P0-G0 重切：G0.3 把档位门禁改成精确函数体后 T1a 精读行数达 8097 越 U2
+    // 的 8000 上限。沿用 2026-10-28（P2-a 切出 T1h）的同一处置：按执行链点名成独立单元，
+    // 上限不放宽 —— channel-map 与 guard-tiers 吃的是同一张「命令 → 通道/档位」台账。
+    id: 'T1i', owner: 'sub', name: '门禁·通道映射与档位面',
+    files: ['tools/check-channel-map.mjs', 'tools/check-guard-tiers.mjs'],
+    contract: '命令 ↔ 前端通道映射 / 三档 guard 档位与 MAIN·READONLY 清单对拍',
+    boundary: '被审对象是 IPC 命令面本身；其它门禁的假绿判定归 T1a',
+    gates: ['check-channel-map', 'check-guard-tiers'],
+  },
+  {
     id: 'T1a', owner: 'sub', name: '门禁·安全与执行面',
-    files: ['tools/check-channel-map.mjs', 'tools/check-guard-tiers.mjs',
-      'tools/check-delete-callsites.mjs', 'tools/check-delete-exits.mjs',
+    files: ['tools/check-delete-callsites.mjs', 'tools/check-delete-exits.mjs',
       'tools/check-ps-callsites.mjs', 'tools/check-ps-extraction.mjs',
       'tools/check-ps-substitution.mjs', 'tools/check-system-bin.mjs',
       'tools/check-fail-closed.mjs', 'tools/check-layering.mjs',

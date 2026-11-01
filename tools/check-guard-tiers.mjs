@@ -51,6 +51,7 @@ import { join, relative } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
 import { walkRs } from './lib/fs-walk.mjs';
+import { blankNonCode, lineAt, splitFunctions } from './lib/src-scan.mjs';
 
 const CMD_DIR = join(REPO_ROOT, 'src-tauri', 'src', 'commands');
 
@@ -256,32 +257,166 @@ const MUST_MAIN = [
 // 只扫一层等于「搬进子目录的命令自动退出档位台账」，那是假绿不是收敛。
 // 相对 CMD_DIR 的正斜杠路径（下方按 join(CMD_DIR, f) 回拼绝对路径读文件）。
 const files = walkRs(CMD_DIR).map((p) => relative(CMD_DIR, p).replace(/\\/g, '/'));
-/** @type {Map<string, {file:string, tier:string|null, line:number}>} */
+
+/** 花括号深度前缀表：判定「文件级」声明用（函数内 const / impl 关联项不算）。 */
+function braceDepths(clean) {
+  const depth = new Int32Array(clean.length + 1);
+  let d = 0;
+  for (let i = 0; i < clean.length; i++) {
+    depth[i] = d;
+    if (clean[i] === '{') d++;
+    else if (clean[i] === '}') d--;
+  }
+  depth[clean.length] = d;
+  return depth;
+}
+
+/**
+ * 解析一个 .rs 文件的文件级函数与 const/static。
+ *
+ * 为什么只认文件级：命令体里引用的 `const X` 若是函数内局部量，它的值不会跨命令复用，
+ * 拿它当提权判据会随局部改名漂移；「文件级」才是命令之间真正共享的判据面。
+ * 常量值保留字符串原文（`-Verb RunAs` 就在字符串里），但注释仍抹掉；
+ * 另存一份抹掉字符串的 code 供标识符递归（避免把日志文本里的单词当引用）。
+ */
+function buildTable(text) {
+  const clean = blankNonCode(text, 'rs');
+  const depth = braceDepths(clean);
+  const funcs = splitFunctions(text, 'rs').filter((fn) => depth[fn.start] === 0);
+  const fnByName = new Map();
+  for (const fn of funcs) {
+    if (!fnByName.has(fn.name)) fnByName.set(fn.name, []);
+    fnByName.get(fn.name).push(fn);
+  }
+  const consts = [];
+  const re = /\b(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:/g;
+  let m;
+  while ((m = re.exec(clean))) {
+    if (depth[m.index] !== 0) continue;
+    const eq = clean.indexOf('=', m.index + m[0].length);
+    if (eq < 0) continue;
+    let j = eq + 1;
+    let nesting = 0;
+    for (; j < clean.length; j++) {
+      const c = clean[j];
+      if (c === '(' || c === '[' || c === '{') nesting++;
+      else if (c === ')' || c === ']' || c === '}') nesting--;
+      else if (c === ';' && nesting === 0) break;
+    }
+    const raw = text.slice(eq + 1, j);
+    consts.push({
+      name: m[1],
+      value: blankNonCode(raw, 'rs', { keepStrings: true }),
+      code: blankNonCode(raw, 'rs'),
+    });
+  }
+  const constByName = new Map();
+  for (const c of consts) {
+    if (!constByName.has(c.name)) constByName.set(c.name, []);
+    constByName.get(c.name).push(c);
+  }
+  return { clean, funcs, fnByName, consts, constByName };
+}
+
+const fileTables = new Map();
+for (const f of files) fileTables.set(f, buildTable(readFileSync(join(CMD_DIR, f), 'utf8')));
+
+/**
+ * 提权出口形态：
+ *   · runas 动词 —— 标识符（`runas_launch` / `let runas`）或字符串常量（`-Verb RunAs`）；
+ *   · ShellExecuteEx 拉起 —— 即使不带 verb，UAC 也会由目标 exe 的 manifest 触发
+ *     （`uninstall_run` 的真实提权出口就是 `shell_run_wait` 里的 `ShellExecuteExW`）。
+ * 只认 `ShellExecuteEx` 不认 `ShellExecuteW`：后者在本仓大量用于普通「打开」（资源管理器 /
+ * 回收站 / 外部程序），全收会把只读档命令卷进 F 组。
+ */
+const ELEVATION_SHAPE = /runas|ShellExecuteEx/i;
+
+/**
+ * 建一个「命令可达提权形态」解析器。
+ *
+ * 起点是命令的**精确函数体**（blankNonCode 后，注释与字符串不计）；沿函数体内出现的
+ * 标识符递归到文件级函数与常量，因为真实出口常常只有一层之遥：
+ *   contextmenu_open_in_regedit → open_regedit_native（runas 变量）
+ *   uninstall_run              → shell_run_wait（ShellExecuteExW）
+ *   quickcmds_run              → QUICKCMDS（`-Verb RunAs` 字符串常量）
+ * 同文件优先；同文件找不到时按裸名跨文件兜底（Rust 的 `use super::x::*` 不做语义解析，
+ * 同名多定义全收——宁可多报，不可漏报）。
+ */
+function makeElevationResolver(tables) {
+  const global = new Map();
+  for (const [file, t] of tables) {
+    for (const fn of t.funcs) {
+      if (!global.has(fn.name)) global.set(fn.name, { fns: [], consts: [] });
+      global.get(fn.name).fns.push({ file, fn });
+    }
+    for (const c of t.consts) {
+      if (!global.has(c.name)) global.set(c.name, { fns: [], consts: [] });
+      global.get(c.name).consts.push({ file, const: c });
+    }
+  }
+  return (startFile, startFn) => {
+    const seenFns = new Set();
+    const seenConsts = new Set();
+    const hits = [];
+    const queue = [{ file: startFile, fn: startFn }];
+    const addConst = (file, c) => {
+      const key = `${file}:${c.name}`;
+      if (seenConsts.has(key)) return;
+      seenConsts.add(key);
+      if (ELEVATION_SHAPE.test(c.value)) hits.push(c.name);
+      const t = tables.get(file);
+      for (const id of new Set(c.code.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [])) {
+        for (const sub of t.constByName.get(id) ?? []) addConst(file, sub);
+      }
+    };
+    while (queue.length) {
+      const cur = queue.shift();
+      const key = `${cur.file}:${cur.fn.start}`;
+      if (seenFns.has(key)) continue;
+      seenFns.add(key);
+      const t = tables.get(cur.file);
+      const code = t.clean.slice(cur.fn.bodyStart, cur.fn.end - 1);
+      if (ELEVATION_SHAPE.test(code)) hits.push(cur.fn.name);
+      for (const id of new Set(code.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [])) {
+        const localFns = t.fnByName.get(id) ?? [];
+        const localConsts = t.constByName.get(id) ?? [];
+        for (const fn of localFns) queue.push({ file: cur.file, fn });
+        for (const c of localConsts) addConst(cur.file, c);
+        if (localFns.length === 0 && localConsts.length === 0) {
+          const g = global.get(id);
+          if (!g) continue;
+          for (const x of g.fns) queue.push(x);
+          for (const x of g.consts) addConst(x.file, x.const);
+        }
+      }
+    }
+    return hits;
+  };
+}
+
+/** @type {Map<string, {file:string, tier:string|null, line:number, windowSetConst:string|null, bodyCode:string}>} */
 const tiers = new Map();
-/** @type {Map<string, string>} 命令名 → 命令体全文（group F 的判据面） */
-const commandBodies = new Map();
+/** @type {Map<string, {file:string, fn:object}>} 命令名 → 精确函数区间（F 组可达性起点） */
+const commandFns = new Map();
+// `#[tauri::command]` 之后到 `pub fn` 之间允许叠加的属性行数（`#[cfg]` / `#[allow]` 等）。
+const ATTR_WINDOW = 8;
 
 for (const f of files) {
-  const text = readFileSync(join(CMD_DIR, f), 'utf8');
-  const lines = text.split('\n');
-  const marks = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].includes('#[tauri::command]')) marks.push(i);
-  }
-  for (let k = 0; k < marks.length; k++) {
-    const start = marks[k];
-    const end = k + 1 < marks.length ? marks[k + 1] : lines.length;
-    let name = null;
-    for (let j = start + 1; j < Math.min(start + 8, end); j++) {
-      const m = lines[j].match(/pub\s+(?:async\s+)?fn\s+(\w+)/);
-      if (m) { name = m[1]; break; }
-    }
-    if (!name) continue;
+  const table = fileTables.get(f);
+  const { clean, funcs } = table;
+  for (const mk of clean.matchAll(/#\[tauri::command\]/g)) {
+    const mark = mk.index;
+    const markLine = lineAt(clean, mark);
+    // 命令函数 = 属性之后最近的文件级 fn（窗口上限见 ATTR_WINDOW）。
+    const fn = funcs.find((x) => x.start > mark && lineAt(clean, x.start) - markLine <= ATTR_WINDOW);
+    if (!fn) continue;
+    if (tiers.has(fn.name)) continue; // 重名由 A1b 条数对拍兜底
+    // 精确函数体：从 `{` 之后到配平 `}` 之前，注释与字符串已抹成空格。
+    const bodyCode = clean.slice(fn.bodyStart, fn.end - 1);
 
     let tier = null;
     let windowSetConst = null;
-    for (let j = start; j < end && tier === null; j++) {
-      const line = lines[j];
+    for (const line of bodyCode.split('\n')) {
       // 顺序即判据：MAIN / readonly / APP_WINDOWS 全集先认，剩下才可能是「自定义窄窗口集」。
       // 窗口集分支必须留在 `tier === null` 之后 —— 早先把它写成独立语句时，
       // `guard::MAIN` 会被第二段 else-if 重判成 GUARD_OTHER，B 组当场 59 条全红。
@@ -299,9 +434,10 @@ for (const f of files) {
       // 手写 label 判定：`window.label() != "main"` 之外，也可能先取出 label 再比较
       // （`app_first_paint` 为写日志就是这样）。认 `.label()` 调用，避免改个写法就漏判。
       else if (/window\.label\(\)/.test(line)) tier = 'HANDWRITTEN';
+      if (tier !== null) break;
     }
-    tiers.set(name, { file: f, tier, line: start + 1, windowSetConst });
-    commandBodies.set(name, lines.slice(start, end).join('\n'));
+    tiers.set(fn.name, { file: f, tier, line: markLine, windowSetConst, bodyCode });
+    commandFns.set(fn.name, { file: f, fn });
   }
 }
 
@@ -382,13 +518,11 @@ check(
 );
 
 // ---- C. MAIN 档不能有 guard_readonly 混写 ----
-const mixed = [...tiers.entries()].filter(([n, v]) => {
-  if (!MUST_MAIN.includes(n) || v.tier !== 'MAIN') return false;
-  const text = readFileSync(join(CMD_DIR, v.file), 'utf8').split('\n');
-  const end = text.findIndex((l, i) => i > v.line && l.includes('#[tauri::command]'));
-  const body = text.slice(v.line - 1, end < 0 ? text.length : end);
-  return body.some((l) => /guard_readonly\(/.test(l));
-});
+// P0-G0.3：判据面改精确函数体（注释与字符串不计）——旧实现按「本命令属性行到下一个
+// 命令属性行」切片，会把命令之后的私有 helper 也算进来。
+const mixed = [...tiers.entries()].filter(
+  ([n, v]) => MUST_MAIN.includes(n) && v.tier === 'MAIN' && /guard_readonly\(/.test(v.bodyCode),
+);
 check(
   mixed.length === 0,
   'C. MAIN 档命令体内无 guard_readonly 混写',
@@ -606,27 +740,130 @@ check(
   inBoth.length ? `同时登记在两张表里 ${JSON.stringify(inBoth)}` : '',
 );
 
-// ---- F. runas ⇒ 必须 MAIN 档（P3-5，R1-G-4） ----
-// 命令体内出现 runas（ShellExecuteW 的提权动词 / `-Verb RunAs`）⇒ 等效提权出口 ——
-// 挂 readonly 档等于让子窗渲染层失陷即可弹 UAC（AGENTS §3「不得下放」）。
-// 现算靶心三条：elevate_request / contextmenu_open_in_regedit / quickcmds_run。
+// ---- F. 提权出口 ⇒ 必须 MAIN 档（P3-5，R1-G-4；P0-G0.3 精确函数体） ----
+// 判据面不再是「两条 #[tauri::command] 之间的文本」，而是：
+//   ① blankNonCode 后的**精确函数体**（注释、字符串不计）；
+//   ② 函数体可达的文件级 const/static 的值（保留字符串原文，`-Verb RunAs` 就在字符串里）；
+//   ③ 同一文件 / 跨文件的文件级 helper（真实出口常常一层之遥：contextmenu_open_in_regedit
+//      → open_regedit_native、uninstall_run → shell_run_wait）。
+// 形态见 ELEVATION_SHAPE：runas 动词与 ShellExecuteEx 拉起。挂 readonly 档等于让子窗渲染层
+// 失陷即可弹 UAC（AGENTS §3「不得下放」）。
 {
+  const resolveElevation = makeElevationResolver(fileTables);
   const runasCmds = [];
   const wrongTier = [];
-  for (const [name, body] of commandBodies) {
-    if (!/runas/i.test(body)) continue;
+  const via = new Map();
+  for (const [name, v] of tiers) {
+    const start = commandFns.get(name);
+    if (!start) continue;
+    const hits = resolveElevation(start.file, start.fn);
+    if (hits.length === 0) continue;
     runasCmds.push(name);
-    if (!MUST_MAIN.includes(name)) wrongTier.push(`${name}（${tiers.get(name)?.file}:${tiers.get(name)?.line}）`);
+    via.set(name, hits.join('/'));
+    if (!MUST_MAIN.includes(name)) wrongTier.push(`${name}（${v.file}:${v.line}）`);
   }
   check(
-    runasCmds.length >= 3,
-    `F. 命令体含 runas 的 ${runasCmds.length} 条（≥3 为地板，防语料失明）`,
-    runasCmds.length < 3 ? 'runas 判定器疑似失明' : runasCmds.join(', '),
+    runasCmds.length >= 4,
+    `F. 命令可达提权形态（runas / ShellExecuteEx）的 ${runasCmds.length} 条（≥4 为地板，防语料失明）`,
+    runasCmds.length < 4 ? '提权判定器疑似失明' : runasCmds.map((n) => `${n}←${via.get(n)}`).join(', '),
   );
   check(
     wrongTier.length === 0,
-    'F2. 含 runas（等效提权出口）的命令全部登记 MAIN 档',
+    'F2. 可达提权形态（等效提权出口）的命令全部登记 MAIN 档',
     wrongTier.length ? `未升档：${JSON.stringify(wrongTier)}` : '',
+  );
+
+  // F3 真实仓正向对照（P0-G0.3）：三条必证——真出口命中、注释假阳性不命中、文件级常量命中。
+  // 每条都先确认样本命令存在：否则命令被删/改名后 `includes` 会空转成假绿。
+  check(
+    tiers.has('uninstall_run') && runasCmds.includes('uninstall_run'),
+    'F3a. 真实仓 uninstall_run 的提权出口被识别（shell_run_wait → ShellExecuteExW，UAC 由目标 manifest 触发）',
+    tiers.has('uninstall_run') ? '' : '样本命令不存在，对照失效',
+  );
+  check(
+    tiers.has('uninstall_list') && !runasCmds.includes('uninstall_list'),
+    'F3b. 真实仓 uninstall_list 不因注释「不加 RUNAS verb」误报',
+    tiers.has('uninstall_list') ? '' : '样本命令不存在，对照失效',
+  );
+  check(
+    tiers.has('quickcmds_run') && runasCmds.includes('quickcmds_run'),
+    'F3c. 真实仓 quickcmds_run 经文件级常量 QUICKCMDS 的 RunAs 命中',
+    tiers.has('quickcmds_run') ? '' : '样本命令不存在，对照失效',
+  );
+}
+
+// ---- F4. 合成正向对照（门禁内每次运行都跑） ----
+// 把「注释不计 / 字符串不计 / 常量可达 / 去掉常量即失明」四条判据钉在门禁内部：
+// 真实仓未来改名或注释漂移时，这几条仍能独立判红，不会和样本一起失效。
+{
+  const commentOnly = `
+#[tauri::command]
+pub fn synth_comment_only<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    // 不加 RUNAS verb：卸载器自带 manifest 会按需弹 UAC
+    let note = "runas -Verb RunAs";
+    guard::guard(&window, guard::MAIN)?;
+    json!({ "note": note })
+}`;
+  const realCall = `
+#[tauri::command]
+pub fn synth_real_call<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    guard::guard(&window, guard::MAIN)?;
+    runas_launch("x");
+    json!({})
+}`;
+  const constSample = `
+const SYNTH_QUICK: &[(&str, &str)] = &[
+    ("sys-cmd-admin", "powershell -Command \\"Start-Process cmd -Verb RunAs\\""),
+];
+#[tauri::command]
+pub fn synth_const_run<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
+    guard::guard(&window, guard::MAIN)?;
+    let _ = SYNTH_QUICK;
+    json!({})
+}`;
+  // 只改定义名、保留引用：等价于「把 RunAs 常量移除」，引用就解析不到了。
+  const constGone = constSample.replace('const SYNTH_QUICK:', 'const SYNTH_QUICK_RENAMED:');
+  const synthTables = new Map([
+    ['synth-comment.rs', buildTable(commentOnly)],
+    ['synth-call.rs', buildTable(realCall)],
+    ['synth-const.rs', buildTable(constSample)],
+    ['synth-const-gone.rs', buildTable(constGone)],
+  ]);
+  const resolveSynth = makeElevationResolver(synthTables);
+  const synthHits = (file, fnName) => {
+    const table = synthTables.get(file);
+    const fn = table.fnByName.get(fnName)?.[0];
+    return fn ? resolveSynth(file, fn) : null;
+  };
+  const commentHits = synthHits('synth-comment.rs', 'synth_comment_only');
+  const callHits = synthHits('synth-call.rs', 'synth_real_call');
+  const constHits = synthHits('synth-const.rs', 'synth_const_run');
+  // 「去掉常量」样本必须**单表单跑**：放在同一张合成表里时，另一份样本的 SYNTH_QUICK
+  // 会被跨文件裸名兜底解析到，F4d 就永远绿——那正是本条对照要防的假绿。
+  const goneTable = synthTables.get('synth-const-gone.rs');
+  const goneFn = goneTable.fnByName.get('synth_const_run')?.[0];
+  const goneHits = goneFn
+    ? makeElevationResolver(new Map([['synth-const-gone.rs', goneTable]]))('synth-const-gone.rs', goneFn)
+    : null;
+  check(
+    commentHits !== null && commentHits.length === 0,
+    'F4a. 合成对照：仅注释/字符串含 runas 不命中',
+    commentHits === null ? '样本函数未解析出来，对照失效' : `实得 ${JSON.stringify(commentHits)}`,
+  );
+  check(
+    callHits !== null && callHits.length > 0,
+    'F4b. 合成对照：同样文字改成真实调用（runas_launch）即命中',
+    callHits === null ? '样本函数未解析出来，对照失效' : `实得 ${JSON.stringify(callHits)}`,
+  );
+  check(
+    constHits !== null && constHits.includes('SYNTH_QUICK'),
+    'F4c. 合成对照：文件级 RunAs 常量被解析',
+    constHits === null ? '样本函数未解析出来，对照失效' : `实得 ${JSON.stringify(constHits)}`,
+  );
+  check(
+    goneHits !== null && goneHits.length === 0,
+    'F4d. 合成对照：去掉该常量后不再命中（常量解析是负载断言）',
+    goneHits === null ? '样本函数未解析出来，对照失效' : `实得 ${JSON.stringify(goneHits)}`,
   );
 }
 
