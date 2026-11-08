@@ -123,6 +123,14 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
                 return Err(format!("写入注册表失败: {name}"));
             }
             let _ = RegCloseKey(hk);
+            // R5e-M01：写后回读——策略/重定向可能把值改成别的数，不能凭 Set 返回成功就报绿。
+            let actual = read_reg_dword_opt(HKEY_LOCAL_MACHINE, subkey, name);
+            if actual != Some(val as i64) {
+                return Err(format!(
+                    "写入后回读不一致: {name} 期望 {val} 实际 {}",
+                    actual.map(|v| v.to_string()).unwrap_or_else(|| "读不到".to_string())
+                ));
+            }
         }
     }
 
@@ -186,7 +194,14 @@ pub fn peripheral_restore() -> Result<Value, String> {
     let stamp = if let Some(caps) = regex_capture(latest_name, r"^backup_(\d{8}_\d{6})") {
         caps
     } else {
-        String::new()
+        // R5e-M02：文件名时间戳不是 ASCII `YYYYMMDD_HHMMSS` 时不能按字节切片猜；
+        // 记日志并按「不可识别」返回，不做半批导入。
+        crate::engine::log::write_log("warn", &format!("外设备份文件名时间戳无法解析，已跳过: {latest_name}"));
+        return Ok(json!({
+            "ok": false, "reason": "unreadable-name", "restored": 0,
+            "total": files.len(), "file": latest_name, "rejected": [],
+            "unreadableDirs": unreadable_dirs,
+        }));
     };
     let group: Vec<&std::path::PathBuf> = if !stamp.is_empty() {
         files.iter().filter(|p| {
@@ -262,13 +277,17 @@ pub(super) fn peripheral_restore_reason(
 }
 
 fn regex_capture(text: &str, pattern: &str) -> Option<String> {
-    // 简单正则：backup_(\d{8}_\d{6})
+    // 简单正则：backup_(\d{8}_\d{6})；只用字符串切分，避免非 ASCII 名字上的字节切片 panic。
     if pattern == r"^backup_(\d{8}_\d{6})" {
-        if text.len() >= 21 && &text[..7] == "backup_" {
-            let stamp = &text[7..21];
-            if stamp.chars().all(|c| c.is_ascii_digit() || c == '_') {
-                return Some(stamp.to_string());
-            }
+        let rest = text.strip_prefix("backup_")?;
+        let (date, rest) = rest.split_once('_')?;
+        let (time, _tail) = rest.split_once('_')?;
+        if date.len() == 8
+            && time.len() == 6
+            && date.chars().all(|c| c.is_ascii_digit())
+            && time.chars().all(|c| c.is_ascii_digit())
+        {
+            return Some(format!("{date}_{time}"));
         }
     }
     None

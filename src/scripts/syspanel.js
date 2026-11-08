@@ -1062,7 +1062,8 @@
       const resp = await window.api.syspanel.powerPlanApply(guid);
       if (resp && resp.success) {
         renderPower(resp.data);
-        pwrToast('info', '电源方案已切换并回读校验通过');
+        if (resp.data && resp.data.degraded) pwrToast('warning', resp.data.degradedReason || '电源方案读取不完整');
+        else pwrToast('info', '电源方案已切换并回读校验通过');
       } else {
         pwrToast('error', (resp && resp.message) || '切换失败');
         await loadPower(); // 失败后**重读**，把实际状态摆回面板（不假装成功）
@@ -2298,6 +2299,7 @@
       const data = resp && resp.success ? resp.data : null;
       if (!data) { renderPowerEmpty((resp && resp.message) || '读取电源方案失败'); return; }
       renderPower(data);
+      if (data.degraded) pwrToast('warning', data.degradedReason || '电源方案读取不完整');
       powerLoaded = true;
     } catch (e) {
       renderPowerEmpty('读取失败：' + (e && e.message ? e.message : String(e)));

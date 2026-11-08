@@ -283,6 +283,9 @@ function braceDepths(clean) {
  */
 function buildTable(text) {
   const clean = blankNonCode(text, 'rs');
+  // T1i-M02：命令体里的内联提权字符串（`Start-Process ... -Verb RunAs`）在 clean
+  // 视图里被抹掉；另存保留字符串的视图专门扫提权形态。
+  const codeKeep = blankNonCode(text, 'rs', { keepStrings: true });
   const depth = braceDepths(clean);
   const funcs = splitFunctions(text, 'rs').filter((fn) => depth[fn.start] === 0);
   const fnByName = new Map();
@@ -317,7 +320,7 @@ function buildTable(text) {
     if (!constByName.has(c.name)) constByName.set(c.name, []);
     constByName.get(c.name).push(c);
   }
-  return { clean, funcs, fnByName, consts, constByName };
+  return { clean, codeKeep, funcs, fnByName, consts, constByName };
 }
 
 const fileTables = new Map();
@@ -331,7 +334,9 @@ for (const f of files) fileTables.set(f, buildTable(readFileSync(join(CMD_DIR, f
  * 只认 `ShellExecuteEx` 不认 `ShellExecuteW`：后者在本仓大量用于普通「打开」（资源管理器 /
  * 回收站 / 外部程序），全收会把只读档命令卷进 F 组。
  */
-const ELEVATION_SHAPE = /runas|ShellExecuteEx/i;
+const ELEVATION_SHAPE = /runas|ShellExecuteEx|elevate/i;
+// T1i-M02：keepStrings 视图只认「真实内联命令形态」，不能把普通字符串里的 runas 当出口。
+const INLINE_ELEVATION_SHAPE = /Start-Process[\s\S]{0,240}-Verb\s+["']?RunAs/i;
 
 /**
  * 建一个「命令可达提权形态」解析器。
@@ -378,7 +383,8 @@ function makeElevationResolver(tables) {
       seenFns.add(key);
       const t = tables.get(cur.file);
       const code = t.clean.slice(cur.fn.bodyStart, cur.fn.end - 1);
-      if (ELEVATION_SHAPE.test(code)) hits.push(cur.fn.name);
+      const rawCode = t.codeKeep.slice(cur.fn.bodyStart, cur.fn.end - 1);
+      if (ELEVATION_SHAPE.test(code) || INLINE_ELEVATION_SHAPE.test(rawCode)) hits.push(cur.fn.name);
       for (const id of new Set(code.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [])) {
         const localFns = t.fnByName.get(id) ?? [];
         const localConsts = t.constByName.get(id) ?? [];

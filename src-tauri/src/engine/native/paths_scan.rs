@@ -41,6 +41,11 @@ fn emit_path(p: &std::path::Path) -> String {
         // 盘符根：`C:` 是驱动器相对、`C:\` 才是根——补回尾杠，不削
         return format!("{stripped}\\");
     }
+    if b.len() == 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\' {
+        // R5b-M04：`\\?\C:\` 剥前缀后是 `C:\`——保留尾杠，不能再 trim 成 `C:`
+        //（`C:` 是驱动器相对，删除/展示目标会变）。
+        return stripped;
+    }
     stripped.trim_end_matches('\\').to_string()
 }
 

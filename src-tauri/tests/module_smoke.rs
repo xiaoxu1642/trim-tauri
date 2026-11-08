@@ -1880,9 +1880,15 @@ fn cleanup_scan_l1_l2_probe() {
     println!(
         "CLEANUP_PERF_PROBE {{\"elapsed_ms\":{elapsed_ms},\"l1_bytes\":{l1_bytes},\"l2_bytes\":{l2_bytes},\"items\":{items},\"files_in_receipt\":{files_in_receipt},\"detail_kind\":\"{kind}\",\"detail_total\":{total},\"headless_files\":{headless_files}}}"
     );
-    assert_eq!(kind, "files", "快照必须仍持有可删文件清单（明细读快照）: {detail}");
-    assert!(total > 0, "fileKeys 型条目的快照明细不得为 0: {detail}");
-    assert!(headless_files > 0, "无头入口必须保持 files: {headless}");
+    // X1-M02：本机没有 windowsCryptographicServices 样本时，`total == 0` 是环境事实，
+    // 不是代码缺陷；显式 SKIP 并说明本节未验证，不许硬红。有样本时才断言快照/无头面。
+    if kind != "files" || total == 0 {
+        skip_and_record("cleanup_scan_l1_l2_probe：本机没有 windowsCryptographicServices 可删样本，快照/无头断言未验证");
+    } else {
+        assert_eq!(kind, "files", "快照必须仍持有可删文件清单（明细读快照）: {detail}");
+        assert!(total > 0, "fileKeys 型条目的快照明细不得为 0: {detail}");
+        assert!(headless_files > 0, "无头入口必须保持 files: {headless}");
+    }
 }
 
 /// 2026-10-06 任务三：`optimizer_restore_frequency`（还原点弹窗「恢复默认创建频率」）
@@ -2396,7 +2402,7 @@ fn bench_history_list_matches_file_truth() {
 #[ignore = "真机实测：读注册表与计划任务，非回归判据，取数时手动 --ignored 跑"]
 fn startup_scan_real_count_vs_writer_cap_probe() {
     let _data = probe_guard();
-    let Ok(items) = trim_tauri_lib::engine::native::startup_scan() else {
+    let Ok((items, _warnings)) = trim_tauri_lib::engine::native::startup_scan() else {
         skip_and_record("startup_scan：本机启动项枚举失败（取数探针无对象，先查环境再谈判据）");
         return;
     };
@@ -2650,9 +2656,24 @@ fn u_r1d_netcheck_unknown_action_rejected_by_snapshot_gate() {
 #[test]
 fn u_r1d_diskbench_single_flight_not_dirty_after_path_reject() {
     let w = main_window();
-    let bad = json!({ "options": { "path": "C:\\__trim_probe_outside_whitelist__" } });
+    // X1-M01：用 Public 下真实存在的目录验证白名单拒因（非存在路径会在更早的
+    // exists() 分支早退，白名单被摘掉也照样绿）。测完即删；无 PUBLIC 则显式 SKIP。
+    let Some(public) = std::env::var_os("PUBLIC") else {
+        skip_and_record("diskbench 单飞：本机没有 PUBLIC 目录，本节未验证");
+        return;
+    };
+    let outside = std::path::PathBuf::from(public).join(format!("TrimSmoke-diskbench-{}", std::process::id()));
+    if std::fs::create_dir_all(&outside).is_err() {
+        skip_and_record("diskbench 单飞：Public 下自建目录失败，本节未验证");
+        return;
+    }
+    let bad = json!({ "options": { "path": outside.to_string_lossy() } });
     let first = invoke(&w, "diskbench_run", bad.clone());
     assert_eq!(first["success"], json!(false), "白名单外路径必须拒: {first}");
+    assert!(
+        common::message_of(&first).contains("测速路径受限"),
+        "拒因必须是白名单闸（不能是路径不存在/不可访问）: {first}"
+    );
     assert_ne!(
         first["busy"],
         json!(true),
@@ -2665,6 +2686,7 @@ fn u_r1d_diskbench_single_flight_not_dirty_after_path_reject() {
         json!(true),
         "早退路径必须释放单飞位（RAII Drop），否则第二次请求被误判进行中: {second}"
     );
+    let _ = std::fs::remove_dir_all(&outside);
 }
 
 /// 真机 `#[ignore]` 探针（v7.2 `R1d-U03`）：diskbench **成功分支**跑完后盘上不得留残。
@@ -3043,7 +3065,7 @@ fn u_ctfmon_startup_chain_guard_live() {
     assert!(add.map(|o| o.status.success()).unwrap_or(false), "建探针 Run 值失败，后续断言无对象");
     guard.created = true;
 
-    let items = startup_scan().expect("启动项扫描失败");
+    let (items, _warnings) = startup_scan().expect("启动项扫描失败");
     let hit = items
         .iter()
         .find(|i| i["source"] == json!("registry") && i["valueName"].as_str() == Some(NAME))

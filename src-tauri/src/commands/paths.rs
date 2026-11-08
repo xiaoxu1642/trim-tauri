@@ -133,7 +133,7 @@ pub fn paths_load<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_j
 
 /// paths:save — 保存单个路径（key 白名单 + 长度/空字节校验 + 存在性回执）
 #[tauri::command]
-pub fn paths_save<R: tauri::Runtime>(window: WebviewWindow<R>, key: String, value: String) -> Result<serde_json::Value, String> {
+pub async fn paths_save<R: tauri::Runtime>(window: WebviewWindow<R>, key: String, value: String) -> Result<serde_json::Value, String> {
     // R1a-M01：本命令写入的路径会被清理扫描原样采纳并永久删除，只在主窗配置页调用。
     guard::guard(&window, guard::MAIN)?;
     if !ALLOWED_KEYS.contains(&key.as_str()) || value.len() > 1024 || value.contains('\0') {
@@ -151,22 +151,40 @@ pub fn paths_save<R: tauri::Runtime>(window: WebviewWindow<R>, key: String, valu
     // v4 P2-D 尾（R7-M01 同族）：读-改-写收口 —— 旧链 `load_paths_config()`（损坏时
     // 已隔离但返回 `{}`）→ 插入单键 → `save_paths_config()` 把整份路径配置覆成只剩
     // 这一次写的键（其余绑定与 scannedAt 静默丢失，回执仍是 success）。现在读失败拒写。
-    let exists = !value.is_empty() && std::path::Path::new(&value).exists();
-    let saved = match security::update_json(&paths::paths_config_file(), |config| {
-        let Some(obj) = config.as_object_mut() else {
-            return Err("路径配置结构异常（非对象）".into());
+    let key_bg = key.clone();
+    let value_bg = value.clone();
+    let (saved, exists) = tauri::async_runtime::spawn_blocking(move || {
+        // R1a-M01：UNC 不做同步 exists()（离线共享会把 IPC 挂住）；本地路径才探存在性。
+        let is_unc = value_bg.starts_with(r"\\");
+        let exists = if is_unc || value_bg.is_empty() {
+            None
+        } else {
+            Some(std::path::Path::new(&value_bg).exists())
         };
-        obj.remove("softwareInventory"); // 软件清单不落盘（与 load_paths_config 同口径）
-        obj.insert(key.clone(), serde_json::json!(value.clone()));
-        Ok(())
-    }) {
-        Ok(_) => true,
-        Err(e) => {
-            log::write_log("error", &format!("保存路径配置失败: {e}"));
-            false
-        }
-    };
-    Ok(serde_json::json!({ "success": saved, "exists": exists }))}
+        let saved = match security::update_json(&paths::paths_config_file(), |config| {
+            let Some(obj) = config.as_object_mut() else {
+                return Err("路径配置结构异常（非对象）".into());
+            };
+            obj.remove("softwareInventory"); // 软件清单不落盘（与 load_paths_config 同口径）
+            obj.insert(key_bg.clone(), serde_json::json!(value_bg.clone()));
+            Ok(())
+        }) {
+            Ok(_) => true,
+            Err(e) => {
+                log::write_log("error", &format!("保存路径配置失败: {e}"));
+                false
+            }
+        };
+        (saved, exists)
+    })
+    .await
+    .map_err(|e| format!("路径配置保存任务异常: {e}"))?;
+    Ok(serde_json::json!({
+        "success": saved,
+        "exists": exists,
+        "existsUnknown": exists.is_none() && !value.is_empty()
+    }))
+}
 
 /// paths:browse — 原生选择文件夹对话框
 #[tauri::command]

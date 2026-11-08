@@ -1,33 +1,33 @@
 {
   "extras": {
     "extraSubtree": [
-      "C:\\Users\\Administrator\\AppData\\Roaming\\Trim",
+      "%APPDATA%\\Trim",
       "C:\\TrimParityExtra\\Data"
     ],
     "extraExact": [
-      "C:\\Users\\Administrator\\Desktop",
-      "C:\\Users\\Administrator\\Documents",
-      "C:\\Users\\Administrator\\Downloads"
+      "%USERPROFILE%\\Desktop",
+      "%USERPROFILE%\\Documents",
+      "%USERPROFILE%\\Downloads"
     ]
   },
-  "rootsJson": "{\"subtree\":[\"c:\\\\users\\\\administrator\\\\appdata\\\\roaming\\\\trim\",\"c:\\\\windows\\\\system32\\\\config\",\"c:\\\\trimparityextra\\\\data\"],\"exact\":[\"c:\\\\windows\",\"c:\\\\program files\",\"c:\\\\program files (x86)\",\"c:\\\\programdata\",\"c:\\\\users\\\\administrator\",\"c:\\\\users\\\\administrator\\\\desktop\",\"c:\\\\users\\\\administrator\\\\documents\",\"c:\\\\users\\\\administrator\\\\downloads\",\"c:\\\\users\\\\administrator\\\\appdata\\\\roaming\",\"c:\\\\users\\\\administrator\\\\appdata\\\\local\"],\"anyDrive\":[\"system volume information\"],\"neverNames\":[\".env\",\".env.*\",\"*.env\",\"id_rsa\",\"id_rsa_sk\",\"id_dsa\",\"id_ecdsa\",\"id_ed25519\",\"id_ed25519_sk\",\"id_ed448\",\"id_x25519\",\"*.pem\",\"*.pfx\",\"*.p12\",\"*.key\",\"*.keystore\",\"*.jks\",\"*.pgp\",\"*.gpg\",\"*.asc\",\"*.kdb\",\"*.kdbx\",\"*.ovpn\",\".htpasswd\",\".netrc\",\".npmrc\",\".pypirc\",\"credentials\",\"credentials.json\",\"authorized_user.json\",\"service_account*.json\",\"*azureprofile.json\",\"terraform.tfstate\",\"terraform.tfstate.*\"]}",
+  "rootsJson": "{\"subtree\":[\"%APPDATA%\\\\trim\",\"%WINDIR%\\\\system32\\\\config\",\"c:\\\\trimparityextra\\\\data\"],\"exact\":[\"%WINDIR%\",\"%ProgramFiles%\",\"%ProgramFiles(x86)%\",\"%PROGRAMDATA%\",\"%USERPROFILE%\",\"%USERPROFILE%\\\\desktop\",\"%USERPROFILE%\\\\documents\",\"%USERPROFILE%\\\\downloads\",\"%APPDATA%\",\"%LOCALAPPDATA%\"],\"anyDrive\":[\"system volume information\"],\"neverNames\":[\".env\",\".env.*\",\"*.env\",\"id_rsa\",\"id_rsa_sk\",\"id_dsa\",\"id_ecdsa\",\"id_ed25519\",\"id_ed25519_sk\",\"id_ed448\",\"id_x25519\",\"*.pem\",\"*.pfx\",\"*.p12\",\"*.key\",\"*.keystore\",\"*.jks\",\"*.pgp\",\"*.gpg\",\"*.asc\",\"*.kdb\",\"*.kdbx\",\"*.ovpn\",\".htpasswd\",\".netrc\",\".npmrc\",\".pypirc\",\"credentials\",\"credentials.json\",\"authorized_user.json\",\"service_account*.json\",\"*azureprofile.json\",\"terraform.tfstate\",\"terraform.tfstate.*\"]}",
   "roots": {
     "subtree": [
-      "c:\\users\\administrator\\appdata\\roaming\\trim",
-      "c:\\windows\\system32\\config",
+      "%APPDATA%\\trim",
+      "%WINDIR%\\system32\\config",
       "c:\\trimparityextra\\data"
     ],
     "exact": [
-      "c:\\windows",
-      "c:\\program files",
-      "c:\\program files (x86)",
-      "c:\\programdata",
-      "c:\\users\\administrator",
-      "c:\\users\\administrator\\desktop",
-      "c:\\users\\administrator\\documents",
-      "c:\\users\\administrator\\downloads",
-      "c:\\users\\administrator\\appdata\\roaming",
-      "c:\\users\\administrator\\appdata\\local"
+      "%WINDIR%",
+      "%ProgramFiles%",
+      "%ProgramFiles(x86)%",
+      "%PROGRAMDATA%",
+      "%USERPROFILE%",
+      "%USERPROFILE%\\desktop",
+      "%USERPROFILE%\\documents",
+      "%USERPROFILE%\\downloads",
+      "%APPDATA%",
+      "%LOCALAPPDATA%"
     ],
     "anyDrive": [
       "system volume information"
@@ -91,31 +91,31 @@
       "protected": true
     },
     {
-      "p": "C:\\Windows",
+      "p": "%WINDIR%",
       "protected": true
     },
     {
-      "p": "C:\\Windows\\",
+      "p": "%WINDIR%\\",
       "protected": true
     },
     {
-      "p": "C:\\Windows\\..\\Windows",
+      "p": "%WINDIR%\\..\\Windows",
       "protected": true
     },
     {
-      "p": "C:\\Windows\\System32\\config",
+      "p": "%WINDIR%\\System32\\config",
       "protected": true
     },
     {
-      "p": "C:\\Windows\\System32\\config\\SAM",
+      "p": "%WINDIR%\\System32\\config\\SAM",
       "protected": true
     },
     {
-      "p": "C:\\Users\\Administrator\\AppData\\Roaming\\Trim",
+      "p": "%APPDATA%\\Trim",
       "protected": true
     },
     {
-      "p": "C:\\Users\\Administrator\\AppData\\Roaming\\Trim\\cleanup\\custom\\x.json",
+      "p": "%APPDATA%\\Trim\\cleanup\\custom\\x.json",
       "protected": true
     },
     {
@@ -123,39 +123,39 @@
       "protected": true
     },
     {
-      "p": "C:\\Users\\Administrator",
+      "p": "%USERPROFILE%",
       "protected": true
     },
     {
-      "p": "C:\\Users\\Administrator\\Desktop",
+      "p": "%USERPROFILE%\\Desktop",
       "protected": true
     },
     {
-      "p": "C:\\Users\\Administrator\\Documents",
+      "p": "%USERPROFILE%\\Documents",
       "protected": true
     },
     {
-      "p": "C:\\Users\\Administrator\\Downloads",
+      "p": "%USERPROFILE%\\Downloads",
       "protected": true
     },
     {
-      "p": "C:\\Users\\Administrator\\AppData\\Roaming",
+      "p": "%APPDATA%",
       "protected": true
     },
     {
-      "p": "C:\\Users\\Administrator\\AppData\\Local",
+      "p": "%LOCALAPPDATA%",
       "protected": true
     },
     {
-      "p": "C:\\Program Files",
+      "p": "%ProgramFiles%",
       "protected": true
     },
     {
-      "p": "C:\\Program Files (x86)",
+      "p": "%ProgramFiles(x86)%",
       "protected": true
     },
     {
-      "p": "C:\\ProgramData",
+      "p": "%PROGRAMDATA%",
       "protected": true
     },
     {
@@ -171,43 +171,43 @@
       "protected": true
     },
     {
-      "p": "C:\\Users\\Administrator\\chillsweep-probe.env",
+      "p": "%USERPROFILE%\\chillsweep-probe.env",
       "protected": true
     },
     {
-      "p": "C:\\Users\\Administrator\\.ssh\\id_rsa",
+      "p": "%USERPROFILE%\\.ssh\\id_rsa",
       "protected": true
     },
     {
-      "p": "C:\\Users\\Administrator\\certs\\server.pem",
+      "p": "%USERPROFILE%\\certs\\server.pem",
       "protected": true
     },
     {
-      "p": "C:\\Users\\Administrator\\.aws\\credentials",
+      "p": "%USERPROFILE%\\.aws\\credentials",
       "protected": true
     },
     {
-      "p": "C:\\Users\\Administrator\\gcp\\service_account_key.json",
+      "p": "%USERPROFILE%\\gcp\\service_account_key.json",
       "protected": true
     },
     {
-      "p": "C:\\Users\\Administrator\\tf\\terraform.tfstate",
+      "p": "%USERPROFILE%\\tf\\terraform.tfstate",
       "protected": true
     },
     {
-      "p": "C:\\Users\\Administrator\\proj\\.env\\lib\\x.txt",
+      "p": "%USERPROFILE%\\proj\\.env\\lib\\x.txt",
       "protected": true
     },
     {
-      "p": "C:\\Users\\Administrator\\proj\\environment\\config.json",
+      "p": "%USERPROFILE%\\proj\\environment\\config.json",
       "protected": false
     },
     {
-      "p": "C:\\Users\\Administrator\\proj\\env.local.txt",
+      "p": "%USERPROFILE%\\proj\\env.local.txt",
       "protected": false
     },
     {
-      "p": "\\\\?\\C:\\Windows\\Temp",
+      "p": "\\\\?\\%WINDIR%\\Temp",
       "protected": false
     },
     {
@@ -235,31 +235,31 @@
       "protected": false
     },
     {
-      "p": "C:\\Windows\\Prefetch",
+      "p": "%WINDIR%\\Prefetch",
       "protected": false
     },
     {
-      "p": "C:\\Windows\\SoftwareDistribution\\Download",
+      "p": "%WINDIR%\\SoftwareDistribution\\Download",
       "protected": false
     },
     {
-      "p": "C:\\Windows\\Logs\\WindowsUpdate",
+      "p": "%WINDIR%\\Logs\\WindowsUpdate",
       "protected": false
     },
     {
-      "p": "C:\\Windows\\System32\\winevt\\Logs",
+      "p": "%WINDIR%\\System32\\winevt\\Logs",
       "protected": false
     },
     {
-      "p": "C:\\Windows\\System32\\DriverStore\\Temp",
+      "p": "%WINDIR%\\System32\\DriverStore\\Temp",
       "protected": false
     },
     {
-      "p": "C:\\Windows\\WinSxS\\Temp",
+      "p": "%WINDIR%\\WinSxS\\Temp",
       "protected": false
     },
     {
-      "p": "C:\\Program Files (x86)\\Steam\\appcache",
+      "p": "%ProgramFiles(x86)%\\Steam\\appcache",
       "protected": false
     },
     {
@@ -267,23 +267,23 @@
       "protected": false
     },
     {
-      "p": "C:\\Users\\Administrator\\AppData\\Roaming\\Tencent\\QQ",
+      "p": "%APPDATA%\\Tencent\\QQ",
       "protected": false
     },
     {
-      "p": "C:\\Users\\Administrator\\AppData\\Roaming\\Code",
+      "p": "%APPDATA%\\Code",
       "protected": false
     },
     {
-      "p": "C:\\Users\\Administrator\\Documents\\xwechat_files\\a\\temp",
+      "p": "%USERPROFILE%\\Documents\\xwechat_files\\a\\temp",
       "protected": false
     },
     {
-      "p": "C:\\Users\\Administrator\\AppData\\Local\\Temp",
+      "p": "%TEMP%",
       "protected": false
     },
     {
-      "p": "C:\\Users\\ADMINI~1\\AppData\\Local\\Temp",
+      "p": "%TEMP%",
       "protected": false
     }
   ],

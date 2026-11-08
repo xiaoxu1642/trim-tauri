@@ -568,6 +568,7 @@
     const rowHtml = (it) => `
       <label class="pick-row">
         <span class="checkbox pick-box${targets.has(it.value) ? ' checked' : ''}" role="checkbox" tabindex="0"
+              aria-label="选择 ${window.ds.escAttr(it.value)}"
               aria-checked="${targets.has(it.value) ? 'true' : 'false'}"
               data-pick="${window.ds.escAttr(it.value)}"></span>
         <span class="pick-name">${escapeHtml(it.value)}</span>
@@ -576,6 +577,7 @@
     const extraHtml = extras.map(ex => `
       <label class="pick-row pick-row-extra">
         <span class="checkbox pick-extra-box${pickedExtras.has(ex.id) ? ' checked' : ''}" role="checkbox" tabindex="0"
+              aria-label="选择 ${window.ds.escAttr(ex.label)}"
               aria-checked="${pickedExtras.has(ex.id) ? 'true' : 'false'}"
               data-pick-extra="${window.ds.escAttr(ex.id)}"></span>
         <span class="pick-name">${escapeHtml(ex.label)}</span>
@@ -992,6 +994,7 @@
     return `<div class="nara-checkrow${disabled ? ' is-optimized' : ''}"
             data-nara-opt="${escapeHtml(o.id)}" data-tip="${tip}">
       <span class="checkbox${on ? ' checked' : ''}${disabled ? ' disabled' : ''}" role="checkbox" tabindex="0"
+            aria-label="选择 ${window.ds.escAttr(o.title)}"
             aria-checked="${on ? 'true' : 'false'}"${disabled ? ' aria-disabled="true"' : ''}>${on ? checkSvg() : ''}</span>
       <span class="nara-checkrow__name" data-tip="点击查看该优化项详情">${escapeHtml(o.title)}</span>
       <span class="nara-checkrow__side">${side.join('')}</span>
@@ -1007,6 +1010,7 @@
       : `<span class="nara-muted" style="padding:0">任务清单加载中…</span>`;
     return `<div class="nara-checkrow" data-nara-task="${escapeHtml(id)}">
       <span class="checkbox${on ? ' checked' : ''}" role="checkbox" tabindex="0"
+            aria-label="选择 ${window.ds.escAttr(t?.title || id)}"
             aria-checked="${on ? 'true' : 'false'}"${t ? '' : ' aria-disabled="true"'}>${on ? checkSvg() : ''}</span>
       <span class="nara-checkrow__name" data-tip="点击查看该优化项详情">${escapeHtml(t?.title || id)}</span>
       <span class="nara-checkrow__side">${side}</span>
@@ -1326,6 +1330,7 @@
     return `<div class="nara-checkrow${isOpt ? ' is-optimized' : ''}"
             data-privacy-opt="${escapeHtml(o.id)}" data-tip="${escapeHtml(tip)}">
       <span class="checkbox${on ? ' checked' : ''}${isOpt ? ' disabled' : ''}" role="checkbox" tabindex="0"
+            aria-label="选择 ${window.ds.escAttr(o.title)}"
             aria-checked="${on ? 'true' : 'false'}"${isOpt ? ' aria-disabled="true"' : ''}>${on ? checkSvg() : ''}</span>
       <span class="nara-checkrow__name" data-tip="点击查看该优化项详情">${escapeHtml(o.title)}</span>
       <span class="nara-checkrow__side">${side.join('')}</span>
@@ -1537,7 +1542,7 @@
     // Enter/Space 的激活在 bindEvents 里与 bindCheckboxKeys 同源合成 click（见该处注释）。
     return `
       <div class="opt-row${isOpt ? ' optimized' : ''}" role="button" tabindex="0" data-id="${id}" data-tip="${isOpt ? '该项优化已生效，点击查看详情与还原入口' : '点击查看「' + escapeHtml(o.title) + '」详情'}">
-        <div class="checkbox${selectedIds.has(o.id) ? ' checked' : ''}${isOpt ? ' disabled' : ''}" data-check="${id}" role="checkbox" tabindex="0" aria-checked="${selectedIds.has(o.id) ? 'true' : 'false'}"${isOpt ? ' aria-disabled="true"' : ''} data-tip="${isOpt ? '已优化的项不可勾选，点击行查看详情' : '勾选/取消选择该优化项'}"></div>
+        <div class="checkbox${selectedIds.has(o.id) ? ' checked' : ''}${isOpt ? ' disabled' : ''}" data-check="${id}" role="checkbox" tabindex="0" aria-label="选择 ${window.ds.escAttr(o.title)}" aria-checked="${selectedIds.has(o.id) ? 'true' : 'false'}"${isOpt ? ' aria-disabled="true"' : ''} data-tip="${isOpt ? '已优化的项不可勾选，点击行查看详情' : '勾选/取消选择该优化项'}"></div>
         <span class="opt-row-index">${index}</span>
         <span class="opt-row-name">${escapeHtml(o.title)}</span>
         ${riskBadge(o.risk)}
@@ -1769,6 +1774,11 @@
       const resp = await window.api.optimizer.stateOverview();
       if (!resp || !resp.success) throw new Error((resp && resp.message) || '无回执');
       overviewOk = true;
+      // A1-M07：状态文件损坏/读取失败时保留已有横幅，并明确提示“状态不完整”。
+      if (resp.degraded) {
+        window.app?.toast?.('warning', resp.degradedReason || '优化状态读取不完整，已显示可用部分');
+        window.app?.log?.('warn', 'optimizer:state-overview degraded');
+      }
       // v2.7.0：主进程首启扫描的持久化结果先灰化（页面未到、扫描未跑完时也有即时反馈）。
       // 审查 v3：这是第二来源，与本机执行落盘（appliedLocal）取并集，不再被实时检测清掉。
       const detected = resp.detected || {};
@@ -2915,8 +2925,10 @@
   // ==================== 一键全选当前页并依次执行 ====================
   function getCurrentPageOptions() {
     const list = displayList(OPTIONS);   // 与界面所见同一份清单（迁出项不在内）
-    if (activeCategory === '全部') return list;
-    return list.filter(o => displayGroup(o) === activeCategory);
+    // F4b-L01：已优化/灰态项不得进入「全选执行」；与逐项勾选同口径。
+    const runnable = list.filter(o => !optimizedIds.has(o.id));
+    if (activeCategory === '全部') return runnable;
+    return runnable.filter(o => displayGroup(o) === activeCategory);
   }
 
   function setCardsSelected(sel) {

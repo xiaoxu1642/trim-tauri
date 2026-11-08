@@ -89,6 +89,10 @@ const CMD_RULES = [
 /** 服务被改成禁用/启动值 4 的步骤 + 文本里出现的服务名（含变量数组形态）。 */
 function securityServiceDisableHit(step, text) {
   const disable = /start\s*=\s*(?:4\b|disabled\b)|-StartupType\s+Disabled|\.StartupType\s*=\s*['"]?Disabled/i.test(text)
+    // T1f-M01：PowerShell/reg.exe 的三类注册表写形态。
+    // 注意 `Stop-Service` 单独出现**不算**永久禁用——它只停当前进程，启动类型没变。
+    || /(?:New-ItemProperty|Set-ItemProperty)[^\n]{0,240}-Name\s+["']?Start["']?[^\n]{0,120}-Value\s+["']?(?:4|Disabled)\b/i.test(text)
+    || /\breg(?:\.exe)?\s+add[^\n]{0,240}\/v\s+["']?Start["']?[^\n]{0,120}\/d\s+["']?(?:4|Disabled)\b/i.test(text)
     || step.disable === true
     || /^disabled$/i.test(String(step.startType ?? ''));
   if (!disable) return false;
@@ -159,6 +163,31 @@ function conceptTokens(text) {
   );
 }
 
+// T1f-M03：同义词组。中文同义改写（「用户账户控制」↔「UAC」）必须能过，
+// 但不能放宽到「任意安全词都算」——只有登记组内的词才算同一概念。
+const SYNONYM_GROUPS = [
+  ['uac', '用户账户控制', 'user account control'],
+  ['vbs', '基于虚拟化的安全', '虚拟化安全', 'virtualization based security'],
+  ['defender', 'windows defender', '杀毒', '防病毒', '实时保护', 'antivirus', 'antispyware'],
+  ['windows update', '自动更新', '系统更新', 'wu'],
+  ['smartscreen', '智能屏幕', 'smart screen'],
+  ['firewall', '防火墙'],
+  ['system restore', '系统还原'],
+  ['hvci', '内存完整性', 'hypervisor enforced code integrity'],
+  ['driver blocklist', '驱动阻止列表', '易受攻击驱动'],
+];
+function hasConceptOverlap(mineText, ruleText) {
+  const mine = conceptTokens(mineText);
+  const rule = conceptTokens(ruleText);
+  if ([...rule].some((t) => mine.has(t))) return true;
+  const lowerMine = String(mineText).toLowerCase();
+  const lowerRule = String(ruleText).toLowerCase();
+  for (const group of SYNONYM_GROUPS) {
+    if (group.some((w) => lowerMine.includes(w)) && group.some((w) => lowerRule.includes(w))) return true;
+  }
+  return false;
+}
+
 /**
  * `why` 元素：它是高危确认框正文（`optimizer.js` 原样展示给用户），必须说的是这条项
  * **为什么**降安全面。机器判「名副其实」需要词表 —— 这里拿规则表自己的 `why` 当概念
@@ -166,12 +195,11 @@ function conceptTokens(text) {
  * 对不上基本等于复制了别条的理由或写成了宣传语（`这条能释放更多磁盘空间` 正是这种）。
  */
 function whyOffTopic(meta) {
-  const mine = conceptTokens(meta.why);
   const out = [];
   for (const rid of Array.isArray(meta.rules) ? meta.rules : []) {
     const rule = [...VALUE_RULES, ...CMD_RULES].find((r) => r.id === rid);
     if (!rule) { out.push(`${rid}（规则表里没有这条规则 id）`); continue; }
-    if (![...conceptTokens(rule.why)].some((t) => mine.has(t))) out.push(rid);
+    if (!hasConceptOverlap(meta.why, rule.why)) out.push(rid);
   }
   return out;
 }
@@ -207,6 +235,9 @@ function whyOffTopic(meta) {
     { id: 'sec-svc-disable', hit: () => fake('HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\WinDefend', '"Start"=dword:00000004'), miss: () => fake('HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\WinDefend', '"Start"=dword:00000002') },
     { id: 'sec-svc-disable', hit: () => fakeCmd('sc.exe config $s start= disabled\n$svc = @("DiagTrack","Sense")'), miss: () => fakeCmd('sc.exe config $s start= disabled\n$svc = @("DiagTrack","WpnService")') },
     { id: 'sec-svc-disable', hit: () => fakeCmd('Set-Service -Name Sense -StartupType Disabled'), miss: () => fakeCmd('Set-Service -Name Sense -StartupType Manual') },
+    { id: 'sec-svc-disable', hit: () => fakeCmd('New-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\WinDefend" -Name Start -Value 4'), miss: () => fakeCmd('Stop-Service -Name WinDefend') },
+    { id: 'sec-svc-disable', hit: () => fakeCmd('Set-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Sense" -Name Start -Value 4'), miss: () => fakeCmd('Set-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Sense" -Name Start -Value 2') },
+    { id: 'sec-svc-disable', hit: () => fakeCmd('reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\wscsvc" /v Start /d 4 /f'), miss: () => fakeCmd('reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\wscsvc" /v Start /d 2 /f') },
     { id: 'sec-svc-disable', hit: () => classify({ steps: [{ service: 'WinDefend', startType: 'Disabled' }] }), miss: () => classify({ steps: [{ service: 'WinDefend', startType: 'Manual' }] }) },
     { id: 'sec-svc-disable', hit: () => classify({ restore: [{ service: 'Sense', disable: true }] }), miss: () => classify({ restore: [{ service: 'Sense', startType: 'Manual' }] }) },
     { id: 'restore-off-cmd', hit: () => fakeCmd('Disable-ComputerRestore -Drive C:\\'), miss: () => fakeCmd('Enable-ComputerRestore -Drive C:\\') },
@@ -231,6 +262,7 @@ function whyOffTopic(meta) {
     ['writes 只写路径', writesProblem('HKLM\\X\\Y') !== '', true],
     ['writes 值为空', writesProblem('HKLM\\X\\Y :: EnableLUA=') !== '', true],
     ['why 与规则概念有交集', whyOffTopic({ why: '关闭 UAC：提权不再弹窗', rules: ['uac-off'] }).length === 0, true],
+    ['why 中文同义改写', whyOffTopic({ why: '关闭用户账户控制，提权不再弹窗', rules: ['uac-off'] }).length === 0, true],
     ['why 与规则概念无关', whyOffTopic({ why: '这条能释放约 200MB 磁盘空间', rules: ['uac-off'] }).length === 1, true],
     ['why 引用了不存在的规则', whyOffTopic({ why: '关闭 UAC', rules: ['no-such-rule'] }).length === 1, true],
   ];

@@ -726,7 +726,15 @@ pub fn stubborn_block() -> Result<Value, String> {
     for svc in &block_services {
         unsafe {
             // 先检查服务是否存在
-            if service_status(svc).is_none() { continue; }
+            match service_status_query(svc) {
+                ServiceQuery::NotFound => continue,
+                ServiceQuery::Unknown => {
+                    fail_services.push(svc.to_string());
+                    failed += 1;
+                    continue;
+                }
+                ServiceQuery::State(_) => {}
+            }
             // v5 M-P2：停止失败不再 `let _ =` 吞掉 —— 这条是「阻止开机自启」的持久策略，
             // 停不动的进程下次开机照样起来，必须进失败清单。
             let stopped = service_stop_pub(svc).is_ok();

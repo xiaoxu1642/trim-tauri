@@ -478,7 +478,15 @@ fn walk_level_flush(
     };
     let mut subdirs: Vec<PathBuf> = Vec::new();
     let mut batch: Vec<ScannedFile> = Vec::new();
-    for ent in rd.flatten() {
+    for ent in rd {
+        let ent = match ent {
+            Ok(e) => e,
+            Err(_) => {
+                // N1b-M01：条目读失败不是「目录到此为止」，计数后继续下一条。
+                note_entry_stat_fail();
+                continue;
+            }
+        };
         // v5-K02 批次 2（N1-M05）：reparse 拦在 file_type 分支**之前**——条目级全形状
         // （挂载卷根/云占位符/指向文件的链接，属性位 0x400；此前只挂 is_dir 分支内，
         // is_symlink=false 的 file 型 reparse 被当普通文件收进扫描结果）。
@@ -607,7 +615,14 @@ fn dir_size(dir: &Path, beat: Option<&ScanBeat>) -> u64 {
         };
         // 本目录直属文件数（P2-J：心跳按「访问完一个目录」结算一次）
         let mut files: u64 = 0;
-        for ent in rd.flatten() {
+        for ent in rd {
+            let ent = match ent {
+                Ok(e) => e,
+                Err(_) => {
+                    note_entry_stat_fail();
+                    continue;
+                }
+            };
             // v5-K02 批次 2（N1-M05）：reparse 拦在类型分支前（条目级全形状，同 walk_level）
             if is_reparse(&ent) {
                 note_reparse_skip();
@@ -785,7 +800,14 @@ fn analyze_dir_deep(
             }
         };
         let files_before = files; // 本目录新增文件数的心跳基准
-        for ent in rd.flatten() {
+        for ent in rd {
+            let ent = match ent {
+                Ok(e) => e,
+                Err(_) => {
+                    note_entry_stat_fail();
+                    continue;
+                }
+            };
             // v5-K02 批次 2（N1-M05）：reparse 拦在类型分支前（条目级全形状，同 walk_level）
             if is_reparse(&ent) {
                 note_reparse_skip();
@@ -915,7 +937,14 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
         let mut times = [0u64; TIME_BUCKETS];
         let mut old_all: BinaryHeap<std::cmp::Reverse<OldFile>> = BinaryHeap::new();
         let now = now_millis();
-        for ent in rd.flatten() {
+        for ent in rd {
+            let ent = match ent {
+                Ok(e) => e,
+                Err(_) => {
+                    note_entry_stat_fail();
+                    continue;
+                }
+            };
             // v5-K02 批次 2（N1-M05）：reparse 拦在类型分支前（条目级全形状，同 walk_level）
             if is_reparse(&ent) {
                 note_reparse_skip();
@@ -1869,7 +1898,14 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
         let mut root_files: Vec<EmptyFile> = Vec::new();
         match fs::read_dir(&p) {
             Ok(rd) => {
-                for ent in rd.flatten() {
+                for ent in rd {
+                    let ent = match ent {
+                        Ok(e) => e,
+                        Err(_) => {
+                            note_entry_stat_fail();
+                            continue;
+                        }
+                    };
                     acc.heartbeat(sink);
                     match ent.file_type() {
                         Ok(t) if t.is_dir() => {
@@ -2063,7 +2099,15 @@ fn collect_empty_fast(
         }
     };
     let mut empty = true;
-    for ent in rd.flatten() {
+    for ent in rd {
+        let ent = match ent {
+            Ok(e) => e,
+            Err(_) => {
+                note_entry_stat_fail();
+                empty = false;
+                continue;
+            }
+        };
         acc.heartbeat(sink);
         let fp = ent.path();
         match ent.file_type() {
@@ -2173,7 +2217,14 @@ fn prune_tree_empty_at(dir: &Path, ignore: &HashSet<String>, depth: usize, up: O
         note_unreadable_dir();
         return false;
     };
-    for ent in rd.flatten() {
+    for ent in rd {
+        let ent = match ent {
+            Ok(e) => e,
+            Err(_) => {
+                note_entry_stat_fail();
+                return false;
+            }
+        };
         let Ok(t) = ent.file_type() else {
             return false;
         };

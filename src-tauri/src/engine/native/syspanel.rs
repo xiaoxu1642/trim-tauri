@@ -27,7 +27,10 @@ use std::time::Duration;
 
 use windows::core::{GUID, PCWSTR};
 use windows::Win32::Foundation::{HLOCAL, LocalFree, WIN32_ERROR};
-use windows::Win32::System::Registry::{REG_DWORD, REG_QWORD};
+use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+use windows::Win32::System::Registry::{
+    REG_DWORD, REG_MULTI_SZ, REG_QWORD, REG_SZ, REG_VALUE_TYPE,
+};
 use windows::Win32::System::Power::{
     ACCESS_INDIVIDUAL_SETTING, ACCESS_SCHEME, ACCESS_SUBGROUP, POWER_DATA_ACCESSOR,
     PlatformRoleDesktop, PlatformRoleMobile, PlatformRoleSlate, PowerDeleteScheme,
@@ -964,6 +967,8 @@ pub fn power_plan_state() -> Value {
         "activeName": active_name,
         // A1-M12：电源操作侧表读失败与「没有记录」分开。
         "degraded": degraded,
+        "degradedReason": if degraded { Some("电源操作侧表读取失败，隐藏方案信息可能缺失") } else { None },
+        "degradedSource": "syspanel.powerOps",
         "options": options,
         "tools": {
             "highPerformanceGuid": HIGH_PERFORMANCE_GUID,
@@ -2004,11 +2009,22 @@ fn normalize_drive(raw: &str) -> Result<String, String> {
     Ok(t.to_uppercase())
 }
 
+/// 卷存在性是写前硬闸：仅形状合法的 `Q:` 不能让 Registry 先落下一条指向不存在卷的
+/// PagingFiles。Windows 没有暴露 `DRIVE_NO_ROOT_DIR` 的现成 feature，这里按 SDK 原值判。
+fn volume_root_exists(drive: &str) -> bool {
+    const DRIVE_UNKNOWN: u32 = 0;
+    const DRIVE_NO_ROOT_DIR: u32 = 1;
+    let root = format!("{drive}\\");
+    let wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
+    let kind = unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) };
+    kind != DRIVE_UNKNOWN && kind != DRIVE_NO_ROOT_DIR && Path::new(&root).is_dir()
+}
+
 /// 写侧参数校验。**任何一项不过一律 Err、不做"部分接受"**：
 ///  - managed=false 且 entries 为空 → 拒（AGENTS §3 危险能力默认关；全关 pagefile
 ///    会让物理内存告罄时直接崩，属经典蓝屏源头）
 ///  - 至少一条 entry 的 max_mb > 0 → 拒（全 0/0 等价于全关，同上）
-///  - 每条 entry 的 drive 归一化；initial_mb <= max_mb；max_mb <= PAGEFILE_MAX_MB
+///  - 每条 entry 的 drive 归一化且卷根实际存在；initial_mb <= max_mb；max_mb <= PAGEFILE_MAX_MB
 ///  - 同一 drive 不允许出现两次（防止后一条静默覆盖前一条）
 fn validate_pagefile(managed: bool, entries: &[PagefileEntry]) -> Result<(), String> {
     if managed {
@@ -2024,6 +2040,9 @@ fn validate_pagefile(managed: bool, entries: &[PagefileEntry]) -> Result<(), Str
         let d = normalize_drive(&e.drive)?;
         if seen.iter().any(|x| x == &d) {
             return Err(format!("盘符 {d} 出现两次；每个卷最多一条配置"));
+        }
+        if !volume_root_exists(&d) {
+            return Err(format!("盘符 {d} 不存在或当前不可访问；分页文件不能指向空卷"));
         }
         seen.push(d);
         if e.initial_mb > PAGEFILE_MAX_MB || e.max_mb > PAGEFILE_MAX_MB {
@@ -2057,10 +2076,95 @@ fn build_paging_files(entries: &[PagefileEntry]) -> Vec<String> {
         .collect()
 }
 
+/// 写一个值后立刻从注册表重新读取实际字节；写入返回 Ok 不等于系统真的保存了目标值。
+fn write_verify_pagefile_value(
+    name: &str,
+    kind: REG_VALUE_TYPE,
+    data: &[u8],
+    write: &mut dyn FnMut(&str, REG_VALUE_TYPE, &[u8]) -> Result<(), u32>,
+    read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+) -> Result<(), String> {
+    write(name, kind, data).map_err(|e| format!("写 {name} 失败（Win32 错误码 {e}）"))?;
+    let got = read(name).ok_or_else(|| format!("回读 {name} 失败；无法证明实际写入值"))?;
+    if got != data {
+        return Err(format!(
+            "回读 {name} 与目标不一致（实际 {} 字节 / 目标 {} 字节）",
+            got.len(),
+            data.len()
+        ));
+    }
+    Ok(())
+}
+
+/// pagefile 两键的顺序与回滚边界。测试用同一函数注入内存写读器，因此「恢复旧写序」
+/// 或删掉回滚都会直接红，而不是只靠静态描述。
+fn apply_pagefile_registry(
+    managed: bool,
+    before_paging: Option<(REG_VALUE_TYPE, Vec<u8>)>,
+    new_paging: Option<(REG_VALUE_TYPE, Vec<u8>)>,
+    auto: (REG_VALUE_TYPE, Vec<u8>),
+    write: &mut dyn FnMut(&str, REG_VALUE_TYPE, &[u8]) -> Result<(), u32>,
+    read: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+) -> Result<(), String> {
+    if !managed {
+        let prior = before_paging
+            .as_ref()
+            .ok_or_else(|| "读取当前 PagingFiles 失败；无原始字节可回滚，已拒绝写入".to_string())?;
+        let (kind, data) = new_paging
+            .as_ref()
+            .ok_or_else(|| "手动模式缺 PagingFiles 目标值".to_string())?;
+        if let Err(err) = write_verify_pagefile_value("PagingFiles", *kind, data, write, read) {
+            let rollback = write_verify_pagefile_value(
+                "PagingFiles",
+                prior.0,
+                &prior.1,
+                write,
+                read,
+            );
+            return Err(match rollback {
+                Ok(()) => format!("{err}；已将 PagingFiles 回滚到写入前值"),
+                Err(rb) => format!("{err}；PagingFiles 回滚失败：{rb}"),
+            });
+        }
+    }
+
+    if let Err(err) = write_verify_pagefile_value(
+        "AutomaticManagedPagefile",
+        auto.0,
+        &auto.1,
+        write,
+        read,
+    ) {
+        if !managed {
+            let Some(prior) = before_paging.as_ref() else {
+                return Err(format!("{err}；第二写失败且缺少原始 PagingFiles，无法自动回滚"));
+            };
+            let rollback = write_verify_pagefile_value(
+                "PagingFiles",
+                prior.0,
+                &prior.1,
+                write,
+                read,
+            );
+            return Err(match rollback {
+                Ok(()) => format!(
+                    "{err}；第二写失败，已将 PagingFiles 回滚到写入前值"
+                ),
+                Err(rb) => format!(
+                    "{err}；第二写失败且 PagingFiles 回滚失败：{rb}"
+                ),
+            });
+        }
+        return Err(err);
+    }
+    Ok(())
+}
+
 /// 写侧：应用虚拟内存配置。
 ///
-/// **执行顺序**：admin 硬要求 → 参数校验 → 备份当前值 → flush 日志 → 写 `AutomaticManagedPagefile`
-/// （+ 手动时写 `PagingFiles`）→ 回读比对 → 返回 `requiresReboot: true`。
+/// **执行顺序**：admin 硬要求 → 参数校验 → 备份当前值 → flush 日志 → 手动时先写
+/// `PagingFiles` → 写 `AutomaticManagedPagefile` → 每次写后回读实际字节 → 返回
+/// `requiresReboot: true`。第二写或任一回读失败时，手动模式回滚 `PagingFiles`。
 ///
 /// 备份走 `atomic_write_json`（AGENTS §3 写 JSON 唯一姿势）、落在
 /// `paths::backup_write_dir()/pagefile-backups/<timestamp>.json`；`prune_stamped_files` 保留 50 份。
@@ -2068,17 +2172,26 @@ fn build_paging_files(entries: &[PagefileEntry]) -> Vec<String> {
 /// 用户可先通过备份 JSON 手动 reg import 恢复。
 pub fn pagefile_apply(managed: bool, entries: &[PagefileEntry]) -> Result<Value, String> {
     use crate::engine::native::{
-        hive_hklm, reg_key_ensure_checked, reg_restore_write_checked, read_reg_value_faithful,
-        read_reg_value_text,
+        hive_hklm, reg_key_ensure_checked, reg_read_value_typed, reg_restore_write_checked,
     };
     use crate::engine::sysinfo::is_admin;
-    use windows::Win32::System::Registry::{REG_MULTI_SZ, REG_SZ};
 
     if !is_admin() {
         return Err("写虚拟内存需要管理员权限（HKLM\\SYSTEM\\...）。请从主窗「以管理员身份运行」入口重启 Trim 后再操作".into());
     }
     validate_pagefile(managed, entries)?;
 
+    let sub = "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management";
+    // 回滚必须用原始类型与原始字节；若读不到旧 PagingFiles，就绝不能先落新值再赌能恢复。
+    let before_paging = if managed {
+        None
+    } else {
+        let prior = unsafe { reg_read_value_typed(hive_hklm(), sub, "PagingFiles") };
+        if prior.is_none() {
+            return Err("读取当前 PagingFiles 失败；无原始字节可回滚，已拒绝写入".into());
+        }
+        prior
+    };
     let before = pagefile_state();
     // 备份先落盘；失败即中止，绝不在没留底的情况下动手
     let backup_path = write_pagefile_backup(&before)?;
@@ -2086,7 +2199,6 @@ pub fn pagefile_apply(managed: bool, entries: &[PagefileEntry]) -> Result<Value,
     // 危险操作前 flush 日志（AGENTS §3）
     crate::engine::log::flush_sync();
 
-    let sub = "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management";
     reg_key_ensure_checked(hive_hklm(), sub).map_err(|e| format!("打开 Memory Management 失败：{e}"))?;
 
     // AutomaticManagedPagefile = REG_SZ "TRUE"/"FALSE"（对齐 WMI 也读同一位置的形态）
@@ -2094,10 +2206,8 @@ pub fn pagefile_apply(managed: bool, entries: &[PagefileEntry]) -> Result<Value,
     let mut am_bytes: Vec<u8> = am_value.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
     // R5b-L08：REG_SZ 必须以 NUL 结尾；缺少 UTF-16 终止符的串会被部分读方按畸形处理。
     am_bytes.extend_from_slice(&0u16.to_le_bytes());
-    reg_restore_write_checked(hive_hklm(), sub, "AutomaticManagedPagefile", REG_SZ, &am_bytes)
-        .map_err(|e| format!("写 AutomaticManagedPagefile 失败：{e}"))?;
 
-    if !managed {
+    let new_paging = if !managed {
         let lines = build_paging_files(entries);
         // MULTI_SZ：每串以 \0 结尾，整体再加一个 \0
         let mut buf: Vec<u8> = Vec::new();
@@ -2108,34 +2218,22 @@ pub fn pagefile_apply(managed: bool, entries: &[PagefileEntry]) -> Result<Value,
             buf.extend_from_slice(&0u16.to_le_bytes());
         }
         buf.extend_from_slice(&0u16.to_le_bytes());
-        reg_restore_write_checked(hive_hklm(), sub, "PagingFiles", REG_MULTI_SZ, &buf)
-            .map_err(|e| format!("写 PagingFiles 失败：{e}"))?;
-    }
-
-    // 回读校验：至少 AutomaticManagedPagefile 必须对得上；手动模式下每条 entry 的
-    // `<drive>\pagefile.sys` 都要在 PagingFiles 里出现
-    let got_managed = read_reg_value_text(hive_hklm(), sub, "AutomaticManagedPagefile")
-        .map(|(_, v)| v.eq_ignore_ascii_case("TRUE"))
-        .unwrap_or(false);
-    if got_managed != managed {
-        return Err(format!(
-            "回读 AutomaticManagedPagefile={got_managed} 与目标 {managed} 不符（可能被 Group Policy 或安全软件拦截）"
-        ));
-    }
-    if !managed {
-        let raw: Vec<String> = read_reg_value_faithful(hive_hklm(), sub, "PagingFiles")
-            .map(|(_k, s)| s.split('\0').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect())
-            .unwrap_or_default();
-        for e in entries {
-            let d = normalize_drive(&e.drive)?;
-            let want_prefix = format!("{d}\\pagefile.sys");
-            if !raw.iter().any(|x| x.starts_with(&want_prefix)) {
-                return Err(format!(
-                    "回读 PagingFiles 未包含 {want_prefix}（可能被 Group Policy 或安全软件覆盖）"
-                ));
-            }
-        }
-    }
+        Some((REG_MULTI_SZ, buf))
+    } else {
+        None
+    };
+    apply_pagefile_registry(
+        managed,
+        before_paging,
+        new_paging,
+        (REG_SZ, am_bytes),
+        &mut |name, kind, data| {
+            reg_restore_write_checked(hive_hklm(), sub, name, kind, data)
+        },
+        &mut |name| unsafe {
+            reg_read_value_typed(hive_hklm(), sub, name).map(|(_kind, data)| data)
+        },
+    )?;
 
     let after = pagefile_state();
     crate::engine::log::write_log(
@@ -2531,6 +2629,13 @@ mod tests {
         PagefileEntry { drive: drive.to_string(), initial_mb, max_mb }
     }
 
+    fn first_existing_drive() -> String {
+        ('A'..='Z')
+            .map(|c| format!("{c}:"))
+            .find(|d| volume_root_exists(d))
+            .expect("测试机至少应有一个可访问卷根")
+    }
+
     #[test]
     fn 盘符归一化吃大小写与尾斜杠() {
         assert_eq!(normalize_drive("C:").unwrap(), "C:");
@@ -2556,34 +2661,173 @@ mod tests {
         let err = validate_pagefile(false, &[]).unwrap_err();
         assert!(err.contains("至少保留"), "空列表错因文案漂了：{err}");
         // 全 0/0：与空列表语义等价，也要拒
-        let err = validate_pagefile(false, &[e("C:", 0, 0), e("D:", 0, 0)]).unwrap_err();
+        let d = first_existing_drive();
+        let err = validate_pagefile(false, &[e(&d, 0, 0)]).unwrap_err();
         assert!(err.contains("0/0") || err.contains("关掉分页文件"), "全零错因漂了：{err}");
     }
 
     #[test]
     fn 手动模式拒绝重复盘符与非法数值() {
+        let d = first_existing_drive();
         // 重复盘符
-        let err = validate_pagefile(false, &[e("C:", 1024, 2048), e("c:", 512, 1024)]).unwrap_err();
+        let lower = d.to_ascii_lowercase();
+        let err = validate_pagefile(false, &[e(&d, 1024, 2048), e(&lower, 512, 1024)]).unwrap_err();
         assert!(err.contains("出现两次"), "重复盘符错因漂了：{err}");
         // Max < Initial
-        let err = validate_pagefile(false, &[e("C:", 4096, 2048)]).unwrap_err();
+        let err = validate_pagefile(false, &[e(&d, 4096, 2048)]).unwrap_err();
         assert!(err.contains("Max") && err.contains("Initial"), "反序错因漂了：{err}");
         // MB 超上限
-        let err = validate_pagefile(false, &[e("C:", 0, PAGEFILE_MAX_MB + 1)]).unwrap_err();
+        let err = validate_pagefile(false, &[e(&d, 0, PAGEFILE_MAX_MB + 1)]).unwrap_err();
         assert!(err.contains("上限"), "上限错因漂了：{err}");
         // 非法盘符
         let err = validate_pagefile(false, &[e("XX", 1024, 2048)]).unwrap_err();
         assert!(err.contains("盘符"), "非法盘符错因漂了：{err}");
     }
 
+    /// R5b-M02：形状合法但当前不存在的卷必须在任何注册表写入前被拒。
+    /// 判红自证：删掉 `validate_pagefile` 里的 `volume_root_exists` 分支，本用例红。
+    #[test]
+    fn 不存在的卷在写前拒绝() {
+        let missing = ('A'..='Z')
+            .map(|c| format!("{c}:"))
+            .find(|d| !volume_root_exists(d))
+            .expect("26 个盘符全部可访问，无法构造不存在卷反例");
+        let err = validate_pagefile(false, &[e(&missing, 1024, 2048)]).unwrap_err();
+        assert!(
+            err.contains("不存在") && err.contains(&missing),
+            "不存在卷必须点名拒绝：{err}"
+        );
+    }
+
     #[test]
     fn 合法参数能通过校验并生成微软形态() {
-        let entries = [e("C:", 8192, 16384), e("d:", 0, 0)]; // 允许某卷明确关，只要整体至少一条 alive
+        let d = first_existing_drive();
+        let entries = [e(&d, 8192, 16384)]; // 至少一条 alive 才允许落盘
         validate_pagefile(false, &entries).expect("应通过");
         let lines = build_paging_files(&entries);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], "C:\\pagefile.sys 8192 16384");
-        assert_eq!(lines[1], "D:\\pagefile.sys 0 0", "小写盘符应归一到大写");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], format!("{}\\pagefile.sys 8192 16384", d));
+        assert_eq!(
+            build_paging_files(&[e("d:", 0, 0)]),
+            vec!["D:\\pagefile.sys 0 0".to_string()],
+            "小写盘符应归一到大写"
+        );
+    }
+
+    struct FakePagefileRegistry {
+        values: std::collections::BTreeMap<String, (REG_VALUE_TYPE, Vec<u8>)>,
+        writes: Vec<String>,
+        fail_auto: bool,
+        drift_paging_once: bool,
+    }
+
+    impl FakePagefileRegistry {
+        fn new(old_paging: (REG_VALUE_TYPE, Vec<u8>)) -> Self {
+            let mut values = std::collections::BTreeMap::new();
+            values.insert("PagingFiles".to_string(), old_paging);
+            Self { values, writes: Vec::new(), fail_auto: false, drift_paging_once: false }
+        }
+
+        fn write(&mut self, name: &str, kind: REG_VALUE_TYPE, data: &[u8]) -> Result<(), u32> {
+            self.writes.push(name.to_string());
+            if name == "AutomaticManagedPagefile" && self.fail_auto {
+                return Err(5);
+            }
+            self.values.insert(name.to_string(), (kind, data.to_vec()));
+            Ok(())
+        }
+
+        fn read(&mut self, name: &str) -> Option<Vec<u8>> {
+            if name == "PagingFiles" && self.drift_paging_once {
+                self.drift_paging_once = false;
+                return Some(b"drifted".to_vec());
+            }
+            self.values.get(name).map(|(_kind, data)| data.clone())
+        }
+    }
+
+    /// R5b-M03 正向：手动模式必须先 PagingFiles、后 AutomaticManagedPagefile，
+    /// 且两次都从实际读回值验证成功。
+    /// 判红自证：交换两行写入顺序，本用例的 writes 断言红。
+    #[test]
+    fn pagefile_写序先_pagingfiles_后自动托管() {
+        use std::cell::RefCell;
+        let old = (REG_MULTI_SZ, b"old-paging".to_vec());
+        let new = (REG_MULTI_SZ, b"new-paging".to_vec());
+        let auto = (REG_SZ, b"FALSE".to_vec());
+        let reg = RefCell::new(FakePagefileRegistry::new(old));
+        let before_paging = reg.borrow().values["PagingFiles"].clone();
+        let result = apply_pagefile_registry(
+            false,
+            Some(before_paging),
+            Some(new.clone()),
+            auto.clone(),
+            &mut |name, kind, data| reg.borrow_mut().write(name, kind, data),
+            &mut |name| reg.borrow_mut().read(name),
+        );
+        result.expect("两写与回读应全部成功");
+        assert_eq!(
+            reg.borrow().writes,
+            vec!["PagingFiles".to_string(), "AutomaticManagedPagefile".to_string()]
+        );
+        assert_eq!(reg.borrow().values["PagingFiles"], new);
+        assert_eq!(reg.borrow().values["AutomaticManagedPagefile"], auto);
+    }
+
+    /// R5b-M03 回滚：第二写失败后必须把 PagingFiles 写回原始字节，机器不能停在
+    /// “手动 + 旧 PagingFiles”之外的半套状态。
+    /// 判红自证：删掉 `apply_pagefile_registry` 的 rollback 分支，本用例红。
+    #[test]
+    fn pagefile_第二写失败回滚第一写() {
+        use std::cell::RefCell;
+        let old = (REG_MULTI_SZ, b"old-paging".to_vec());
+        let new = (REG_MULTI_SZ, b"new-paging".to_vec());
+        let reg = RefCell::new(FakePagefileRegistry::new(old.clone()));
+        reg.borrow_mut().fail_auto = true;
+        let err = apply_pagefile_registry(
+            false,
+            Some(old.clone()),
+            Some(new),
+            (REG_SZ, b"FALSE".to_vec()),
+            &mut |name, kind, data| reg.borrow_mut().write(name, kind, data),
+            &mut |name| reg.borrow_mut().read(name),
+        )
+        .expect_err("第二写失败必须返回 Err");
+        assert!(err.contains("回滚"), "失败回执必须点名已回滚：{err}");
+        assert_eq!(reg.borrow().values["PagingFiles"], old, "PagingFiles 必须恢复原始字节");
+        assert_eq!(
+            reg.borrow().writes,
+            vec![
+                "PagingFiles".to_string(),
+                "AutomaticManagedPagefile".to_string(),
+                "PagingFiles".to_string()
+            ],
+            "回滚必须发生在确认第二写失败之后"
+        );
+    }
+
+    /// R5b-M03 回读：写入返回 Ok 但实际读回不同 ⇒ 必须判错并回滚，不能只比刚写字符串。
+    #[test]
+    fn pagefile_回读必须读实际注册表字节() {
+        use std::cell::RefCell;
+        let old = (REG_MULTI_SZ, b"old-paging".to_vec());
+        let reg = RefCell::new(FakePagefileRegistry::new(old.clone()));
+        reg.borrow_mut().drift_paging_once = true;
+        let err = apply_pagefile_registry(
+            false,
+            Some(old.clone()),
+            Some((REG_MULTI_SZ, b"new-paging".to_vec())),
+            (REG_SZ, b"FALSE".to_vec()),
+            &mut |name, kind, data| reg.borrow_mut().write(name, kind, data),
+            &mut |name| reg.borrow_mut().read(name),
+        )
+        .expect_err("实际回读漂移必须返回 Err");
+        assert!(err.contains("回读") && err.contains("PagingFiles"), "错因要指向实际回读：{err}");
+        assert_eq!(reg.borrow().values["PagingFiles"], old);
+        assert_eq!(
+            reg.borrow().writes,
+            vec!["PagingFiles".to_string(), "PagingFiles".to_string()]
+        );
     }
 
     /// 端到端跑一次 pagefile_apply，属发布前手工核对（真 admin 才走真写段）。

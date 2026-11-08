@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::safestorage;
 
 /// 密钥掩码。渲染层不再持有同名常量，掩码只由后端产出。
-/// 汇总出口 [`mask_settings`]：`src-tauri/src/commands/settings.rs:1117`。
+/// 汇总出口 [`mask_settings`]：`src-tauri/src/commands/settings.rs:1126`。
 pub const SECRET_MASK: &str = "••••••••";
 
 /// 需加密/脱敏的字段名（加密与掩码共用这一份表）。
@@ -406,32 +406,60 @@ pub fn prune_stale_atomic_temps(dir: &Path) -> usize {
         crate::engine::protect::note_root_skipped("原子写临时件清扫", dir, &verdict);
         return 0;
     }
-    let removed = prune_stale_temps_depth(dir, now, 0);
+    let mut skipped = 0usize;
+    let removed = prune_stale_temps_depth(dir, now, 0, &mut skipped);
     if removed > 0 {
-        crate::engine::log::write_log("info", &format!("已清理过期原子写临时件 {removed} 个"));
+        crate::engine::log::write_log(
+            "info",
+            &format!("已清理过期原子写临时件 {removed} 个，跳过 {skipped} 个（非本工具精确命名/非普通文件）"),
+        );
     }
     removed
 }
 
-fn prune_stale_temps_depth(dir: &Path, now: SystemTime, depth: usize) -> usize {
+/// R7-M01：只认 `.{原文件名}.{16 hex}.tmp` 这一种本文件生成形态。
+fn is_atomic_temp_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('.') else { return false; };
+    let Some(rest) = rest.strip_suffix(".tmp") else { return false; };
+    let Some((_, hex)) = rest.rsplit_once('.') else { return false; };
+    hex.len() == 16 && hex.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn prune_stale_temps_depth(dir: &Path, now: SystemTime, depth: usize, skipped: &mut usize) -> usize {
     if depth > 4 { return 0; }
     let Ok(entries) = fs::read_dir(dir) else { return 0 };
     let mut removed = 0;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let Ok(entry) = entry else {
+            *skipped += 1;
+            continue;
+        };
         let p = entry.path();
-        let Ok(md) = fs::symlink_metadata(&p) else { continue };
+        let Ok(md) = fs::symlink_metadata(&p) else {
+            *skipped += 1;
+            continue;
+        };
         if md.is_dir() {
             if !crate::engine::protect::is_reparse(&md) {
-                removed += prune_stale_temps_depth(&p, now, depth + 1);
+                removed += prune_stale_temps_depth(&p, now, depth + 1, skipped);
             }
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        if !(name.starts_with('.') && name.ends_with(".tmp")) { continue; }
+        // 非精确命名（老版本/用户自建 `*.tmp`）一律不删，只记跳过。
+        if !is_atomic_temp_name(&name) {
+            *skipped += 1;
+            continue;
+        }
         let old = md.modified().ok().and_then(|t| now.duration_since(t).ok())
             .is_some_and(|age| age > Duration::from_secs(24 * 60 * 60));
-        if old && !crate::engine::protect::is_reparse(&md) && fs::remove_file(&p).is_ok() {
-            removed += 1;
+        if old && !crate::engine::protect::is_reparse(&md) {
+            match fs::remove_file(&p) {
+                Ok(()) => removed += 1,
+                Err(_) => *skipped += 1,
+            }
+        } else {
+            *skipped += 1;
         }
     }
     removed

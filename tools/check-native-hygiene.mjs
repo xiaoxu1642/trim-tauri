@@ -732,6 +732,89 @@ function rustFns(src) {
   }
 }
 
+// ---- N15（T1a-M04）：reparse 语义判据必须走 0x400 / is_reparse ----
+// Windows 上 `file_type().is_symlink()` 对 junction 与云占位符为 false，只拿它当
+// reparse 闸会放行这两类。生产面单独出现 `is_symlink()` 必须逐文件登记理由；
+// 新形态默认红。测试区由 stripRustProduction 切掉。
+const SYMLINK_RE = /\.is_symlink\s*\(/g;
+const SYMLINK_ALLOW = [
+  { file: 'native-scanner/src/scan.rs', count: 7, reason: '扫描枚举层只跳过 symlink；junction/云占位符由删除前的 reparse_ancestor（0x400）复检，读侧不跟随链接' },
+  { file: 'native-scanner/src/cleanup_scan.rs', count: 1, reason: '清理扫描的目录项过滤同上：删除执行侧另有 protect::is_reparse 复检' },
+  { file: 'src-tauri/src/engine/protect.rs', count: 1, reason: '仅非 Windows 编译分支的 is_reparse 回退实现（Windows 生产分支走 0x400 属性位）' },
+  { file: 'src-tauri/src/commands/fileclean.rs', count: 1, reason: 'file_type 缓存只用于展示/变更检测；真正删除前的条目复核走 protect::is_reparse（0x400）' },
+  { file: 'src-tauri/src/commands/uninstall/drivers_orphan.rs', count: 1, reason: '驱动残留枚举只跳过 symlink；紧随其后的 symlink_metadata + protect::is_reparse 才是删除闸' },
+  { file: 'src-tauri/src/commands/uninstall/list_run.rs', count: 1, reason: '卸载项扫描只跳过快捷方式链接；删除链另有 protect::is_path_protected + is_reparse' },
+];
+/** 只切 `#[cfg(test)] mod … {` 测试模块，不误切 `#[cfg(test)] use …` 单行属性。 */
+function stripTestModules(src) {
+  const lines = src.split('\n');
+  const out = [];
+  let skipping = false;
+  let depth = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!skipping && /^\s*#\[cfg\(test\)\]\s*$/.test(line)) {
+      let j = i + 1;
+      while (j < lines.length && lines[j].trim() === '') j++;
+      if (j < lines.length && /^\s*(?:pub\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{/.test(lines[j])) {
+        skipping = true;
+        depth = 0;
+        out.push('');
+        continue;
+      }
+      if (j < lines.length && /^\s*(?:pub\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*;/.test(lines[j])) {
+        // 外部测试模块（`#[cfg(test)] mod contract_tests;`）：其后没有生产代码。
+        break;
+      }
+    }
+    if (skipping) {
+      for (const ch of line) {
+        if (ch === '{') depth++;
+        else if (ch === '}') {
+          depth--;
+          if (depth === 0) {
+            skipping = false;
+            break;
+          }
+        }
+      }
+      out.push('');
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join('\n');
+}
+{
+  const sample = 'let x = ent.file_type().map(|t| t.is_symlink());';
+  if ([...sample.matchAll(SYMLINK_RE)].length !== 1) {
+    g.fail('N15 对照a：裸 is_symlink() 样本必须命中');
+  }
+  if ([...'let x = protect::is_reparse(&md);'.matchAll(SYMLINK_RE)].length !== 0) {
+    g.fail('N15 对照b：is_reparse 合规样本不得误报');
+  }
+  const counts = new Map();
+  for (const f of files) {
+    const rel = relative(ROOT, f).replace(/\\/g, '/');
+    if (/_tests\.rs$/.test(rel)) continue;
+    const clean = blankNonCode(stripTestModules(readFileSync(f, 'utf8')));
+    const n = [...clean.matchAll(SYMLINK_RE)].length;
+    if (n) counts.set(rel, n);
+  }
+  for (const [rel, n] of counts) {
+    const allow = SYMLINK_ALLOW.find((a) => a.file === rel);
+    if (!allow) {
+      g.fail(`N15：${rel} 生产面单独使用 is_symlink() ${n} 处（未登记）——junction/云占位符会漏；改用 protect::is_reparse(0x400) 或在 SYMLINK_ALLOW 登记理由`);
+    } else if (allow.count !== n) {
+      g.fail(`N15：${rel} is_symlink() 现算 ${n} ≠ 登记 ${allow.count}（增删都必须同步本表）——${allow.reason}`);
+    }
+  }
+  for (const a of SYMLINK_ALLOW) {
+    if (!counts.has(a.file)) g.fail(`N15：${a.file} 登记了 ${a.count} 处但现算为 0 —— 判据失明或代码已改（同步本表）：${a.reason}`);
+  }
+  if (counts.size === 0) g.fail('N15：生产面 is_symlink 语料为 0 ⇒ 扫描面/正则失明，本节未校验');
+}
+
 // 扫描面地板：源文件数过少 ⇒ walkRs 失明；快照调用点命中过少 ⇒ N8 语料失明；
 // CLEANUP 取用点命中过少 ⇒ N9-B 语料失明（N9 取用点本应 ≥6，命中 0~5 即正则/域前缀出事）
 if (files.length < 50) g.fail(`扫描面只有 ${files.length} 个 .rs（< 50）⇒ 疑似 root 失明`);

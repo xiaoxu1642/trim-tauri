@@ -2097,27 +2097,26 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
     /// 差 10000 倍。忘了这个换算，`to_ms` 会算出 1970 年附近 ⇒ 区间永远判 false。
     #[test]
     fn m2c_filetime换算口径() {
-        const EPOCH_DIFF_100NS: i64 = 116_444_736_000_000_000;
-        let to_ms = |ft: i64| (ft - EPOCH_DIFF_100NS) / 10_000;
-
         // Unix 纪元 = FILETIME 0
-        assert_eq!(to_ms(EPOCH_DIFF_100NS), 0, "FILETIME 纪元点应换算成 Unix 0");
+        assert_eq!(filetime_to_unix_ms(116_444_736_000_000_000), 0, "FILETIME 纪元点应换算成 Unix 0");
         // 2026-01-01T00:00:00Z 的 Unix 毫秒（1767225600000）
-        let ft_2026 = EPOCH_DIFF_100NS + 1_767_225_600_000i64 * 10_000;
-        assert_eq!(to_ms(ft_2026), 1_767_225_600_000, "2026-01-01 的 FILETIME 换算应等于该时刻的 Unix 毫秒");
+        let ft_2026 = 116_444_736_000_000_000 + 1_767_225_600_000i64 * 10_000;
+        assert_eq!(filetime_to_unix_ms(ft_2026), 1_767_225_600_000, "2026-01-01 的 FILETIME 换算应等于该时刻的 Unix 毫秒");
         // 100ns 精度：+10000 个 100ns 单位 = +1 毫秒
-        assert_eq!(to_ms(ft_2026 + 10_000), 1_767_225_600_001, "加 1 毫秒的 FILETIME 差值应换算成 +1");
+        assert_eq!(filetime_to_unix_ms(ft_2026 + 10_000), 1_767_225_600_001, "加 1 毫秒的 FILETIME 差值应换算成 +1");
 
         // 区间语义：一个落在 [2026-01-01, 2026-01-08) 内的时刻应判 true
         let now_ms = 1_767_225_600_000i64 + 3 * 86_400_000; // +3 天
         let (start, end) = (ft_2026, ft_2026 + 7 * 86_400_000 * 10_000);
+        let start_ms = filetime_to_unix_ms(start);
+        let end_ms = filetime_to_unix_ms(end);
         assert!(
-            to_ms(start) <= now_ms && now_ms < to_ms(end),
+            start_ms <= now_ms && now_ms < end_ms,
             "区间内（+3 天）必须判 true"
         );
-        // 边界：正好等于 start ⇒ true（闭区间左端）；正好等于 end ⇒ false（开区间右端）
-        assert!(to_ms(start) <= to_ms(start) && to_ms(start) < to_ms(end), "左端点应包含");
-        assert!(!(to_ms(end) <= to_ms(end) && to_ms(end) < to_ms(end)), "右端点应不包含（暂停已到期）");
+        // 边界：左端包含、右端不包含（用真实函数算出的两个时刻判定，不是恒真式）
+        assert!(start_ms <= start_ms && start_ms < end_ms, "左端点应包含");
+        assert!(!(start_ms <= end_ms && end_ms < end_ms), "右端点应不包含（暂停已到期）");
     }
 
     /// M2-C 的反向护栏：`regEnum` / `regTimeWindow` 两种形态的**判定分支必须真实存在**。

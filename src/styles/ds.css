@@ -189,8 +189,8 @@ input[type="range"].ds-slider:focus-visible {
   text-align: left;
   cursor: pointer;
 }
-.ds-menu-item:hover,
-.ds-menu-item:focus-visible { background: var(--accent-soft); color: var(--accent); outline: none; }
+.ds-menu-item:hover { background: var(--accent-soft); color: var(--accent); }
+.ds-menu-item:focus-visible { background: var(--accent-soft); color: var(--accent); outline: 2px solid var(--accent); outline-offset: -2px; }
 .ds-menu-item.danger { color: var(--danger); }
 .ds-menu-item.danger:hover,
 .ds-menu-item.danger:focus-visible { background: var(--danger-soft); }

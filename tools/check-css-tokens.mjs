@@ -30,6 +30,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 /**
  * 名字边界：前后都不许再接 \w 或 `-`。
@@ -83,9 +84,7 @@ if (cssFiles.length !== CSS_FLOOR) {
 }
 
 /** 把 CSS 块注释替换成等长空白：偏移量不变，报出来的行号才对得上原文件 */
-function blankComments(text) {
-  return text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
-}
+const blankComments = (text) => blankNonCode(text, 'css', { keepStrings: true });
 
 function lineOf(text, index) {
   let line = 1;
@@ -293,11 +292,7 @@ for (const file of cssFiles) {
 // v2-L4P-44（E-13）：JS/HTML 的定义面同样要先剥注释——注释里的 `--x: v` 举例
 // 会把「真身未定义」的变量洗白成已定义（CSS 侧 v2-M16 已修，此处是同族漏网）。
 // 剥除用等长空白替换，行号偏移保持不变。
-function blankJsComments(text) {
-  return text
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-    .replace(/(^|[^:"'`\\])\/\/[^\n]*/g, (m, keep) => keep + m.slice(keep.length).replace(/[^\n]/g, ' '));
-}
+const blankJsComments = (text) => blankNonCode(text, 'js', { keepStrings: true });
 function blankHtmlComments(text) {
   return text.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, ' '));
 }
@@ -437,9 +432,7 @@ let curveSites = 0;
   const jsDir = join(REPO_ROOT, 'src', 'scripts');
   for (const f of readdirSync(jsDir).filter((n) => n.endsWith('.js'))) {
     // 剥注释再扫：注释里说明「原曲线是 X」是史实，不是违规（判定面=可执行代码）
-    const text = readFileSync(join(jsDir, f), 'utf8')
-      .replace(/\/\*[\s\S]*?\*\//g, ' ')
-      .replace(/(^|[^:\w])\/\/.*$/gm, '$1');
+    const text = blankNonCode(readFileSync(join(jsDir, f), 'utf8'), 'js', { keepStrings: true });
     for (const m of text.matchAll(/cubic-bezier\(([^)]+)\)/g)) {
       curveSites++;
     }

@@ -173,6 +173,8 @@
   // size=0 的占位行（native-scanner 的 emit_recycle_bin）。判据集中在这一个常量上，
   // 不要在别处再写字符串字面量。
   const RECYCLE_ID = 'recycleBin';
+  const PERMANENT_DELETE_NOTE = '常规清理项直接永久删除、不进入回收站，删后不可恢复；含注册表项的条目删除前自动导出 .reg 备份，永久删除的文件在 64MB/文件、256MB/批次上限内自动留副本。';
+  const FILECLEAN_RECYCLE_NOTE = '文件清理项移入回收站，可从回收站还原。';
 
   // P1 安装检测（detect）未命中的条目：扫描后从列表隐藏（重新扫描/换规则后自动恢复）
   const hiddenIds = new Set();
@@ -1071,6 +1073,9 @@
             const fcResp = await window.api.fileclean.scan(item.fileCleanType, customPath);
             if (fcResp.success && fcResp.data) {
               fileCleanData.set(id, fcResp.data);
+              if (fcResp.data.degraded) {
+                window.app?.toast?.('warning', `${item.name}：${fcResp.data.degradedReason || '路径配置读取失败，扫描结果可能不完整'}`);
+              }
               // v4 P2-E（R1-M05）：扫描达上限要留痕（旧实现无 truncated 字段，用户以为扫完了）
               if (fcResp.data.truncated) {
                 console.warn(`[Trim] ${item.name} 扫描达上限，结果可能不完整`);
@@ -1544,6 +1549,11 @@
       .filter(r => r && r.id !== RECYCLE_ID && (r.risk === 'high' || r.risk === 'medium'));
     const highRisk = risky.filter(r => r.risk === 'high');
     const mediumRisk = risky.filter(r => r.risk === 'medium');
+    const lowRisk = selectedWithResultIds()
+      .map(id => scanResults.get(id))
+      .filter(r => r && r.id !== RECYCLE_ID && !FILECLEAN_IDS.includes(r.id)
+        && r.risk !== 'high' && r.risk !== 'medium');
+    let confirmedPermanentRisk = false;
 
     // F4a1-M01 的残留射程（2026-10-23 复核）：删除后果此前只出现在行 tooltip 上，
     // 而用户做决定那一刻看的是这枚确认弹窗——扫描回执结构上不带 ifDeleted（它是规则库
@@ -1568,6 +1578,7 @@
         consequenceItems(highRisk)
       );
       if (!ok) return null;
+      confirmedPermanentRisk = true;
     }
 
     // D10：中风险二次确认（黄色），与高风险红色确认分级
@@ -1580,8 +1591,8 @@
       // recycle_one），措辞与备份还原页（备份说明）同源，不再承诺系统级恢复。
       const hasFileClean = mediumRisk.some(r => FILECLEAN_IDS.includes(r.id));
       const deletionNote = hasFileClean
-        ? '常规清理项直接永久删除、不进入回收站（含注册表项的条目删除前自动导出 .reg 备份，永久删除的文件在 64MB/文件、256MB/批次上限内自动留副本）；文件清理项移入回收站，可从回收站还原。'
-        : '本链直接永久删除、不进入回收站，删后不可恢复；含注册表项的条目删除前自动导出 .reg 备份，永久删除的文件在 64MB/文件、256MB/批次上限内自动留副本。';
+        ? PERMANENT_DELETE_NOTE + FILECLEAN_RECYCLE_NOTE
+        : PERMANENT_DELETE_NOTE;
       const ok = await window.app?.confirmWarning(
         '中风险操作确认',
         `您选择了 ${mediumRisk.length} 个中风险项（建议清理前核对用途）：\n${mediumRisk.map(r => '• ' + r.name).join('\n')}`,
@@ -1592,6 +1603,29 @@
       );
       // F4a1-M02：取消支必须走调用方的收尾，本段不再自己复位 busy（busy 已移到确认之后才置起）
       if (!ok) return null;
+      confirmedPermanentRisk = true;
+    }
+
+    // F4a1-M15：低风险常规项同样走永久删，不能因为风险等级低就零确认。
+    // 文件清理项走回收站，必须排除；已有高/中风险确认时不再重复弹同一告知。
+    if (!confirmedPermanentRisk && lowRisk.length > 0) {
+      let ok = false;
+      try {
+        ok = await window.app?.confirmWarning(
+          '永久删除确认',
+          `您选择了 ${lowRisk.length} 个低风险常规清理项：\n${lowRisk.map(r => '• ' + r.name).join('\n')}\n\n这些项目会直接永久删除，不进入回收站。`,
+          '仍然清理',
+          '取消',
+          PERMANENT_DELETE_NOTE,
+          consequenceItems(lowRisk)
+        );
+      } catch (e) {
+        window.app?.log?.('warn', `永久删除确认组件异常: ${(e && e.message) || e}`);
+        window.app?.toast?.('error', '永久删除确认组件异常，本次清理已中止');
+        return null;
+      }
+      if (!ok) return null;
+      confirmedPermanentRisk = true;
     }
 
     // G-4：回收站的红色高危确认。方案 §2.2 G-4 的三条要求在这里兑现两条：
@@ -1677,7 +1711,7 @@
       allItems.filter(i => i.postAction === 'explorer').map(i => i.id)
     );
     // 回收站是单独的不可逆动作：只要它在场，force 就为真（沿用既有「有确认过就带 force」口径）
-    const force = (highRisk.length > 0 || mediumRisk.length > 0 || recycleItems.length > 0);
+    const force = (confirmedPermanentRisk || recycleItems.length > 0);
     // 确认段到此为止：交出去的就是「用户已经逐档看过并同意的那份计划」。
     return { allItems, regularItems, fileCleanItems, recycleItems, force, explorerPickIds };
   }
@@ -1868,9 +1902,15 @@
 
       // 从结果中移除已清理的
       for (const d of result.details || []) {
-        if (d.status === 'ok') {
+        // F4a1-M16：ok 但仍有失败文件/残留/安全拒绝时不得把条目从重试集摘掉。
+        const failedFiles = Array.isArray(d.failedFiles) ? d.failedFiles.length : 0;
+        const remains = (Number(d.residual) || 0) + failedFiles
+          + (Number(d.protectedBlocked) || 0) + (Number(d.nameShapeBlocked) || 0);
+        if (d.status === 'ok' && remains === 0) {
           scanResults.delete(d.id);
           selectedIds.delete(d.id);
+        } else if (remains > 0) {
+          selectedIds.add(d.id);
         }
       }
 
@@ -2450,7 +2490,8 @@
       const sr = scanResults.get(d.id) || {};
       const label = sr.name || d.name || d.id;
       // R4（2026-10-15）：按因标注——权限不足与被占用分开（下一步动作不同）
-      const note = (Number(d.residual) || 0) > 0 ? '部分残留（被占用）'
+      const fileCount = (Array.isArray(d.failedFiles) ? d.failedFiles.length : 0) || (Number(d.residual) || 0);
+      const note = fileCount > 0 ? `${fileCount} 个文件残留（被占用）`
         : (Number(d.denied) || 0) > 0 ? '权限不足' : '清理失败';
       return `<div class="lock-app-row"><span class="lock-app-name" data-tip="${escapeHtml(sr.path || label)}">${escapeHtml(label)}</span><span class="lock-app-count">${note}</span></div>`;
     }).join('');
@@ -2490,7 +2531,7 @@
       // explorer 退出到重新拉起、句柄释放需要几秒；太早重试会再撞一次占用
       await new Promise(r => setTimeout(r, 3500));
       ctrl.close();
-      selectedIds = new Set(failedIds.filter(id => scanResults.has(id)));
+      selectedIds = new Set(failedIds);
       updateUI();
       await clean();
     });
@@ -2535,6 +2576,16 @@
     const uninst = (respU && respU.success && respU.data && respU.data.backups) || [];
     const packData = (respP && respP.success && respP.data) || {};
     const packs = packData.packs || [];
+    // A1-M06：后端已把「读坏」与「没有备份」分开，这里必须消费，不能只报“还没有备份”。
+    const degradedSources = [
+      resp?.data?.degraded ? '清理注册表备份' : '',
+      respF?.data?.degraded ? '永久删文件备份' : '',
+      respU?.data?.degraded ? '卸载注册表备份' : '',
+      packData.degraded ? '卸载还原包' : ''
+    ].filter(Boolean);
+    if (degradedSources.length) {
+      window.app?.toast?.('warning', `部分备份读取不完整：${degradedSources.join('、')}`);
+    }
     if (!backups.length && !manifests.length && !uninst.length && !packs.length) {
       // A1-L01：整段来源失败不能被渲染成「还没有备份」。
       body.innerHTML = failedSources.length
@@ -2767,19 +2818,20 @@
           return;
         }
         const { kind, total, truncated, files } = resp.data;
+        const degraded = resp.data?.degraded === true;
         const meta = ctrl.footer.querySelector('[data-role="meta"]');
         if (kind === 'reg') {
           body.innerHTML = `<div class="empty-state"><p>注册表条目（共 ${total} 项键/值），不产生文件清单。</p></div>`;
         } else if (kind === 'dism') {
           body.innerHTML = `<div class="empty-state"><p>DISM 组件清理为系统级操作，不产生文件清单。</p></div>`;
         } else if (!files.length) {
-          body.innerHTML = `<div class="empty-state"><p>未枚举到文件（目录为空或已被清理）。</p></div>`;
+          body.innerHTML = `<div class="empty-state"><p>${degraded ? '部分目录不可读，未能枚举到完整文件清单' : '未枚举到文件（目录为空或已被清理）。'}</p></div>`;
         } else {
           body.innerHTML = `<div class="detail-file-list">${files.map(f =>
             `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(f.path)}">${escapeHtml(xtable.middleEllipsis(f.path, 96))}</span><span class="detail-file-size">${formatSize(f.size)}</span></div>`
           ).join('')}</div>`;
         }
-        if (meta) meta.textContent = `共 ${total} 个文件${truncated ? '（仅展示前 600 条）' : ''}`;
+        if (meta) meta.textContent = `共 ${total} 个文件${truncated ? '（仅展示前 600 条）' : ''}${degraded ? '；部分目录不可读，清单可能不完整' : ''}`;
         ctrl.footer.querySelector('[data-role="copyBtn"]').addEventListener('click', async () => {
           if (!files.length) return;
           try {

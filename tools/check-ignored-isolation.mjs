@@ -670,5 +670,9 @@ for (const c of CONTROLS) {
 g.ok(`全仓 #[ignore] 对象：${ignored.length} 条（src ${srcIgnored} / tests ${testsIgnored.length}；地板 ${MIN_IGNORED_REPO}）`);
 g.ok(`tests 侧隔离根对账：${testsIgnored.length} 条 / 未先定根 ${isoBad} 条（豁免 ${isoExempt.size} 条，只减不增）`);
 g.ok(`真机写注册表守卫对账：命中 ${writeItems.length} 条 / 无守卫 ${writeBad} 条（登记表 ${wgExempt.size} 条）`);
-g.ok(`正向对照 ${CONTROLS.length} 组通过（${ctrlResults.join(' / ')}；含「注释洗白必红」「无 created 闸 Drop 删除必红」）`);
+g.controlFailed(
+  ctrlBad,
+  CONTROLS.length,
+  `正向对照（通过 ${ctrlResults.length} 组：${ctrlResults.join(' / ')}；含「注释洗白必红」「无 created 闸 Drop 删除必红」）`,
+);
 g.finish('check-ignored-isolation: 全部通过（隔离根仅 tests 侧；注册表写守卫覆盖 src + tests）');

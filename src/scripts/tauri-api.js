@@ -850,7 +850,8 @@
     style.id = 'tauri-caption-style';
     style.textContent = [
       // 高度必须与 main.css .titlebar（36px）一致：46px 时代字形中心比品牌行低 5px（真机目检实锤）。
-      '.tauri-caption{position:fixed;top:0;right:0;height:36px;display:flex;z-index:100000;',
+      // F2-L05：caption 必须高于 NE 缩放热区（100001），关闭按钮右上角才优先命中。
+      '.tauri-caption{position:fixed;top:0;right:0;height:36px;display:flex;z-index:100002;',
       '  -webkit-user-select:none;user-select:none;}',
       '.tauri-caption-btn{width:46px;height:100%;border:0;background:transparent;cursor:default;',
       '  display:flex;align-items:center;justify-content:center;padding:0;color:currentColor;',

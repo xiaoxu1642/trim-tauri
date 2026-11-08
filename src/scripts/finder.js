@@ -223,7 +223,7 @@
   function checkboxHtml(id, checked) {
     // P3-1（可达性）：三属性同现（键盘 Space 激活由 ds.bindCheckboxKeys 合成 click，
     // 选中态同步在 onTableClick 里随 class 一起写 aria-checked）
-    return `<span class="checkbox ${checked ? 'checked' : ''}" data-fcheck="${id}" role="checkbox" tabindex="0" aria-checked="${checked ? 'true' : 'false'}"></span>`;
+    return `<span class="checkbox ${checked ? 'checked' : ''}" data-fcheck="${id}" role="checkbox" tabindex="0" aria-checked="${checked ? 'true' : 'false'}" aria-label="选择 ${window.ds.escAttr(id)}"></span>`;
   }
 
   function nameOf(path) {
@@ -380,7 +380,7 @@
         const nestedCell = nested > 0
           ? `<span class="finder-name-text" data-tip="删除该目录会整树移入回收站，连带其下 ${nested} 个空子目录与树内的 0 字节文件（可在回收站还原）">${nested} 个</span>`
           : '<span class="finder-name-text" style="opacity:.55">—</span>';
-        hd += `<tr class="${checked ? 'finder-row-selected' : ''}"><td>${checkboxHtml('ed_' + esc(r.path), checked)}</td><td><div class="finder-cell"><span class="finder-name-text">${esc(nameOf(r.path))}</span><span class="finder-name-text" style="opacity:.55">·</span><span class="finder-path-text" data-tip="${esc(r.path)}">${esc(middleEllipsis(r.path, 64))}</span></div></td><td class="finder-col-size">${fmtDate(r.created)}</td><td class="finder-col-size">${nestedCell}</td><td class="finder-col-size"><span class="finder-reveal" data-empty-ignore="${esc(r.path)}" data-tip="加入忽略名单，重扫不再显示（可在「忽略名单」里移出）" style="cursor:pointer">忽略</span></td></tr>`;
+        hd += `<tr class="${checked ? 'finder-row-selected' : ''}"><td>${checkboxHtml('ed_' + esc(r.path), checked)}</td><td><div class="finder-cell"><span class="finder-name-text">${esc(nameOf(r.path))}</span><span class="finder-name-text" style="opacity:.55">·</span><span class="finder-path-text" data-tip="${esc(r.path)}">${esc(middleEllipsis(r.path, 64))}</span></div></td><td class="finder-col-size">${fmtDate(r.created)}</td><td class="finder-col-size">${nestedCell}</td><td class="finder-col-size"><span class="finder-reveal" role="button" tabindex="0" data-empty-ignore="${esc(r.path)}" data-tip="加入忽略名单，重扫不再显示（可在「忽略名单」里移出）" style="cursor:pointer">忽略</span></td></tr>`;
       }
       hd += '</tbody></table>';
       if (pagesD > 1) hd += pagerHtml('dirs', s.pageD, pagesD);
@@ -558,18 +558,22 @@
     anFetch([path], nameOf(path));
   }
 
-  function anUp() {
+  async function anUp() {
     if (an.scanning || an.trail.length <= 1) return;
     an.trail.pop();
     renderAnBreadcrumb();
-    renderAn();
+    const cur = anCurrent();
+    if (cur && !an.cache.has(cur.key)) await anScan(cur.paths, cur.key);
+    else renderAn();
   }
 
-  function anGoto(idx) {
+  async function anGoto(idx) {
     if (an.scanning || idx < 0 || idx >= an.trail.length) return;
     an.trail = an.trail.slice(0, idx + 1);
     renderAnBreadcrumb();
-    renderAn();
+    const cur = anCurrent();
+    if (cur && !an.cache.has(cur.key)) await anScan(cur.paths, cur.key);
+    else renderAn();
   }
 
   function anAppData() {
@@ -588,6 +592,11 @@
     if (sm && Number(sm.size) > 0) sm.size = Math.max(0, Number(sm.size) - (Number(freed) || 0));
     layer.exts = [];
     layer.times = [];
+    // F4b-M01：父层面包屑缓存里的该子目录大小/占比也是删除前的值；
+    // 作废父层缓存，返回上级时重扫，而不是继续显示旧行。
+    if (an.trail.length > 1) {
+      for (const node of an.trail.slice(0, -1)) an.cache.delete(node.key);
+    }
   }
 
   async function anDelete(path) {
@@ -874,7 +883,7 @@
         <td><div class="finder-cell"><span class="finder-name-text">${esc(nameOf(r.path))}</span><span class="finder-path-text" style="color:var(--fg-tertiary)" data-tip="${esc(r.path)}">${esc(middleEllipsis(r.path, 58))}</span></div></td>
         <td class="finder-col-size">${formatSize(r.size)}</td>
         <td class="finder-col-size">${esc(when)}</td>
-        <td class="finder-col-size"><span class="finder-reveal" data-reveal="${esc(r.path)}" data-tip="在资源管理器中定位" style="cursor:pointer">定位</span> · <span data-an-del-file="${esc(r.path)}" data-tip="移入回收站" style="cursor:pointer;color:var(--danger-text)">删除</span></td>
+        <td class="finder-col-size"><span class="finder-reveal" role="button" tabindex="0" data-reveal="${esc(r.path)}" data-tip="在资源管理器中定位" style="cursor:pointer">定位</span> · <span role="button" tabindex="0" data-an-del-file="${esc(r.path)}" data-tip="移入回收站" style="cursor:pointer;color:var(--danger-text)">删除</span></td>
       </tr>`;
     }
     html += '</tbody></table></div>';
@@ -889,7 +898,7 @@
     box.style.display = 'flex';
     const parts = an.trail.map((n, i) => {
       const cur = i === an.trail.length - 1;
-      return `<span class="finder-name-text ${cur ? '' : 'finder-reveal'}" ${cur ? 'style="font-weight:500"' : `style="color:var(--accent);cursor:pointer" data-an-goto="${i}"`} data-tip="${esc(n.paths.join(' | '))}">${esc(n.label)}</span>`;
+      return `<span class="finder-name-text ${cur ? '' : 'finder-reveal'}" ${cur ? 'style="font-weight:500"' : `role="button" tabindex="0" style="color:var(--accent);cursor:pointer" data-an-goto="${i}"`} data-tip="${esc(n.paths.join(' | '))}">${esc(n.label)}</span>`;
     }).join('<span style="opacity:.5;margin:0 4px">▸</span>');
     const upBtn = an.trail.length > 1 ? '<button type="button" class="btn btn-secondary btn-small" data-an-up style="margin-left:auto">← 返回上级</button>' : '';
     box.innerHTML = parts + upBtn;
@@ -936,10 +945,10 @@
     for (const r of layer.dirs) {
       const pct = Math.min(100, Math.round(r.size * 100 / total));
       html += `<tr>
-        <td><div class="finder-cell"><span class="finder-name-text" data-an-drill="${esc(r.path)}" data-tip="点击下钻到 ${esc(r.path)}" style="color:var(--accent);cursor:pointer">${esc(nameOf(r.path))} ▸</span><span class="finder-path-text" style="color:var(--fg-tertiary)" data-tip="${esc(r.path)}">${esc(middleEllipsis(r.path, 58))}</span></div></td>
+        <td><div class="finder-cell"><span class="finder-name-text" role="button" tabindex="0" data-an-drill="${esc(r.path)}" data-tip="点击下钻到 ${esc(r.path)}" style="color:var(--accent);cursor:pointer">${esc(nameOf(r.path))} ▸</span><span class="finder-path-text" style="color:var(--fg-tertiary)" data-tip="${esc(r.path)}">${esc(middleEllipsis(r.path, 58))}</span></div></td>
         <td class="finder-col-size">${formatSize(r.size)}</td>
         <td><div style="height:6px;border-radius:var(--radius-badge);background:var(--accent-light)"><div style="height:6px;border-radius:var(--radius-badge);background:var(--accent);width:${pct}%"></div></div></td>
-        <td class="finder-col-size"><span class="finder-reveal" data-reveal="${esc(r.path)}" data-tip="在资源管理器中定位" style="cursor:pointer">定位</span> · <span data-an-del="${esc(r.path)}" data-tip="整树移入回收站" style="cursor:pointer;color:var(--danger-text)">删除</span></td>
+        <td class="finder-col-size"><span class="finder-reveal" role="button" tabindex="0" data-reveal="${esc(r.path)}" data-tip="在资源管理器中定位" style="cursor:pointer">定位</span> · <span role="button" tabindex="0" data-an-del="${esc(r.path)}" data-tip="整树移入回收站" style="cursor:pointer;color:var(--danger-text)">删除</span></td>
       </tr>`;
     }
     if (sm && sm.childrenTruncated === 'true') {
@@ -1074,6 +1083,15 @@
   }
 
   function render(key) { RENDER_FN[key](); }
+
+  // A3-M01：行内动作是 span，必须能 Tab 到并用 Enter/Space 触发同一 click 链。
+  function onTableKeydown(e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const target = e.target.closest('[role="button"][tabindex="0"]');
+    if (!target) return;
+    e.preventDefault();
+    target.click();
+  }
 
   // 表格行内复选框点击（事件委托）+ 空页分页翻页 + 折叠栏目头 + 路径定位 + 分析器下钻/删除
   function onTableClick(e, tableId, key) {
@@ -1340,6 +1358,7 @@
       document.getElementById(cfg.deleteBtn)?.addEventListener('click', guardAsync('删除选中', () => onDelete(key)));
       // 表格复选框委托 + 分页翻页 + 折叠栏目头（dups 的表名为 dupTable；empty 用自己表 id）
       document.getElementById(cfg.table)?.addEventListener('click', e => onTableClick(e, cfg.table, key));
+      document.getElementById(cfg.table)?.addEventListener('keydown', onTableKeydown);
       // P3-1（可达性）：表格勾选框键盘激活（Space/Enter ⇒ 合成 click 走同一 onTableClick）
       window.ds?.bindCheckboxKeys?.(document.getElementById(cfg.table), '[data-fcheck]');
       // 盘符点选器（empty/an）：委托点击 + 拉取盘符渲染（默认全选）
@@ -1357,6 +1376,7 @@ document.getElementById(cfg.drivesEl)?.addEventListener('keydown', onDriveClick)
       if (goto_) { anGoto(Number(goto_.dataset.anGoto)); return; }
       if (e.target.closest('[data-an-up]')) anUp();
     });
+    document.getElementById('anBreadcrumb')?.addEventListener('keydown', onTableKeydown);
     // M6 Treemap：格子挂在 #anTreemapSection，而 `data-an-drill` 的委托只绑在表格 `#anTable` 上
     // ⇒ 只加容器不加监听的话，格子看着能点（cursor:pointer）事件却没人接（2026-09-29 目检就是这个）。
     // 键盘同理：Enter/Space 要等价于点击，否则这一层交互键盘到不了。
@@ -1393,6 +1413,9 @@ document.getElementById(cfg.drivesEl)?.addEventListener('keydown', onDriveClick)
   window.finder = { ensureInit };
 
   // 首帧后自动初始化（若 app.js 未触发，兜底）
-  if (document.readyState !== 'loading') { ensureInit(); }
-  else document.addEventListener('DOMContentLoaded', ensureInit);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', ensureInit);
+  } else {
+    ensureInit();
+  }
 })();

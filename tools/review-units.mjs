@@ -473,6 +473,15 @@ export const UNITS = [
     gates: ['check-rule-schema-sync', 'check-fixture-freshness'],
   },
   {
+    // 2026-11-09 P0：回执三态门禁承接了前端失败消费的四条 P0 断言，T1b 兜底
+    // 再次越过 U2 上限。按执行链点名成独立单元，上限不放宽。
+    id: 'T1j', owner: 'sub', name: '门禁·回执三态与前端失败消费',
+    files: ['tools/check-receipt-tri-state.mjs'],
+    contract: 'IPC 回执 success/status 逐项判读 / 失败项保留 / 成功提示只由成功回执触发',
+    boundary: '审的是渲染层对后端回执的消费形态；后端命令体本身归 R 系单元',
+    gates: ['check-receipt-tri-state'],
+  },
+  {
     // 2026-10-16 拆分（P2-B）：新增 check-headless-cli 后兜底形态达 8005 行越 8000 上限，
     // 按主题把「样式与前端面」9 件点名进 T1d；本单元保留为新增门禁的兜底认领位。
     id: 'T1b', owner: 'sub', name: '门禁·数据产物与其余（新增门禁自动落入）',

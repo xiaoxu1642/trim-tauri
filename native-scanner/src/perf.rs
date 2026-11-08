@@ -157,23 +157,42 @@ fn close_bench_json(base: &str, warn: &[String]) -> String {
     format!("{base}{}}}", bench_warn_field(warn))
 }
 
-/// 清理同一测速目录里上一轮留下的 `tb_*.bin`（只碰本工具自己的命名形态）。
-fn sweep_stale_bench_files(dir: &std::path::Path) -> (usize, usize) {
+/// N1c-Y01：名字必须是本工具生成的精确形态 `tb_<线程>_<PID>_<单调毫秒>.bin`。
+/// 旧实现只判 `tb_` 前缀 + `.bin` 后缀，用户同目录的 `tb_notes.bin` 也会被永久删。
+fn is_stale_bench_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("tb_") else { return false; };
+    let Some(rest) = rest.strip_suffix(".bin") else { return false; };
+    let parts: Vec<&str> = rest.split('_').collect();
+    parts.len() == 3
+        && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// 清理同一测速目录里上一轮留下的精确命名文件（只碰本工具自己的形态）。
+/// 返回 `(removed, skipped, failed)`；受保护路径/名字不匹配/读不到都只记 skipped。
+fn sweep_stale_bench_files(dir: &std::path::Path) -> (usize, usize, usize) {
     let mut removed = 0usize;
+    let mut skipped = 0usize;
     let mut failed = 0usize;
     if let Ok(rd) = std::fs::read_dir(dir) {
         for entry in rd.flatten() {
             let name = entry.file_name();
             let s = name.to_string_lossy();
-            if s.starts_with("tb_") && s.ends_with(".bin") {
-                match std::fs::remove_file(entry.path()) {
-                    Ok(_) => removed += 1,
-                    Err(_) => failed += 1,
-                }
+            if !is_stale_bench_name(&s) {
+                skipped += 1;
+                continue;
+            }
+            let p = entry.path();
+            if crate::scan::is_protected_path(&p.to_string_lossy(), None) {
+                skipped += 1;
+                continue;
+            }
+            match std::fs::remove_file(&p) {
+                Ok(_) => removed += 1,
+                Err(_) => failed += 1,
             }
         }
     }
-    (removed, failed)
+    (removed, skipped, failed)
 }
 
 fn delete_bench_file(path: &str, warn: &mut Vec<String>) {
@@ -203,6 +222,23 @@ fn build_offset_map(file_size: u64, io_size: u64) -> Vec<u64> {
     map
 }
 
+/// 收尾等待只收仍在途的槽位。`u64::MAX` 是已收口/提交失败标记，事件可能仍保持
+/// signaled；把它继续放进等待集合会让「等待全部」永久卡住，并诱使调用方提前关事件。
+fn pending_io_indices(in_flight: &[(u64, u128)]) -> Vec<usize> {
+    in_flight
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (tag, _))| (*tag != u64::MAX).then_some(i))
+        .collect()
+}
+
+/// 启动一个只等单个对象的等待。收尾绝不能使用 `bWaitAll=1`：不同请求的完成时刻
+/// 本就分散，等待全部会把「已有事件可收口」拖成固定超时。
+unsafe fn wait_for_one_event(events: &[*mut core::ffi::c_void], timeout_ms: u32) -> u32 {
+    use windows_sys::Win32::System::Threading::WaitForMultipleObjects;
+    WaitForMultipleObjects(events.len() as u32, events.as_ptr(), 0, timeout_ms)
+}
+
 /// 单线程一个阶段。kind: 0=seq write,1=seq read,2=rand read,3=rand write
 /// 返回 (字节数, 完成请求数, 端到端累计时延 ns)
 unsafe fn bench_phase(
@@ -214,10 +250,12 @@ unsafe fn bench_phase(
     seq_size: u64,
     offsets: &[u64],
 ) -> Result<(u64, u64, u128), String> {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, WAIT_OBJECT_0};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
     use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
-    use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
-    use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
+    use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+    use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent};
 
     let mut ovl: Vec<OVERLAPPED> = Vec::with_capacity(qd);
     let mut events: Vec<*mut core::ffi::c_void> = Vec::with_capacity(qd);
@@ -264,7 +302,7 @@ unsafe fn bench_phase(
     loop {
         if mono_ms() >= deadline_ms { break; }
         let n = events.len() as u32;
-        let wait = WaitForMultipleObjects(n, events.as_ptr(), 0, 200);
+        let wait = wait_for_one_event(&events, 200);
         if wait < WAIT_OBJECT_0 || wait >= WAIT_OBJECT_0 + n { continue; }
         let i = (wait - WAIT_OBJECT_0) as usize;
         let mut transferred: u32 = 0;
@@ -280,24 +318,56 @@ unsafe fn bench_phase(
             in_flight[i].0 = u64::MAX;
         }
     }
-    // 收尾：等全部在途落定（截止后仍在途的请求很小，1s 足够）
+    // 收尾：先给在途请求 1s 自然完成；仍挂起就逐项取消，再阻塞收口。
+    // 任何一条都不能在事件/缓冲仍被 I/O 持有时离开本函数。
     let hard = mono_ms() + 1000;
-    let mut remaining: Vec<usize> = (0..qd).collect();
+    let mut remaining = pending_io_indices(&in_flight);
+    let mut wait_failed: Option<u32> = None;
     while !remaining.is_empty() && mono_ms() < hard {
         let hs: Vec<*mut core::ffi::c_void> = remaining.iter().map(|&i| events[i]).collect();
+        let wait = wait_for_one_event(&hs, 300);
         let n = hs.len() as u32;
-        let wait = WaitForMultipleObjects(n, hs.as_ptr(), 1, 300);
-        if wait < WAIT_OBJECT_0 || wait >= WAIT_OBJECT_0 + n { break; }
-        let i = remaining.remove((wait - WAIT_OBJECT_0) as usize);
+        if wait < WAIT_OBJECT_0 || wait >= WAIT_OBJECT_0 + n {
+            if wait != WAIT_TIMEOUT {
+                wait_failed = Some(GetLastError());
+                break;
+            }
+            continue;
+        }
+        let rel = (wait - WAIT_OBJECT_0) as usize;
+        let i = remaining.remove(rel);
         let mut transferred: u32 = 0;
-        let _ = GetOverlappedResult(handle, &ovl[i], &mut transferred, 0);
+        let completed = GetOverlappedResult(handle, &ovl[i], &mut transferred, 0) != 0;
         if in_flight[i].0 != u64::MAX {
             lat_total += mono_ns().saturating_sub(in_flight[i].1);
-            bytes_done += transferred as u64;
-            ops_done += 1;
+            if completed {
+                bytes_done += transferred as u64;
+                ops_done += 1;
+            }
+            in_flight[i].0 = u64::MAX;
+        }
+    }
+    if !remaining.is_empty() {
+        for &i in &remaining {
+            let _ = CancelIoEx(handle, &ovl[i]);
+        }
+        for i in remaining.drain(..) {
+            let mut transferred: u32 = 0;
+            let completed = GetOverlappedResult(handle, &ovl[i], &mut transferred, 1) != 0;
+            if in_flight[i].0 != u64::MAX {
+                lat_total += mono_ns().saturating_sub(in_flight[i].1);
+                if completed {
+                    bytes_done += transferred as u64;
+                    ops_done += 1;
+                }
+                in_flight[i].0 = u64::MAX;
+            }
         }
     }
     for ev in events { let _ = CloseHandle(ev); }
+    if let Some(err) = wait_failed {
+        return Err(format!("测速收尾等待失败（GetLastError={err}），在途 I/O 已取消并收口"));
+    }
     Ok((bytes_done, ops_done, lat_total))
 }
 
@@ -427,9 +497,28 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
     if let Err(e) = std::fs::create_dir_all(&bench_dir) {
         return Err(format!("测试目录创建失败: {bench_dir}（{e}）"));
     }
-    let (swept, sweep_failed) = sweep_stale_bench_files(std::path::Path::new(&bench_dir));
-    if swept > 0 || sweep_failed > 0 {
-        arg_warn.push(format!("上一轮测速残留清理: 删除 {swept} 个、失败 {sweep_failed} 个"));
+    // N1c-Y01：只有「--path 的直接子目录且名字是 Trim-DiskBench*」才允许清扫。
+    // 自定义更深的 bench 目录不扫（宁可留残留，也不在用户目录里按名删文件）。
+    let base_key = crate::scan::lexically_normalize(dir.trim_end_matches('\\'));
+    let bench_path = std::path::Path::new(&bench_dir);
+    let direct_child = bench_path
+        .parent()
+        .map(|p| crate::scan::lexically_normalize(&p.to_string_lossy()).trim_end_matches('\\') == base_key.trim_end_matches('\\'))
+        .unwrap_or(false);
+    let bench_name_ok = bench_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.starts_with("Trim-DiskBench"))
+        .unwrap_or(false);
+    let (swept, sweep_skipped, sweep_failed) = if direct_child && bench_name_ok {
+        sweep_stale_bench_files(bench_path)
+    } else {
+        (0, 0, 0)
+    };
+    if swept > 0 || sweep_skipped > 0 || sweep_failed > 0 {
+        arg_warn.push(format!(
+            "上一轮测速残留清理: 删除 {swept} 个、跳过 {sweep_skipped} 个、失败 {sweep_failed} 个"
+        ));
     }
     bench_progress(on_progress, "seqwrite", 0);
 
@@ -1503,6 +1592,145 @@ mod tests {
 }
 
 #[cfg(test)]
+mod n1c_r01_tests {
+    use super::*;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent};
+
+    unsafe fn new_event() -> HANDLE {
+        let ev = CreateEventW(std::ptr::null(), 0, 0, std::ptr::null());
+        assert!(!ev.is_null(), "CreateEventW 失败：{}", std::io::Error::last_os_error());
+        ev
+    }
+
+    /// qd=1、完成时间超过旧收尾单次等待：只要事件最终 signaled，就必须
+    /// 按真实完成收口，而不是把「单次 Wait 超时」当成全部收尾。
+    #[cfg(windows)]
+    #[test]
+    fn qd1_单请求超过_300ms_仍逐个收口() {
+        let ev = unsafe { new_event() };
+        let ev_addr = ev as usize;
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(320));
+            assert_ne!(unsafe { SetEvent(ev_addr as HANDLE) }, 0, "SetEvent 失败");
+        });
+        let mut in_flight = vec![(0u64, mono_ns())];
+        let started = std::time::Instant::now();
+        let remaining = pending_io_indices(&in_flight);
+        assert_eq!(remaining, vec![0], "qd=1 的唯一槽位必须进入收尾集合");
+        let wait = unsafe { wait_for_one_event(&[ev], 500) };
+        assert_eq!(wait, WAIT_OBJECT_0, "单请求必须在 500ms 内完成并唤醒");
+        in_flight[0].0 = u64::MAX;
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(300),
+            "用例必须真实覆盖超过 300ms 的在途窗口"
+        );
+        assert!(pending_io_indices(&in_flight).is_empty(), "收口后不得再留 in_flight 槽位");
+        writer.join().expect("延迟完成线程 panic");
+        let _ = unsafe { CloseHandle(ev) };
+    }
+
+    /// qd=8/32：等待必须一次只取一个事件；每个已收口槽位都置回 `u64::MAX`。
+    /// 破坏自证：把 `pending_io_indices` 改回 `0..qd`，未 signaled 的 MAX 槽位会留下，
+    /// 本用例最终因剩余集合非空而红。
+    #[cfg(windows)]
+    #[test]
+    fn qd8_与_qd32_返回前全部槽位标记收口() {
+        for qd in [8usize, 32] {
+            let events: Vec<HANDLE> = (0..qd).map(|_| unsafe { new_event() }).collect();
+            let mut in_flight: Vec<(u64, u128)> =
+                (0..qd).map(|i| (i as u64, mono_ns())).collect();
+            // 预先保留若干「已收口」槽位，专测等待集合不能把它们再收进去。
+            for i in (0..qd).step_by(3) {
+                in_flight[i].0 = u64::MAX;
+            }
+            let active: Vec<usize> = pending_io_indices(&in_flight);
+            assert!(!active.is_empty(), "qd={qd} 用例必须至少留一个在途槽位");
+            assert_eq!(
+                active,
+                (0..qd).filter(|i| in_flight[*i].0 != u64::MAX).collect::<Vec<_>>(),
+                "qd={qd} 收尾集合必须过滤已收口槽位"
+            );
+            let addrs: Vec<usize> = active.iter().map(|&i| events[i] as usize).collect();
+            let writer = std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                for addr in addrs {
+                    assert_ne!(unsafe { SetEvent(addr as HANDLE) }, 0, "SetEvent 失败");
+                }
+            });
+            let mut remaining = pending_io_indices(&in_flight);
+            while !remaining.is_empty() {
+                let hs: Vec<HANDLE> = remaining.iter().map(|&i| events[i]).collect();
+                let wait = unsafe { wait_for_one_event(&hs, 1_000) };
+                assert!(
+                    wait >= WAIT_OBJECT_0 && wait < WAIT_OBJECT_0 + hs.len() as u32,
+                    "qd={qd} 等待异常：wait={wait}"
+                );
+                let i = remaining.remove((wait - WAIT_OBJECT_0) as usize);
+                in_flight[i].0 = u64::MAX;
+            }
+            writer.join().expect("完成线程 panic");
+            assert!(
+                in_flight.iter().all(|(tag, _)| *tag == u64::MAX),
+                "qd={qd} 返回前仍有未收口槽位：{in_flight:?}"
+            );
+            for ev in events {
+                let _ = unsafe { CloseHandle(ev) };
+            }
+        }
+    }
+
+    /// 直接钉住 Win32 等待语义：一个事件 signaled、另一个仍在途时必须立刻返回前者。
+    /// 破坏自证：把 `wait_for_one_event` 的 `bWaitAll` 从 0 改成 1，本用例得到
+    /// `WAIT_TIMEOUT` 并红。
+    #[cfg(windows)]
+    #[test]
+    fn 收尾等待只取单个事件不使用_wait_all() {
+        let events = [unsafe { new_event() }, unsafe { new_event() }];
+        assert_ne!(unsafe { SetEvent(events[1]) }, 0);
+        let wait = unsafe { wait_for_one_event(&events, 100) };
+        assert_eq!(wait, WAIT_OBJECT_0 + 1, "未 signaled 的槽位不得拖住已完成的槽位");
+        assert_ne!(wait, WAIT_TIMEOUT);
+        for ev in events {
+            let _ = unsafe { CloseHandle(ev) };
+        }
+    }
+
+    /// 防退化哨兵：生产收尾块必须复用受限集合与单对象等待，并在关事件前取消、
+    /// 阻塞收口剩余 I/O。结构断言与上面的行为用例一起挡住「改回全量 + WaitAll」。
+    #[test]
+    fn 生产收尾结构保留取消后阻塞收口() {
+        let src = include_str!("perf.rs");
+        let phase = src
+            .split("unsafe fn bench_phase(")
+            .nth(1)
+            .and_then(|s| s.split("unsafe fn open_bench_file").next())
+            .expect("bench_phase 被改名或删除");
+        assert!(
+            phase.contains("pending_io_indices(&in_flight)"),
+            "收尾集合必须只取仍在途槽位"
+        );
+        assert!(
+            phase.contains("wait_for_one_event(&hs, 300)"),
+            "收尾等待必须走单对象封装"
+        );
+        assert!(
+            phase.contains("CancelIoEx(handle, &ovl[i])"),
+            "超时后必须先取消剩余 I/O"
+        );
+        assert!(
+            phase.contains("GetOverlappedResult(handle, &ovl[i], &mut transferred, 1)"),
+            "取消后必须阻塞 GetOverlappedResult 确认收口"
+        );
+        let wait_all_one = ["WaitForMultipleObjects(n, hs.as_ptr(), ", "1, 300)"].concat();
+        assert!(
+            !phase.contains(&wait_all_one),
+            "bWaitAll=1 会让一个未完请求拖住全部事件"
+        );
+    }
+}
+
+#[cfg(test)]
 mod p1_6e_arg_tests {
     use super::{
         bench_warn_field, clamp_to_whitelist, close_bench_json, net_interval, parse_bench_arg,
@@ -1678,10 +1906,14 @@ mod p2e_m17_tests {
         let dir: &std::path::Path = sb.as_ref();
         std::fs::write(dir.join("tb_0_111_222.bin"), b"x").unwrap();
         std::fs::write(dir.join("tb_1_111_222.bin"), b"y").unwrap();
+        std::fs::write(dir.join("tb_notmine.bin"), b"n").unwrap();
+        std::fs::write(dir.join("tb_deadbeef.bin"), b"d").unwrap();
         std::fs::write(dir.join("keep.txt"), b"z").unwrap();
-        let (removed, failed) = sweep_stale_bench_files(dir);
-        assert_eq!((removed, failed), (2, 0));
+        let (removed, skipped, failed) = sweep_stale_bench_files(dir);
+        assert_eq!((removed, skipped, failed), (2, 3, 0));
         assert!(dir.join("keep.txt").exists(), "不得误删非测速文件");
+        assert!(dir.join("tb_notmine.bin").exists(), "非精确命名不得删");
+        assert!(dir.join("tb_deadbeef.bin").exists(), "非精确命名不得删");
         assert!(!dir.join("tb_0_111_222.bin").exists());
     }
 }

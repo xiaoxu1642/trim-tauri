@@ -516,6 +516,8 @@
     window.addEventListener('unhandledrejection', (event) => {
       const text = describeReason(event && event.reason);
       console.error('[Trim] 未处理的 Promise 拒绝:', event && event.reason);
+      // F4a1-M18：应用已就绪时给用户一个可见出口，不只落 console/日志。
+      try { window.app?.toast?.('error', '发生未处理的错误，请重试'); } catch (_) { /* 兜底自身不得再抛 */ }
       try {
         if (window.logger && typeof window.logger.write === 'function') {
           window.logger.write('error', '未处理的 Promise 拒绝: ' + text);
@@ -568,6 +570,8 @@
     if (!host) return;
     host.addEventListener('keydown', (e) => {
       if (e.key !== ' ' && e.key !== 'Enter') return;
+      // F1b-M01：长按 Space/Enter 只触发一次，避免重复翻转。
+      if (e.repeat) return;
       const t = e.target && e.target.closest ? e.target.closest(selector) : null;
       if (!t || !host.contains(t)) return;
       e.preventDefault();

@@ -263,14 +263,27 @@ mod tests {
         let Ok(dir) = crate::engine::paths::temp_script_dir() else {
             return;
         };
-        let Ok(rd) = std::fs::read_dir(&dir) else {
+        if std::fs::read_dir(&dir).is_err() {
             return;
-        };
-        let left: Vec<String> = rd
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|n| crate::engine::tmpnames::BACKUP_STAGE.matches(n))
-            .collect();
-        assert!(left.is_empty(), "私有 tmp 残留中转件：{left:?}");
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let left: Vec<String> = std::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| crate::engine::tmpnames::BACKUP_STAGE.matches(n))
+                .collect();
+            if left.is_empty() {
+                return;
+            }
+            // 其它测试也可能在本目录里短暂产出中转件；等到守卫回收后再判残留，
+            // 超过宽限仍存在才是真泄漏，不能用 --test-threads=1 掩盖竞态。
+            if std::time::Instant::now() >= deadline {
+                panic!("私有 tmp 残留中转件：{left:?}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 }

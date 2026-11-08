@@ -56,11 +56,13 @@
   }
 
   function setTransform(el, transform, transition) {
-    // 保留容器已有的行内 transition；其中旧的 transform 片段先剔除再拼接（M3 N-4），
+    // 保留容器已有的 transition；其中旧的 transform 片段先剔除再拼接（M3 N-4），
     // 其余过渡属性（box-shadow / border-color 等）原样保留。
+    // F5-M01：transition 通常写在样式表里，行内 style.transition 为空；必须读计算值，
+    // 否则行内只写 transform 会把 CSS 的 background/box-shadow 过渡整体覆盖掉。
     var base = el.dataset.tiltBase;
     if (base === undefined) {
-      base = el.style.transition || '';
+      base = getComputedStyle(el).transition || '';
       el.dataset.tiltBase = base;
       delete el.dataset.tiltRest; // base 新建/变更 → 合并结果作废（下一句重算）
     }
@@ -69,6 +71,9 @@
     var rest = el.dataset.tiltRest;
     if (rest === undefined) {
       rest = stripTransformTransition(base);
+      // F5-M01：`transition: all` 与行内 transform 拼接后，后置 all 会覆盖
+      // transform 的时长/缓动，颜色/描边/阴影则时好时坏。展开成显式属性再拼。
+      rest = rest.replace(/(^|,)\s*all(?=\s|$)/g, '$1 background, background-color, border-color, box-shadow, color, opacity');
       el.dataset.tiltRest = rest;
     }
     var merged = rest ? transition + ', ' + rest : transition;

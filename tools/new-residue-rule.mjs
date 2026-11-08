@@ -120,10 +120,15 @@ if (opt.out) {
 if (opt.out && fs.existsSync(tmp)) die(`--out 指向的文件已存在，拒绝覆盖: ${tmp}`);
 fs.writeFileSync(tmp, JSON.stringify(candidate, null, 2) + '\n', 'utf8');
 
-const run = spawnSync(process.execPath, [GATE, '--preview', tmp], { encoding: 'utf8', cwd: ROOT });
+const run = spawnSync(process.execPath, [GATE, '--preview', tmp], { encoding: 'utf8', cwd: ROOT, timeout: 5 * 60 * 1000 });
 const out = (run.stdout || '') + (run.stderr || '');
 console.log(out.replace(/^/gm, '  '));
 
+if (run.error) {
+  if (!opt.out) fs.rmSync(tmp, { force: true });
+  console.error(`✗ 预览门禁超时或无法启动（A5-M02，5 分钟上限）：${run.error.message}`);
+  process.exit(1);
+}
 if (run.status !== 0) {
   if (!opt.out) fs.rmSync(tmp, { force: true });
   console.error('✗ 干跑未通过，真库未改动。按上面的原因修正参数后重跑。');

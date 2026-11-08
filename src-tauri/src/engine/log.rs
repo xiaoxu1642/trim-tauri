@@ -308,7 +308,13 @@ fn read_window_start(size: u64) -> u64 {
 /// 2. **一次取值、一处判据**：旧实现拿 `metadata().len()` 判大小、拿 `bytes.len()` 做切片，
 ///    两次取值之间文件被外部截短（轮动/手工删）时 `bytes.len() - 524288` 直接**下溢 panic**；
 ///    现在窗口起点由同一个 `size` 用 `saturating_sub` 算出，读多少都按实际字节处理。
-pub fn read_log(date: Option<&str>) -> String {
+pub struct LogReadState {
+    pub content: String,
+    pub degraded: bool,
+    pub error: Option<String>,
+}
+
+pub fn read_log_state(date: Option<&str>) -> LogReadState {
     let date = match date {
         Some(d) if !d.is_empty() => d.to_string(),
         _ => local_date_str(SystemTime::now()),
@@ -322,36 +328,55 @@ pub fn read_log(date: Option<&str>) -> String {
             .enumerate()
             .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit());
     if !valid {
-        return "读取日志失败: 日期格式无效".into();
+        return LogReadState { content: String::new(), degraded: true, error: Some("日期格式无效".into()) };
     }
     let file = paths::log_dir().join(format!("app-{date}.log"));
     // 「没有这份日志」不是错误：交空串（命令层/日志页按空内容呈现）
     let mut f = match fs::File::open(&file) {
         Ok(f) => f,
-        Err(_) => return String::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return LogReadState { content: String::new(), degraded: false, error: None };
+        }
+        Err(e) => {
+            return LogReadState { content: String::new(), degraded: true, error: Some(e.to_string()) };
+        }
     };
     let size = match f.metadata() {
         Ok(m) => m.len(),
-        Err(_) => return String::new(),
+        Err(e) => return LogReadState { content: String::new(), degraded: true, error: Some(e.to_string()) },
     };
     let start = read_window_start(size);
     if start > 0 && f.seek(SeekFrom::Start(start)).is_err() {
-        return format!("读取日志失败: 无法定位到末尾窗口 {start}");
+        return LogReadState {
+            content: String::new(),
+            degraded: true,
+            error: Some(format!("无法定位到末尾窗口 {start}")),
+        };
     }
     let want = ((size - start) as usize).min(LOG_READ_MAX_BYTES as usize);
     let mut buf = Vec::with_capacity(want);
     if let Err(e) = f.read_to_end(&mut buf) {
-        return format!("读取日志失败: {e}");
+        return LogReadState { content: String::new(), degraded: true, error: Some(e.to_string()) };
     }
     let text = String::from_utf8_lossy(&buf).to_string();
-    if start == 0 {
-        return text;
+    let content = if start == 0 {
+        text
+    } else {
+        // 窗口切在行中间时丢掉那一截：交出去半行会让日志页第一行看着像乱码
+        match text.find('\n') {
+            Some(idx) => text[idx + 1..].to_string(),
+            None => text,
+        }
+    };
+    LogReadState { content, degraded: false, error: None }
+}
+
+pub fn read_log(date: Option<&str>) -> String {
+    let state = read_log_state(date);
+    if let Some(e) = state.error {
+        return format!("读取日志失败: {e}");
     }
-    // 窗口切在行中间时丢掉那一截：交出去半行会让日志页第一行看着像乱码
-    match text.find('\n') {
-        Some(idx) => text[idx + 1..].to_string(),
-        None => text,
-    }
+    state.content
 }
 
 /// 日志导出：把当天日志复制到目标路径（对话框由命令层负责）

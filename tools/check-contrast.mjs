@@ -48,6 +48,7 @@
 // 用法：node tools/check-contrast.mjs
 
 import { readFileSync, readdirSync } from 'node:fs';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 /**
  * 扫描面：**三份 CSS 都算**（审查 L-28，2026-10-03 L4 收口；2026-10-12 P0 拆分后加 main-pages.css）。
@@ -82,7 +83,7 @@ const CSS_FILES = [
 // 剥离注释但**保留换行与字符数**：这样按 index 算出来的行号仍然准确，
 // 且选择器不会被块前注释污染 —— 否则棘轮键「选择器|前景」会随注释文字改动而漂移
 // （与 check-system-bin 的 file:line 漂移是同一类坑）。
-const stripComments = (raw) => raw.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+const stripComments = (raw) => blankNonCode(raw, 'css', { keepStrings: true });
 // 每份文件独立成一份「带标签的解析原料」。THEME 变量表只取 main.css（见上方说明）。
 const CSS_PARTS = CSS_FILES.map((f) => ({
   label: f.label,
@@ -1398,14 +1399,16 @@ function layerCandidates(layer, vars) {
   const s = layer.trim();
   const g = s.match(/^linear-gradient\(([\s\S]*)\)$/);
   if (!g) {
-    const c = parseColor(s, vars);
+    // T1d-M04：渐变/层里的 color-mix(... transparent) 也要走 parseBg 的透明合成
+    // 分支；旧实现只调 parseColor，语义染层因此整条落在解析面外。
+    const c = parseBg(s, vars);
     return c ? [{ c, expr: s }] : [];
   }
   const out = [];
   for (const arg of splitLayers(g[1])) {
     const stop = arg.replace(/^-?[\d.]+deg$/i, '').replace(/\s+[\d.]+%\s*$/, '').trim();
     if (!stop) continue;
-    const c = parseColor(stop, vars);
+    const c = parseBg(stop, vars);
     if (c) out.push({ c, expr: stop });
   }
   return out;
@@ -1557,6 +1560,41 @@ check(
     : HOST_STACK_SITES.length < HOST_STACK_MIN
       ? '登记宿主少于下限（删条目就等于放开判据）'
       : '',
+);
+
+// G2（T1d-M04）：gradient + color 规则的枚举棘轮。
+// 旧 A 组只解析 parseBg 能吃的实底；`background: linear-gradient(...)` + `color`
+// 的规则整批落在解析面外，既不算违规也不算覆盖。这里用 H 组同一套逐 stop 取最坏
+// 的合成器补算，并把「规则数 / 已覆盖数」双地板钉住——新增一条渐变文字面必须被算到。
+const GRADIENT_COLOR_FLOOR = 14;
+const gradientColorRules = ALL_RULES.filter((r) => {
+  if (/::(before|after)\b/.test(r.selector)) return false;
+  if (r.opacity === 0) return false;
+  const decls = readBgDecls(r.body);
+  return decls.some((d) => /linear-gradient\s*\(/i.test(d)) && !!declOf(r.body, 'color');
+});
+const gradientColorRows = [];
+const gradientColorIssues = [];
+for (const r of gradientColorRules) {
+  const layers = bgLayersOf(r);
+  const fgExpr = declOf(r.body, 'color');
+  if (!layers || !fgExpr) {
+    gradientColorIssues.push(`${r.file}#${r.selector} 渐变/前景解析失败`);
+    continue;
+  }
+  const res = evalStack(lightVars, 'var(--bg-app)', layers, fgExpr, AA_LARGE);
+  if (res.error) gradientColorIssues.push(`${r.file}#${r.selector} ${res.error}`);
+  else gradientColorRows.push({ key: `${r.file}#${r.selector}`, file: r.file, selector: r.selector, ratio: res.ratio });
+}
+check(
+  gradientColorRules.length >= GRADIENT_COLOR_FLOOR &&
+    gradientColorRows.length === gradientColorRules.length &&
+    gradientColorIssues.length === 0 &&
+    gradientColorRows.every((r) => r.ratio >= AA_LARGE),
+  `G2. gradient + color 规则全部纳入对比度计算（现算 ${gradientColorRules.length} 条 ≥ ${GRADIENT_COLOR_FLOOR}，已算 ${gradientColorRows.length} 条` +
+    (gradientColorRows.length ? `，最低 ${Math.min(...gradientColorRows.map((r) => r.ratio)).toFixed(2)}:1 ≥ ${AA_LARGE}:1` : '') + '）',
+  gradientColorIssues.join('；') ||
+    gradientColorRows.filter((r) => r.ratio < AA_LARGE).map((r) => `${r.key} ${r.ratio.toFixed(2)}:1 < ${AA_LARGE}`).join('；'),
 );
 {
   // 正向对照五件（§4.1：每条断言都要能自己变红）：

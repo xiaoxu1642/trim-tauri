@@ -24,7 +24,7 @@ import { join, relative } from 'node:path';
 import { REPO_ROOT } from './ps-origin.mjs';
 import { walkRs } from './lib/fs-walk.mjs';
 import { gate } from './lib/gate.mjs';
-import { splitFunctions } from './lib/src-scan.mjs';
+import { blankNonCode, splitFunctions } from './lib/src-scan.mjs';
 
 const SRC = join(REPO_ROOT, 'src-tauri', 'src');
 
@@ -314,12 +314,22 @@ function extractHitsFromText(text) {
 
 /** @type {{file:string,line:number,raw:string,name:string|null,wrapped:boolean,ident:string|null,kind:string,argHead:string}[]} */
 const hits = [];
+const systemToolLiterals = [];
 for (const f of files) {
   const text = readFileSync(f, 'utf8');
-  fileTexts.set(relative(REPO_ROOT, f).replace(/\\/g, '/'), text);
+  const rel = relative(REPO_ROOT, f).replace(/\\/g, '/');
+  fileTexts.set(rel, text);
+  // T1a-M02：system_tool 的实参白名单不能只看 spawn 实参——两跳绑定
+  // （let t = system_tool("x"); let u = t; quiet_cmd(u)）的源头也要逐字校验。
+  // `#[cfg(test)]` 里的 system_tool("git") / 安装包路径是**负例断言**，不是生产调用；
+  // 与 shell_run_wait 的 I 组同口径，只收生产段。
+  const keep = blankNonCode(text.split('#[cfg(test)]')[0], 'rs', { keepStrings: true });
+  for (const m of keep.matchAll(/system_tool\s*\(\s*(?:r?)"((?:[^"\\]|\\.)*)"/g)) {
+    systemToolLiterals.push({ file: rel, name: m[1], index: m.index });
+  }
   for (const h of extractHitsFromText(text)) {
     hits.push({
-      file: relative(REPO_ROOT, f).replace(/\\/g, '/'),
+      file: rel,
       ...h,
     });
   }
@@ -360,6 +370,23 @@ check(
   'B. system_tool 只用于随系统分发的工具（白名单内）',
   misPinned.length
     ? `不在白名单 ${JSON.stringify(misPinned.map((h) => `${h.file}:${h.line} ${h.name}`))}`
+    : '',
+);
+
+// ---- B2. 所有 system_tool 字面量实参（含 let RHS / 闭包 / match 臂）必须进 PINNED ----
+// B 组只看 spawn 实参：`let t = system_tool("evil.exe"); quiet_cmd(t);` 的源头
+// 字面量不会进入 quiet 命中，旧判据因此漏掉两跳绑定的名字。这里按清洗后的
+// 全文收集，两跳变量名也要在 PINNED 里过一遍。
+const pinnedNameHit = (name) => {
+  const lower = String(name).toLowerCase();
+  return PINNED.some((p) => p.toLowerCase() === lower || (!lower.endsWith('.exe') && p.toLowerCase() === lower + '.exe'));
+};
+const badSystemToolLiterals = systemToolLiterals.filter((s) => !pinnedNameHit(s.name));
+check(
+  systemToolLiterals.length >= 20 && badSystemToolLiterals.length === 0,
+  `B2. system_tool 全量字面量实参均在 PINNED（现算 ${systemToolLiterals.length} 处 ≥ 20）`,
+  badSystemToolLiterals.length
+    ? `非白名单 ${JSON.stringify(badSystemToolLiterals.map((s) => `${s.file}:${s.name}`))}`
     : '',
 );
 
@@ -408,6 +435,39 @@ function resolveBinding(file, ident, callOffset) {
   const text = fileTexts.get(file);
   if (!text) return 'unknown';
   return judgeBindingInText(text, ident, callOffset);
+}
+
+/**
+ * T1a-M02：解析变量到 system_tool 字面量名（最多两跳）。
+ * 找不到/不可静态收敛返回 null；字面量未包裹返回 'literal-unwrapped' 的判定
+ * 仍由 judgeBindingInText 负责，本函数只补「两跳变量名也要进 PINNED」。
+ */
+function resolveBindingName(file, ident, callOffset, depth = 0) {
+  if (depth > 2) return null;
+  const text = fileTexts.get(file);
+  if (!text) return null;
+  const fn = splitFunctions(text).find((f) => callOffset >= f.start && callOffset < f.end);
+  if (!fn) return null;
+  const scope = text.slice(fn.start, callOffset);
+  const letRe = /\blet\b([^=;]{0,160}?)=/g;
+  let m;
+  let found = null;
+  while ((m = letRe.exec(scope)) !== null) {
+    if (!new RegExp(`\\b${ident}\\b`).test(m[1])) continue;
+    const semi = scope.indexOf(';', m.index + m[0].length);
+    const rhs = scope.slice(m.index + m[0].length, semi < 0 ? scope.length : semi).trim();
+    const literal = rhs.match(/system_tool\s*\(\s*r?"([^"]+)"/);
+    if (literal) {
+      found = literal[1];
+      continue;
+    }
+    const next = rhs.match(/^&?\s*(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*$/);
+    if (next) {
+      const nested = resolveBindingName(file, next[1], m.index + m[0].length, depth + 1);
+      if (nested) found = nested;
+    }
+  }
+  return found;
 }
 
 /**
@@ -462,8 +522,11 @@ const cFailures = [];
 for (const h of identSites) {
   const key = `${h.file}:${h.line}`;
   const verdict = resolveBinding(h.file, h.ident, h.offset);
+  const resolvedName = resolveBindingName(h.file, h.ident, h.offset);
   if (verdict === 'literal-unwrapped') {
     cFailures.push(`${key} 绑定到 PINNED 字面量且未经 system_tool 解析（ident=${h.ident}）`);
+  } else if (resolvedName !== null && !pinnedNameHit(resolvedName)) {
+    cFailures.push(`${key} 两跳绑定到非白名单 ${resolvedName}（ident=${h.ident}）`);
   } else if (verdict === 'unknown' && !resolveClosureBinding(h.file, h.ident, h.offset) && !siteCovered.has(key)) {
     cFailures.push(`${key} 变量形态无法静态收敛（ident=${h.ident}），必须在 SITE_EXEMPT 用唯一锚文本登记理由`);
   }

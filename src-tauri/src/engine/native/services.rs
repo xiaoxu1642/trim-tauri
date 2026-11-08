@@ -11,30 +11,46 @@ use super::common::*;
 // ==================== B8 netcheck_status：网络连通性检测 ====================
 
 
-/// 查询服务状态（Running/Stopped 等）
-pub(super) unsafe fn service_status(name: &str) -> Option<(u32, u32)> {
+/// A1-M04：服务查询三态——查询失败（权限/SCM 异常）不得与「未找到」同形。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ServiceQuery {
+    State(u32),
+    NotFound,
+    Unknown,
+}
+
+/// 查询服务状态的三态版本。
+pub(super) unsafe fn service_status_query(name: &str) -> ServiceQuery {
     // 返回 (currentState, startType)；startType 需要 QueryServiceConfig，简化为 0
     // v6-P2（R5/A5 panic 族）：旧写法 `if is_err { return }` + 紧跟 `.unwrap()`——
     // 不变量靠约定不靠类型。改结构化 match：句柄失败路径显式关上游句柄，unwrap 从
     // 生产面消失（与同文件 service_stop 的 map_err 口径一致）。
     let scm = match OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT) {
         Ok(h) => h,
-        Err(_) => return None,
+        Err(_) => return ServiceQuery::Unknown,
     };
     let name_w = to_wide(name);
     let svc = match OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_QUERY_STATUS) {
         Ok(h) => h,
-        Err(_) => {
+        Err(e) => {
             let _ = CloseServiceHandle(scm);
-            return None;
+            return if win32_of(&e) == 1060 { ServiceQuery::NotFound } else { ServiceQuery::Unknown };
         }
     };
     let mut status = SERVICE_STATUS::default();
     let ok = QueryServiceStatus(svc, &mut status as *mut _);
     let _ = CloseServiceHandle(svc);
     let _ = CloseServiceHandle(scm);
-    if ok.is_err() { return None; }
-    Some((status.dwCurrentState.0, 0))
+    if ok.is_err() { return ServiceQuery::Unknown; }
+    ServiceQuery::State(status.dwCurrentState.0)
+}
+
+/// 兼容旧调用方：Unknown 与 NotFound 都折成 None（新调用方应使用三态版本）。
+pub(super) unsafe fn service_status(name: &str) -> Option<(u32, u32)> {
+    match service_status_query(name) {
+        ServiceQuery::State(state) => Some((state, 0)),
+        _ => None,
+    }
 }
 
 /// 停止服务（`Stop-Service -Name X -Force` 的**动作**侧等价物）

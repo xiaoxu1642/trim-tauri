@@ -16,13 +16,21 @@
  * `keepStrings: true` 只抹注释、保留字符串原文 —— 供「判定对象就是字符串字面量」的门禁用
  * （T1h-L04：check-idle-scripts 必须看见 `'DOMContentLoaded'` 事件名）。仍按字符串状态机跳过
  * 其内容，因此字符串里的 `//` 不会被误当行注释。
- * @param {string} text @param {'rs'|'js'} lang @param {{keepStrings?: boolean}} [opts] */
-export function blankNonCode(text, lang = 'rs', { keepStrings = false } = {}) {
+ * @param {string} text @param {'rs'|'js'|'css'|'html'} lang
+ * @param {{keepStrings?: boolean, lineComments?: boolean, blockComments?: boolean, onBlockComment?: (span: {start: number, length: number}) => void}} [opts] */
+export function blankNonCode(
+  text,
+  lang = 'rs',
+  { keepStrings = false, lineComments = true, blockComments = true, onBlockComment = null } = {},
+) {
   const out = text.split('');
   const blank = (from, to) => {
     for (let i = from; i < to && i < out.length; i++) if (out[i] !== '\n' && out[i] !== '\r') out[i] = ' ';
   };
   const isRs = lang === 'rs';
+  const isJs = lang === 'js';
+  const isCss = lang === 'css';
+  const isHtml = lang === 'html';
   let i = 0;
   const n = text.length;
   // JS 正则字面量的上下文判据：`/` 到底是「新正则开头」还是「除号/注释」。
@@ -43,7 +51,14 @@ export function blankNonCode(text, lang = 'rs', { keepStrings = false } = {}) {
   };
   while (i < n) {
     const c = text[i], d = text[i + 1];
-    if (!isRs && c === '/' && d !== '/' && d !== '*' && regexCouldStart()) {
+    if (isHtml && text.startsWith('<!--', i)) {
+      const close = text.indexOf('-->', i + 4);
+      const end = close < 0 ? n : close + 3;
+      blank(i, end);
+      i = end;
+      continue;
+    }
+    if (isJs && c === '/' && d !== '/' && d !== '*' && regexCouldStart()) {
       let j = i + 1, inClass = false, closed = false;
       while (j < n) {
         const e = text[j];
@@ -59,17 +74,18 @@ export function blankNonCode(text, lang = 'rs', { keepStrings = false } = {}) {
         if (!keepStrings) blank(i, j); i = j; prev = '/'; continue;
       }
     }
-    if (c === '/' && d === '/') {
+    if (lineComments && (isRs || isJs) && c === '/' && d === '/') {
       let j = i; while (j < n && text[j] !== '\n') j++;
       blank(i, j); i = j; continue;
     }
-    if (c === '/' && d === '*') {
+    if (blockComments && (isRs || isJs || isCss) && c === '/' && d === '*') {
       let j = i + 2, depth = 1;
       while (j < n && depth > 0) {
         if (isRs && text[j] === '/' && text[j + 1] === '*') { depth++; j += 2; continue; }
         if (text[j] === '*' && text[j + 1] === '/') { depth--; j += 2; continue; }
         j++;
       }
+      onBlockComment?.({ start: i, length: Math.min(j, n) - i });
       blank(i, Math.min(j, n)); i = j; continue;
     }
     // Rust 原始字符串：r"..." / r#"..."#（可多个 #）
@@ -83,12 +99,31 @@ export function blankNonCode(text, lang = 'rs', { keepStrings = false } = {}) {
         if (!keepStrings) blank(i, end); i = end; prev = '"'; continue;
       }
     }
-    if (c === '"') {
+    if (isCss && c === "'") {
+      let j = i + 1;
+      while (j < n) {
+        if (text[j] === '\\') { j += 2; continue; }
+        if (text[j] === "'") { j++; break; }
+        j++;
+      }
+      if (!keepStrings) blank(i, j); i = j; prev = "'"; continue;
+    }
+    if (isJs && c === "'") {
+      let j = i + 1;
+      while (j < n) {
+        if (text[j] === '\\') { j += 2; continue; }
+        if (text[j] === "'") { j++; break; }
+        if (text[j] === '\n') break;
+        j++;
+      }
+      if (!keepStrings) blank(i, j); i = j; prev = "'"; continue;
+    }
+    if ((isRs || isJs || isCss) && c === '"') {
       let j = i + 1;
       while (j < n) { if (text[j] === '\\') { j += 2; continue; } if (text[j] === '"') { j++; break; } if (text[j] === '\n' && !isRs) break; j++; }
       if (!keepStrings) blank(i, j); i = j; prev = '"'; continue;
     }
-    if (!isRs && c === '`') {
+    if (isJs && c === '`') {
       let j = i + 1;
       while (j < n) {
         if (text[j] === '\\') { j += 2; continue; }

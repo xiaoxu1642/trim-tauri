@@ -53,6 +53,9 @@
   // Promise；档位一收紧或通道改名，症状是按弹窗次数刷错误日志而非当场暴露。持有返回值显式吞掉（不阻塞弹窗），
   // 计数只有**读得到**才算留痕：首次失败发一条告警，之后只累加、不刷屏。
   var _reportFailures = 0;
+  // F4a1-M18：create 抛错时不能静默。主窗由 app.confirm 消费这条记录并 toast；
+  // 子窗没有 app.js，直接走 subToast。modal.js 本身不得引用 window.app。
+  var _createFailure = null;
   function report(method, info) {
     try {
       var p = window.api?.modal?.[method]?.(info || {});
@@ -250,7 +253,9 @@
         ? `<b>删除后果：</b><ul>${rows.slice(0, foldAfter).map(li).join('')}</ul>` +
           (rest.length ? `<button class="btn btn-secondary" type="button" data-more>${label}</button><ul data-more-p>${rest.map(li).join('')}</ul>` : '')
         : '';
-      const ctrl = create({
+      let ctrl;
+      try {
+        ctrl = create({
         // 每个确认框使用唯一 id：允许多个确认框并存（如连续的批量高危确认），
         // 避免固定 id 互相顶掉导致前一个 Promise 永不 resolve
         id: 'confirmModal-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
@@ -267,8 +272,16 @@
         // 文案是「仍然执行」，不是无脑回车能滑过去的「确定」；② Esc 与点击遮罩/取消键都仍是取消；③ 警示文案由
         // dangerHint 结构化渲染在正文下方，不需要靠焦点位置强调。
         initialFocus: '[data-confirm="ok"]',
-        onClose() { finish(false); }
-      });
+          onClose() { finish(false); }
+        });
+      } catch (e) {
+        // F4a1-M18：create 抛错时 Promise 必须落 false，不能把调用方永久挂起。
+        console.error('[Trim] 确认框创建失败:', e);
+        _createFailure = e;
+        try { window.subToast?.stack?.('error', '确认框创建失败，本次不执行任何改动'); } catch (_) { /* 提示失败不得再抛 */ }
+        finish(false);
+        return;
+      }
       ctrl.footer.querySelector('[data-confirm="ok"]').addEventListener('click', () => { finish(true); ctrl.close(); });
       ctrl.footer.querySelector('[data-confirm="cancel"]').addEventListener('click', () => ctrl.close());
       // 展开件：初态折叠（display:none 也移出 Tab 序），ARIA 交给 ds.accordion
@@ -302,7 +315,17 @@
   }
 
   // M2（v3.6.5）M2-6：统一销毁契约（destroy 解绑 MutationObserver + DOMContentLoaded）
-  window.modal = { create, confirm, closeAll, destroy: stopObserver };
+  window.modal = {
+    create,
+    confirm,
+    closeAll,
+    destroy: stopObserver,
+    consumeCreateFailure: function () {
+      var failure = _createFailure;
+      _createFailure = null;
+      return failure;
+    }
+  };
   window.emptyState = emptyState;
   window.errorState = errorState;
 })();

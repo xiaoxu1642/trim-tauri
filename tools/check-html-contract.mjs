@@ -12,6 +12,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(ROOT, 'src');
@@ -39,9 +40,7 @@ const jsFiles = readdirSync(join(SRC, 'scripts')).filter((f) => f.endsWith('.js'
 const dsUsers = new Set();
 for (const f of jsFiles) {
   if (f === 'ds.js') continue;
-  const code = readFileSync(join(SRC, 'scripts', f), 'utf8')
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:"'`\\])\/\/[^\n]*/g, '$1');
+  const code = blankNonCode(readFileSync(join(SRC, 'scripts', f), 'utf8'), 'js', { keepStrings: true });
   if (/\bwindow\.ds\b|\bds\.[A-Za-z_$]/.test(code)) dsUsers.add(f);
 }
 const inlineHits = [];
@@ -280,10 +279,23 @@ const balanced = (from, at) => {
     surfaces.push({ label: f, names: [...clean.matchAll(/<script[^>]*\bsrc="([^"]+)"/g)].map((m) => m[1].split('/').pop()) });
   }
   const appJs = readFileSync(join(SRC, 'scripts', 'app.js'), 'utf8');
-  const pageAt = appJs.indexOf('PAGE_SCRIPTS');
-  const idleAt = appJs.indexOf('IDLE_SCRIPTS');
+  // T1d-M02：锚点必须是声明本身，不是文件里第一次出现该词——注释里写
+  // `IDLE_SCRIPTS [` 会把旧实现带到一个假开括号，之后的清单解析全部失明。
+  const declAnchor = (src, name, open) => {
+    const m = new RegExp(`(?:^|\\n)\\s*(?:const|let|var)\\s+${name}\\s*=\\s*\\${open}`).exec(src);
+    return m ? m.index + m[0].lastIndexOf(open) : -1;
+  };
+  const pageAt = declAnchor(appJs, 'PAGE_SCRIPTS', '{');
+  const idleAt = declAnchor(appJs, 'IDLE_SCRIPTS', '[');
+  const anchorSelf = (() => {
+    const sample = '// IDLE_SCRIPTS [ 是说明\nconst IDLE_SCRIPTS = [\'a.js\'];\nconst PAGE_SCRIPTS = { x: [\'b.js\'] };';
+    return declAnchor(sample, 'IDLE_SCRIPTS', '[') === sample.indexOf("['a.js']") &&
+      declAnchor(sample, 'PAGE_SCRIPTS', '{') === sample.indexOf("{ x:");
+  })();
   if (pageAt < 0 || idleAt < 0) {
     check(false, '7. 依赖边 intro.js → modelpicker.js', 'app.js 里定位不到 PAGE_SCRIPTS/IDLE_SCRIPTS 锚点 —— 扫描面失明，先修锚点再谈判定');
+  } else if (!anchorSelf) {
+    check(false, '7. 依赖边 intro.js → modelpicker.js', '声明锚点判定器自检失败（注释里的同名 token 仍会抢锚点）');
   } else {
     const pageBlock = balanced(appJs, appJs.indexOf('{', pageAt));
     for (const m of pageBlock.matchAll(/['"]?([\w-]+)['"]?\s*:\s*\[/g)) {

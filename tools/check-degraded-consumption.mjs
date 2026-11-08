@@ -53,30 +53,42 @@ const TABLE = [
     anchor: { file: 'src/scripts/models-window.js', fn: 'load', text: 'resp.degraded === true' } },
   { file: 'src-tauri/src/commands/appearance.rs', fn: 'appearance_get_prefs', status: 'consumed',
     anchor: { file: 'src/scripts/pathbinding-appearance.js', fn: 'syncAppearanceFromBackend', text: 'resp.degraded === true' } },
-  { file: 'src-tauri/src/commands/fileclean.rs', fn: 'fileclean_scan', status: 'pending',
-    batch: '2026-11-02 退役批',
-    reason: '原 consumed 锚点挂在 K13 的待删清单消费函数上（读的是 pending-list 回执，并非 fileclean 回执）；该段随查看/撤回整体退役后，cleanup.js 对 fcResp.data.degraded 实际零消费，如实降为 pending',
-    anchor: { file: 'src/scripts/cleanup.js', text: 'fcResp.data.degraded' } },
+  { file: 'src-tauri/src/commands/fileclean.rs', fn: 'fileclean_scan', status: 'consumed',
+    anchor: { file: 'src/scripts/cleanup.js', fn: 'scan', text: 'fcResp.data.degraded' } },
   { file: 'src-tauri/src/commands/startup.rs', fn: 'startup_scan', status: 'consumed',
     anchor: { file: 'src/scripts/startup.js', fn: 'scan', text: 'resp.degraded === true' } },
+  { file: 'src-tauri/src/commands/cleanup/backup.rs', fn: 'collect_reg_backup_list', status: 'consumed',
+    via: 'cleanup_reg_backup_list',
+    anchor: { file: 'src/scripts/cleanup.js', fn: 'renderRegBackupList', text: 'resp?.data?.degraded' } },
+  { file: 'src-tauri/src/commands/cleanup/backup.rs', fn: 'collect_file_backup_list', status: 'consumed',
+    via: 'cleanup_file_backup_list',
+    anchor: { file: 'src/scripts/cleanup.js', fn: 'renderRegBackupList', text: 'respF?.data?.degraded' } },
+  { file: 'src-tauri/src/commands/uninstall/backup_report.rs', fn: 'uninstall_reg_backup_list', status: 'consumed',
+    anchor: { file: 'src/scripts/cleanup.js', fn: 'renderRegBackupList', text: 'respU?.data?.degraded' } },
+  { file: 'src-tauri/src/commands/uninstall/backup_report.rs', fn: 'uninstall_batch_list', status: 'consumed',
+    anchor: { file: 'src/scripts/cleanup.js', fn: 'renderRegBackupList', text: 'packData.degraded' } },
+  { file: 'src-tauri/src/commands/uninstall/list_run.rs', fn: 'uninstall_list', status: 'consumed',
+    anchor: { file: 'src/scripts/uninstall.js', fn: 'loadApps', text: 'resp.data.degraded' } },
+  { file: 'src-tauri/src/commands/log.rs', fn: 'log_read', status: 'consumed',
+    anchor: { file: 'src/scripts/logger.js', fn: 'load', text: 'resp.degraded' } },
+  { file: 'src-tauri/src/engine/log.rs', fn: 'read_log_state', status: 'consumed',
+    via: 'log_read',
+    anchor: { file: 'src/scripts/logger.js', fn: 'load', text: 'resp.degraded' } },
+  { file: 'src-tauri/src/engine/native/cleanup.rs', fn: 'cleanup_detail', status: 'consumed',
+    via: 'cleanup_item_detail',
+    anchor: { file: 'src/scripts/cleanup.js', fn: 'openItemDetail', text: 'resp.data?.degraded' } },
   // ---- pending：收紧后现存违例，逐条带理由与归属，只减不增 ----
   { file: 'src-tauri/src/commands/appearance.rs', fn: 'appearance_get_material', status: 'pending',
     batch: 'B3/P1-6',
     reason: '材质面未见消费方：window-material.js 现算无 degraded；归 B3/P1-6 展示层分态',
     anchor: { file: 'src/scripts/window-material.js', text: 'degraded' } },
-  { file: 'src-tauri/src/commands/optimizer/overview.rs', fn: 'optimizer_state_overview', status: 'pending',
-    batch: 'B3/P1-6A',
-    reason: '与 R3b-M10 同一条链（目录不可用 vs 空目录）；归 B3/P1-6A',
-    anchor: { file: 'src/scripts/optimizer.js', text: 'degraded' } },
-  { file: 'src-tauri/src/commands/overview.rs', fn: 'overview_hardware', status: 'pending',
-    batch: 'G4-b/假绿#5',
-    reason: '收紧射程后新露出：扫描失败回落旧缓存，但 overview.js 对 degraded 零消费；归前端分态批次（P1 波3）',
-    anchor: { file: 'src/scripts/overview.js', text: 'degraded' } },
-  { file: 'src-tauri/src/engine/native/syspanel.rs', fn: 'power_plan_state', status: 'pending',
+  { file: 'src-tauri/src/commands/optimizer/overview.rs', fn: 'optimizer_state_overview', status: 'consumed',
+    anchor: { file: 'src/scripts/optimizer.js', fn: 'loadStateOverview', text: 'resp.degraded' } },
+  { file: 'src-tauri/src/commands/overview.rs', fn: 'overview_hardware', status: 'consumed',
+    anchor: { file: 'src/scripts/overview.js', fn: 'loadHardware', text: 'resp.degraded === true' } },
+  { file: 'src-tauri/src/engine/native/syspanel.rs', fn: 'power_plan_state', status: 'consumed',
     via: 'syspanel_power_plan_get',
-    batch: 'G4-b/假绿#5',
-    reason: 'helper 发射经 syspanel_power_plan_get 回传，syspanel.js 对 degraded 零消费；是否要求前端消费待域单元裁定，归前端分态批次',
-    anchor: { file: 'src/scripts/syspanel.js', text: 'degraded' } },
+    anchor: { file: 'src/scripts/syspanel.js', fn: 'onApplyPower', text: 'resp.data.degraded' } },
 ];
 
 const walk = (dir, ext) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
@@ -482,14 +494,21 @@ g.ok(`degraded 契约对账（双视图 / 函数级）：发射 ${commandCount} 
     g.fail('B3-4：src/scripts/pathbinding.js 不存在（判定对象缺失）');
   } else {
     const pbsrc = readFileSync(pb, 'utf8');
-    const init = initState(pbsrc);
+    // T1e-M03：判据必须跑注释抹白视图。用 blankJs 会把 `'ok'` 字符串一起抹掉，
+    // initState 直接失明；保留字符串、只抹注释才能既读初值又不让注释顶账。
+    const pbsrcCode = blankNonCode(pbsrc, 'js', { keepStrings: true });
+    const commentSample = `// let pathConfigState = 'ok';\nlet pathConfigState = 'loading';`;
+    if (initState(blankNonCode(commentSample, 'js', { keepStrings: true })) !== 'loading') {
+      g.fail('B3-4 正向对照失败：注释里的旧初值仍被当成声明');
+    }
+    const init = initState(pbsrcCode);
     if (init === null) g.fail('B3-4：找不到 pathConfigState 声明（判据锚点失效）');
     else if (init !== 'loading') {
       g.fail(`B3-4：pathConfigState 初值是 '${init}'，应为 'loading' —— 未落地时自称就绪，扫描会拿空配置覆盖真源`);
     } else {
       g.ok("B3-4：pathConfigState 初值为 'loading'（load 未完成不再冒充就绪）");
     }
-    if (/if\s*\(\s*pathConfigState\s*!==\s*'ok'\s*\)/.test(pbsrc)) {
+    if (/if\s*\(\s*pathConfigState\s*!==\s*'ok'\s*\)/.test(pbsrcCode)) {
       g.ok("B3-4：扫描入口以 `!== 'ok'` 前置（loading / unavailable / degraded 一并拒）");
     } else {
       g.fail("B3-4：扫描入口缺少 `pathConfigState !== 'ok'` 前置 —— 只拒 degraded 会让 loading/unavailable 穿过");

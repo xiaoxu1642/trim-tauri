@@ -33,6 +33,8 @@ class Litebox {
         this.dialog = document.createElement("dialog");
         document.body.appendChild(this.dialog);
         this.dialog.classList.add("litebox");
+        // F4a1-M17：关闭态不仅透明度 0，还必须 inert + display:none，否则按钮仍在 Tab 序。
+        this.dialog.setAttribute('inert', '');
         this.dialog.innerHTML = `<div class="counter">1/4</div><div class="zoom-level">缩放:100%</div><div class="lightbox-stage"><div class="lightbox-container"><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"alt="灯箱图片"class="lightbox-image"id="lightbox-image"><div class="caption">图片描述</div></div><div class="lightbox-controls"><button id="prev-btn"data-tip="上一张 (左箭头)"><svg viewBox="0 0 16 16"><path fill-rule="evenodd"d="M12 8a.5.5 0 0 1-.5.5H5.707l2.147 2.146a.5.5 0 0 1-.708.708l-3-3a.5.5 0 0 1 0-.708l3-3a.5.5 0 1 1 .708.708L5.707 7.5H11.5a.5.5 0 0 1 .5.5"/></svg></button><button id="next-btn"data-tip="下一张 (右箭头)"><svg viewBox="0 0 16 16"><path fill-rule="evenodd"d="M4 8a.5.5 0 0 1 .5-.5h5.793L8.146 5.354a.5.5 0 1 1 .708-.708l3 3a.5.5 0 0 1 0 .708l-3 3a.5.5 0 0 1-.708-.708L10.293 8.5H4.5A.5.5 0 0 1 4 8"/></svg></button></div></div><div class="nav-controls"><button id="zoom-in-btn"data-tip="放大 (+键)"><svg viewBox="0 0 16 16"><path d="M8 4a.5.5 0 0 1 .5.5v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3A.5.5 0 0 1 8 4"/></svg></button><button id="zoom-out-btn"data-tip="缩小 (-键)"><svg viewBox="0 0 16 16"><path d="M4 8a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 0 1h-7A.5.5 0 0 1 4 8"/></svg></button><button id="rotate-btn"data-tip="旋转 (R键)"><svg viewBox="-4 -4 24 24"><path fill-rule="evenodd"d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2z"/><path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466"/></svg></button><button id="reset-btn"data-tip="重置 (0键)"><svg viewBox="-8 -8 32 32"><path fill-rule="evenodd"d="M5.828 10.172a.5.5 0 0 0-.707 0l-4.096 4.096V11.5a.5.5 0 0 0-1 0v3.975a.5.5 0 0 0 .5.5H4.5a.5.5 0 0 0 0-1H1.732l4.096-4.096a.5.5 0 0 0 0-.707m4.344 0a.5.5 0 0 1 .707 0l4.096 4.096V11.5a.5.5 0 1 1 1 0v3.975a.5.5 0 0 1-.5.5H11.5a.5.5 0 0 1 0-1h2.768l-4.096-4.096a.5.5 0 0 1 0-.707m0-4.344a.5.5 0 0 0 .707 0l4.096-4.096V4.5a.5.5 0 1 0 1 0V.525a.5.5 0 0 0-.5-.5H11.5a.5.5 0 0 0 0 1h2.768l-4.096 4.096a.5.5 0 0 0 0 .707m-4.344 0a.5.5 0 0 1-.707 0L1.025 1.732V4.5a.5.5 0 0 1-1 0V.525a.5.5 0 0 1 .5-.5H4.5a.5.5 0 0 1 0 1H1.732l4.096 4.096a.5.5 0 0 1 0 .707"/></svg></button><span class="lb-toolbar-sep"aria-hidden="true"></span><button id="close-btn"class="lb-action"aria-label="关闭"data-tip="关闭 (ESC)"><svg viewBox="0 0 16 16"><path d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708"/></svg><span>关闭</span></button></div>`
         this.range = document;
         this.clickHandler = this.click.bind(this);
@@ -117,6 +119,7 @@ class Litebox {
 
     show() {
         if (!this.dialog.hasAttribute('open')) {
+            this.dialog.removeAttribute('inert');
             if (this.dialog.showModal) {
                 this.dialog.showModal();
                 this.dialog.setAttribute('open', '');
@@ -129,6 +132,7 @@ class Litebox {
             this.dialog.close();
         }
         this.dialog.removeAttribute('open');
+        this.dialog.setAttribute('inert', '');
         this.resetLightbox();
     }
 

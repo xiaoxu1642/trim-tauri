@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import { REPO_ROOT } from './ps-origin.mjs';
 import { gate } from './lib/gate.mjs';
 import { scriptSrcs, styleLinks } from './lib/html-tags.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const SRC = join(REPO_ROOT, 'src');
 const HTML = join(SRC, 'index.html');
@@ -380,7 +381,7 @@ if (!od.okPage || !od.okIdle) {
 
 // F5 首帧握手唯一性（F3-M08）：判前先剥注释——注释里引用函数名属文档，不是调用点
 {
-  const strip = (t) => t.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:"'`\\])\/\/[^\n]*/g, '$1');
+  const strip = (t) => blankNonCode(t, 'js', { keepStrings: true });
   const fpBad = judgeFirstPaintHandshake(
     strip(readFileSync(join(SRC, 'scripts', 'tauri-api.js'), 'utf8')),
     strip(readFileSync(join(SRC, 'scripts', 'app.js'), 'utf8')),

@@ -15,16 +15,10 @@
 // `tools/check-data-parity.mjs` 直接调用做内存重算比对（生成与校验共用同一段实现，
 // 才不会让「校验逻辑」本身变成第二个会漂的副本）。本文件被 import 时**不写盘**。
 //
-// ⚠ 关于「把夹具里的用户目录脱敏」（审查 v2-L9）：**不能只在本文件里钉合成环境**，
-// 试过，并被 `cargo test --lib protect::` 实证否决：Rust 侧 `matches_js_authority` 拿
-// `build_roots(extras)` 与夹具 `rootsJson` **整串**比，而 `build_roots` 的默认段读的是
-// **测试进程自己的** %USERPROFILE%/%APPDATA%（`protect.rs` 与 JS 侧 `buildDefaultRoots` 对称）。
-// 生成器把环境钉成 `C:\Users\ParityUser` 后，两侧就成了「钉过的默认段」⇄「真机默认段 ∪ extras」，
-// 断言必红（实测 left 同时含 administrator 与 parityuser 两组条目）。
-// ⇒ 真正脱敏要 `protect.rs` 那条用例把「默认段」也吃夹具输入（夹具多存一份 env，
-//    测试里先 set_var 再 build_roots）——那是 .rs 侧改动，本轮只登记、不动手、不留红。
-// ⇒ 顺带量到一个同源事实：夹具冻的是**出生机**的用户目录，换机器 `cargo test` 即红，
-//    必须重跑一次生成器；`check-data-parity.mjs` 的 P4 按这个口径给了显式提示。
+// T1c-M41：生成时固定一套合成环境，落盘前把具体路径换成 `%USERPROFILE%` /
+// `%APPDATA%` / `%LOCALAPPDATA%` / `%WINDIR%` / `%ProgramFiles%` 等占位符。
+// Rust 消费侧按测试进程自己的环境展开，因此夹具既不携带出生机用户名，也不要求换机后
+// 先重跑生成器。
 
 import { createRequire } from 'node:module';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -38,6 +32,73 @@ import { writeFileAtomic } from './lib/atomic-write.mjs';
 // T1c-L09：PS 探针脚本落仓根 tmp/（.gitignore 已忽略），不落全局 %TEMP% ——
 // 后者被 check-test-sandbox 当「trim-* 残留」观测，崩溃一次就给该观测项喂一条残渣。
 const PSV_TMP_ROOT = join(REPO_ROOT, 'tmp');
+
+const PARITY_ENV = {
+  SystemDrive: 'C:',
+  USERPROFILE: 'C:\\ParityHome',
+  HOMEDRIVE: 'C:',
+  HOMEPATH: '\\ParityHome',
+  APPDATA: 'C:\\ParityHome\\AppData\\Roaming',
+  LOCALAPPDATA: 'C:\\ParityHome\\AppData\\Local',
+  WINDIR: 'C:\\Windows',
+  SystemRoot: 'C:\\Windows',
+  PROGRAMDATA: 'C:\\ProgramData',
+  ProgramFiles: 'C:\\Program Files',
+  'ProgramFiles(x86)': 'C:\\Program Files (x86)',
+  TEMP: 'C:\\ParityHome\\AppData\\Local\\Temp',
+  TMP: 'C:\\ParityHome\\AppData\\Local\\Temp',
+};
+
+const ENV_PLACEHOLDERS = [
+  ['TEMP', '%TEMP%'],
+  ['LOCALAPPDATA', '%LOCALAPPDATA%'],
+  ['APPDATA', '%APPDATA%'],
+  ['ProgramFiles(x86)', '%ProgramFiles(x86)%'],
+  ['ProgramFiles', '%ProgramFiles%'],
+  ['PROGRAMDATA', '%PROGRAMDATA%'],
+  ['WINDIR', '%WINDIR%'],
+  ['USERPROFILE', '%USERPROFILE%'],
+];
+
+/** 只在生成器进程内钉住合成环境，返回前逐键恢复，避免污染同进程门禁。 */
+function withParityEnv(fn) {
+  const saved = new Map();
+  for (const [key, val] of Object.entries(PARITY_ENV)) {
+    saved.set(key, process.env[key]);
+    process.env[key] = val;
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [key, val] of saved) {
+      if (val === undefined) delete process.env[key];
+      else process.env[key] = val;
+    }
+  }
+}
+
+function replaceEnvPath(s, from, to) {
+  const re = new RegExp(from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  return s.replace(re, to);
+}
+
+function replaceEnvPaths(value) {
+  if (typeof value === 'string') {
+    let out = value;
+    for (const [key, token] of ENV_PLACEHOLDERS) {
+      out = replaceEnvPath(out, PARITY_ENV[key], token);
+      const escapedFrom = JSON.stringify(PARITY_ENV[key]).slice(1, -1);
+      const escapedTo = JSON.stringify(token).slice(1, -1);
+      out = replaceEnvPath(out, escapedFrom, escapedTo);
+    }
+    return out;
+  }
+  if (Array.isArray(value)) return value.map(replaceEnvPaths);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, replaceEnvPaths(v)]));
+  }
+  return value;
+}
 
 /**
  * 真实执行 PS 端 Test-PathProtected（P1-05/S1 根治）：把权威模块的 PS 函数落临时
@@ -98,13 +159,17 @@ function runPsVectors(PROTECT, vectors) {
  * @returns {{extras: object, rootsJson: string, roots: object, vectors: Array<{p: string, protected: boolean}>, psVectors?: Array<boolean>|{error: string}}}
  */
 export function buildParityFixture({ runPs = false } = {}) {
+  return withParityEnv(() => buildParityFixtureInEnv({ runPs }));
+}
+
+function buildParityFixtureInEnv({ runPs }) {
   const require = createRequire(import.meta.url);
   const PROTECT = require(`${ORIGIN}/src/main/ps-protect-path.js`);
 
-  const APPDATA = process.env.APPDATA || '';
-  const LOCALAPPDATA = process.env.LOCALAPPDATA || '';
-  const HOME = process.env.USERPROFILE || '';
-  const WINDIR = process.env.WINDIR || 'C:\\Windows';
+  const APPDATA = process.env.APPDATA;
+  const LOCALAPPDATA = process.env.LOCALAPPDATA;
+  const HOME = process.env.USERPROFILE;
+  const WINDIR = process.env.WINDIR;
 
   // 与生产链路同构：主进程启动时用 known folder 补 exact、用自身数据目录补 subtree。
   // Electron 版的 APP_DATA_DIR 是 %APPDATA%\Trim；Tauri 版是 %APPDATA%\<identifier>，
@@ -187,16 +252,13 @@ export function buildParityFixture({ runPs = false } = {}) {
     join(APPDATA, 'Code'),
     join(HOME, 'Documents', 'xwechat_files', 'a', 'temp'),
     join(LOCALAPPDATA, 'Temp'),
-    // 本机 %TEMP% 常是 8.3 短名形式（如 C:\Users\<人>\ 的短名 + AppData\Local\Temp）：
-    // JS 侧 realpathSync.native、Rust 侧 GetLongPathNameW 都会先触盘展开再判，展开不掉才 fail-closed。
-    // ⚠ 这一条是**机器相关**的（换机可能既没有短名、也展开不动），与上面「夹具冻出生机用户目录」
-    // 是同一个待修问题；本轮不改判定形状，只在 check-data-parity.mjs 的 P4 里显式提示。
+    // TEMP 同样先落成占位符，消费侧按当前测试进程的 TEMP 展开；短名展开语义不变。
     process.env.TEMP || join(LOCALAPPDATA, 'Temp'),
   ];
 
   const vectorResults = vectors.map((p) => ({ p, protected: PROTECT.isPathProtected(p) }));
 
-  return {
+  return replaceEnvPaths({
     // 夹具生成时的输入，Rust 测试用同样输入调用 configure()
     extras,
     rootsJson,
@@ -210,7 +272,7 @@ export function buildParityFixture({ runPs = false } = {}) {
     // P1-05/S1：PS 端真实执行判定（应与 JS vectors.protected 逐项一致）。
     // 仅显式重生成路径产生（runPs:true）；MUST_RUN 门禁的内存重算不含本字段。
     ...(runPs ? { psVectors: runPsVectors(PROTECT, vectorResults) } : {}),
-  };
+  });
 }
 
 /** 夹具落盘路径（生成器写、门禁读，坐标只此一处） */

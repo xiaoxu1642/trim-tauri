@@ -44,6 +44,7 @@ import { blankNonCode, splitFunctions, skipBraces, lineAt } from './lib/src-scan
 // 「不在本机」而打 SKIP + exit 0，门禁静默变成未校验（T1b-L01）。
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(ROOT, 'src-tauri', 'src');
+const NATIVE = join(ROOT, 'native-scanner', 'src');
 const GUARD = 'inspect_root(';
 const READ = 'read_dir(';
 const DESTRUCTIVE = ['remove_file(', 'remove_dir_all(', 'send_to_trash_os(', 'delete_file_with_panic('];
@@ -160,7 +161,11 @@ function build(code) {
       deletes: DESTRUCTIVE.some((d) => body.includes(d)),
       // T1e-L05：只出现 `inspect_root(` 不算判过 —— 返回值必须真被读（`is_trusted()`），
       // 否则「调了一下、没看结果」也能把根入口洗白。
-      guards: body.includes(GUARD) && body.includes('is_trusted()'),
+      // T1e-M04：native-scanner 没有 inspect_root，根/目标闸是
+      // `is_protected_path` 与 N1c-Y01 的「直接子目录 + Trim-DiskBench 名字」双判据。
+      guards: (body.includes(GUARD) && body.includes('is_trusted()'))
+        || body.includes('is_protected_path(')
+        || (body.includes('direct_child') && body.includes('bench_name_ok')),
       calls: null,
       argCalls: null,
     };
@@ -191,7 +196,7 @@ if (!g.skipUnlessPresent(join(SRC, 'engine', 'protect.rs'), 'src-tauri/src（本
   process.exit(0);
 }
 
-for (const abs of walk(SRC)) {
+for (const abs of [...walk(SRC), ...walk(NATIVE)]) {
   const rel = relative(ROOT, abs).split('\\').join('/');
   const code = readFileSync(abs, 'utf8');
   if (!code.includes(READ)) continue;

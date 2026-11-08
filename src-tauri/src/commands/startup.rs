@@ -112,6 +112,15 @@ fn validate_snapshot_items(items: &[Value], snap: &HashMap<String, Value>) -> Op
     for it in items {
         let id = it.get("id").and_then(|v| v.as_str())?;
         let known = snap.get(id)?;
+        // 命令层只接受扫描链自己产生的两种来源标记；缓存/快照里的未知值
+        // 一律按“不是最近一次扫描结果”拒绝。注册表与任务臂还会在 native
+        // 层进一步只收 origin=scan（R5d-M04）。
+        if !matches!(
+            known.get("origin").and_then(|v| v.as_str()),
+            Some("scan") | Some("disabled-ledger")
+        ) {
+            return None;
+        }
         if let (Some(a), Some(b)) = (
             it.get("filePath").and_then(|v| v.as_str()),
             known.get("filePath").and_then(|v| v.as_str()),
@@ -185,12 +194,12 @@ pub async fn startup_scan<R: Runtime>(window: WebviewWindow<R>, refresh: Option<
 
     // S3：纯 Rust 原生
     let scan = match tauri::async_runtime::spawn_blocking(native::startup_scan).await {
-        Ok(Ok(items)) => Ok(items),
+        Ok(Ok((items, warnings))) => Ok((items, warnings)),
         Ok(Err(e)) => Err(e),
         Err(e) => Err(format!("任务异常: {e}")),
     };
-    let data: Vec<Value> = match scan {
-        Ok(items) => items,
+    let (data, warnings): (Vec<Value>, Vec<String>) = match scan {
+        Ok(v) => v,
         Err(e) => {
             // R1b-M01：一次抖动不能把空表写进缓存/快照（否则该页长期显示为空、启停全被拒）。
             log::write_log("warn", &format!("startup:scan 原生失败: {e}"));
@@ -204,8 +213,18 @@ pub async fn startup_scan<R: Runtime>(window: WebviewWindow<R>, refresh: Option<
 
     let normalized = normalize_ids(data);
     snapshot::set(&snapshot::domain_key(&label, "startup"), snapshot::by_id(&normalized));
-    save_cache(&normalized);
-    json!({ "success": true, "data": normalized })
+    // 有来源读不到时不写缓存：否则下一次「命中缓存」会把不完整列表伪装成完整。
+    if warnings.is_empty() {
+        save_cache(&normalized);
+    }
+    json!({
+        "success": true,
+        "data": normalized,
+        "scanWarnings": warnings,
+        "degraded": !warnings.is_empty(),
+        "degradedReason": if warnings.is_empty() { Value::Null } else { json!("部分启动项来源不可读，列表可能不完整") },
+        "degradedSource": "startup.scan"
+    })
 }
 /// startup:toggle（enable=true 启用 / false 禁用）
 #[tauri::command]
@@ -815,8 +834,25 @@ mod tests {
 
     #[test]
     fn snapshot_items_only() {
-        let snap = snapshot::by_id(&[json!({ "id": "r1", "filePath": "C:\\A\\x.lnk" })]);
+        let snap = snapshot::by_id(&[
+            json!({ "id": "r1", "filePath": "C:\\A\\x.lnk", "origin": "scan" }),
+            json!({ "id": "ledger", "filePath": "", "origin": "disabled-ledger" }),
+            json!({ "id": "no-origin", "filePath": "" }),
+            json!({ "id": "forged", "filePath": "", "origin": "forged" }),
+        ]);
         assert!(validate_snapshot_items(&[json!({ "id": "r1" })], &snap).is_some());
+        assert!(
+            validate_snapshot_items(&[json!({ "id": "ledger" })], &snap).is_some(),
+            "合法台账行仍需进入命令层，具体哪条执行链接受由 native 臂决定"
+        );
+        assert!(
+            validate_snapshot_items(&[json!({ "id": "no-origin" })], &snap).is_none(),
+            "缺来源标记的旧缓存不得进入执行链"
+        );
+        assert!(
+            validate_snapshot_items(&[json!({ "id": "forged" })], &snap).is_none(),
+            "未知来源标记必须 fail-closed"
+        );
         assert!(validate_snapshot_items(&[json!({ "id": "nope" })], &snap).is_none());
         // filePath 与快照不一致即拒绝（防替换删除目标）
         assert!(validate_snapshot_items(

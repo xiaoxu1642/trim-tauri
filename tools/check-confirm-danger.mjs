@@ -50,7 +50,7 @@ if (files.length < 10) {
 
 // 剥离块注释（等长替换保偏移量与行号），行注释在命中处按行前缀判定
 function stripBlockComments(text) {
-  return text.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+  return blankNonCode(text, 'js', { keepStrings: true, lineComments: false });
 }
 /**
  * T1a-L03：命中点之前是否已进入**行注释**——必须跳过字符串字面量里的 `//`。
@@ -102,6 +102,9 @@ function nativeFallbackViolations(text) {
 // 判据面刻意只收 `window.app` 前缀：`window.modal.confirm({...})` 是另一层契约（对象参数、
 // 组件缺席即 fail-closed），它的 await 位置由那段代码自己的 try 管，不并入本判据。
 const RE_AWAIT_APP_CONFIRM = /\bawait\s+window\s*\.\s*app\s*\??\.\s*confirm(?:Danger|Warning)?\s*\(/g;
+// F4a1-M18：uninstall.js 的确认调用使用 `confirmDanger?.(` 可选链形态；
+// 其它历史调用点仍按原判据（不在本次范围，避免把 30+ 处存量一次拖红）。
+const RE_AWAIT_APP_CONFIRM_OPTIONAL = /\bawait\s+window\s*\.\s*app\s*\??\.\s*confirm(?:Danger|Warning)?\s*\?\.\s*\(/g;
 /**
  * 返回「不在 try 内」的命中下标。判定＝命中之前最近的 `try {` 与命中之间没有 catch 闭合，
  * 且命中之后能找到同一个 try 的 `} catch`。源码级近似（不做括号配对），对本仓写法足够；
@@ -111,9 +114,10 @@ const RE_AWAIT_APP_CONFIRM = /\bawait\s+window\s*\.\s*app\s*\??\.\s*confirm(?:Da
  * 偏移与原文一一对应）。旧实现直接搜原文：`try {` 只出现在行注释里时会被当成真 try，
  * 把「不在 try 内」误判成 inside —— 一条说明文字就能翻转 try 归属。
  */
-function confirmOutsideTry(text, clean = blankNonCode(text, 'js')) {
+function confirmOutsideTry(text, clean = blankNonCode(text, 'js', { keepStrings: true }), optionalChain = false) {
   const out = [];
-  for (const m of text.matchAll(RE_AWAIT_APP_CONFIRM)) {
+  const re = optionalChain ? RE_AWAIT_APP_CONFIRM_OPTIONAL : RE_AWAIT_APP_CONFIRM;
+  for (const m of text.matchAll(re)) {
     const t = clean.lastIndexOf('try {', m.index);
     let inside = false;
     if (t >= 0) {
@@ -164,7 +168,7 @@ for (const f of files) {
   }
   // B3-2/B3-3：确认件 await 的 try 归属（逐文件计数，与基线比）
   {
-    const hits = confirmOutsideTry(text);
+    const hits = confirmOutsideTry(text, blankNonCode(text, 'js', { keepStrings: true }), f.endsWith('uninstall.js'));
     if (hits.length > (CONFIRM_TRY_BASELINE[f] ?? 0)) {
       for (const idx of hits.slice(0, 3)) {
         outsideTry.push(`${f}:${text.slice(0, idx).split(String.fromCharCode(10)).length}`);

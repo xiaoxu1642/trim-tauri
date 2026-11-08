@@ -274,10 +274,15 @@
       const resp = await window.api.uninstall.list(currentScope);
       if (!resp.success) throw new Error(resp.message || '枚举失败');
       apps = resp.data.apps || [];
+      // A1-M03：卸载键读不到时后端带 unreadableKeys/degraded，不能显示成“没有程序”。
+      const degraded = resp.data.degraded === true || (Number(resp.data.unreadableKeys) || 0) > 0;
       if (!apps.length) {
-        listEl.innerHTML = '<div class="finder-empty">没有枚举到已安装程序</div>';
+        listEl.innerHTML = degraded
+          ? '<div class="finder-empty">部分卸载键不可读，未能枚举到已安装程序；请以管理员身份重试</div>'
+          : '<div class="finder-empty">没有枚举到已安装程序</div>';
         return;
       }
+      if (degraded) window.app?.toast?.('warning', resp.data.degradedReason || '部分卸载键不可读，列表可能不完整');
       // 新一轮枚举 = 新的「最近一次扫描结果」，回到首页（同 finder 重扫复位）
       appsPage = 1;
       renderAppList();
@@ -499,17 +504,23 @@
     const isAppx = appId.startsWith('APPX|');
     // B1（2026-09-28 二轮拍板）：静默勾选框已删，静默优先是后端默认行为——
     // 前端不再传 silent 参数，卸载方式由后端按安装器类型裁决并经 usedSilent/fellBack 回传。
-    const ok = await window.app?.confirmDanger?.(
-      '确认卸载',
-      isAppx
-        ? `将从当前用户移除 Windows 应用「${app.displayName}」（Remove-AppxPackage，不弹确认界面）。`
-        : `将卸载「${app.displayName}」：支持静默的安装器（msi/inno/nsis）先尝试静默卸载，否则自动弹出原厂卸载界面，按其提示操作。`,
-      '开始卸载',
-      '取消',
-      isAppx
-        ? '移除后其 %LOCALAPPDATA%\\Packages\\<包名> 应用数据将进入残留扫描候选，可一并清理（进回收站，可还原）。'
-        : '卸载是不可逆操作；完成后 Trim 会自动复查卸载结果并提供残留扫描。'
-    );
+    let ok = false;
+    try {
+      ok = await window.app?.confirmDanger?.(
+        '确认卸载',
+        isAppx
+          ? `将从当前用户移除 Windows 应用「${app.displayName}」（Remove-AppxPackage，不弹确认界面）。`
+          : `将卸载「${app.displayName}」：支持静默的安装器（msi/inno/nsis）先尝试静默卸载，否则自动弹出原厂卸载界面，按其提示操作。`,
+        '开始卸载',
+        '取消',
+        isAppx
+          ? '移除后其 %LOCALAPPDATA%\\Packages\\<包名> 应用数据将进入残留扫描候选，可一并清理（进回收站，可还原）。'
+          : '卸载是不可逆操作；完成后 Trim 会自动复查卸载结果并提供残留扫描。'
+      );
+    } catch (e) {
+      window.app?.toast?.('error', '确认框打开失败：' + ((e && e.message) || e));
+      return;
+    }
     if (!ok) return;
     running = true;
     try {
@@ -600,12 +611,18 @@
     const app = apps.find((a) => a.id === appId);
     if (!app) return;
     const label = mode === 'repair' ? '修复' : '修改';
-    const ok = await window.app?.confirmDanger?.(
-      `确认${label}`,
-      `将打开「${app.displayName}」自带的${label}程序（来自注册表 ModifyPath），按其界面提示操作。`,
-      `开始${label}`,
-      '取消'
-    );
+    let ok = false;
+    try {
+      ok = await window.app?.confirmDanger?.(
+        `确认${label}`,
+        `将打开「${app.displayName}」自带的${label}程序（来自注册表 ModifyPath），按其界面提示操作。`,
+        `开始${label}`,
+        '取消'
+      );
+    } catch (e) {
+      window.app?.toast?.('error', '确认框打开失败：' + ((e && e.message) || e));
+      return;
+    }
     if (!ok) return;
     running = true;
     startBusyBar(`正在启动${label}程序…`);
@@ -822,11 +839,11 @@
         return;
       }
       const btn = e.target.closest('[data-un-app]');
-      if (btn && !btn.disabled) runUninstall(btn.dataset.unApp);
+      if (btn && !btn.disabled) runUninstall(btn.dataset.unApp).catch(e => window.app?.toast?.('error', '卸载失败: ' + ((e && e.message) || e)));
       const mod = e.target.closest('[data-un-modify]');
-      if (mod && !mod.disabled) runModify(mod.dataset.unModify, 'modify');
+      if (mod && !mod.disabled) runModify(mod.dataset.unModify, 'modify').catch(e => window.app?.toast?.('error', '修改失败: ' + ((e && e.message) || e)));
       const rep = e.target.closest('[data-un-repair]');
-      if (rep && !rep.disabled) runModify(rep.dataset.unRepair, 'repair');
+      if (rep && !rep.disabled) runModify(rep.dataset.unRepair, 'repair').catch(e => window.app?.toast?.('error', '修复失败: ' + ((e && e.message) || e)));
       // 行内「查残留」按钮已按用户 2026-10-05 裁定删除：软件既然还装在机器上，谈不上残留。
       // 唯一的入口是卸载完成后自动打开残留副窗（见 runUninstall 尾部），主窗已无常驻入口。
     });
@@ -838,6 +855,9 @@
   window.uninstall = { init };
 
   // 进页动态注入时 readyState 已是 complete/interactive，直接初始化（check-idle-scripts 口径）
-  if (document.readyState !== 'loading') { init(); }
-  else document.addEventListener('DOMContentLoaded', init);
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
 })();

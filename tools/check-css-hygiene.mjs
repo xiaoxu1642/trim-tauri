@@ -16,11 +16,12 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CSS_FILES = ['main.css', 'main-pages.css', 'ds.css', 'litebox.css'].map((f) => join(ROOT, 'src', 'styles', f));
 const read = (p) => readFileSync(p, 'utf8');
-const blank = (t) => t.replace(/\/\*[\s\S]*?\*\//g, ' ');
+const blank = (t) => blankNonCode(t, 'css', { keepStrings: true });
 
 let fail = 0;
 const check = (ok, label, detail = '') => {

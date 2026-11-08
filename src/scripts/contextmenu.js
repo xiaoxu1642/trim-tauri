@@ -436,7 +436,7 @@
     const toggleable = isToggleable(item);
     return `
       <div class="ctx-kanban-row ${item.risk === 'protected' ? 'protected' : ''} ${enabled ? '' : 'disabled-row'}" data-item-key="${escapeHtml(key)}" data-tip="单击查看详情">
-        <div class="checkbox ${enabled ? 'checked' : ''} ${toggleable ? '' : 'disabled'}" role="checkbox" tabindex="0" aria-checked="${enabled ? 'true' : 'false'}"${toggleable ? '' : ' aria-disabled="true"'} data-tip="${enabled ? '取消勾选禁用此项' : '勾选启用此项'}"></div>
+        <div class="checkbox ${enabled ? 'checked' : ''} ${toggleable ? '' : 'disabled'}" role="checkbox" tabindex="0" aria-checked="${enabled ? 'true' : 'false'}" aria-label="勾选 ${window.ds.escAttr(item.name)}"${toggleable ? '' : ' aria-disabled="true"'} data-tip="${enabled ? '取消勾选禁用此项' : '勾选启用此项'}"></div>
         <span class="ctx-row-index">${index}</span>
         <span class="ctx-row-main">
           <span class="ctx-row-name">${escapeHtml(item.name)}</span>
@@ -510,7 +510,7 @@
       bodyClass: 'ctx-detail-body',
       bodyHtml: `
           <div class="ctx-detail-grid">
-            <div class="ctx-detail-row"><span class="ctx-detail-label">注册表路径</span><span class="ctx-detail-value mono ${regJumpable ? 'ctx-reg-jump' : ''}" ${regJumpable ? 'data-role="regJump" data-tip="点击在注册表编辑器中定位（需要时会自动请求管理员权限）"' : ''}>${escapeHtml(regPath || '--')}</span></div>
+            <div class="ctx-detail-row"><span class="ctx-detail-label">注册表路径</span><span class="ctx-detail-value mono ${regJumpable ? 'ctx-reg-jump' : ''}" ${regJumpable ? 'role="button" tabindex="0" data-role="regJump" data-tip="点击在注册表编辑器中定位（需要时会自动请求管理员权限）"' : ''}>${escapeHtml(regPath || '--')}</span></div>
             ${nativeRowHtml(item)}
             ${riskRowHtml(item)}
              <div class="ctx-detail-row"><span class="ctx-detail-label">所属公司</span><span class="ctx-detail-value">${escapeHtml(item.company || '--')}</span></div>
@@ -571,6 +571,11 @@
         } finally {
           regJump.classList.remove('jumping');
         }
+      });
+      regJump.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        regJump.click();
       });
     }
   }

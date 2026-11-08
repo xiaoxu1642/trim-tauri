@@ -85,8 +85,8 @@ const EXEMPTS = new Map([
   // T1a-M07：`reg_import_apply` 并入统一名单后暴露的两条还原命令——它们写回的是
   // 已过四道闸的注册表 sections（严格解析 / 受保护面 / 封条核对 / HKLM 提权），
   // 文件面 is_path_protected 对注册表键没有判定语义。
-  ['uninstall_reg_backup_restore', { apis: {}, why: '注册表备份还原：reg_backup_restore_guards 四道闸，执行臂吃同一份 sections；文件面 protect 不适用' }],
-  ['cleanup_reg_backup_restore', { apis: {}, why: '同上——清理域与卸载域共用同一 reg_backup_restore_guards 公共件' }],
+  ['uninstall_reg_backup_restore', { apis: { reg_import_apply: 1 }, why: '注册表备份还原：reg_backup_restore_guards 四道闸，执行臂吃同一份 sections；文件面 protect 不适用' }],
+  ['cleanup_reg_backup_restore', { apis: { reg_import_apply: 1 }, why: '同上——清理域与卸载域共用同一 reg_backup_restore_guards 公共件；删除函数指针在命令体的 spawn_blocking 闭包内传入，实际执行仍在 blocking helper' }],
 ]);
 
 // ---- 正向清单：审查矩阵逐列核过的文件型删除出口，protect 判定不许掉 ----
@@ -178,6 +178,12 @@ function judgeProtectPair(src) {
     issues.push('有 is_path_protected 却无 is_system_namespace——%WINDIR% 子孙会穿过保护面（两闸必须成对）');
   }
   return issues;
+}
+
+/** T1a-M01：成对对象按「两闸都出现的文件」计数；只数文件数会让 0 对也打 ✓。 */
+function countProtectPairs(src) {
+  const n = (re) => (src.match(re) ?? []).length;
+  return Math.min(n(/\bis_path_protected\s*\(/g), n(/\bis_system_namespace\s*\(/g));
 }
 
 // 审查 L-5（2026-10-03）二跳盲区登记（只登记不改，按白名单纪律）：
@@ -355,7 +361,9 @@ check(unknownExits.length === 0, '3. 无未注册的删除出口（新出口默�
 // T1a-L13：豁免计数棘轮 —— 每条豁免登记它认领的删除 API 及次数，与命令体实际调用逐项对拍。
 // 长 API 名先匹配并抹掉，避免 `remove_dir_all` 被 `remove_dir` 重复计数。
 function apiCounts(body) {
-  let rest = body;
+  // 还原执行臂的真实名称是 `reg_import_apply_sections`；共享删除名单把它归在
+  // `reg_import_apply` 家族，计数前先归一，避免豁免把真实调用记成 0。
+  let rest = body.replace(/\breg_import_apply_sections\b/g, 'reg_import_apply');
   const out = {};
   for (const mk of [...DELETE_MARKERS].sort((a, b) => b.length - a.length)) {
     const re = new RegExp(`\\b${mk}\\b`, 'g');
@@ -419,21 +427,39 @@ if (missing.length > missingCmds.length) {
   }
   // C01-c：成对棘轮（R2a 彻底方案）——residue* 的文件面产源/出口，
   // is_path_protected 与 is_system_namespace 必须共现，出现孤立即红。
-  const pairFiles = srcFiles.filter((f) => /uninstall[/\\]residue/.test(path.relative(ROOT, f)));
+  // 测试文件只断言 is_system_namespace 本身，不构成生产删除出口；把它留在扫描面会
+  // 让「每文件至少贡献 1 对」永远无法成立，也会把真实成对对象稀释成文件数。
+  const pairFiles = srcFiles.filter((f) => {
+    const rel = path.relative(ROOT, f).replace(/\\/g, '/');
+    return /uninstall\/residue/.test(rel) && !/_tests\.rs$/.test(rel);
+  });
   const pairIssues = [];
+  const pairDead = [];
+  let pairSites = 0;
   for (const f of pairFiles) {
-    for (const issue of judgeProtectPair(blankNonCode(fs.readFileSync(f, 'utf8')))) {
+    const clean = blankNonCode(fs.readFileSync(f, 'utf8'));
+    const pairs = countProtectPairs(clean);
+    pairSites += pairs;
+    if (pairs === 0) {
+      pairDead.push(`${path.relative(ROOT, f).replace(/\\/g, '/')}（protect=${(clean.match(/\bis_path_protected\s*\(/g) ?? []).length}/sysns=${(clean.match(/\bis_system_namespace\s*\(/g) ?? []).length}）`);
+    }
+    for (const issue of judgeProtectPair(clean)) {
       pairIssues.push(`${path.relative(ROOT, f).replace(/\\/g, '/')}: ${issue}`);
     }
   }
   check(pairIssues.length === 0, `C01-c. 删除产源/出口两闸成对（is_path_protected ⇄ is_system_namespace，扫 ${pairFiles.length} 个文件）`,
     pairIssues.length ? pairIssues.join('；') : '全部成对');
-  // T1a-M27：扫描对象按目录名派生且此前无地板 —— residue 改名或搬走
-  // 时「扫不到任何文件，全部成对」照样打 ✓。地板取现算值（与 check-layering 同纪律）。
+  // T1a-M01：地板从「文件数」改为「成对站点数」，且每个生产文件至少贡献 1 对。
+  // 0 对时「全部成对」不再成立——这正是 residue_trace_tests.rs 曾把文件数地板
+  // 顶绿、真实成对对象只有 2 的缺口。
   check(
-    pairFiles.length >= 3,
-    `C01-c 扫描面对象地板（residue 现算 ${pairFiles.length} 个 ≥ 3）`,
-    pairFiles.length < 3 ? '目录改名或搬走 ⇒ 成对断言不再对任何文件生效（0 文件也打 ✓ 的假绿）' : '',
+    pairSites >= 2 && pairDead.length === 0,
+    `C01-c 成对站点地板（residue 现算 ${pairSites} 对 / ${pairFiles.length} 个生产文件，每文件 ≥1 对且合计 ≥2）`,
+    pairDead.length
+      ? `以下文件两闸未共现：${pairDead.join('；')}`
+      : pairSites < 2
+        ? '成对对象不足 2：protect/sysns 可能被整体下沉或删除，C01-c 已退化成 0 对象 ✓'
+        : '',
   );
 }
 
@@ -468,6 +494,7 @@ const POSITIVE_CONTROLS = (() => {
   // ⑥ C01-c：成对棘轮两向（孤立即红 / 成对放行）
   checks.push(['C01 成对棘轮：孤立 protect 判红', judgeProtectPair('fn a() { is_path_protected(p); }').length > 0]);
   checks.push(['C01 成对棘轮：两闸共现放行', judgeProtectPair('fn a() { is_path_protected(p); is_system_namespace(p); }').length === 0]);
+  checks.push(['C01 成对计数：只有 sysns 记 0 对', countProtectPairs('fn a() { is_system_namespace(p); }') === 0]);
   for (const [label, ok] of checks) {
     if (!ok) { console.error(`✗ 正向对照失败：${label}——判定器已失效，本门禁的 ✓ 不可信`); process.exit(1); }
   }

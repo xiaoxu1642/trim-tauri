@@ -35,6 +35,12 @@ use super::apply::*;
 use super::backup_restore::*;
 use super::catalog::*;
 
+/// R3b-M02：FILETIME（1601 起，100ns）→ Unix 毫秒的唯一生产实现。
+pub(super) fn filetime_to_unix_ms(ft: i64) -> i64 {
+    const EPOCH_DIFF_100NS: i64 = 116_444_736_000_000_000;
+    (ft - EPOCH_DIFF_100NS) / 10_000
+}
+
 /// D0 三侧覆盖契约锚点：门禁按本常量与本文件下述各侧 anchor 做静态对拍。
 ///
 /// 门禁能判红的前提是「锚点存在且唯一」：改这里的字符串而不同步门禁，门禁会红
@@ -569,12 +575,9 @@ pub(super) fn judge_check(c: &Check) -> bool {
                     (Some(start), Some(end)) => {
                         // FILETIME → Unix 毫秒。与 `registry.rs::reg_key_last_write_ms`
                         // 用同一个 `EPOCH_DIFF_100NS` 口径（100ns 计数、自 1601-01-01 起）。
-                        const EPOCH_DIFF_100NS: i64 = 116_444_736_000_000_000;
                         // `now_ms` 取系统时钟：FILETIME 是 UTC，Unix 纪元也是 UTC，无时区差。
                         let now_ms = crate::engine::now_ms();
-                        // 化到同一量纲再比（FILETIME 是 100ns，now_ms 是毫秒，差 10000 倍）。
-                        let to_ms = |ft: i64| (ft - EPOCH_DIFF_100NS) / 10_000;
-                        to_ms(start) <= now_ms && now_ms < to_ms(end)
+                        filetime_to_unix_ms(start) <= now_ms && now_ms < filetime_to_unix_ms(end)
                     }
                     _ => false,
                 };
@@ -1001,6 +1004,7 @@ pub async fn optimizer_batch_preflight<R: Runtime>(
     let restore = restore.unwrap_or(false);
     let mut runnable: Vec<String> = Vec::new();
     let mut rejected: Vec<Value> = Vec::new();
+    let mut needs_confirm: Vec<String> = Vec::new();
     for id in &ids {
         // 未知 id 记「未知选项」而不是跳过：跳过等于把它算进 runnable，
         // 前端会对一个不存在的项发 run 并拿到「未知的优化选项」—— 预检形同虚设。
@@ -1009,11 +1013,16 @@ pub async fn optimizer_batch_preflight<R: Runtime>(
             continue;
         };
         match preflight_reason(opt, id, restore) {
+            // R3b-M01：高危确认不是「被拒绝」——批量入口要保留该项并走红色二次确认。
+            Some(PreflightReject::NeedHighRiskConfirm) => {
+                needs_confirm.push(id.clone());
+                runnable.push(id.clone());
+            }
             Some(r) => rejected.push(json!({ "id": id, "reason": r.message() })),
             None => runnable.push(id.clone()),
         }
     }
-    json!({ "success": true, "runnable": runnable, "rejected": rejected })
+    json!({ "success": true, "runnable": runnable, "rejected": rejected, "needsConfirm": needs_confirm })
 }
 
 /// optimizer:state-overview —— 记账清单 + stale 判定 + detected

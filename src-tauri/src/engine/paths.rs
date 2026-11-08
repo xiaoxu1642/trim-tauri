@@ -46,6 +46,11 @@ const MIGRATION_FILES: &[&str] = &[
     "bench-history.json",
 ];
 
+/// M1-L03：迁移完成标记（最后写）。此前用 `appearance.json` 当总闸——它先复制成功、
+/// 后续文件失败时，剩余文件永远不会再补。标记独立于任何业务文件，只有本轮
+/// missing-only 对账无失败才落盘。
+const MIGRATION_MARKER: &str = ".migration-complete";
+
 /// 需整体搬迁的**目录**清单（逐文件、缺失才复制）。同上加判据。
 /// - `backgrounds`    用户手工导入的背景图
 /// - `fonts`          用户导入字体的副本（不搬则字体设置里的"导入字体"整条失效）
@@ -256,20 +261,38 @@ pub fn backup_read_entries(sub: &str) -> Vec<(PathBuf, bool)> {
 /// 给出，不在调用方各写前缀检查）。根自身或父组件是 junction 时整根跳过并把原因写进
 /// 日志——否则链接另一头的外部文件会被当"我们的备份"展示，还原按钮点下去就是往那边写。
 pub fn read_entries_across_roots(dirs: Vec<PathBuf>) -> Vec<(PathBuf, bool)> {
+    read_entries_across_roots_state(dirs).0
+}
+
+/// A1-M06：与 [`read_entries_across_roots`] 同源，额外返回「不可读根/条目」计数。
+/// 备份列表命令必须把「读坏」与「真的没有备份」分开，不能回 success:true 空集。
+pub fn read_entries_across_roots_state(dirs: Vec<PathBuf>) -> (Vec<(PathBuf, bool)>, usize) {
     let mut out: Vec<(PathBuf, bool)> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
+    let mut unreadable = 0usize;
     for (i, dir) in dirs.into_iter().enumerate() {
         let verdict = protect::inspect_root(&dir, data_root_base(&dir).as_deref());
         if !verdict.is_trusted() {
             protect::note_root_skipped(&format!("备份枚举 {i} 号根"), &dir, &verdict);
+            unreadable += 1;
             continue;
         }
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
-        for ent in rd.flatten() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            unreadable += 1;
+            continue;
+        };
+        for ent in rd {
+            let Ok(ent) = ent else {
+                unreadable += 1;
+                continue;
+            };
             let path = ent.path();
             // `is_file()` 跟随链接：子项自己是 junction 时它把链接另一头的实体报成
             // "我们有一份备份"。这里只看链接本体（symlink_metadata），reparse 一律不上报。
-            let Ok(md) = std::fs::symlink_metadata(&path) else { continue };
+            let Ok(md) = std::fs::symlink_metadata(&path) else {
+                unreadable += 1;
+                continue;
+            };
             if !md.is_file() || protect::is_reparse(&md) {
                 continue;
             }
@@ -282,7 +305,7 @@ pub fn read_entries_across_roots(dirs: Vec<PathBuf>) -> Vec<(PathBuf, bool)> {
             out.push((path, i > 0));
         }
     }
-    out
+    (out, unreadable)
 }
 
 /// P0-2A/B：**根与可信基的关系只在本文件（路径工厂）算一次**，调用方一律走这两行。
@@ -623,9 +646,10 @@ pub fn migrate_legacy_once() -> Option<String> {
         }
     }
 
-    // 第二段：Trim → com.xiaoxu.trim（D5：仅当新目录无 appearance.json 时执行，可重跑）
-    if legacy.exists() && !target.join("appearance.json").exists() {
+    // 第二段：Trim → com.xiaoxu.trim（M1-L03：独立完成标记，missing-only 对账）
+    if legacy.exists() && !target.join(MIGRATION_MARKER).exists() {
         let mut copied = 0usize;
+        let mut failed = 0usize;
         for name in MIGRATION_FILES {
             let src = legacy.join(name);
             let dst = target.join(name);
@@ -633,10 +657,18 @@ pub fn migrate_legacy_once() -> Option<String> {
                 continue;
             }
             if std::fs::create_dir_all(&target).is_err() {
+                failed += 1;
                 break;
             }
-            if std::fs::copy(&src, &dst).is_ok() {
-                copied += 1;
+            match std::fs::copy(&src, &dst) {
+                Ok(_) => copied += 1,
+                Err(e) => {
+                    failed += 1;
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!("迁移文件失败（保留标记缺失，下次启动重试）: {} -> {}（{e}）", src.display(), dst.display()),
+                    );
+                }
             }
         }
         if copied > 0 {
@@ -654,12 +686,32 @@ pub fn migrate_legacy_once() -> Option<String> {
                 continue;
             }
             let n = std::fs::read_dir(&src).map(|r| r.count()).unwrap_or(0);
-            if copy_dir_missing_only(&src, &target.join(name)).is_ok() {
-                moved_dirs.push(format!("{name}({n} 项)"));
+            match copy_dir_missing_only(&src, &target.join(name)) {
+                Ok(()) => moved_dirs.push(format!("{name}({n} 项)")),
+                Err(e) => {
+                    failed += 1;
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!("迁移目录失败（保留标记缺失，下次启动重试）: {}（{e}）", src.display()),
+                    );
+                }
             }
         }
         if !moved_dirs.is_empty() {
             notes.push(format!("已迁移数据子目录：{}", moved_dirs.join("、")));
+        }
+        // 标记必须最后写：任何文件/目录失败都不写，下一轮继续 missing-only 补齐。
+        if failed == 0 {
+            let at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let marker = format!("{{\"version\":1,\"at\":{at}}}\n");
+            if crate::security::atomic_write_file(&target.join(MIGRATION_MARKER), marker.as_bytes()).is_ok() {
+                notes.push("数据目录迁移完成标记已写入".into());
+            } else {
+                crate::engine::log::write_log("warn", "迁移完成标记写入失败，下次启动重试 missing-only 对账");
+            }
         }
     }
 

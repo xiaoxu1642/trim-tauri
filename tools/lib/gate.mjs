@@ -53,5 +53,23 @@ export function gate(self) {
     if (successMsg) console.log(successMsg);
   };
 
-  return { fail, ok, warn, skipUnlessPresent, finish, get failed() { return failed; } };
+  /**
+   * T1e-M01/M02：正向对照失败也必须进失败计数与退出码。
+   * 旧实现只 console.error 后照常打印「N 组通过」，对照组坏了门禁仍绿。
+   * 只有 ctrlBad === 0 才允许 ok；任何一组失败都返回 true 并计入 failed。
+   * @param {number} ctrlBad
+   * @param {number} total
+   * @param {string} label
+   * @param {string} [detail]
+   */
+  const controlFailed = (ctrlBad, total, label, detail = '') => {
+    if (ctrlBad > 0) {
+      fail(`${label}：${ctrlBad}/${total} 组失败${detail ? `（${detail}）` : ''}`);
+      return true;
+    }
+    ok(`${label}：${total} 组通过`);
+    return false;
+  };
+
+  return { fail, ok, warn, skipUnlessPresent, finish, controlFailed, get failed() { return failed; } };
 }

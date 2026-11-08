@@ -64,7 +64,9 @@ const SHARED_TOKENS_UPPER = [
   'LOCALAPPDATA', 'APPDATA', 'USERPROFILE', 'WINDIR', 'PROGRAMDATA',
   'PROGRAMFILES', 'PROGRAMFILES(X86)', 'SYSTEMROOT',
 ];
-const TOKEN_FLOORS = { cleanup: 10, residue: 8 };
+// T1g-L01：地板从旧值（10/8）提到现库实况（14/10）；单域削词不再被旧地板吞掉。
+const TOKEN_FLOORS = { cleanup: 14, residue: 10 };
+const REQUIRED_CLEANUP_TOKENS = ['SystemDrive'];
 const TOKEN_CASE_PIN = { cleanup: false, residue: true };
 function tokenSeparationViolations(schema) {
   const bad = [];
@@ -77,6 +79,11 @@ function tokenSeparationViolations(schema) {
     }
     if (t?.caseInsensitive !== TOKEN_CASE_PIN[dom]) {
       bad.push(`${dom}.tokens.caseInsensitive = ${JSON.stringify(t?.caseInsensitive)}，契约钉死 ${TOKEN_CASE_PIN[dom]}（翻向 = 比对口径放宽/收紧）`);
+    }
+  }
+  for (const token of REQUIRED_CLEANUP_TOKENS) {
+    if (!(schema.cleanup?.tokens?.allowed ?? []).includes(token)) {
+      bad.push(`cleanup.tokens.allowed 缺必需 token「${token}」——现库有真实规则使用它，删掉会让装载侧静默失配`);
     }
   }
   const ci = (x) => x.toUpperCase();
@@ -99,6 +106,24 @@ function tokenSeparationViolations(schema) {
     bad.push('两域 allowed 出现包含关系（一域被另一域吞并）——「刻意两份」的红线被合并');
   }
   return { bad, perDomain, inter: inter.length };
+}
+
+// T1g-M01：schema 里的 `matchGroupsMinNonEmpty` 是门禁专用键，运行期真源仍是
+// `residue_update.rs` 的字面量。两边必须对拍，且不是“把 Rust 改成读表”。
+const GATE_ONLY_KEYS = ['residue.matchGroupsMinNonEmpty'];
+function gateOnlyProblems(schema, residueText) {
+  const bad = [];
+  const declared = new Set(Array.isArray(schema.gateOnly) ? schema.gateOnly : []);
+  for (const key of GATE_ONLY_KEYS) {
+    if (!declared.has(key)) bad.push(`schema.gateOnly 未声明「${key}」（门禁专用键必须显式标注）`);
+  }
+  const m = /hit_groups\s*<\s*(\d+)/.exec(residueText);
+  if (!m) {
+    bad.push('residue_update.rs 找不到 hit_groups 阈值字面量（运行期真源失明）');
+  } else if (Number(m[1]) !== Number(schema.residue?.matchGroupsMinNonEmpty)) {
+    bad.push(`residue.matchGroupsMinNonEmpty=${schema.residue?.matchGroupsMinNonEmpty} ≠ Rust 字面量 ${m[1]}`);
+  }
+  return bad;
 }
 
 /// floors=true 时对「现算出的键数量」施加地板：抓取口径失效（正则过时/代码改写）与
@@ -203,6 +228,23 @@ const POSITIVE_CONTROLS = [
     const ok = reverseKeyProblems(mini, '', '', { 'cleanup.dead': '书面 scope' });
     const stale = reverseKeyProblems(mini, '', '', { 'cleanup.gone': '书面 scope' });
     return ok.missing.length === 0 && stale.stale.includes('cleanup.gone') ? '' : 'scope 登记或过期判定失效';
+  }],
+  ['门禁专用键未声明 / 与 Rust 字面量漂移应判红', () => {
+    const missingDecl = gateOnlyProblems(
+      { residue: { matchGroupsMinNonEmpty: 2 }, gateOnly: [] },
+      'if hit_groups < 2 {',
+    );
+    const drift = gateOnlyProblems(
+      { residue: { matchGroupsMinNonEmpty: 3 }, gateOnly: ['residue.matchGroupsMinNonEmpty'] },
+      'if hit_groups < 2 {',
+    );
+    const ok = gateOnlyProblems(
+      { residue: { matchGroupsMinNonEmpty: 2 }, gateOnly: ['residue.matchGroupsMinNonEmpty'] },
+      'if hit_groups < 2 {',
+    );
+    return missingDecl.length > 0 && drift.length > 0 && ok.length === 0
+      ? ''
+      : 'gateOnly 声明/阈值对拍器失真';
   }],
 ];
 
@@ -318,6 +360,12 @@ check(
   sep.bad.length === 0,
   `4. 两域允许集分离（cleanup ${sep.perDomain.cleanup} / residue ${sep.perDomain.residue} / 大小写不敏感交集 ${sep.inter}）`,
   sep.bad.join('；'),
+);
+const gateOnlyBad = gateOnlyProblems(schema, residueText);
+check(
+  gateOnlyBad.length === 0,
+  `4b. 门禁专用键 ${GATE_ONLY_KEYS.join(' / ')} 已声明且与 Rust 字面量对拍`,
+  gateOnlyBad.join('；'),
 );
 
 const rev = reverseKeyProblems(schema, rulesText, residueText, TOOL_CONSUMED_SCOPE);

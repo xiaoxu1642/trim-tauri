@@ -362,6 +362,7 @@
 
   async function switchPageInner(pageName) {
     const seq = ++navSeq;
+    const prevPage = document.querySelector('.page.active')?.id?.replace(/^page-/, '') || '';
     // 磁盘清理四合一：旧子页地址（cleanup-dups 等）统一映射到主页并恢复对应分段
     let cleanupView = 'cleanup';
     if (CLEANUP_VIEWS.indexOf(pageName) > -1) {
@@ -381,48 +382,51 @@
     // 持久化活跃页（窗口状态记忆：启动恢复上次页面）。走到这里的一定是最新那次点击 ——
     // 过期续体已在上面两处 return，故本行是 ACTIVE_PAGE_KEY 的唯一写入口，只会写最终生效页。
     try { localStorage.setItem(ACTIVE_PAGE_KEY, pageName); } catch (e) {}
-    document.querySelectorAll('.nav-item').forEach(el => {
-      el.classList.toggle('active', el.dataset.page === pageName);
-    });
-    document.querySelectorAll('.page').forEach(el => {
-      el.classList.toggle('active', el.id === 'page-' + pageName);
-    });
-    document.querySelectorAll('.nav-subitem').forEach(el => {
-      // 分类树子项（data-category）高亮由右键管理模块独立维护，切换页面不清除
-      if (el.dataset.category !== undefined) return;
-      el.classList.toggle('active', el.dataset.page === pageName);
-    });
-    const speedParent = document.querySelector('[data-nav-toggle="speed"]');
-    if (speedParent) speedParent.classList.toggle('active', pageName === 'netspeed' || pageName === 'diskbench' || pageName === 'netcheck');
+    const applyActivePage = (name) => {
+      document.querySelectorAll('.nav-item').forEach(el => {
+        el.classList.toggle('active', el.dataset.page === name);
+      });
+      document.querySelectorAll('.page').forEach(el => {
+        el.classList.toggle('active', el.id === 'page-' + name);
+      });
+      document.querySelectorAll('.nav-subitem').forEach(el => {
+        if (el.dataset.category !== undefined) return;
+        el.classList.toggle('active', el.dataset.page === name);
+      });
+      const sp = document.querySelector('[data-nav-toggle="speed"]');
+      if (sp) sp.classList.toggle('active', name === 'netspeed' || name === 'diskbench' || name === 'netcheck');
+    };
+    applyActivePage(pageName);
 
     // 页面进入逻辑
     // v3.7.0 议题五第 0 步：此处原本是裸变量（logger.load() / startup.load()），
     // 脚本未加载即 ReferenceError 并中断整个 app.js。改 window.xxx?. 后模块才可被移出首屏。
-    if (pageName === 'logs') window.logger?.load?.();
-    if (pageName === 'startup') window.startup?.load?.();
+    try {
+    if (pageName === 'logs') await window.logger?.load?.();
+    if (pageName === 'startup') await window.startup?.load?.();
     // 审查 K3：这两处原本是裸 `?.init?.()`，与 ensurePageScripts 的那次 init 叠在一起，
     // 第一次进页就会绑两份监听器。quickcmds 的 renderTabs/renderList 只在首绑时需要
     // （页面 DOM 是 display 切换、不重建）。
     if (pageName === 'quickcmds') initModuleByName('quickcmds');
     // v3.2.1：首次进入磁盘清理页自动检测规则库云端版本（右上角 toast 提示更新）
     // U1-d：一级「备份还原」页（cleanup.js 是首屏脚本，无需懒加载；每次进页重读列表）
-    if (pageName === 'backups') window.cleanup?.onBackupsEnter?.();
+    if (pageName === 'backups') await window.cleanup?.onBackupsEnter?.();
     if (pageName === 'memoryclean') {
-      window.memoryclean?.loadInfo?.();
+      await window.memoryclean?.loadInfo?.();
     }
     // 审查 K3-1：settings 页此前裸调 pathbinding.init()，绕过 _initedModules 台账，
     // 重复进页会叠加 IPC 订阅。pathbinding 在 MODULES_NEEDING_INIT 里，走台账统一收口。
     if (pageName === 'settings') initModuleByName('pathbinding');
     // v3.7.0：「默认应用接管」页面与模块已整块删除（含专家模式），进页钩子随之移除
     // 运行库修复（v3.3.0）：首次进入自动扫描一次（只读）
-    if (pageName === 'runtimes') window.runtimes?.onEnter?.();
+    if (pageName === 'runtimes') await window.runtimes?.onEnter?.();
     // 网络检测（v3.0）：进入页面展示上次结果（不自动重跑）
-    if (pageName === 'netcheck') window.netcheck?.onEnter?.();
+    if (pageName === 'netcheck') await window.netcheck?.onEnter?.();
     // 实时网速（已并入网络测速页）：进入网络测速页启动采集，离开停止，避免后台空耗 CPU
-    if (pageName === 'netspeed') window.realtime?.start?.();
+    if (pageName === 'netspeed') await window.realtime?.start?.();
     else window.realtime?.stop?.();
     // 系统概览：进入启动实时指标轮询，离开停止
-    if (pageName === 'overview') window.overview?.start?.();
+    if (pageName === 'overview') await window.overview?.start?.();
     else window.overview?.stop?.();
     // 网络测速：仅点击"开始测速"按钮后才加载网页；离开本页回收 iframe 与采样定时器
     if (pageName !== 'netspeed') window.netspeed?.stop?.();
@@ -432,6 +436,14 @@
     // 改为 true：切页时侧边岛坐标必变 → 弹簧滑动；unchanged 的栏（如 cleanupTabs active 未变）
     // 由方案 A 的坐标判定跳过挤压，隐藏页 0 尺寸栏 placeThumb 自动跳过、待下次刷新。
     window.liquidBar?.refreshAll?.(true);
+    } catch (e) {
+      // F3-M10：钩子失败不留在半激活页；回滚 active/记忆并给可见提示。
+      console.error('[Trim] 切页钩子失败:', e);
+      window.app?.log?.('error', `切页到 ${pageName} 失败: ${(e && e.message) || e}`);
+      window.app?.toast?.('error', '页面初始化失败，已回滚到上一页');
+      try { if (prevPage) localStorage.setItem(ACTIVE_PAGE_KEY, prevPage); } catch (_) {}
+      if (prevPage) applyActivePage(prevPage);
+    }
   }
 
   // 模态确认：统一代理到 modal.confirm（单一实现），支持 danger 红色二次确认。
@@ -457,6 +469,12 @@
       warningHint: String(opts.warningHint || ''),
       // 删除后果区：结构化传入、缺席即不渲染
       consequences: Array.isArray(opts.consequences) ? opts.consequences : null
+    }).then((ok) => {
+      // F4a1-M18：modal.create 抛错时 modal.confirm 落 false；这里补主窗可见提示。
+      if (window.modal.consumeCreateFailure?.()) {
+        toast('error', '确认框创建失败，本次不执行任何改动');
+      }
+      return ok;
     });
   }
 

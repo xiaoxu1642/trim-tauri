@@ -22,6 +22,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gate } from './lib/gate.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 // 仓根由本文件位置推出，不用 `process.cwd()`：换目录单跑会假红（T1b-L01）。
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -221,6 +222,205 @@ const addCase = (id, ok) => { CASES.push({ id, ok }); };
       g.ok('M14：清空密钥也走红色确认件');
     }
     addCase('M14', judge(src));
+  }
+}
+
+// ---------- P0-F4a1-M15：低危常规项永久删必须有确认 ----------
+{
+  const src = read('src/scripts/cleanup.js');
+  const html = read('src/index.html');
+  if (!src || !html) {
+    g.fail('F4a1-M15：cleanup.js 或 index.html 不存在（判定对象缺失）');
+  } else {
+    const clean = blankNonCode(src, 'js', { keepStrings: true });
+    const block = funcBlock(clean, 'confirmCleanPlan') || '';
+    const judge = (text, markup) => {
+      const fn = funcBlock(text, 'confirmCleanPlan') || '';
+      return /const\s+lowRisk\s*=/.test(fn)
+        && /r\.id\s*!==\s*RECYCLE_ID/.test(fn)
+        && /!FILECLEAN_IDS\.includes\(r\.id\)/.test(fn)
+        && /confirmWarning\(\s*'永久删除确认'/.test(fn)
+        && /不进入回收站/.test(fn)
+        && /if\s*\(!ok\)\s*return null;/.test(fn)
+        && /id="cleanupPermanentHint"[^>]*>[^<]*不进入回收站/.test(markup);
+    };
+    const goodSample = [
+      'async function confirmCleanPlan() {',
+      "  const lowRisk = selectedWithResultIds().filter(r => r.id !== RECYCLE_ID && !FILECLEAN_IDS.includes(r.id));",
+      "  const ok = await window.app?.confirmWarning('永久删除确认', '这些项目会直接永久删除，不进入回收站。');",
+      '  if (!ok) return null;',
+      '}',
+    ].join('\n');
+    const badSample = [
+      'async function confirmCleanPlan() {',
+      "  const lowRisk = selectedWithResultIds().filter(r => r.id !== RECYCLE_ID && !FILECLEAN_IDS.includes(r.id));",
+      '  return lowRisk;',
+      '}',
+    ].join('\n');
+    const goodHtml = '<div id="cleanupPermanentHint">常规清理项会直接永久删除，不进入回收站。</div>';
+    const badHtml = '<div id="cleanupPermanentHint">常规清理项。</div>';
+    if (!judge(goodSample, goodHtml) || judge(badSample, badHtml)) {
+      g.fail('F4a1-M15 正向对照失败：永久删确认判定器失真（必须能把「有确认+页面告知」与「零确认」分开）');
+    }
+    const ok = judge(clean, html);
+    if (!ok) {
+      g.fail('F4a1-M15：低危常规项缺永久删确认/页面缺告知，或未排除文件清理项');
+    } else {
+      g.ok('F4a1-M15：低危常规项永久删有确认，文件清理项被排除，页面有「不进入回收站」提示');
+    }
+    addCase('F4a1-M15', ok);
+  }
+}
+
+// ---------- P0-A2-M01：startup.remove 回执与逐项 status 必须都判 ----------
+{
+  const src = read('src/scripts/startup.js');
+  if (!src) {
+    g.fail('A2-M01：src/scripts/startup.js 不存在（判定对象缺失）');
+  } else {
+    const clean = blankNonCode(src, 'js', { keepStrings: true });
+    const helper = funcBlock(clean, 'startupRemoveOutcome') || '';
+    const lines = clean.split('\n');
+    const removeSites = allIndexes(clean, 'window.api.startup.remove([it])');
+    const checkedSites = removeSites.length === 2 && removeSites.every((at) => {
+      const line = lines[at];
+      const after = lines.slice(at + 1, at + 10).join('\n');
+      return /const\s+resp\s*=\s*await\s+window\.api\.startup\.remove\(\[it\]\);/.test(line)
+        && /const\s+removed\s*=\s*startupRemoveOutcome\(resp,\s*it\)/.test(after)
+        && /if\s*\(!removed\.ok\)/.test(after)
+        && /continue;/.test(after);
+    });
+    const judge = (text) => {
+      const block = funcBlock(text, 'startupRemoveOutcome') || '';
+      const body = text.split('\n');
+      const sites = allIndexes(text, 'window.api.startup.remove([it])');
+      return /resp\.success\s*!==\s*true/.test(block)
+        && /Array\.isArray\(data\.results\)/.test(block)
+        && /hit\.status\s*!==\s*'ok'/.test(block)
+        && sites.length === 2
+        && sites.every((at) => /const\s+resp\s*=\s*await\s+window\.api\.startup\.remove\(\[it\]\);/.test(body[at]));
+    };
+    const goodSample = [
+      'function startupRemoveOutcome(resp, item) {',
+      "  if (!resp || resp.success !== true) return { ok: false };",
+      '  const data = resp.data || {};',
+      '  const results = Array.isArray(data.results) ? data.results : [];',
+      "  if (hit.status !== 'ok') return { ok: false };",
+      '}',
+      'async function enforceStartupDefend() {',
+      '  const resp = await window.api.startup.remove([it]);',
+      '  const resp = await window.api.startup.remove([it]);',
+      '}',
+    ].join('\n');
+    const badSample = [
+      'function startupRemoveOutcome(resp, item) { return { ok: true }; }',
+      'async function enforceStartupDefend() {',
+      '  await window.api.startup.remove([it]);',
+      '  await window.api.startup.remove([it]);',
+      '}',
+    ].join('\n');
+    if (!judge(goodSample) || judge(badSample)) {
+      g.fail('A2-M01 正向对照失败：startup.remove 回执判定器失真（必须能把「读 success+status」与「只 await」分开）');
+    }
+    const ok = judge(clean) && checkedSites;
+    if (!ok) {
+      g.fail('A2-M01：startup.remove 失败回执或逐项 status 未判，失败项仍可能进 autoDeleted / 黑名单');
+    } else {
+      g.ok('A2-M01：startup.remove 两处删除入口都逐项判 success/status，失败项保留');
+    }
+    addCase('A2-M01', ok);
+  }
+}
+
+// ---------- P0-F4c-M08：字体保存与删除都必须读 resolve 的 success:false ----------
+{
+  const src = read('src/scripts/fontmanager.js');
+  if (!src) {
+    g.fail('F4c-M08：src/scripts/fontmanager.js 不存在（判定对象缺失）');
+  } else {
+    const clean = blankNonCode(src, 'js', { keepStrings: true });
+    const saveBlock = funcBlock(clean, 'saveConfig') || '';
+    const removalWindow = windowAfter(clean, 'window.api.fonts.removeImported()', 35) || '';
+    const judge = (text) => {
+      const save = funcBlock(text, 'saveConfig') || '';
+      const remove = windowAfter(text, 'window.api.fonts.removeImported()', 35) || '';
+      return /resp\.success\s*!==\s*true/.test(save)
+        && /if\s*\(resp\s*&&\s*resp\.success\)/.test(remove)
+        && /\}\s*else\s*\{/.test(remove);
+    };
+    const goodSample = [
+      'async function saveConfig() {',
+      '  const resp = await window.api.fonts.saveConfig(settings);',
+      "  if (!resp || resp.success !== true) throw new Error('失败');",
+      '}',
+      'window.api.fonts.removeImported()',
+      'if (resp && resp.success) { ok(); } else { fail(); }',
+    ].join('\n');
+    const badSample = [
+      'async function saveConfig() {',
+      '  await window.api.fonts.saveConfig(settings);',
+      '}',
+      'window.api.fonts.removeImported()',
+      'toast.success();',
+    ].join('\n');
+    if (!judge(goodSample) || judge(badSample)) {
+      g.fail('F4c-M08 正向对照失败：字体写配置判定器失真（必须能把「判 success」与「只 await」分开）');
+    }
+    const ok = judge(clean) && /resp\.success\s*!==\s*true/.test(saveBlock) && /if\s*\(resp\s*&&\s*resp\.success\)/.test(removalWindow);
+    if (!ok) {
+      g.fail('F4c-M08：字体保存/删除仍未判 success:false，失败会被念成「已应用 / 已删除」');
+    } else {
+      g.ok('F4c-M08：字体保存与删除都读回执，success:false 不再走成功提示');
+    }
+    addCase('F4c-M08', ok);
+  }
+}
+
+// ---------- P0-F4a2-M31：防恢复 setPref 只传布尔，读取兼容历史布尔值 ----------
+{
+  const src = read('src/scripts/startup.js');
+  if (!src) {
+    g.fail('F4a2-M31：src/scripts/startup.js 不存在（判定对象缺失）');
+  } else {
+    const clean = blankNonCode(src, 'js', { keepStrings: true });
+    const syncBlock = funcBlock(clean, 'syncDefendEnabledPref') || '';
+    const persistBlock = funcBlock(clean, 'persistDefendPref') || '';
+    const judge = (text) => {
+      const sync = funcBlock(text, 'syncDefendEnabledPref') || '';
+      const persist = funcBlock(text, 'persistDefendPref') || '';
+      return /typeof\s+enabled\s*!==\s*'boolean'/.test(sync)
+        && /setPref\(DEFEND_PREF_KEY,\s*enabled\)/.test(sync)
+        && /resp\.success\s*!==\s*true/.test(sync)
+        && /syncDefendEnabledPref\(defendStore\.enabled\s*===\s*true\)/.test(persist)
+        && /typeof\s+v\s*===\s*'boolean'/.test(text);
+    };
+    const goodSample = [
+      'function syncDefendEnabledPref(enabled) {',
+      "  if (typeof enabled !== 'boolean') return false;",
+      '  setPref(DEFEND_PREF_KEY, enabled);',
+      '  if (resp.success !== true) return false;',
+      '}',
+      'function persistDefendPref() { syncDefendEnabledPref(defendStore.enabled === true); }',
+      "if (typeof v === 'boolean') use(v);",
+    ].join('\n');
+    const badSample = [
+      'function syncDefendEnabledPref(enabled) {',
+      '  setPref(DEFEND_PREF_KEY, { enabled });',
+      '}',
+      'function persistDefendPref() { syncDefendEnabledPref({ enabled: true }); }',
+      'if (v && typeof v === "object") use(v);',
+    ].join('\n');
+    if (!judge(goodSample) || judge(badSample)) {
+      g.fail('F4a2-M31 正向对照失败：偏好布尔契约判定器失真（必须能把「布尔载荷+读回执」与「对象载荷+只 catch」分开）');
+    }
+    const ok = judge(clean) && /typeof\s+enabled\s*!==\s*'boolean'/.test(syncBlock)
+      && /syncDefendEnabledPref\(defendStore\.enabled\s*===\s*true\)/.test(persistBlock);
+    if (!ok) {
+      g.fail('F4a2-M31：防恢复 setPref 仍传对象/未判 success，或读取端未兼容历史布尔值');
+    } else {
+      g.ok('F4a2-M31：防恢复只写布尔总开关并判回执，读取端兼容历史布尔值');
+    }
+    addCase('F4a2-M31', ok);
   }
 }
 

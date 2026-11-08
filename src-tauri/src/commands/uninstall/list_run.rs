@@ -99,17 +99,39 @@ pub(super) fn uninstall_entry_admissible(
 /// 枚举一个 hive 根下的卸载条目。root 不存在 → 空集。
 /// 过滤口径与执行侧共用 [`uninstall_entry_admissible`]（R2b-M30）：空 DisplayName /
 /// SystemComponent=1 / ReleaseType 含 update|hotfix|security 的跳过（系统组件与更新不是「已安装程序」）。
-pub(super) unsafe fn enum_uninstall_root(hive: windows::Win32::System::Registry::HKEY, root: &str) -> Vec<Value> {
+#[derive(Default, Clone, Copy)]
+pub(super) struct UninstallReadStats {
+    pub(super) unreadable_keys: usize,
+    pub(super) missing_display_name: usize,
+}
+
+pub(super) unsafe fn enum_uninstall_root(
+    hive: windows::Win32::System::Registry::HKEY,
+    root: &str,
+) -> (Vec<Value>, UninstallReadStats) {
     use windows::Win32::System::Registry::{RegOpenKeyExW, RegCloseKey, KEY_READ};
     let mut out = Vec::new();
-    for sub in crate::engine::native::reg_enum_subkeys_pub(hive, root) {
+    let mut stats = UninstallReadStats::default();
+    let (subs, incomplete) = crate::engine::native::reg_enum_subkeys_pub_scan(hive, root);
+    if incomplete {
+        stats.unreadable_keys += 1;
+    }
+    for sub in subs {
         let sub_path = format!("{root}\\{sub}");
         let sk = to_wide(&sub_path);
         let mut hk = windows::Win32::System::Registry::HKEY::default();
         if RegOpenKeyExW(hive, windows::core::PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+            stats.unreadable_keys += 1;
             continue;
         }
-        let display_name = reg_sz(hk, "DisplayName").unwrap_or_default();
+        // A1-M03：值读不到与「没有 DisplayName」分开计数；两者都不再把失败折成空串。
+        let display_name = match reg_sz(hk, "DisplayName") {
+            Some(v) => v,
+            None => {
+                stats.missing_display_name += 1;
+                String::new()
+            }
+        };
         let system_component = reg_dword(hk, "SystemComponent").unwrap_or(0);
         let release_type = reg_sz(hk, "ReleaseType").unwrap_or_default().to_lowercase();
         let display_version = reg_sz(hk, "DisplayVersion").unwrap_or_default();
@@ -158,7 +180,7 @@ pub(super) unsafe fn enum_uninstall_root(hive: windows::Win32::System::Registry:
             "installerKind": installer_kind,
         }));
     }
-    out
+    (out, stats)
 }
 
 // ==================== B6 / B7：体积兜底与最近运行（2026-09-29，借鉴方案 P2） ====================
@@ -393,7 +415,7 @@ pub async fn uninstall_list<R: tauri::Runtime>(
     }
     // 注册表枚举 / Appx 枚举都是纯阻塞 IO，丢 blocking 池，避免占住 async worker。
     // 枚举失败显式上抛（空数组会被当成「没有程序」伪装成功）。
-    let apps = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<Value>, String> {
+    let apps = tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<Value>, UninstallReadStats), String> {
         use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
         if scope == "windows" {
             let mut rows = enum_appx_packages()?;
@@ -406,13 +428,21 @@ pub async fn uninstall_list<R: tauri::Runtime>(
                 })
                 .collect();
             rows.extend(enum_appx_store_extras(&seen));
-            return Ok(rows);
+            return Ok((rows, UninstallReadStats::default()));
         }
         let mut apps: Vec<Value> = Vec::new();
+        let mut read_stats = UninstallReadStats::default();
         unsafe {
-            apps.extend(enum_uninstall_root(HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"));
-            apps.extend(enum_uninstall_root(HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"));
-            apps.extend(enum_uninstall_root(HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"));
+            for (hive, root) in [
+                (HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+                (HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+                (HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+            ] {
+                let (mut rows, stats) = enum_uninstall_root(hive, root);
+                apps.append(&mut rows);
+                read_stats.unreadable_keys += stats.unreadable_keys;
+                read_stats.missing_display_name += stats.missing_display_name;
+            }
         }
         // 跨根去重（HiBit 同口径）：同一程序常同时出现在 HKLM 64 位与 WOW6432Node 键下。
         // 键 = 显示名+版本+发布者（小写）；保留先出现者（HKCU 优先，用户级条目更贴近当前用户）。
@@ -452,12 +482,22 @@ pub async fn uninstall_list<R: tauri::Runtime>(
             let bn = b["displayName"].as_str().unwrap_or("").to_lowercase();
             an.cmp(&bn)
         });
-        Ok(apps)
+        Ok((apps, read_stats))
     })
     .await
     .unwrap_or_else(|e| Err(format!("枚举异常: {e}")));
     match apps {
-        Ok(list) => json!({ "success": true, "data": { "apps": list } }),
+        Ok((list, stats)) => json!({
+            "success": true,
+            "data": {
+                "apps": list,
+                "unreadableKeys": stats.unreadable_keys,
+                "missingDisplayName": stats.missing_display_name,
+                "degraded": stats.unreadable_keys > 0,
+                "degradedReason": if stats.unreadable_keys > 0 { Some("部分卸载键不可读，列表可能不完整") } else { None },
+                "degradedSource": "uninstall.listRun"
+            }
+        }),
         Err(e) => json!({ "success": false, "message": e }),
     }
 }
@@ -534,6 +574,19 @@ pub(super) const QUIET_DENY_HOSTS: &[&str] = &[
     "conhost.exe",
 ];
 
+/// 取卸载器宿主名时采用与 Windows 文件解析一致的尾部归一。
+///
+/// Windows 允许可执行文件名以 `.` / 空格 结尾并按去掉后的名称解析；只比较原始
+/// 字面量会让 `cmd.exe.` 这类写法绕过宿主名单。归一过程不依赖返回值长度，可安全
+/// 处理非 ASCII 路径。
+pub(super) fn uninstaller_host_name(exe: &str) -> String {
+    exe.rsplit(['\\', '/'])
+        .next()
+        .unwrap_or("")
+        .trim_end_matches([' ', '.'])
+        .to_ascii_lowercase()
+}
+
 /// 卸载/修改执行面的统一准入（R2b-K01 + R2b-M02，v7.2 C05）。
 ///
 /// 返回**解析后的绝对路径**，把「注册表原文 → ShellExecuteEx」之间的三种错误形态
@@ -551,7 +604,7 @@ pub(super) fn admit_uninstaller_exec(exe: &str, args: &str) -> Result<String, St
     if exe.is_empty() {
         return Err("卸载器路径为空".to_string());
     }
-    let name = exe.rsplit(['\\', '/']).next().unwrap_or("").to_ascii_lowercase();
+    let name = uninstaller_host_name(exe);
     if QUIET_DENY_HOSTS.contains(&name.as_str()) {
         return Err(format!("{name} 是 shell/脚本宿主，参数会被二次解释，拒绝执行注册表原文"));
     }
@@ -602,9 +655,8 @@ pub(super) fn quiet_string_reject_reason(
     args: &str,
     file_exists: &dyn Fn(&Path) -> bool,
 ) -> Option<String> {
-    let exe_low = exe.to_lowercase();
-    let name = exe_low.rsplit(['\\', '/']).next().unwrap_or("");
-    if QUIET_DENY_HOSTS.contains(&name) {
+    let name = uninstaller_host_name(exe);
+    if QUIET_DENY_HOSTS.contains(&name.as_str()) {
         return Some(format!("{name} 是 shell/脚本宿主，参数会被二次解释"));
     }
     if !name.ends_with(".exe") {
@@ -1937,6 +1989,23 @@ mod exec_surface_tests {
             admit_uninstaller_exec(r"C:\Windows\System32\cmd.exe", "/c calc.exe").is_err(),
             "绝对路径形态的宿主机同样拒（判据看基名）"
         );
+        // A6-M02：Win32 会剥掉可执行文件末尾的点/空格。必须对带引号的
+        // UninstallString 走同一条解析链，否则 `.exe.` 会绕过字面量名单。
+        for raw in [
+            r#""C:\Windows\System32\cmd.exe." /c start calc"#,
+            r#""C:\Windows\System32\cmd.exe. " /c start calc"#,
+            r#""C:\Windows\System32\CMD.EXE." /c start calc"#,
+            r#""cmd.exe " /c start calc"#,
+            r#""cmd.exe. " /c start calc"#,
+            r#""cmd.exe ." /c start calc"#,
+        ] {
+            let (exe, args) = split_uninstall_cmd(raw).expect("带引号卸载串应可解析");
+            let rejected = admit_uninstaller_exec(&exe, &args).unwrap_err();
+            assert!(rejected.contains("宿主"), "尾点/尾空格宿主必须拒：{raw} => {rejected}");
+        }
+        // 正对照：普通厂商卸载器与 msiexec 不得被归一误伤。
+        assert!(admit_uninstaller_exec(r"C:\Program Files\Vendor\unins000.exe.", "/S").is_ok());
+        assert!(admit_uninstaller_exec("msiexec.exe", "/X{00000000-0000-0000-0000-000000000000}").is_ok());
         for args in ["/S & calc.exe", "/S | calc", "/S > out.txt", "/S ; calc", "/S $x", "/S `calc`"] {
             assert!(admit_uninstaller_exec(r"C:\Apps\unins000.exe", args).is_err(), "注入形态必须拒：{args}");
         }

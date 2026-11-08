@@ -528,6 +528,12 @@ fn spawn_and_wait_with_timeout(
 ) -> std::io::Result<std::process::Output> {
     use std::process::{Output, Stdio};
     use std::time::Instant;
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // A5-M01：quiet 路径统一 suspended 启动，入 Job 后再恢复。
+        cmd.creation_flags(0x0800_0000 | 0x0000_0004);
+    }
 
     let mut child = cmd
         .stdin(Stdio::null())
@@ -551,6 +557,10 @@ fn spawn_and_wait_with_timeout(
             None
         }
     };
+    if let Err(e) = crate::engine::job::resume_suspended_process(child.id()) {
+        let _ = child.kill();
+        return Err(std::io::Error::other(format!("子进程挂起态恢复失败: {e}")));
+    }
     // 必须在等退出**之前**把两条管道 take 走并立刻起线程读尽（审查 v3 P0-1）。
     // 旧实现只轮询 `try_wait()`、一条都不读，于是子进程写满匿名管道缓冲（Windows 默认
     // 4 KB 量级）就阻塞在 write、永不退出，`try_wait()` 恒 None，一路走到登记超时，

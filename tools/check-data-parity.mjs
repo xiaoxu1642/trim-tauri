@@ -22,6 +22,7 @@
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 import { ORIGIN, REPO_ROOT } from './ps-origin.mjs';
 import { buildParityFixture, FIXTURE_PATH } from './gen-protect-parity.mjs';
@@ -166,8 +167,8 @@ const FALLBACK_REL = join('src', 'scripts', 'cleanup-fallback.generated.js');
 // P4 `tools/fixtures/protect-parity.json` ⇄ `vendor/…/ps-protect-path.js`
 // 附录 G 已注明：`protect.rs` 那条 `matches_js_authority` 抓的是 **Rust 侧口径漂移**，
 // 抓不到「基线重拷了、夹具没重跑」——夹具是入库快照，期望值本身过期时 Rust 测的是旧口径。
-// 这里用生成器的同一个函数在内存里重算一遍与落盘夹具比（就是那条缺的腿）；
-// 分档理由见块内注释（夹具冻的是出生机的用户目录）。
+// 这里用生成器的同一个函数在内存里重算一遍与落盘夹具比（就是那条缺的腿）。
+// T1c-M41 起夹具使用环境占位符，换机不再需要先重跑生成器。
 // ---------------------------------------------------------------------------
 {
   let committed = null;
@@ -182,12 +183,8 @@ const FALLBACK_REL = join('src', 'scripts', 'cleanup-fallback.generated.js');
     const stripPs = (f) => { const c = { ...f }; delete c.psVectors; return c; };
     const freshNoPs = stripPs(fresh);
     const committedNoPs = stripPs(committed);
-    // 夹具冻的是**出生机**的用户目录（JS 权威实现的默认清单读 process.env，
-    // `protect.rs` 那条用例也读自己进程的 env）—— 实测把 USERPROFILE 换成别的值，
-    // `cargo test --lib protect::` 立刻红。所以这里分两档，既不放纵漂移也不误报：
-    //   · 本机就是出生机 ⇒ 整串逐字节比（最强，基线重拷没重跑夹具必红）
-    //   · 本机不是出生机 ⇒ 只比「机器中立那半」（不含 C:\Users\ 的条目与向量判定），
-    //     并把用户目录那一半显式标为未比对（不静默、不判绿充数）
+    // 新夹具带环境占位符，JS 现算与本机环境无关，可以直接整串比对。旧夹具仍保留
+    // 出生机分档，避免历史产物在迁移窗口里被误报。
     const homeOf = (o) => {
       const m = JSON.stringify(o).match(/users[\\/]+([^\s"'\\/]+)/i);
       return m ? m[1].toLowerCase() : '';
@@ -195,11 +192,12 @@ const FALLBACK_REL = join('src', 'scripts', 'cleanup-fallback.generated.js');
     const localHome = homeOf({ p: process.env.USERPROFILE || '' });
     const fixtureHome = homeOf(committed);
     const isBirthMachine = !!localHome && localHome === fixtureHome;
+    const envNeutral = /%USERPROFILE%|%APPDATA%|%LOCALAPPDATA%|%WINDIR%/i.test(JSON.stringify(committed));
     // 「机器中立」判据：路径里不含用户目录段（users\<name> 之后的部分也可能带用户相关目录名，
     // 所以整条一起排除，宁可少判也不误判）
     const neutral = (v) => !/users[\\/]/i.test(typeof v === 'string' ? v : JSON.stringify(v));
     const detail = [];
-    if (isBirthMachine) {
+    if (isBirthMachine || envNeutral) {
       if (JSON.stringify(freshNoPs) !== JSON.stringify(committedNoPs)) detail.push('整串不一致 ⇒ 基线被重拷过或夹具被手改');
     } else {
       const pick = (f) => ({
@@ -213,11 +211,11 @@ const FALLBACK_REL = join('src', 'scripts', 'cleanup-fallback.generated.js');
     const denied = fresh.vectors.filter(v => v.protected).length;
     check(detail.length === 0,
       `P4 受保护路径夹具 ⇄ JS 权威现算（向量 ${fresh.vectors.length}：判拒 ${denied} / 放行 ${fresh.vectors.length - denied}；`
-      + `${isBirthMachine ? `本机即夹具出生机，整串比对` : `出生机=${fixtureHome || '?'} ≠ 本机=${localHome || '?'}，只比机器中立部分`}）`,
-      detail.join('；') || (isBirthMachine ? '' :
+      + `${envNeutral ? '环境占位符夹具，整串比对' : isBirthMachine ? '本机即夹具出生机，整串比对' : `出生机=${fixtureHome || '?'} ≠ 本机=${localHome || '?'}，只比机器中立部分`}）`,
+      detail.join('；') || (isBirthMachine || envNeutral ? '' :
         '※ 用户目录相关条目未比对（换机后 `cargo test --lib protect::` 同样会红，需先重跑生成器）'),
     );
-    if (!isBirthMachine) {
+    if (!isBirthMachine && !envNeutral) {
       console.log('  · 想让夹具机器中立，得先让 protect.rs 那条用例把「默认段」也吃夹具输入（见 gen-protect-parity.mjs 顶部说明）。');
     }
   }
@@ -392,19 +390,32 @@ const NO_COMMENT_REGISTRY = [
   const { readdirSync, statSync } = await import('node:fs');
   const pathMod = await import('node:path');
   const nameIndex = new Map();
+  const add = (abs) => {
+    const base = pathMod.basename(abs);
+    const arr = nameIndex.get(base) || [];
+    arr.push(abs);
+    nameIndex.set(base, arr);
+  };
   const walk = (dir) => {
     for (const e of readdirSync(dir, { withFileTypes: true })) {
-      if (e.name === 'target' || e.name === 'node_modules' || e.name.startsWith('.')) continue;
+      // T1b-M01：docs/build-release 是本地审查与打包产物，不属于仓内真源；
+      // 它们进索引会让「_comment 点名」被只在本地存在的同名文件顶绿。
+      if (e.name === 'target' || e.name === 'node_modules' || e.name === 'docs' || e.name === 'build-release' || e.name.startsWith('.')) continue;
       const p = pathMod.join(dir, e.name);
       if (e.isDirectory()) walk(p);
-      else {
-        const arr = nameIndex.get(e.name) || [];
-        arr.push(p);
-        nameIndex.set(e.name, arr);
-      }
+      else add(p);
     }
   };
-  walk(REPO_ROOT);
+  // 优先用 git 跟踪面：未跟踪的本地文档/探针/下载件不得为「坐标存活」背书。
+  const git = spawnSync('git', ['ls-files', '-z'], { cwd: REPO_ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  if (git.status === 0 && git.stdout) {
+    for (const rel of git.stdout.split('\0').filter(Boolean)) {
+      const abs = join(REPO_ROOT, rel.replace(/\//g, pathMod.sep));
+      if (existsSync(abs)) add(abs);
+    }
+  } else {
+    walk(REPO_ROOT);
+  }
   // 运行期生成文件（%APPDATA%，不落仓）：_comment 提及它们是讲数据来源，不是仓内坐标
   const RUNTIME_GENERATED = new Set(['optimizer-backups.json', 'optimizer-runtime.json.sig.json']);
   const dataDir = join(REPO_ROOT, 'src-tauri', 'data');

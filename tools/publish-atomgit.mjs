@@ -26,7 +26,13 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHash } from 'node:crypto';
+import {
+  createHash,
+  createPublicKey,
+  generateKeyPairSync,
+  sign as signEd25519,
+  verify as verifyEd25519,
+} from 'node:crypto';
 
 import { writeFileAtomic } from './lib/atomic-write.mjs';
 
@@ -73,6 +79,172 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 const read = (p) => readFileSync(p, 'utf8');
 
+const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+
+function decodeMinisignEnvelope(text, kind) {
+  const b64 = String(text ?? '').trim();
+  if (!b64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) {
+    throw new Error(`${kind} 不是单层 base64`);
+  }
+  const raw = Buffer.from(b64, 'base64');
+  if (!raw.length) throw new Error(`${kind} base64 解出空内容`);
+  return raw.toString('utf8');
+}
+
+function parseMinisignSignature(sigText) {
+  const inner = decodeMinisignEnvelope(sigText, '.sig').split(/\r?\n/).filter((l) => l.length);
+  if (inner.length !== 4) throw new Error(`签名应为四行 minisign 文本，实得 ${inner.length} 行`);
+  const bin = Buffer.from(inner[1], 'base64');
+  const global = Buffer.from(inner[3], 'base64');
+  if (bin.length !== 74 || global.length !== 64) {
+    throw new Error(`签名 blob 长度异常（signature=${bin.length}, global=${global.length}）`);
+  }
+  const algorithm = bin.subarray(0, 2).toString('latin1');
+  if (algorithm !== 'Ed' && algorithm !== 'ED') {
+    throw new Error(`不支持的 minisign 算法 ${JSON.stringify(algorithm)}`);
+  }
+  if (!inner[2].startsWith('trusted comment: ')) {
+    throw new Error('签名第三行不是 trusted comment');
+  }
+  return {
+    algorithm,
+    keyId: bin.subarray(2, 10),
+    signature: bin.subarray(10, 74),
+    trustedComment: inner[2].slice('trusted comment: '.length),
+    globalSignature: global,
+  };
+}
+
+function parseMinisignPublicKey(pubkeyText) {
+  const inner = decodeMinisignEnvelope(pubkeyText, 'updater pubkey').split(/\r?\n/).filter((l) => l.length);
+  if (inner.length !== 2) throw new Error(`公钥应为两行 minisign 文本，实得 ${inner.length} 行`);
+  const bin = Buffer.from(inner[1], 'base64');
+  if (bin.length !== 42) throw new Error(`公钥 blob 应为 42 字节，实得 ${bin.length}`);
+  const algorithm = bin.subarray(0, 2).toString('latin1');
+  if (algorithm !== 'Ed' && algorithm !== 'ED') {
+    throw new Error(`不支持的 minisign 公钥算法 ${JSON.stringify(algorithm)}`);
+  }
+  const der = Buffer.concat([ED25519_SPKI_PREFIX, bin.subarray(10, 42)]);
+  return {
+    keyId: bin.subarray(2, 10),
+    key: createPublicKey({ key: der, format: 'der', type: 'spki' }),
+  };
+}
+
+/**
+ * 与 `tauri-plugin-updater::verify_signature` 的公开验签链同口径：
+ * 先按签名算法验文件（ED=Blake2b-512 预哈希，Ed=旧版直签），再验 global signature。
+ * trusted comment 只有在这两步都通过后才可以消费。
+ */
+function verifyMinisign(data, sigText, pubkeyText) {
+  const sig = parseMinisignSignature(sigText);
+  const pub = parseMinisignPublicKey(pubkeyText);
+  if (!sig.keyId.equals(pub.keyId)) {
+    throw new Error(`签名 keyid=${sig.keyId.toString('hex')} 与 updater 公钥=${pub.keyId.toString('hex')} 不一致`);
+  }
+  const signed = sig.algorithm === 'ED'
+    ? createHash('blake2b512').update(data).digest()
+    : data;
+  if (!verifyEd25519(null, signed, pub.key, sig.signature)) {
+    throw new Error('setup.exe 字节验签失败');
+  }
+  const global = Buffer.concat([sig.signature, Buffer.from(sig.trustedComment, 'utf8')]);
+  if (!verifyEd25519(null, global, pub.key, sig.globalSignature)) {
+    throw new Error('minisign trusted comment 的 global signature 验签失败');
+  }
+  return { trustedComment: sig.trustedComment };
+}
+
+function selfTestMinisign() {
+  // 正向对照：minisign-verify 0.2.5 自带测试向量的预哈希签名（消息为 `test`）。
+  // 该向量不经过本脚本自造密钥，能发现“自签自验但算法口径整体写错”的假绿。
+  const knownPub = Buffer.from([
+    'untrusted comment: minisign public key E7620F1842B4E81F',
+    'RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3',
+    '',
+  ].join('\n')).toString('base64');
+  const knownSig = Buffer.from([
+    'untrusted comment: signature from minisign secret key',
+    'RUQf6LRCGA9i559r3g7V1qNyJDApGip8MfqcadIgT9CuhV3EMhHoN1mGTkUidF/z7SrlQgXdy8ofjb7bNJJylDOocrCo8KLzZwo=',
+    'trusted comment: timestamp:1556193335\tfile:test',
+    'y/rUw2y8/hOUYjZU71eHp/Wo1KZ40fGy2VJEDl34XMJM+TX48Ss/17u3IvIfbVR1FkZZSNCisQbuQY+bHwhEBg==',
+    '',
+  ].join('\n')).toString('base64');
+  verifyMinisign(Buffer.from('test'), knownSig, knownPub);
+
+  const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+  const rawPublic = publicKey.export({ format: 'der', type: 'spki' }).subarray(-32);
+  const keyId = Buffer.from('0102030405060708', 'hex');
+  const pubBlob = Buffer.concat([Buffer.from('ED', 'latin1'), keyId, rawPublic]);
+  const pubEnvelope = Buffer.from(
+    `untrusted comment: minisign public key: 0102030405060708\n${pubBlob.toString('base64')}\n`,
+  ).toString('base64');
+  const data = Buffer.from('synthetic setup bytes for publish preflight', 'utf8');
+  const digest = createHash('blake2b512').update(data).digest();
+  const signature = signEd25519(null, digest, privateKey);
+  const trustedComment = 'timestamp:0\tfile:Trim_1.0.0_x64-setup.exe\tversion:1.0.0';
+  const globalSignature = signEd25519(
+    null,
+    Buffer.concat([signature, Buffer.from(trustedComment, 'utf8')]),
+    privateKey,
+  );
+  const sigBlob = Buffer.concat([Buffer.from('ED', 'latin1'), keyId, signature]);
+  const sigEnvelope = Buffer.from(
+    [
+      'untrusted comment: signature from tauri secret key',
+      sigBlob.toString('base64'),
+      `trusted comment: ${trustedComment}`,
+      globalSignature.toString('base64'),
+      '',
+    ].join('\n'),
+  ).toString('base64');
+
+  const got = verifyMinisign(data, sigEnvelope, pubEnvelope);
+  if (got.trustedComment !== trustedComment) throw new Error('正例 trusted comment 不一致');
+
+  const tampered = Buffer.from(data);
+  tampered[0] ^= 1;
+  let dataRejected = false;
+  try {
+    verifyMinisign(tampered, sigEnvelope, pubEnvelope);
+  } catch {
+    dataRejected = true;
+  }
+  if (!dataRejected) throw new Error('篡改 setup 字节仍通过验签 —— 判据失明');
+
+  // 版本号写在 trusted comment 里，必须由 global signature 一并背书；只验包体而不验
+  // 注释，会让攻击者把旧包配上新版本号。这里保留原 global signature，单独改注释。
+  const tamperedComment = trustedComment.replace('version:1.0.0', 'version:9.9.9');
+  if (tamperedComment === trustedComment) throw new Error('自检向量未覆盖 version 字段');
+  const tamperedCommentSig = Buffer.from(
+    [
+      'untrusted comment: signature from tauri secret key',
+      sigBlob.toString('base64'),
+      `trusted comment: ${tamperedComment}`,
+      globalSignature.toString('base64'),
+      '',
+    ].join('\n'),
+  ).toString('base64');
+  let commentRejected = false;
+  try {
+    verifyMinisign(data, tamperedCommentSig, pubEnvelope);
+  } catch {
+    commentRejected = true;
+  }
+  if (!commentRejected) throw new Error('篡改 trusted comment 仍通过验签 —— 版本绑定失明');
+
+  console.log('✓ minisign 自检：真实验签正例通过，包体篡改与 trusted comment 篡改负例均被拒');
+}
+
+if (has('--self-test-minisign')) {
+  try {
+    selfTestMinisign();
+    process.exit(0);
+  } catch (e) {
+    die(`minisign 自检失败：${e?.message ?? e}`);
+  }
+}
+
 // ---------------- 本地预检与清单生成 ----------------
 
 const conf = JSON.parse(read(join(ROOT, 'src-tauri', 'tauri.conf.json')));
@@ -93,20 +265,34 @@ function preflight() {
   for (const [kind, p] of Object.entries(files)) {
     if (!existsSync(p)) die(`缺产物（${kind}）：${p}（先按发版手册 §7.3 构建并签名）`);
   }
-  ok(`产物三件齐（${ver}）：setup ${(readFileSync(files.setup).length / 1048576).toFixed(1)}MB / portable / sig`);
+  // 签名验的是**这一份实际字节**，sha256 也从同一 Buffer 派生；后续重建未重签时，
+  // 不会出现「清单 hash 来自新包、签名只解注释」的假通过。
+  const setupBuf = readFileSync(files.setup);
+  ok(`产物三件齐（${ver}）：setup ${(setupBuf.length / 1048576).toFixed(1)}MB / portable / sig`);
 
-  // 签名形状 + 版本钉死：--app-version 漏传时 trusted comment 缺 `version:`，
-  // 客户端 requireSignedVersion 会把整批更新判 MissingSignedVersion（发版手册 §7.4 的坑）
+  // 与 updater 插件同链验签：updater 公钥 → minisign 文件签名 → global signature。
+  // trusted comment 必须等密码学验证通过后才能消费。
   const sigText = read(files.sig);
-  const lines = Buffer.from(sigText.replace(/\s+/g, ''), 'base64').toString('utf8').split('\n');
-  const sigOk =
-    lines[0]?.startsWith('untrusted comment: signature from tauri secret key') &&
-    new RegExp(`(?:^|\\t)version:${ver.replace(/\./g, '\\.')}$`).test(lines[2] ?? '') &&
-    (lines[2] ?? '').includes(`file:${setupName}`);
-  if (!sigOk) {
-    fail(`签名与版本 ${ver} 不匹配或形状不对（解出的 minisign 文本第 3 行没有 file:${setupName} 与 version:${ver}）—— 重签：--app-version 必传且先删旧 .sig`);
-  } else {
-    ok(`签名 trusted comment 含 file:${setupName} 且 version:${ver}（requireSignedVersion 可过）`);
+  let trustedComment = '';
+  try {
+    trustedComment = verifyMinisign(
+      setupBuf,
+      sigText,
+      String(conf?.plugins?.updater?.pubkey ?? ''),
+    ).trustedComment;
+    ok(`setup.exe 实字节验签通过（updater keyid 与 .sig 一致）`);
+  } catch (e) {
+    fail(`setup.exe 实字节验签失败：${e?.message ?? e} —— 必须重签，禁止只替换 .sig 注释`);
+  }
+  if (trustedComment) {
+    const sigOk =
+      new RegExp(`(?:^|\\t)version:${ver.replace(/\./g, '\\.')}$`).test(trustedComment) &&
+      trustedComment.includes(`file:${setupName}`);
+    if (!sigOk) {
+      fail(`签名 trusted comment 与版本 ${ver}/file:${setupName} 不匹配 —— 重签时 --app-version 必传`);
+    } else {
+      ok(`签名 trusted comment 含 file:${setupName} 且 version:${ver}（requireSignedVersion 可过）`);
+    }
   }
 
   // notes 与 update.md 顶部条目钉死：清单里的说明就是本版更新日志，不许错版
@@ -123,7 +309,7 @@ function preflight() {
   const notes = md.slice(start, end).join('\n').trim();
   ok(`notes 取自 update.md 顶部条目（${notes.length} 字符）`);
 
-  const setupSha = sha256(readFileSync(files.setup));
+  const setupSha = sha256(setupBuf);
   info(`setup sha256 = ${setupSha}`);
 
   return { files, sigText, notes, setupSha };

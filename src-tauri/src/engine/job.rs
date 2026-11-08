@@ -56,6 +56,51 @@ impl ProcessJob {
     }
 }
 
+/// A5-M01：以 `CREATE_SUSPENDED` 启动的子进程，在入 Job 后必须恢复。
+///
+/// 不用 `ResumeThread(主线程句柄)`：std 不暴露 spawn 返回的线程句柄。这里枚举该 PID
+/// 的线程并逐个恢复；此时进程尚未执行任何用户代码，不存在孙进程竞态。
+pub(crate) fn resume_suspended_process(pid: u32) -> Result<usize, String> {
+    use windows::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+            .map_err(|e| format!("线程快照失败: {e}"))?;
+        if snap == INVALID_HANDLE_VALUE {
+            return Err("线程快照句柄无效".to_string());
+        }
+        let mut entry = THREADENTRY32 {
+            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        let mut resumed = 0usize;
+        let mut ok = Thread32First(snap, &mut entry).is_ok();
+        while ok {
+            if entry.th32OwnerProcessID == pid {
+                if let Ok(thread) = OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID) {
+                    let r = ResumeThread(thread);
+                    let _ = CloseHandle(thread);
+                    if r == u32::MAX {
+                        let _ = CloseHandle(snap);
+                        return Err(format!("恢复线程 {} 失败", entry.th32ThreadID));
+                    }
+                    resumed += 1;
+                }
+            }
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            ok = Thread32Next(snap, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snap);
+        if resumed == 0 {
+            return Err(format!("PID {pid} 没有可恢复的线程"));
+        }
+        Ok(resumed)
+    }
+}
+
 impl Drop for ProcessJob {
     fn drop(&mut self) {
         unsafe {

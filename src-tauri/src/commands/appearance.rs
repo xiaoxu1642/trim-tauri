@@ -304,6 +304,10 @@ pub fn appearance_bg_import<R: Runtime>(window: WebviewWindow<R>) -> Result<Valu
     let dest = available_bg_path(&dir, &ext);
     // 审查 L9：先量体积再拷。扩展名白名单挡不住一个 4 GB 的 .png —— 这条命令是同步的
     // （对话框本身要阻塞主线程），无上限的 fs::copy 会把 UI 钉死并写满数据盘。
+    // R1b-M10：UNC 不先触盘（离线共享会挂住同步命令）。
+    if src.to_string_lossy().starts_with(r"\\") {
+        return Ok(json!({ "success": false, "message": "背景图片不支持网络路径，请先下载到本机" }));
+    }
     const MAX_BG_BYTES: u64 = 50 * 1024 * 1024;
     match std::fs::metadata(&src) {
         Ok(m) if m.len() > MAX_BG_BYTES => {

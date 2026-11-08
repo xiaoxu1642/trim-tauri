@@ -527,12 +527,15 @@ if (!covPath) {
       if (!ledger[id]) ledger[id] = { covered: [], commandsRun: [] };
       ledger[id].covered.push(...(obj.covered ?? []));
       ledger[id].commandsRun.push(...(obj.commandsRun ?? []));
+      // T1a-M03：契约已补 counts；旧四键台账里的 linesRead 不能丢，归并时一并搬运。
+      if (typeof obj.linesRead === 'number') ledger[id].linesRead = obj.linesRead;
       if (obj.counts && typeof obj.counts === 'object') ledger[id].counts = { ...(obj.counts ?? {}), ...ledger[id].counts };
     } else {
       for (const [id, rec] of Object.entries(obj)) {
         if (!ledger[id]) ledger[id] = { covered: [], commandsRun: [] };
         ledger[id].covered.push(...(rec.covered ?? []));
         ledger[id].commandsRun.push(...(rec.commandsRun ?? []));
+        if (typeof rec.linesRead === 'number') ledger[id].linesRead = rec.linesRead;
         if (rec.counts && typeof rec.counts === 'object') ledger[id].counts = { ...(rec.counts ?? {}), ...ledger[id].counts };
       }
     }

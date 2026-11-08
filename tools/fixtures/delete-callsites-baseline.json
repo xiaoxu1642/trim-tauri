@@ -78,7 +78,7 @@
     "src-tauri/src/commands/optimizer/contract_tests.rs": 1,
     "src-tauri/src/commands/uninstall/residue.rs": 1,
     "src-tauri/src/engine/native/cleanup.rs": 1,
-    "src-tauri/src/engine/native/registry.rs": 5,
+    "src-tauri/src/engine/native/registry.rs": 7,
     "src-tauri/src/engine/reg_backup.rs": 2
   },
   "reg_restore_delete": {
@@ -110,7 +110,7 @@
     "src-tauri/src/engine/native/registry.rs": 1
   },
   "RegDeleteKeyW": {
-    "src-tauri/src/engine/native/registry.rs": 2
+    "src-tauri/src/engine/native/registry.rs": 3
   },
   "DeleteFileW": {
     "native-scanner/src/perf.rs": 1

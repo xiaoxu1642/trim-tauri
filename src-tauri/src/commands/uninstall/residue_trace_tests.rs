@@ -1086,7 +1086,8 @@ use super::residue_update::*;
             (r"C:\Program Files\AntiCheatExpert\ACE-CORE102706.sys", Some(r"C:\Program Files\AntiCheatExpert\ACE-CORE102706.sys")),
             (r"C:\Windows\System32\svchost.exe -k netsvcs", Some(r"C:\Windows\System32\svchost.exe")),
             (r"\??\C:\Windows\System32\drivers\ACEX.sys", Some(r"C:\Windows\System32\drivers\ACEX.sys")),
-            (r"\\server\share\unins000.exe /S", Some(r"\\server\share\unins000.exe")),
+            // R2b-M02：UNC 触碰会先发起 SMB 名解析，落点证据链必须 fail-closed。
+            (r"\\server\share\unins000.exe /S", None),
             // 认不出的一律 None —— 把"判不出来"当成"不存在"就是假阳性的来源
             ("notepad.exe", None),
             (r"C:\Program Files\Foo\launcher", None),

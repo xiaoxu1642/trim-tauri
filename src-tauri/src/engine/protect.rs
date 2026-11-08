@@ -887,6 +887,9 @@ pub fn validate_mutation_target(p: &str) -> Result<(), String> {
     if name_has_control_chars(p) {
         return Err(format!("目标路径含 NUL 或控制字符，已拒绝：{p:?}"));
     }
+    if let Some(reason) = path_name_shape_block_reason(p) {
+        return Err(reason);
+    }
     if is_path_protected(p) {
         return Err(format!("受保护的系统/用户路径，已拒绝：{p}"));
     }
@@ -943,6 +946,38 @@ pub fn json_of(r: &ProtectRoots) -> String {
 /// （`reg_backup::parse_reg_text` 按行切段），路径里出现控制字符同理。
 pub fn name_has_control_chars(s: &str) -> bool {
     s.chars().any(|c| c.is_control())
+}
+
+/// R5a-M01：Windows 名字形态闸（文件面）。扫描产出的路径在真正删除前必须过这一道。
+///
+/// 判据：任一分量以 `.`/空格结尾；任一分量是 `.`/`..`；任一分量主干是保留设备名
+/// （CON/PRN/AUX/NUL/COM1-9/LPT1-9，含 `CON.txt` 形态）。系统命名空间例外由既有
+/// `is_system_namespace` 保留——本闸只回答「名字形态是否可精确执行」。
+pub fn path_name_shape_block_reason(p: &str) -> Option<String> {
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    if p.is_empty() {
+        return Some("目标路径为空".to_string());
+    }
+    for comp in p.split(['\\', '/']) {
+        if comp.is_empty() {
+            continue;
+        }
+        if comp == "." || comp == ".." {
+            return Some(format!("目标路径含相对段（{comp}），已拒绝：{p}"));
+        }
+        if comp.ends_with('.') || comp.ends_with(' ') {
+            return Some(format!("目标路径分量以尾点/尾空格结尾，Win32 会改写落点，已拒绝：{p}"));
+        }
+        let stem = comp.split('.').next().unwrap_or(comp).trim_end_matches(' ');
+        if RESERVED.iter().any(|r| stem.eq_ignore_ascii_case(r)) {
+            return Some(format!("目标路径含 Windows 保留设备名（{stem}），已拒绝：{p}"));
+        }
+    }
+    None
 }
 
 /// 注册表禁删面（A1）
@@ -1314,14 +1349,91 @@ mod tests {
     }
 
     /// 夹具由 `node tools/gen-protect-parity.mjs` 用 JS 权威实现（ps-protect-path.js）生成：
-    /// 含清单 JSON 与 38 条向量的判定结果。任何一处口径漂移都会在这里失败——
+    /// 含机器中立占位符与向量的判定结果。任何一处口径漂移都会在这里失败——
     /// 这是「JS 判拒、Rust 放行」这类静默漏防的唯一机器拦截点。
     const FIXTURE: &str = include_str!("../../../tools/fixtures/protect-parity.json");
+
+    /// 夹具里的 `%USERPROFILE%` 等占位符按当前测试进程展开；这样同一份跟踪文件可在
+    /// 任意用户名/APPDATA 重定向的机器上复现，不会把出生机目录写回仓库。
+    fn expand_fixture_path(s: &str) -> String {
+        let drive = {
+            let d = env("SystemDrive");
+            if d.is_empty() { "C:".to_string() } else { d.trim_end_matches('\\').to_string() }
+        };
+        let home = {
+            let h = env("USERPROFILE");
+            if !h.is_empty() { h } else { format!("{}{}", env("HOMEDRIVE"), env("HOMEPATH")) }
+        };
+        let appdata = {
+            let a = env("APPDATA");
+            if a.is_empty() { format!("{}\\AppData\\Roaming", home) } else { a }
+        };
+        let local_appdata = {
+            let l = env("LOCALAPPDATA");
+            if l.is_empty() { format!("{}\\AppData\\Local", home) } else { l }
+        };
+        let windir = {
+            let w = env("WINDIR");
+            if w.is_empty() { format!("{}\\Windows", drive) } else { w }
+        };
+        let programdata = {
+            let p = env("PROGRAMDATA");
+            if p.is_empty() { format!("{}\\ProgramData", drive) } else { p }
+        };
+        let program_files = {
+            let p = env("ProgramFiles");
+            if p.is_empty() { format!("{}\\Program Files", drive) } else { p }
+        };
+        let program_files_x86 = {
+            let p = env("ProgramFiles(x86)");
+            if p.is_empty() { format!("{}\\Program Files (x86)", drive) } else { p }
+        };
+        let temp = {
+            let t = env("TEMP");
+            if t.is_empty() { format!("{}\\Temp", local_appdata) } else { t }
+        };
+        [
+            ("%TEMP%", temp),
+            ("%LOCALAPPDATA%", local_appdata),
+            ("%APPDATA%", appdata),
+            ("%ProgramFiles(x86)%", program_files_x86),
+            ("%ProgramFiles%", program_files),
+            ("%PROGRAMDATA%", programdata),
+            ("%WINDIR%", windir),
+            ("%USERPROFILE%", home),
+        ]
+        .into_iter()
+        .fold(s.to_string(), |out, (token, val)| out.replace(token, &val))
+    }
+
+    fn expand_fixture_value(v: &Value) -> Value {
+        match v {
+            Value::String(s) => Value::String(expand_fixture_path(s)),
+            Value::Array(a) => Value::Array(a.iter().map(expand_fixture_value).collect()),
+            Value::Object(o) => Value::Object(
+                o.iter()
+                    .map(|(k, v)| (k.clone(), expand_fixture_value(v)))
+                    .collect(),
+            ),
+            _ => v.clone(),
+        }
+    }
 
     #[test]
     fn matches_js_authority() {
         let f: Value = serde_json::from_str(FIXTURE).expect("夹具解析失败");
-        let extras = &f["extras"];
+        let lower = FIXTURE.to_ascii_lowercase();
+        assert!(
+            !lower.contains("\\users\\"),
+            "夹具不得固化任何本机用户目录：{}",
+            lower.lines().find(|l| l.contains("\\users\\")).unwrap_or("")
+        );
+        assert!(
+            FIXTURE.contains("%USERPROFILE%") && FIXTURE.contains("%APPDATA%"),
+            "夹具缺少环境占位符，换机复现链已退化"
+        );
+        let expanded = expand_fixture_value(&f);
+        let extras = &expanded["extras"];
         let strvec = |v: &Value| -> Vec<String> {
             v.as_array()
                 .map(|a| a.iter().filter_map(|s| s.as_str()).map(String::from).collect())
@@ -1333,17 +1445,38 @@ mod tests {
             &strvec(&extras["extraExact"]),
             &strvec(&extras["extraAnyDrive"]),
         );
+        let fixture_roots_value: Value = serde_json::from_str(
+            f["rootsJson"].as_str().expect("夹具 rootsJson 应为字符串"),
+        )
+        .expect("夹具 rootsJson 不是合法 JSON");
+        let mut expanded_roots_value = expand_fixture_value(&fixture_roots_value);
+        for key in ["subtree", "exact", "anyDrive", "neverNames"] {
+            if let Some(items) = expanded_roots_value[key].as_array_mut() {
+                for item in items {
+                    if let Some(s) = item.as_str() {
+                        let normalized = if key == "subtree" || key == "exact" {
+                            normalize_for_compare(s).low
+                        } else {
+                            s.to_lowercase()
+                        };
+                        *item = Value::String(normalized);
+                    }
+                }
+            }
+        }
+        let expanded_roots_json = serde_json::to_string(&expanded_roots_value)
+            .expect("展开后的 rootsJson 序列化失败");
 
         // ① 清单 JSON 逐字节一致（含键顺序，便于双侧对拍）
         assert_eq!(
             json_of(&roots),
-            f["rootsJson"].as_str().unwrap(),
+            expanded_roots_json,
             "受保护清单 JSON 与 JS 权威实现不一致"
         );
 
         // ② 逐向量判定一致
         let mut diff: Vec<String> = Vec::new();
-        for v in f["vectors"].as_array().unwrap() {
+        for v in expanded["vectors"].as_array().unwrap() {
             let p = v["p"].as_str().unwrap();
             let expect = v["protected"].as_bool().unwrap();
             let got = is_path_protected_with(p, &roots);
@@ -1360,12 +1493,12 @@ mod tests {
 
         // ③ P1-05/S1：PS 端真实执行结果（psVectors）必须与 JS vectors.protected 逐项一致。
         // psVectors 是生成器实际跑 Windows PowerShell 得到的布尔数组；为 {error} 或缺项即红。
-        let ps = f["psVectors"].as_array().expect(
+        let ps = expanded["psVectors"].as_array().expect(
             "夹具缺 psVectors（PS 端未真实执行或执行报错——重跑 node tools/gen-protect-parity.mjs）",
         );
-        assert_eq!(ps.len(), f["vectors"].as_array().unwrap().len(),
+        assert_eq!(ps.len(), expanded["vectors"].as_array().unwrap().len(),
             "psVectors 条数与 vectors 不符");
-        for (i, (pv, v)) in ps.iter().zip(f["vectors"].as_array().unwrap()).enumerate() {
+        for (i, (pv, v)) in ps.iter().zip(expanded["vectors"].as_array().unwrap()).enumerate() {
             let got = pv.as_bool().unwrap_or(false);
             let want = v["protected"].as_bool().unwrap();
             assert_eq!(got, want,
@@ -1602,6 +1735,22 @@ mod tests {
         );
         // verbatim 不可折回形态仍按字面键口径（P0-1 的既有契约，不能被本改动带偏）
         assert_eq!(normalize_lexical(r"\\.\C:\Windows."), r"\\.\c:\windows.");
+    }
+
+    /// R5a-M01：删除前的名字形态闸必须能判红尾点/尾空格/保留名/相对段。
+    #[test]
+    fn r5a_m01_path_name_shape_gate() {
+        for bad in [
+            r"C:\probe\CON",
+            r"C:\probe\CON.txt",
+            r"C:\probe\tail.",
+            r"C:\probe\tail ",
+            r"C:\probe\..\victim.txt",
+        ] {
+            assert!(path_name_shape_block_reason(bad).is_some(), "应拒绝：{bad}");
+        }
+        assert!(path_name_shape_block_reason(r"C:\probe\normal.txt").is_none());
+        assert!(path_name_shape_block_reason(r"\\srv\share\normal.txt").is_none());
     }
 
     /// v5-K02 批次 1（R6a-M02）：判据层与比较键层共用同一词法归一。

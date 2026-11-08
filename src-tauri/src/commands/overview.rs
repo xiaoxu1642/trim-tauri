@@ -119,7 +119,9 @@ pub async fn overview_hardware<R: tauri::Runtime>(
             // 扫描失败回落旧缓存（degraded），避免一次失败把页面清空
             match read_system_info_cache().await {
                 Some((at, data)) => Ok(serde_json::json!({
-                    "success": true, "data": data, "cached": true, "cachedAt": at, "degraded": true
+                    "success": true, "data": data, "cached": true, "cachedAt": at, "degraded": true,
+                    "degradedReason": "系统信息采集失败，已回落到旧缓存",
+                    "degradedSource": "overview.systemInfo"
                 })),
                 None => Ok(serde_json::json!({ "success": false, "message": message })),
             }

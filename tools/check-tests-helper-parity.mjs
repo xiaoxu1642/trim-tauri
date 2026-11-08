@@ -28,6 +28,7 @@ import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gate } from './lib/gate.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const TESTS = join(ROOT, 'src-tauri', 'tests');
@@ -40,11 +41,9 @@ const g = gate(import.meta.url);
 // 那正是「清单塌缩」型假绿（sub_windows 元断言同一条纪律）。
 const HELPER_FLOOR = 8;
 
-/** 剥 Rust 行注释与块注释（不处理嵌套块注释——本仓 tests/ 无此形态）。 */
+/** 剥 Rust 行注释与块注释；嵌套块注释由共享状态机处理。 */
 function stripComments(src) {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+  return blankNonCode(src, 'rs', { keepStrings: true });
 }
 
 /** 从 common/mod.rs 现解析 pub helper 名单（单一真源，不硬编码）。 */

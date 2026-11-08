@@ -245,12 +245,23 @@ pub fn uninstall_reg_backup_list<R: tauri::Runtime>(window: WebviewWindow<R>) ->
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
-    let mut items = render_reg_backups(crate::engine::paths::backup_read_entries(
-        UNINSTALL_REG_BACKUP_SUB,
-    ));
+    let (entries, unreadable) = crate::engine::paths::read_entries_across_roots_state(
+        crate::engine::paths::backup_read_dirs(UNINSTALL_REG_BACKUP_SUB),
+    );
+    let mut items = render_reg_backups(entries);
     let total_count = items.len();
     items.truncate(50);
-    json!({ "success": true, "data": { "backups": items, "totalCount": total_count } })
+    json!({
+        "success": true,
+        "data": {
+            "backups": items,
+            "totalCount": total_count,
+            "unreadable": unreadable,
+            "degraded": unreadable > 0,
+            "degradedReason": if unreadable > 0 { Some("部分注册表备份目录/文件不可读，列表可能不完整") } else { None },
+            "degradedSource": "uninstall.regBackupList"
+        }
+    })
 }
 
 /// uninstall:reg-backup-restore — 把单个备份 import 回注册表（主窗专属）。
@@ -334,11 +345,16 @@ pub fn uninstall_batch_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Valu
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
+    let (packs, unreadable) = crate::engine::restore_pack::list_with_state(50);
     json!({
         "success": true,
         "data": {
-            "packs": crate::engine::restore_pack::list(50),
+            "packs": packs,
             "totalBytes": crate::engine::restore_pack::total_bytes(),
+            "unreadable": unreadable,
+            "degraded": unreadable > 0,
+            "degradedReason": if unreadable > 0 { Some("部分还原包目录/清单不可读，列表可能不完整") } else { None },
+            "degradedSource": "uninstall.batchList"
         }
     })
 }

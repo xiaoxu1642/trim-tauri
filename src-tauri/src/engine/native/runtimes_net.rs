@@ -38,6 +38,7 @@ fn parse_proxy_endpoints(server: &str) -> Vec<(String, Option<u16>)> {
         if part.is_empty() { continue; }
         let hostport = part.rsplit_once('=').map(|(_, v)| v.trim()).unwrap_or(part);
         if hostport.is_empty() { continue; }
+        let hostport = strip_proxy_userinfo(hostport);
         if let Some(rest) = hostport.strip_prefix('[') {
             if let Some(end) = rest.find(']') {
                 let host = format!("[{}]", &rest[..end]);
@@ -54,12 +55,45 @@ fn parse_proxy_endpoints(server: &str) -> Vec<(String, Option<u16>)> {
     out
 }
 
+/// 代理串的 `scheme://user:pass@host` 与 `user:pass@host` 都只保留 host 段。
+/// 该函数是回显、回环判定与监听探测的共同入口，禁止在调用点各写一份。
+fn strip_proxy_userinfo(s: &str) -> &str {
+    let body = s.rsplit_once("://").map(|(_, tail)| tail).unwrap_or(s);
+    body.rsplit_once('@').map(|(_, host)| host).unwrap_or(body)
+}
+
+fn proxy_is_loopback(host: &str) -> bool {
+    let host = strip_proxy_userinfo(host);
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "[::1]"
+}
+
+fn proxy_endpoint_text(host: &str, port: Option<u16>) -> String {
+    let host = strip_proxy_userinfo(host);
+    match port {
+        Some(p) => format!("{host}:{p}"),
+        None => format!("{host}:端口未知"),
+    }
+}
+
+fn mask_proxy(s: &str) -> String {
+    let body = strip_proxy_userinfo(s);
+    let had_userinfo = s.rsplit_once('@').is_some();
+    let mask = if body.starts_with(|c: char| c.is_ascii_digit()) {
+        let parts: Vec<&str> = body.split('.').collect();
+        if parts.len() >= 4 { format!("{}.*.*", parts[0]) } else { body.to_string() }
+    } else if let Some(dot) = body.find('.') {
+        format!("{}.*", &body[..dot])
+    } else {
+        body.to_string()
+    };
+    if had_userinfo { format!("***:***@{mask}") } else { mask }
+}
+
 /// 单端点监听判定：Some(true/false) = 有结论；None = 不可判定（无端口 / 非本机 /
 /// 双栈探针都不可用）。IPv4 与 IPv6 各探一次，任一在听即算在听。
 fn endpoint_listening(host: &str, port: Option<u16>) -> Option<bool> {
     let Some(port) = port else { return None };
-    let loopback = host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "[::1]";
-    if !loopback { return None; }
+    if !proxy_is_loopback(host) { return None; }
     let probe = |addr: &str| -> Option<bool> {
         match std::net::TcpListener::bind((addr, port)) {
             Ok(_) => Some(false),
@@ -526,10 +560,11 @@ pub fn netcheck_status() -> Result<Value, String> {
 
         // ---- 3. DHCP 服务 ----
         let dhcp_in_use = up_nics.iter().any(|n| n.dhcp_enabled);
-        let dhcp_svc = service_status("Dhcp");
+        let dhcp_svc = service_status_query("Dhcp");
         let (dhcp_status, dhcp_detail, dhcp_repair, dhcp_evidence) = match dhcp_svc {
-            None => ("warn", "未找到 Dhcp 服务".to_string(), Value::Null, vec!["Dhcp 服务：未找到".to_string()]),
-            Some((state, _)) => {
+            ServiceQuery::NotFound => ("warn", "未找到 Dhcp 服务".to_string(), Value::Null, vec!["Dhcp 服务：未找到".to_string()]),
+            ServiceQuery::Unknown => ("warn", "Dhcp 服务查询失败（权限或 SCM 异常）".to_string(), Value::Null, vec!["Dhcp 服务：查询失败".to_string()]),
+            ServiceQuery::State(state) => {
                 let state_str = match state { 4 => "Running", 1 => "Stopped", _ => "Unknown" };
                 let ev = format!("Dhcp 服务：{state_str}；DHCP 网卡启用：{dhcp_in_use}");
                 if state == 4 {
@@ -546,8 +581,18 @@ pub fn netcheck_status() -> Result<Value, String> {
         items.push(json!({"id": "dhcp", "status": dhcp_status, "evidence": dhcp_evidence, "detail": dhcp_detail, "repair": dhcp_repair}));
 
         // ---- 4. DNS ----
-        let dns_svc = service_status("Dnscache");
+        let dns_query = service_status_query("Dnscache");
         let mut dns_evidence: Vec<String> = Vec::new();
+        let mut dns_unknown = false;
+        let dns_svc = match dns_query {
+            ServiceQuery::State(state) => Some((state, 0)),
+            ServiceQuery::NotFound => None,
+            ServiceQuery::Unknown => {
+                dns_unknown = true;
+                dns_evidence.push("Dnscache 服务：查询失败".to_string());
+                None
+            }
+        };
         if let Some((state, _)) = dns_svc {
             let state_str = match state { 4 => "Running", 1 => "Stopped", _ => "Unknown" };
             dns_evidence.push(format!("Dnscache 服务：{state_str}"));
@@ -560,7 +605,9 @@ pub fn netcheck_status() -> Result<Value, String> {
             }
         }
         let dns_svc_stopped = dns_svc.map(|(s, _)| s != 4).unwrap_or(false);
-        let (dns_status, dns_detail, dns_repair) = if dns_svc_stopped || !has_dns {
+        let (dns_status, dns_detail, dns_repair) = if dns_unknown {
+            ("warn", "DNS Client 服务查询失败，无法确认其运行状态".to_string(), Value::Null)
+        } else if dns_svc_stopped || !has_dns {
             if dns_svc_stopped {
                 ("fail", "DNS Client 服务未运行".to_string(), json!({"id": "start-dnscache"}))
             } else {
@@ -604,21 +651,6 @@ pub fn netcheck_status() -> Result<Value, String> {
         // API 读取失败是「未知」，不能当成「无代理」。
         let winhttp_proxy = winhttp_proxy_native();
         let winhttp_has_proxy = matches!(winhttp_proxy, Some(Some(_)));
-        fn mask_proxy(s: &str) -> String {
-            let body = s;
-            // 去掉 scheme
-            let body = if let Some(pos) = body.find("://") { &body[pos+3..] } else { body };
-            let at = body.rfind('@');
-            let mask = if let Some(pos) = at { &body[pos+1..] } else { body };
-            let mask = if mask.starts_with(|c: char| c.is_ascii_digit()) {
-                // IPv4：掩中间两段
-                let parts: Vec<&str> = mask.split('.').collect();
-                if parts.len() >= 4 { format!("{}.*.*", parts[0]) } else { mask.to_string() }
-            } else {
-                if let Some(dot) = mask.find('.') { format!("{}.*", &mask[..dot]) } else { mask.to_string() }
-            };
-            if at.is_some() { format!("***:***@{mask}") } else { mask }
-        }
         if p_gpo {
             proxy_status = "warn";
             proxy_evidence.push("检测到组策略下发的代理（由组织管理）".to_string());
@@ -629,9 +661,7 @@ pub fn netcheck_status() -> Result<Value, String> {
             let endpoints = parse_proxy_endpoints(&p_server);
             let mut any_listening = false;
             let mut any_unknown = false;
-            let is_loopback = endpoints.iter().any(|(h, _)| {
-                h.eq_ignore_ascii_case("localhost") || h == "127.0.0.1" || h == "[::1]"
-            });
+            let is_loopback = endpoints.iter().any(|(h, _)| proxy_is_loopback(h));
             for (h, port) in &endpoints {
                 match endpoint_listening(h, *port) {
                     Some(true) => any_listening = true,
@@ -641,10 +671,7 @@ pub fn netcheck_status() -> Result<Value, String> {
             }
             let ep_text = endpoints
                 .iter()
-                .map(|(h, p)| match p {
-                    Some(p) => format!("{h}:{p}"),
-                    None => format!("{h}:端口未知"),
-                })
+                .map(|(h, p)| proxy_endpoint_text(h, *p))
                 .collect::<Vec<_>>()
                 .join("、");
             proxy_evidence.push(format!(
@@ -1025,5 +1052,34 @@ mod tests {
         );
         assert!(endpoint_listening("127.0.0.1", None).is_none());
         assert!(endpoint_listening("example.com", Some(7890)).is_none());
+    }
+
+    /// R5b-M01：userinfo 只能参与连接字符串解析，绝不能进入 evidence；剥离后
+    /// 127.0.0.1/localhost 仍必须被识别为本机残留代理候选。
+    /// 判红自证：把 `proxy_endpoint_text` 改回直接拼 `host`，第一条脱敏断言红；
+    /// 去掉回环判定的剥离，第二条红。
+    #[test]
+    fn 代理凭据不进入回执且脱敏后仍识别回环() {
+        let eps = parse_proxy_endpoints(
+            "http=user:secret@127.0.0.1:8080;socks=alice:pw@localhost:7890",
+        );
+        let shown = eps.iter()
+            .map(|(h, p)| proxy_endpoint_text(h, *p))
+            .collect::<Vec<_>>()
+            .join("、");
+        assert!(!shown.contains("user") && !shown.contains("secret") && !shown.contains('@'), "{shown}");
+        assert!(!shown.contains("alice") && !shown.contains("pw@"), "{shown}");
+        assert_eq!(proxy_endpoint_text("user:secret@127.0.0.1", Some(8080)), "127.0.0.1:8080");
+        assert_eq!(proxy_endpoint_text("alice:pw@localhost", None), "localhost:端口未知");
+        assert_eq!(
+            parse_proxy_endpoints("user:secret@127.0.0.1"),
+            vec![("127.0.0.1".to_string(), None)],
+            "无端口的 userinfo 也不能让 host 被冒号误拆"
+        );
+        assert!(proxy_is_loopback(&eps[0].0), "剥 userinfo 后应识别 127.0.0.1：{:?}", eps[0]);
+        assert!(proxy_is_loopback(&eps[1].0), "剥 userinfo 后应识别 localhost：{:?}", eps[1]);
+        let masked = mask_proxy("http://user:secret@127.0.0.1:8080");
+        assert!(!masked.contains("user") && !masked.contains("secret"), "{masked}");
+        assert!(masked.starts_with("***:***@"), "带 userinfo 的回显必须显式掩码：{masked}");
     }
 }

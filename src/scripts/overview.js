@@ -141,11 +141,13 @@
     try {
       let data = null;
       let cachedAt = null;
+      let degraded = false;
       if (window.api?.overview?.hardware) {
         const resp = await window.api.overview.hardware({ refresh: !!force });
         if (!resp.success) throw new Error(resp.message);
         data = resp.data;
         cachedAt = resp.cachedAt || null;
+        degraded = resp.degraded === true;
       } else if (window.api?.device) {
         const resp = await window.api.device.scan();
         if (!resp.success) throw new Error(resp.message);
@@ -162,7 +164,9 @@
       }
       el.innerHTML = rows.map(([label, value]) =>
         `<div class="device-info-row"><span class="device-info-label">${label}</span><span class="device-info-value">${escapeHtml(value || '--')}</span></div>`
-      ).join('');
+      ).join('') + (degraded
+        ? '<div class="device-info-row"><span class="device-info-label">读取状态</span><span class="device-info-value">部分信息读取失败，显示的是上次缓存，可能不完整</span></div>'
+        : '');
       state.hardwareLoaded = true;
     } catch (e) {
       el.innerHTML = `<div class="empty-state"><p>硬件信息加载失败：${escapeHtml(e.message)}</p></div>`;

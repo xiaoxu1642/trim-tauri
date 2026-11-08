@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 
 import { gate } from './lib/gate.mjs';
 import { styleLinks } from './lib/html-tags.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const S = 'src/styles';
@@ -119,7 +120,7 @@ const PSEUDO_ELEM = new Set(['before', 'after', 'first-line', 'first-letter', 's
   'webkit-slider-thumb', 'webkit-slider-runnable-track', 'webkit-inner-spin-button', 'webkit-outer-spin-button',
   'backdrop', 'marker', 'file-selector-button', 'cue', 'grammar-error', 'spelling-error']);
 function selInfo(prelude) {
-  const p = prelude.replace(/\/\*[\s\S]*?\*\//g, '');
+  const p = blankNonCode(prelude, 'css', { keepStrings: true });
   const cls = [...p.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)].map(m => m[1]);
   const ids = [...p.matchAll(/#(-?[_a-zA-Z][\w-]*)/g)].map(m => m[1]);
   const attrs = [...p.matchAll(/\[\s*([_a-zA-Z][\w-]*)/g)].map(m => m[1]);
@@ -157,7 +158,7 @@ function corpusOf(htmlRel) {
   for (const s of scripts) {
     const abs = join(ROOT, s);
     if (!existsSync(abs)) { g.fail(`${htmlRel} 声明的脚本 ${s} 不在盘上（语料残缺，S2 判据不可信）`); continue; }
-    const js = readFileSync(abs, 'utf8').replace(/\/\*[\s\S]*?\*\//g, ' ');
+    const js = blankNonCode(readFileSync(abs, 'utf8'), 'js', { keepStrings: true });
     texts.push(js);
     for (const m of js.matchAll(/(['"`])((?:\\.|(?!\1)[^\\])*?)\1/g)) texts.push(' ' + m[2].replace(/\\./g, ' ') + ' ');
   }
@@ -297,6 +298,10 @@ const DS_PAIR_BASELINE_RAW = [
   '.ds-badge::before|content', '.ds-badge::before|flex-shrink',
   '.ds-badge::before|height', '.ds-badge::before|width',
   '.ds-menu-item.danger:hover, .ds-menu-item.danger:focus-visible|background',
+  '.ds-menu-item:focus-visible|outline',
+  '.ds-menu-item:focus-visible|outline-offset',
+  '.ds-menu-item:hover|background',
+  '.ds-menu-item:hover|color',
   '.ds-menu-item:hover, .ds-menu-item:focus-visible|background',
   '.ds-menu-item:hover, .ds-menu-item:focus-visible|color',
   '.ds-menu-item:hover, .ds-menu-item:focus-visible|outline',

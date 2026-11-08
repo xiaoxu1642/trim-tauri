@@ -132,10 +132,14 @@ if (!existsSync(join(CRATE, 'Cargo.toml'))) {
 const r = spawnSync(
   'cargo',
   ['test', '--message-format', 'short', 'ps_substitution', '--', '--nocapture', '--ignored'],
-  { cwd: CRATE, env: { ...process.env, TRIM_PS_SUBST_DIR: work }, encoding: 'utf8', shell: false }
+  { cwd: CRATE, env: { ...process.env, TRIM_PS_SUBST_DIR: work }, encoding: 'utf8', shell: false, timeout: 5 * 60 * 1000 }
 );
 if (!FIXED_DIR) {
   rmSync(work, { recursive: true, force: true });
+}
+if (r.error) {
+  console.log(`\n✗ cargo test ps_substitution 超时或无法启动（A5-M02，5 分钟上限）：${r.error.message}`);
+  process.exit(1);
 }
 const cargoText = `${r.stdout || ''}${r.stderr || ''}`;
 console.log(cargoText.trimEnd());

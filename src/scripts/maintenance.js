@@ -13,7 +13,7 @@
   let NARA_PANEL_MAINT = null;
   const status = new Map();     // taskId -> 'idle'|'running'|'ok'|'warn'|'error'
   const selected = new Set();   // 批量勾选的 taskId（跨分类保留）
-  let batch = null;             // 批量状态 { total, done, ok, fail, cancelRequested } | null
+  let batch = null;             // 批量状态 { total, done, ok, fail, cancelRequested, outputStarted } | null
   // 审查 2026-09-27 M8：批量执行中触发提权时，应用将重启、内存勾选集丢失。
   // 剩余批次在提权确认瞬间写入 localStorage，重启进页时恢复预勾选并提示续跑。
   const MAINT_PENDING_BATCH_KEY = 'trim-maint-pending-batch';
@@ -241,7 +241,7 @@
       const badge = st !== 'idle' ? `<span class="maint-status maint-status-${st}">${STATUS_LABEL[st] || st}</span>` : '';
       const adminTag = t.admin ? '<span class="maint-admin-tag" data-tip="需要管理员权限">管理员</span>' : '';
       return `
-        <div class="maint-card${isSelected ? ' selected' : ''}${isRunning ? ' running' : ''}" data-id="${escapeHtml(t.id)}">
+        <div class="maint-card${isSelected ? ' selected' : ''}${isRunning ? ' running' : ''}" data-id="${escapeHtml(t.id)}" tabindex="0" role="button" aria-label="查看「${escapeHtml(t.title)}」详情">
           <label class="maint-check" data-tip="勾选后可批量执行">
             <input type="checkbox" data-check="${escapeHtml(t.id)}" ${isSelected ? 'checked' : ''} ${busy ? 'disabled' : ''} aria-label="选择 ${escapeHtml(t.title)}" />
           </label>
@@ -275,6 +275,13 @@
     el.querySelectorAll('.maint-card').forEach(card => {
       card.addEventListener('click', (e) => {
         if (e.target.closest('button, input, label')) return;
+        const task = tasks.find(t => t.id === card.dataset.id);
+        if (task) openMaintDetail(task);
+      });
+      card.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        if (e.target.closest('button, input, label')) return;
+        e.preventDefault();
         const task = tasks.find(t => t.id === card.dataset.id);
         if (task) openMaintDetail(task);
       });
@@ -327,7 +334,11 @@
     const body = document.getElementById('maintOutputBody');
     const head = document.getElementById('maintOutputTitle');
     if (head) head.textContent = title;
-    if (body) body.textContent = '';
+    // F4a2-M32：批量执行保留开始横幅与前序输出；单次操作仍清空。
+    // 不能拿 batch.done > 0 判定：首个任务确认前的 showOutput 也会被当成「批量开始」，
+    // 把开始横幅和 [1/N] 行清掉。由 runBatch 在首帧落笔后置 outputStarted。
+    const append = !!(batch && batch.outputStarted);
+    if (body && !append) body.textContent = '';
     if (panel) panel.style.display = 'block';
   }
 
@@ -480,8 +491,9 @@
     );
     if (!ok) return;
 
-    batch = { total: list.length, done: 0, ok: 0, fail: 0, cancelRequested: false };
+    batch = { total: list.length, done: 0, ok: 0, fail: 0, cancelRequested: false, outputStarted: false };
     showOutput(`批量执行 ${list.length} 项 · 输出`);
+    batch.outputStarted = true;
     appendOutput(`===== 批量执行开始：共 ${list.length} 项 =====`);
     updateBatchbar();
     renderList();

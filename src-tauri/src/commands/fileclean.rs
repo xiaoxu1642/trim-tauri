@@ -613,6 +613,8 @@ pub async fn fileclean_scan<R: Runtime>(
     let mut resp = scan_response(items, total_size, resolved_display, unhandled, truncated);
     if let Some(o) = resp.as_object_mut() {
         o.insert("degraded".into(), json!(degraded));
+        o.insert("degradedReason".into(), json!(if degraded { Some("路径配置读取失败，扫描目录可能回落到默认值") } else { None }));
+        o.insert("degradedSource".into(), json!("fileclean.paths"));
     }
     resp
 }

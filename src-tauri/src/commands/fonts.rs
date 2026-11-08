@@ -254,12 +254,20 @@ pub async fn fonts_import<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
     let checked = {
         let probe = src.clone();
         tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            // R1b-M10：UNC 不先触盘（离线共享会把 IO 挂住）；字体导入只收本地文件。
+            if probe.to_string_lossy().starts_with(r"\\") {
+                return Err("字体文件不支持网络路径，请先下载到本机".to_string());
+            }
             if !probe.exists() {
                 return Err("字体文件不存在或不可访问".to_string());
             }
             let meta = std::fs::metadata(&probe).map_err(|_| "字体文件为空或不可读取".to_string())?;
             if !meta.is_file() || meta.len() == 0 {
                 return Err("字体文件为空或不可读取".to_string());
+            }
+            const MAX_FONT_BYTES: u64 = 50 * 1024 * 1024;
+            if meta.len() > MAX_FONT_BYTES {
+                return Err(format!("字体文件过大（{} MB），上限 50 MB", meta.len() / 1024 / 1024));
             }
             if !is_font_file_valid(&probe) {
                 return Err(

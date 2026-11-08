@@ -22,6 +22,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const CRATE = join(REPO_ROOT, 'native-scanner');
 const SRC = join(CRATE, 'src');
@@ -110,6 +111,8 @@ const DIFF_TEST = join(CRATE, 'tests', 'cleanup_scan_rule_diff.rs');
 const r = spawnSync('cargo', ['test'], {
   cwd: CRATE,
   stdio: 'inherit',
+  // A5-M02：无超时的子进程会永久挂住门禁；5 分钟覆盖本仓全 crate 测试的实测上限。
+  timeout: 5 * 60 * 1000,
 });
 
 // v6-K21：cargo 失败**不再提前 exit**——静态留痕断言（R1-2/E9/E10/E11）照样跑完，
@@ -158,14 +161,15 @@ function isSkipBranch(line) {
 
 /** 找每处跳过站点，并检查其后续 3 行内是否有计数自增 */
 function reparseSkipSites(src, label) {
-  const lines = src.split('\n');
+  const lines = blankNonCode(src, 'rs').split('\n');
+  const original = src.split('\n');
   const bare = [];
   let counted = 0;
   for (let i = 0; i < lines.length; i++) {
     if (!isSkipBranch(lines[i])) continue;
     const win = lines.slice(i, i + 4).join('\n');
     if (/skipped_reparse\s*\+=\s*1|note_reparse_skip\(\)/.test(win)) counted++;
-    else bare.push(`${label}:${i + 1} ${lines[i].trim()}`);
+    else bare.push(`${label}:${i + 1} ${(original[i] ?? lines[i]).trim()}`);
   }
   return { bare, counted };
 }
@@ -226,14 +230,15 @@ if (EXPECTED_UNTRACED.length) {
 // `+= ` / `-= ` 形式的累加。这才是「留痕不许改变判定」的可判形态。
 const judgeAdds = [];
 for (const [src, label] of [[scanRs, 'scan.rs'], [cleanRs, 'cleanup_scan.rs']]) {
-  const lines = src.split('\n');
+  const lines = blankNonCode(src, 'rs').split('\n');
+  const original = src.split('\n');
   for (let i = 0; i < lines.length; i++) {
     if (!isSkipBranch(lines[i])) continue;
     const win = lines.slice(i, i + 4);
     win.forEach((l, k) => {
       if (/skipped_reparse\s*\+=\s*1|note_reparse_skip\(\)/.test(l)) return;
       if (/\w+\s*\+=\s*[0-9]/.test(l) || /\w+\s*-=\s*[0-9]/.test(l)) {
-        judgeAdds.push(`${label}:${i + k + 1} ${l.trim()}`);
+        judgeAdds.push(`${label}:${i + k + 1} ${(original[i + k] ?? l).trim()}`);
       }
     });
   }

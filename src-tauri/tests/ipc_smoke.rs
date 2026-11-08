@@ -27,7 +27,7 @@ mod common;
 
 use common::{
     assert_guard_passed, assert_guard_rejected, invoke, invoke_text, main_window, message_of,
-    probe_guard, sub_windows, window_with_label, GUARD_REJECT_MARK,
+    probe_guard, skip_and_record, sub_windows, window_with_label, GUARD_REJECT_MARK,
 };
 use serde_json::json;
 
@@ -111,7 +111,24 @@ fn quickcmds_run_rejects_unknown_id() {
 #[test]
 fn diskbench_run_rejects_outside_whitelist() {
     let w = main_window();
-    let res = invoke(&w, "diskbench_run", json!({ "options": { "path": "C:\\Windows" } }));
+    // X1-M01：不要拿真实系统目录做「白名单外」样本——万一下游白名单被摘掉，
+    // 这条会真的往 C:\Windows 落盘测速。用 Public 下自建目录（不在 USERPROFILE/
+    // TEMP/APPDATA 白名单内），测完即删；建不出来就显式 SKIP，不许硬红。
+    let Some(public) = std::env::var_os("PUBLIC") else {
+        skip_and_record("diskbench_run 白名单外样本：本机没有 PUBLIC 目录，本节未验证");
+        return;
+    };
+    let outside = std::path::PathBuf::from(public).join(format!("TrimSmoke-diskbench-{}", std::process::id()));
+    if std::fs::create_dir_all(&outside).is_err() {
+        skip_and_record("diskbench_run 白名单外样本：Public 下自建目录失败，本节未验证");
+        return;
+    }
+    let res = invoke(
+        &w,
+        "diskbench_run",
+        json!({ "options": { "path": outside.to_string_lossy() } }),
+    );
+    let _ = std::fs::remove_dir_all(&outside);
     assert_eq!(res["success"], json!(false), "白名单外路径必须被拒: {res}");
     assert!(
         message_of(&res).contains("测速路径受限"),

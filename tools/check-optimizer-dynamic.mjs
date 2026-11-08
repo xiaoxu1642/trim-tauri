@@ -57,6 +57,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const R = (rel) => readFileSync(join(REPO_ROOT, ...rel.split('/')), 'utf8');
 
@@ -462,7 +463,10 @@ function sideMarkerProblem(src, field, sideName, anchor) {
   }
   const body = rustFnBody(src, anchor.fn);
   if (!body) return `「${field}」${sideName}侧的 fn ${anchor.fn}() 取不到函数体 —— 改名/搬家了要同步本门禁`;
-  return body.includes(anchor.marker)
+  // T1f-M02：标记必须在可执行行，注释里的同名文本不顶账。
+  // 保留字符串：`get("startType")` / `kind: "reg"` 的判别子本身就是字面量；
+  // 只抹注释即可挡住「注释里的标记顶账」。
+  return blankNonCode(body, 'rs', { keepStrings: true }).includes(anchor.marker)
     ? ''
     : `「${field}」${sideName}侧 fn ${anchor.fn}() 体内没有 \`${anchor.marker}\`（文件别处出现不算消费）`;
 }
@@ -534,8 +538,16 @@ function sideMarkerProblem(src, field, sideName, anchor) {
       检测: [{ fn: 'collect_checks', marker: 'kind: "svc"' }],
       备份: [{ fn: 'collect_service_start_targets', marker: 'svc_start_target' }],
     },
-    // startType 的三侧锚点是写在文件头的 D0-* 契约声明（不是函数体标记），保持整文件判。
-    startType: { 执行: 'D0-EXEC-SIDE', 检测: 'D0-CHECK-SIDE', 备份: 'D0-BACKUP-SIDE' },
+    // T1f-M02：startType 旧锚点只是文件头注释（D0-*-SIDE），注释删不删都不影响
+    // 实际读取。改成三侧真实消费行：执行/检测/备份都必须读 `s.get("startType")`。
+    startType: {
+      执行: [
+        { fn: 'build_script', marker: 'get("startType")' },
+        { fn: 'native_execute_steps', marker: 'get("startType")' },
+      ],
+      检测: [{ fn: 'collect_checks', marker: 'get("startType")' }],
+      备份: [{ fn: 'collect_service_start_targets', marker: 'get("startType")' }],
+    },
     disable: {
       执行: [{ fn: 'build_script', marker: 'want_disable' }, { fn: 'native_execute_steps', marker: 'want_disable' }],
       检测: [{ fn: 'collect_checks', marker: 'kind: "svc"' }],
@@ -597,12 +609,18 @@ function sideMarkerProblem(src, field, sideName, anchor) {
   const ctlPass = sideMarkerProblem(demo, 'reg', '检测', { fn: 'consume_checks', marker: 'kind: "reg"' }) === '';
   const ctlOther = sideMarkerProblem(demo, 'reg', '检测', { fn: 'other', marker: 'kind: "reg"' }) !== '';
   const ctlNoFn = sideMarkerProblem(demo, 'reg', '检测', { fn: 'missing_fn', marker: 'kind: "reg"' }) !== '';
-  check(ctlPass && ctlOther && ctlNoFn,
-    'A8.5 对照：消费函数体内放行 / 标记只落在别的函数体内必红 / 取不到函数体必红',
+  const ctlComment = sideMarkerProblem(
+    'fn consume_checks() {\n  // kind: "reg"\n}',
+    'reg',
+    '检测',
+    { fn: 'consume_checks', marker: 'kind: "reg"' },
+  ) !== '';
+  check(ctlPass && ctlOther && ctlNoFn && ctlComment,
+    'A8.5 对照：消费函数体内放行 / 标记只落在别的函数体内必红 / 取不到函数体必红 / 只在注释里出现必红',
     ctlPass
-      ? (ctlOther && ctlNoFn
+      ? (ctlOther && ctlNoFn && ctlComment
         ? ''
-        : `判据失灵：${[!ctlOther ? '别的函数体被当成消费' : '', !ctlNoFn ? '函数体取不到却放行' : ''].filter(Boolean).join('、')}`)
+        : `判据失灵：${[!ctlOther ? '别的函数体被当成消费' : '', !ctlNoFn ? '函数体取不到却放行' : '', !ctlComment ? '注释里的标记被当成消费' : ''].filter(Boolean).join('、')}`)
       : '消费函数体内的标记反而被判红');
 
   // ⑥ 覆盖率棘轮：数据层出现新字段时，三侧覆盖必须跟上。

@@ -15,7 +15,7 @@
 
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use super::dead::expand_pct;
+use super::dead::{expand_pct, is_remote_or_device_path};
 use super::helpers::{reg_sz, to_wide};
 use super::residue::reg_enum_subkeys;
 use super::residue_update::contribs;
@@ -234,12 +234,14 @@ pub(super) fn wegame_dirs_from_ini(text: &str) -> Vec<String> {
         }
         let Some((_, val)) = t.split_once('=') else { continue };
         let v = val.trim().trim_matches('"');
-        // 绝对路径形态：`X:\...` 或 `\\server\share\...`
-        let abs = (v.len() > 3
+        if is_remote_or_device_path(v) {
+            continue;
+        }
+        // 本机绝对路径形态：`X:\...`；UNC/设备路径已在上一行 fail-closed。
+        let abs = v.len() > 3
             && v.as_bytes()[0].is_ascii_alphabetic()
             && v.as_bytes()[1] == b':'
-            && v.as_bytes()[2] == b'\\')
-            || v.starts_with(r"\\");
+            && v.as_bytes()[2] == b'\\';
         if abs && !out.iter().any(|o| o == v) {
             out.push(v.to_string());
         }
@@ -248,13 +250,16 @@ pub(super) fn wegame_dirs_from_ini(text: &str) -> Vec<String> {
 }
 
 /// 「安装目录」注册表值的清洗（Origin `Install Dir` / Uplay `InstallDir` / GOG `PATH` 共用）：
-/// 去空白与包裹引号、去尾部路径分隔符；只接受绝对路径形态（盘符 `X:\`/`X:/` 或 UNC `\\`），
+/// 去空白与包裹引号、去尾部路径分隔符；只接受本机盘符绝对路径（`X:\`/`X:/`），
 /// 其余返回 None（脏值不静默变成一条记录）。
 pub(super) fn clean_install_dir_value(raw: &str) -> Option<String> {
     let v = raw.trim().trim_matches('"').trim().trim_end_matches(['\\', '/']);
+    if is_remote_or_device_path(v) {
+        return None;
+    }
     let b = v.as_bytes();
     let drive_abs = b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/');
-    if v.is_empty() || !(drive_abs || v.starts_with(r"\\")) {
+    if v.is_empty() || !drive_abs {
         return None;
     }
     Some(v.to_string())
@@ -262,15 +267,18 @@ pub(super) fn clean_install_dir_value(raw: &str) -> Option<String> {
 
 /// Battle.net `Agent\product.db` 文本 → 安装目录候选。
 /// 该文件是文本非 sqlite（上游实现事实，cankao/5 §3.2）：以控制字符为分隔切段，
-/// 取形如绝对路径的段（`X:/…` 或 UNC），去重保序、忽略大小写。
+/// 取形如本机盘符绝对路径的段（`X:/…`），去重保序、忽略大小写。
 /// 刻意**不**按「非 ASCII 全切」（上游写法）：中文安装目录是合法路径，切碎会把它一起丢掉。
 pub(super) fn battlenet_dirs_from_db(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for seg in text.split(|c: char| (c as u32) < 0x20 || c as u32 == 0x7F) {
         let t = seg.trim().trim_matches('"').trim();
+        if is_remote_or_device_path(t) {
+            continue;
+        }
         let b = t.as_bytes();
         let drive_abs = b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'/';
-        if !(drive_abs || t.starts_with(r"\\")) {
+        if !drive_abs {
             continue;
         }
         if !out.iter().any(|o| o.eq_ignore_ascii_case(t)) {
@@ -474,12 +482,19 @@ fn collect_epic(index: &mut PlatformIndex, notes: &mut Vec<String>) {
     }
     files.sort();
     let mut parsed_any = false;
+    let mut item_failed = 0usize;
     for p in &files {
         if index.records.len() >= COLLECT_HARD_CAP {
             break;
         }
-        let Ok(text) = std::fs::read_to_string(p) else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+        let Ok(text) = std::fs::read_to_string(p) else {
+            item_failed += 1;
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else {
+            item_failed += 1;
+            continue;
+        };
         parsed_any = true;
         let Some(dir) = epic_install_dir(&v) else { continue };
         let expanded = expand_pct(&dir).unwrap_or(dir);
@@ -494,9 +509,14 @@ fn collect_epic(index: &mut PlatformIndex, notes: &mut Vec<String>) {
             dir_lc: norm,
         });
     }
-    if !parsed_any && !files.is_empty() {
-        index.unreadable.push("Epic");
-        notes.push(format!("Epic {UNREADABLE_SUFFIX}（{}.item 全部解析失败）", files.len()));
+    if item_failed > 0 || (!parsed_any && !files.is_empty()) {
+        if !index.unreadable.iter().any(|x| *x == "Epic") {
+            index.unreadable.push("Epic");
+        }
+        notes.push(format!(
+            "Epic {UNREADABLE_SUFFIX}（{item_failed}/{} 个 .item 读取或解析失败；任一失败都不能结论「不在库」）",
+            files.len()
+        ));
     }
 }
 
@@ -1060,7 +1080,7 @@ mod tests {
 
     #[test]
     fn wegame_ini_only_accepts_absolute_dirs() {
-        let ini = "; comment\n[Install]\nGamePath=D:\\WeGame\\apps\\lol\nSmall=12\nBad=relative\\path\nOther=\"C:\\WeGame\\apps\\dk\"\n[UI]\n";
+        let ini = "; comment\n[Install]\nGamePath=D:\\WeGame\\apps\\lol\nSmall=12\nBad=relative\\path\nRemote=\\\\NAS\\share\\games\nOther=\"C:\\WeGame\\apps\\dk\"\n[UI]\n";
         assert_eq!(wegame_dirs_from_ini(ini), vec!["D:\\WeGame\\apps\\lol", "C:\\WeGame\\apps\\dk"]);
     }
 
@@ -1075,7 +1095,7 @@ mod tests {
         assert_eq!(clean_install_dir_value("\"D:\\Games\\A\"").as_deref(), Some("D:\\Games\\A"));
         assert_eq!(clean_install_dir_value("  C:/Games/B  ").as_deref(), Some("C:/Games/B"));
         assert_eq!(clean_install_dir_value("D:\\Games\\A\\\\\\  ").as_deref(), Some("D:\\Games\\A"));
-        assert_eq!(clean_install_dir_value(r"\\NAS\share\games").as_deref(), Some(r"\\NAS\share\games"));
+        assert_eq!(clean_install_dir_value(r"\\NAS\share\games"), None, "UNC 安装目录必须先于触盘 fail-closed");
         assert_eq!(clean_install_dir_value(""), None);
         assert_eq!(clean_install_dir_value("relative\\path"), None);
         assert_eq!(clean_install_dir_value("C:/"), None); // 尾部裁剪后只剩盘符 = 非法路径值
@@ -1088,7 +1108,7 @@ mod tests {
         let db = "\u{0}C:/Program Files (x86)/Overwatch\u{0}\"D:/Games/暗黑破坏神 IV\"\u{1}https://example.com/x\u{2}relative/y\u{3}C:\\Backslash\\No\u{0}c:/program files (x86)/overwatch\u{4}\\\\NAS\\share\\games\u{5}";
         assert_eq!(
             battlenet_dirs_from_db(db),
-            vec!["C:/Program Files (x86)/Overwatch", "D:/Games/暗黑破坏神 IV", r"\\NAS\share\games"]
+            vec!["C:/Program Files (x86)/Overwatch", "D:/Games/暗黑破坏神 IV"]
         );
         assert!(battlenet_dirs_from_db("").is_empty());
     }

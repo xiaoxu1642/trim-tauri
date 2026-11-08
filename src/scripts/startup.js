@@ -113,8 +113,43 @@
     persistDefendPref();
   }
 
-  // 写路径：内存镜像 → localStorage 镜像（尽力）→ 后端真源（fire-and-forget）。
+  // 写路径：内存镜像 → localStorage 镜像（尽力）→ 后端真源（仅布尔总开关，fire-and-forget）。
   // 后端写失败只降级不阻塞：本次会话仍按内存值工作，重启后由本地镜像兜底。
+  function warnDefendPrefSync(message) {
+    window.app?.log?.('warn', message);
+    if (!prefSyncWarned) {
+      prefSyncWarned = true;
+      window.app?.toast?.('warning', '防恢复设置未能写入配置文件，清理浏览器数据后可能丢失');
+    }
+  }
+
+  function syncDefendEnabledPref(enabled) {
+    if (typeof enabled !== 'boolean') {
+      warnDefendPrefSync('防恢复偏好写入被拒绝：enabled 必须是布尔值');
+      return false;
+    }
+    if (!window.api?.settings?.setPref) return false;
+    let pending = null;
+    try {
+      pending = window.api.settings.setPref(DEFEND_PREF_KEY, enabled);
+    } catch (e) {
+      warnDefendPrefSync(`防恢复偏好写入配置异常: ${e.message}`);
+      return false;
+    }
+    if (!pending || typeof pending.then !== 'function') {
+      warnDefendPrefSync('防恢复偏好写入未返回回执');
+      return false;
+    }
+    pending.then((resp) => {
+      if (!resp || resp.success !== true) {
+        warnDefendPrefSync(`防恢复偏好写入配置失败（本次仍生效，重启后以本地镜像为准）: ${(resp && resp.message) || '未知原因'}`);
+      }
+    }).catch((e) => {
+      warnDefendPrefSync(`防恢复偏好写入配置失败（本次仍生效，重启后以本地镜像为准）: ${e.message}`);
+    });
+    return true;
+  }
+
   function persistDefendPref() {
     prefsDirty = true;
     try {
@@ -122,21 +157,7 @@
       localStorage.setItem(DEFEND_KEY, JSON.stringify(defendStore.defend));
       localStorage.setItem(BLACKLIST_KEY, JSON.stringify(defendStore.blacklist));
     } catch (e) { /* 镜像写失败不影响主流程（真源在后端） */ }
-    try {
-      window.api?.settings?.setPref?.(DEFEND_PREF_KEY, {
-        enabled: defendStore.enabled === true,
-        defend: defendStore.defend,
-        blacklist: defendStore.blacklist,
-      })?.catch?.((e) => {
-        window.app?.log?.('warn', `防恢复偏好写入配置失败（本次仍生效，重启后以本地镜像为准）: ${e.message}`);
-        if (!prefSyncWarned) {
-          prefSyncWarned = true;
-          window.app?.toast?.('warning', '防恢复设置未能写入配置文件，清理浏览器数据后可能丢失');
-        }
-      });
-    } catch (e) {
-      window.app?.log?.('warn', `防恢复偏好写入配置异常: ${e.message}`);
-    }
+    syncDefendEnabledPref(defendStore.enabled === true);
   }
 
   // 后端真源回读（页面加载时一次）：有值 ⇒ 采纳并刷新开关条；无值 ⇒ 把本地镜像
@@ -146,15 +167,19 @@
       const resp = await window.api?.settings?.getPrefs?.();
       if (!resp || !resp.success || prefsDirty) return;
       const v = resp.data?.[DEFEND_PREF_KEY];
-      if (v && typeof v === 'object' && !Array.isArray(v)) {
-        defendStore.enabled = v.enabled === true;
-        defendStore.defend = (v.defend && typeof v.defend === 'object' && !Array.isArray(v.defend)) ? v.defend : {};
-        defendStore.blacklist = Array.isArray(v.blacklist) ? v.blacklist : [];
+      const legacyObject = v && typeof v === 'object' && !Array.isArray(v);
+      if (typeof v === 'boolean' || legacyObject) {
+        defendStore.enabled = typeof v === 'boolean' ? v : v.enabled === true;
+        if (legacyObject) {
+          defendStore.defend = (v.defend && typeof v.defend === 'object' && !Array.isArray(v.defend)) ? v.defend : {};
+          defendStore.blacklist = Array.isArray(v.blacklist) ? v.blacklist : [];
+        }
         try {
           localStorage.setItem(DEFEND_ENABLED_KEY, JSON.stringify(defendStore.enabled));
           localStorage.setItem(DEFEND_KEY, JSON.stringify(defendStore.defend));
           localStorage.setItem(BLACKLIST_KEY, JSON.stringify(defendStore.blacklist));
         } catch (e) { /* 镜像写失败不影响（真源已就位） */ }
+        if (legacyObject) persistDefendPref(); // 历史对象迁回布尔总开关；账本继续由本地镜像承载
       } else {
         persistDefendPref(); // 迁移：后端没有值，把本地现值推上去
       }
@@ -209,6 +234,25 @@
     } catch (e) { return false; }
   }
 
+  function startupRemoveOutcome(resp, item) {
+    if (!resp || resp.success !== true) {
+      return { ok: false, message: (resp && resp.message) || '删除未执行' };
+    }
+    const data = resp.data || {};
+    const results = Array.isArray(data.results) ? data.results : [];
+    const hit = results.find(x => x && x.id === (item && item.id));
+    if ((Number(data.success) || 0) < 1) {
+      return { ok: false, message: '删除回执未报告成功项' };
+    }
+    if (!hit) {
+      return { ok: false, message: '删除回执缺少该项结果' };
+    }
+    if (hit.status !== 'ok') {
+      return { ok: false, message: hit.message || `删除状态为 ${hit.status || '未知'}` };
+    }
+    return { ok: true, message: hit.message || '已删除' };
+  }
+
   // 扫描完成后调用：黑名单拦截 + 顽固恢复计数升级
   async function enforceStartupDefend() {
     if (!items.length || !window.api?.startup?.remove) return;
@@ -222,6 +266,7 @@
     let changed = false;
     const autoDeleted = [];
     const escalated = [];
+    const defendFailures = [];
 
     // 1) 黑名单项再次出现（程序重新创建）→ 逐条红色确认后自动删除
     // 系统输入链项排除在自动删除之外：后端两臂本来就会拒删，若不在这里挡，
@@ -233,7 +278,13 @@
       const ok = await confirmDefendDelete(name, '已在「防恢复」黑名单中，本次扫描又发现它被重新创建');
       if (!ok) { window.app?.log?.('info', `用户已取消删除黑名单启动项「${name}」`); continue; }
       try {
-        await window.api.startup.remove([it]);
+        const resp = await window.api.startup.remove([it]);
+        const removed = startupRemoveOutcome(resp, it);
+        if (!removed.ok) {
+          defendFailures.push(`${name}：${removed.message}`);
+          window.app?.log?.('warn', `删除黑名单启动项「${name}」失败: ${removed.message}`);
+          continue;
+        }
         autoDeleted.push(name);
         items = items.filter(i => fpOf(i) !== fpOf(it));
         changed = true;
@@ -252,7 +303,13 @@
           const ok = await confirmDefendDelete(defend[fp].name, `禁用后已连续 ${defend[fp].strikes} 次被外部自动恢复`);
           if (ok) {
             try {
-              await window.api.startup.remove([it]);
+              const resp = await window.api.startup.remove([it]);
+              const removed = startupRemoveOutcome(resp, it);
+              if (!removed.ok) {
+                defendFailures.push(`${defend[fp].name}：${removed.message}`);
+                window.app?.log?.('warn', `删除顽固恢复启动项「${defend[fp].name}」失败: ${removed.message}`);
+                continue;
+              }
               if (!blacklist.includes(fp)) blacklist.push(fp);
               escalated.push(defend[fp].name);
               items = items.filter(i => fpOf(i) !== fp);
@@ -277,6 +334,10 @@
     if (escalated.length) {
       window.app?.log?.('warn', `防恢复机制：以下启动项连续 ${DEFEND_STRIKES_LIMIT} 次禁用后仍被恢复，已删除并加入黑名单：${escalated.join('、')}`);
       window.app?.toast('warning', `已删除并拦截 ${escalated.length} 个顽固恢复的启动项`);
+    }
+    if (defendFailures.length) {
+      window.app?.log?.('warn', `防恢复删除失败，已保留并等待下次扫描重试：${defendFailures.join('；')}`);
+      window.app?.toast?.('warning', `防恢复删除失败 ${defendFailures.length} 项，已保留并等待下次扫描重试`);
     }
     if (changed) render();
   }
@@ -356,6 +417,7 @@
       // 旧代码对它零引用 ⇒ 照旧弹绿色「扫描完成」，用户以为刚扫过，随后拿过期快照启停，
       // 已从系统消失的项会在原生侧逐项报错。失败回落必须与「扫描完成」分开说。
       const degraded = resp.degraded === true;
+      const scanWarnings = Array.isArray(resp.scanWarnings) ? resp.scanWarnings : [];
       // 按 启用状态 -> 来源 -> 名称 排序，禁用项置底
       next.sort((a, b) => {
         if (!!a.enabled !== !!b.enabled) return a.enabled ? -1 : 1;
@@ -384,6 +446,10 @@
       render();
       if (!silent) {
         if (degraded) window.app?.toast('warning', '本次扫描失败，已回落到上次的缓存结果，可能与系统现状不一致');
+        else if (scanWarnings.length) {
+          window.app?.toast('warning', `扫描完成，但部分来源不可读（${scanWarnings.length} 处），列表可能不完整`);
+          window.app?.log?.('warn', '启动项扫描告警: ' + scanWarnings.join('；'));
+        }
         else window.app?.toast('success', `扫描完成，共发现 ${items.length} 项启动项`);
       }
     } catch (e) {

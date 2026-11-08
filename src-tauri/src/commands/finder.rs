@@ -37,7 +37,7 @@
 //! 3. `\\?\` 前缀：扫描输出经 `unix_path` 已剥离；本文件的键函数也剥（Node `path.resolve`
 //!    保留原样），即带前缀的删除请求在不带前缀的快照里能命中——语义同一路径，属放宽而非放行。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Mutex;
@@ -91,6 +91,8 @@ pub(crate) struct SnapEntry {
     /// 真身只用于两件事：判「这一项是不是 lossy」，以及让两条 lossy 后撞成同一展示串的
     /// 原生路径不互相覆盖（覆盖等于把界面上那一行的身份悄悄换掉）。
     raw: Option<OsString>,
+    /// 文本形态是否真的丢过信息（UNC 也登记 raw，但它不是 lossy）。
+    lossy: bool,
 }
 
 impl SnapEntry {
@@ -104,7 +106,7 @@ impl SnapEntry {
 
     /// 文本形态是否丢了信息（R1d-L02：丢了信息 ⇒ 一律不删，计 `unhandled`）
     fn is_lossy(&self) -> bool {
-        self.raw.is_some()
+        self.lossy
     }
 }
 
@@ -124,6 +126,7 @@ fn store_snapshot(
     scan_type: &str,
     items: &[Value],
     raws: &HashMap<String, OsString>,
+    lossy_keys: &HashSet<String>,
     ts: i64,
 ) -> usize {
     let slot_key = crate::engine::snapshot::domain_key(label, scan_type);
@@ -156,6 +159,7 @@ fn store_snapshot(
             let kind_dir = t == "emptyfolder"
                 || t == "appdata"
                 || (t == "analyzer" && akind == Some("dir"));
+            let lossy = lossy_keys.contains(&key);
             slot.insert(
                 key,
                 SnapEntry {
@@ -164,6 +168,7 @@ fn store_snapshot(
                     empty: t == "emptyfolder",
                     ts,
                     raw,
+                    lossy,
                 },
             );
         }
@@ -219,6 +224,8 @@ struct ScanTally {
     /// 只登记「文本形态确实丢了信息」的条目（`trim_finder::util::has_lossy_path`），
     /// 正常机器上这张表恒空，不给快照另添一份内存开销。
     raws: Mutex<HashMap<String, OsString>>,
+    /// 展示串已 lossy 的键集（与 raws 分开：UNC 也登记 raw，但不可删判定只认 lossy）。
+    lossy_keys: Mutex<HashSet<String>>,
     /// 审查 M8：原生侧每有一条 `warn`（打不开的目录、被跳过的项…）与每一条**畸形行**计一次。
     /// 目的不是统计，而是让渲染层能区分「真的没有重复文件」与「没权限看所以什么都没列出来」——
     /// 旧实现两者都回 `success:true, data:[]`，用户完全无从判断。
@@ -253,6 +260,10 @@ impl ScanTally {
         if let Some(rp) = raw {
             if trim_finder::util::has_lossy_path(rp) {
                 self.note_lossy(path_key(p), rp.as_os_str().to_os_string());
+            } else if p.starts_with("//") {
+                // R1d-M01：UNC 展示串是 `//server/share/...`；删除必须吃原始
+                // `\\server\share\...`，不能把展示串再反解回路径。
+                self.note_raw(path_key(p), rp.as_os_str().to_os_string(), false);
             }
         }
         self.items.lock().unwrap_or_else(|e| e.into_inner()).push(v);
@@ -262,17 +273,28 @@ impl ScanTally {
     /// · 同一个无法表示的路径被重复输出（duplicates 里既进 emptyfile 又进组）只算一项；
     /// · 两条不同真身塌进同一个展示串 ⇒ 后者永远定位不到，也算一项。
     fn note_lossy(&self, key: String, os: OsString) {
+        self.lossy_keys
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.clone());
+        self.note_raw(key, os, true);
+    }
+
+    /// 登记原生路径真身；`count_unhandled` 只对 lossy 条目为 true。
+    fn note_raw(&self, key: String, os: OsString, count_unhandled: bool) {
         use std::collections::hash_map::Entry;
         let mut g = self.raws.lock().unwrap_or_else(|e| e.into_inner());
         match g.entry(key) {
             Entry::Occupied(v) => {
-                if v.get() != &os {
+                if v.get() != &os && count_unhandled {
                     self.unhandled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             Entry::Vacant(v) => {
                 v.insert(os);
-                self.unhandled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if count_unhandled {
+                    self.unhandled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
             }
         }
     }
@@ -291,6 +313,10 @@ impl ScanTally {
 
     fn take_raws(&self) -> HashMap<String, OsString> {
         std::mem::take(&mut *self.raws.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    fn take_lossy_keys(&self) -> HashSet<String> {
+        std::mem::take(&mut *self.lossy_keys.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     fn snapshot(&self) -> TallyReport {
@@ -615,11 +641,11 @@ pub async fn finder_scan<R: tauri::Runtime>(
         }
         // 审查 M8：把「受限结果」的元数据一并交回，别只交 items
         let report = sink.tally.snapshot();
-        (sink.tally.take_items(), sink.tally.take_raws(), report)
+        (sink.tally.take_items(), sink.tally.take_raws(), sink.tally.take_lossy_keys(), report)
     })
     .await;
 
-    let (items, raws, report) = match scanned {
+    let (items, raws, lossy_keys, report) = match scanned {
         Ok(v) => v,
         Err(e) => {
             log::write_log("error", &format!("finder {scan_type} 失败: {e}"));
@@ -633,7 +659,7 @@ pub async fn finder_scan<R: tauri::Runtime>(
         }
     };
 
-    let slot_size = store_snapshot(&label, &scan_type, &items, &raws, crate::engine::now_ms());
+    let slot_size = store_snapshot(&label, &scan_type, &items, &raws, &lossy_keys, crate::engine::now_ms());
     let unhandled = report.unhandled;
     // 畸形行要在日志里单说一句：`errors` 同时装着「读不到的目录」和「解析不了的行」，
     // 这两类问题的处置方式完全不同（审查 v2-M4）
@@ -773,7 +799,7 @@ pub async fn finder_delete<R: tauri::Runtime>(
     let safe_total = valid_safe.len();
     // 性能优化 P1：预检逐条 `metadata` / 空树复检 / `read_dir` 全是磁盘 I/O（条目上限
     // 可达 FINDER_DELETE_MAX），整段搬进阻塞池，执行体见 `run_delete_preflight`。
-    let (preflight, mut unhandled) =
+    let (preflight, mut unhandled, preflight_failed, preflight_error) =
         match tauri::async_runtime::spawn_blocking(move || run_delete_preflight(valid_safe)).await {
             Ok(v) => v,
             Err(e) => {
@@ -781,6 +807,15 @@ pub async fn finder_delete<R: tauri::Runtime>(
                 return json!({ "success": false, "message": format!("删除失败: {e}") });
             }
         };
+    if preflight_failed > 0 {
+        return json!({
+            "success": false,
+            "message": format!(
+                "删除预检失败（{preflight_failed} 项）：{}",
+                preflight_error.unwrap_or_else(|| "目标无法读取".to_string())
+            )
+        });
+    }
     if preflight.is_empty() {
         return json!({
             "success": true,
@@ -928,9 +963,11 @@ pub async fn finder_delete<R: tauri::Runtime>(
 /// 性能优化 P1：这一段逐条做 `metadata` + 空目录树递归复检 + `read_dir`，全是磁盘 I/O
 /// 且条目上限可达 `FINDER_DELETE_MAX`；抽成独立同步函数后由 `finder_delete` 整段丢进
 /// 阻塞池，async 命令体不再占住 runtime worker。
-fn run_delete_preflight(valid_safe: Vec<SnapEntry>) -> (Vec<SnapEntry>, usize) {
+fn run_delete_preflight(valid_safe: Vec<SnapEntry>) -> (Vec<SnapEntry>, usize, usize, Option<String>) {
     let mut preflight: Vec<SnapEntry> = Vec::new();
     let mut unhandled = 0usize;
+    let mut failed = 0usize;
+    let mut first_error: Option<String> = None;
     for it in &valid_safe {
         // 文件名无法无损表示 ⇒ 保护清单判定（按字符串比对）不可靠，宁可不删也要明说
         if it.is_lossy() {
@@ -973,11 +1010,15 @@ fn run_delete_preflight(valid_safe: Vec<SnapEntry>) -> (Vec<SnapEntry>, usize) {
                     log::write_log("warn", &format!("finder 删除预检: 目标已不存在，跳过 -> {}", it.path));
                 } else {
                     log::write_log("warn", &format!("finder 删除预检失败: {} -> {e}", it.path));
+                    failed += 1;
+                    if first_error.is_none() {
+                        first_error = Some(format!("{}（{e}）", it.path));
+                    }
                 }
             }
         }
     }
-    (preflight, unhandled)
+    (preflight, unhandled, failed, first_error)
 }
 
 /// 原生删除结果行的 `mode` → 分档（R4，2026-10-15）。
@@ -1351,7 +1392,8 @@ mod tests {
             serde_json::from_str::<Value>(&item_body(&disp_b)).unwrap(),
         ];
         let label = "test-lossy-collision";
-        let slot_size = store_snapshot(label, "duplicates", &items, &raws, 1);
+        let lossy_keys: HashSet<String> = raws.keys().cloned().collect();
+        let slot_size = store_snapshot(label, "duplicates", &items, &raws, &lossy_keys, 1);
         assert_eq!(slot_size, 1, "同一键位只留一条");
         let stored = snapshots().lock().unwrap_or_else(|e| e.into_inner());
         let entry = find_label_entry(&stored, label, &path_key(&disp_a)).expect("条目应在槽内");
@@ -1363,9 +1405,11 @@ mod tests {
         assert!(entry.is_lossy());
         drop(stored);
         // R1d-L02：lossy 条目的最终语义是「不删」——预检必须把它剔除并计 unhandled
-        let (kept, unhandled) = run_delete_preflight(vec![entry]);
+        let (kept, unhandled, failed, error) = run_delete_preflight(vec![entry]);
         assert!(kept.is_empty(), "lossy 项不得进入删除批");
         assert_eq!(unhandled, 1, "剔除要计数，不能静默消失");
+        assert_eq!(failed, 0, "lossy 是策略性跳过，不是预检失败");
+        assert!(error.is_none());
     }
 
     /// K09：快照槽必须带扫描类型第二维——先扫 emptyfolder、再扫 appdata（同一路径
@@ -1379,10 +1423,11 @@ mod tests {
         let empty_item = json!({ "path": dir, "type": "emptyfolder" });
         let appdata_item = json!({ "path": dir, "type": "appdata" });
         let raws = HashMap::new();
+        let lossy_keys = HashSet::new();
         // ① 先扫 emptyfolder：槽里是带 empty 标记的目录条目
-        store_snapshot(&label, "empty", &[empty_item], &raws, 1);
+        store_snapshot(&label, "empty", &[empty_item], &raws, &lossy_keys, 1);
         // ② 再扫 appdata（同路径）：两个类型各进各的槽
-        store_snapshot(&label, "appdata", &[appdata_item], &raws, 2);
+        store_snapshot(&label, "appdata", &[appdata_item], &raws, &lossy_keys, 2);
         let stored = snapshots().lock().unwrap_or_else(|e| e.into_inner());
         // 读侧跨类型查：必须拿到带 empty 标记的那条
         let hit = find_label_entry(&stored, &label, &path_key(dir)).expect("跨类型查找必须命中");

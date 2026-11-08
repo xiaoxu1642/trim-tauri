@@ -62,7 +62,7 @@ for (const f of CORPUS_FILES) if (existsSync(f) && isCorpusText(f)) corpus.push(
 function stripCommentsForRefs(file, text) {
   if (/\.(?:js|mjs|cjs)$/i.test(file)) return blankNonCode(text, 'js', { keepStrings: true });
   if (/\.rs$/i.test(file)) return blankNonCode(text, 'rs', { keepStrings: true });
-  if (/\.css$/i.test(file)) return text.replace(/\/\*[\s\S]*?\*\//g, ' ');
+  if (/\.css$/i.test(file)) return blankNonCode(text, 'css', { keepStrings: true });
   if (/\.html$/i.test(file)) return text.replace(/<!--[\s\S]*?-->/g, ' ');
   return text;
 }

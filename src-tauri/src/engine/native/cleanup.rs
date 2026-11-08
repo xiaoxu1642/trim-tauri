@@ -65,10 +65,12 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
     let cap = 600usize;
     // A6-L01：与 cleanup_execute 的 `unresolved` 同名字段、同语义（未解析的令牌）
     let mut unresolved: Vec<String> = Vec::new();
+    // A1-M02：read_dir / metadata 失败不再折成空明细；回执带 unreadable/degraded。
+    let mut unreadable: i64 = 0;
 
     // special=dism
     if rule.get("special").and_then(|v| v.as_str()) == Some("dism") {
-        return Ok(json!({"kind": "dism", "total": 0, "truncated": false, "files": [], "unresolved": []}));
+        return Ok(json!({"kind": "dism", "total": 0, "truncated": false, "files": [], "unresolved": [], "unreadable": 0, "degraded": false}));
     }
 
     // regKeys 型
@@ -84,7 +86,7 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
                     count += unsafe { reg_count_key(hive, &rest, rk.get("value").is_some()) };
                 }
             }
-            return Ok(json!({"kind": "reg", "total": count, "truncated": false, "files": [], "unresolved": unresolved}));
+            return Ok(json!({"kind": "reg", "total": count, "truncated": false, "files": [], "unresolved": unresolved, "unreadable": unreadable, "degraded": unreadable > 0, "degradedReason": if unreadable > 0 { Some("部分注册表/文件目标不可读，明细可能偏少") } else { None }}));
         }
     }
 
@@ -102,7 +104,7 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
                 let expanded = expand_env(path);
                 if note_unexpanded_in_detail(&expanded, path, &mut unresolved) { continue; }
                 // 段级 glob 展开（v0.1.6 真机修复：旧实现遇 `*` 直接 Err 且 PS 回退已删）
-                for base in expand_glob_dirs(&expanded) {
+                for base in expand_glob_dirs(&expanded, &mut unreadable) {
                     if let Ok(meta) = std::fs::metadata(&base) {
                         if meta.is_file() {
                             if seen.insert(base.clone()) {
@@ -115,10 +117,10 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
                         }
                     }
                     if !std::path::Path::new(&base).is_dir() { continue; }
-                    enumerate_files(&base, pattern, recurse, &mut files, &mut total, &mut seen, cap);
+                    enumerate_files(&base, pattern, recurse, &mut files, &mut total, &mut seen, cap, &mut unreadable);
                 }
             }
-            return Ok(json!({"kind": "files", "total": total, "truncated": total > cap, "files": files, "unresolved": unresolved}));
+            return Ok(json!({"kind": "files", "total": total, "truncated": total > cap, "files": files, "unresolved": unresolved, "unreadable": unreadable, "degraded": unreadable > 0, "degradedReason": if unreadable > 0 { Some("部分目录/文件不可读，明细可能偏少") } else { None }}));
         }
     }
 
@@ -127,17 +129,17 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
         let mut files: Vec<Value> = Vec::new();
         let mut total = 0usize;
         let mut seen = std::collections::HashSet::new();
-        enumerate_files(target_path, "*", true, &mut files, &mut total, &mut seen, cap);
-        return Ok(json!({"kind": "files", "total": total, "truncated": total > cap, "files": files, "unresolved": unresolved}));
+        enumerate_files(target_path, "*", true, &mut files, &mut total, &mut seen, cap, &mut unreadable);
+        return Ok(json!({"kind": "files", "total": total, "truncated": total > cap, "files": files, "unresolved": unresolved, "unreadable": unreadable, "degraded": unreadable > 0, "degradedReason": if unreadable > 0 { Some("部分目录/文件不可读，明细可能偏少") } else { None }}));
     }
 
-    Ok(json!({"kind": "files", "total": 0, "truncated": false, "files": [], "unresolved": unresolved}))
+    Ok(json!({"kind": "files", "total": 0, "truncated": false, "files": [], "unresolved": unresolved, "unreadable": unreadable, "degraded": unreadable > 0, "degradedReason": if unreadable > 0 { Some("部分目录/文件不可读，明细可能偏少") } else { None }}))
 }
 
 /// 段级 glob 展开（规则库 `%...\*\...` 形态，真机 v0.1.6 反馈）：路径中含 `*`
 /// 的段对子项名做通配匹配，返回展开后的具体路径（目录或文件）。跳过 reparse 项。
 /// 只认 `*`（与 glob_match 同口径）；静态段直接拼接，开销可忽略。
-fn expand_glob_dirs(pattern_path: &str) -> Vec<String> {
+fn expand_glob_dirs(pattern_path: &str, unreadable: &mut i64) -> Vec<String> {
     let mut cur: Vec<String> = Vec::new();
     for seg in pattern_path.split('\\').filter(|s| !s.is_empty()) {
         if cur.is_empty() {
@@ -150,16 +152,16 @@ fn expand_glob_dirs(pattern_path: &str) -> Vec<String> {
                 next.push(format!("{base}\\{seg}"));
                 continue;
             }
-            let Ok(rd) = std::fs::read_dir(base) else { continue };
-            for entry in rd.filter_map(|e| e.ok()) {
+            let Ok(rd) = std::fs::read_dir(base) else { *unreadable += 1; continue };
+            for entry in rd {
+                let Ok(entry) = entry else { *unreadable += 1; continue; };
                 let name = entry.file_name().to_string_lossy().to_string();
                 if !glob_match(seg, &name) { continue; }
                 // 同 enumerate_files 口径：跳过 reparse（v2-L4P-11/C-1：is_symlink 在
                 // Windows 上只认 SYMLINK/MOUNT_POINT 两个 tag，云占位符那类
                 // is_symlink=false && is_dir=true 的 reparse 会被放过去穿透进另一块存储）
-                if let Ok(meta) = entry.metadata() {
-                    if crate::engine::protect::is_reparse(&meta) { continue; }
-                }
+                let Ok(meta) = entry.metadata() else { *unreadable += 1; continue; };
+                if crate::engine::protect::is_reparse(&meta) { continue; }
                 next.push(format!("{base}\\{name}"));
             }
         }
@@ -177,26 +179,28 @@ fn enumerate_files(
     dir: &str, pattern: &str, recurse: bool,
     files: &mut Vec<Value>, total: &mut usize,
     seen: &mut std::collections::HashSet<String>, cap: usize,
+    unreadable: &mut i64,
 ) {
-    enumerate_files_at(dir, pattern, recurse, files, total, seen, cap, 0)
+    enumerate_files_at(dir, pattern, recurse, files, total, seen, cap, 0, unreadable)
 }
 
 fn enumerate_files_at(
     dir: &str, pattern: &str, recurse: bool,
     files: &mut Vec<Value>, total: &mut usize,
     seen: &mut std::collections::HashSet<String>, cap: usize,
-    depth: usize,
+    depth: usize, unreadable: &mut i64,
 ) {
     if depth >= ENGINE_WALK_MAX_DEPTH { return; }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    for entry in rd.filter_map(|e| e.ok()) {
+    let Ok(rd) = std::fs::read_dir(dir) else { *unreadable += 1; return };
+    for entry in rd {
+        let Ok(entry) = entry else { *unreadable += 1; continue; };
         let path = entry.path();
         // 跳过 reparse 点（v2-L4P-11/C-1：0x400 属性位口径，见 expand_glob_dirs 注释）
-        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(meta) = entry.metadata() else { *unreadable += 1; continue; };
         if crate::engine::protect::is_reparse(&meta) { continue; }
         if meta.is_dir() {
             if recurse {
-                enumerate_files_at(&path.to_string_lossy(), pattern, recurse, files, total, seen, cap, depth + 1);
+                enumerate_files_at(&path.to_string_lossy(), pattern, recurse, files, total, seen, cap, depth + 1, unreadable);
             }
         } else if meta.is_file() {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -641,6 +645,8 @@ struct OutcomeCounters {
     gone: i64,
     /// 被保护清单拒绝（安全闸门正常工作；关任何程序都不会变可删）
     protected_blocked: i64,
+    /// R5a-M01：路径名字形态（尾点/尾空格/保留设备名/相对段）被拒
+    name_shape_blocked: i64,
     /// Kudu S2（2026-10-16）：路径祖先在执行前变成链接/junction 而拒
     /// （同 protected_blocked：安全闸门动作，不是用户侧问题）
     reparse_blocked: i64,
@@ -683,6 +689,12 @@ fn classify_outcome(
         return (
             "skip",
             format!("{} 个文件位于受保护路径，已按保护清单拒绝删除", c.protected_blocked),
+        );
+    }
+    if nothing_done && c.name_shape_blocked > 0 {
+        return (
+            "skip",
+            format!("{} 个文件路径名字形态非法（尾点/尾空格/保留设备名/相对段），已拒绝删除", c.name_shape_blocked),
         );
     }
     if nothing_done && c.reparse_blocked > 0 {
@@ -743,6 +755,9 @@ fn classify_outcome(
     if c.protected_blocked > 0 {
         // 部分被拒时要单独说一句，且**不许混进「被占用」那个数**。
         suffix = format!("{suffix}；{} 个位于受保护路径已拒绝", c.protected_blocked);
+    }
+    if c.name_shape_blocked > 0 {
+        suffix = format!("{suffix}；{} 个路径名字形态非法已拒绝", c.name_shape_blocked);
     }
     if c.reparse_blocked > 0 {
         // Kudu S2：同 protected_blocked 的姿势——独立出现、不许被「被占用」吞掉。
@@ -1117,6 +1132,7 @@ fn cleanup_execute_with_backup_root(
                 }
                 let mut removed = 0i64;
                 let mut reg_failed = 0i64;
+                let mut skipped_lossy = 0usize;
                 for (hive, rest, value) in &parsed {
                     match value.as_deref() {
                         // F-1（2026-09-28 用户拍板）：value="*" = 清空该键全部值
@@ -1130,7 +1146,8 @@ fn cleanup_execute_with_backup_root(
                             // P1-6G：枚举不完整（键打不开 / 中途报错 / 值名超缓冲上限）时，
                             // 展开出来的「0 条」不是「这个键本来没值」。旧签名只回 Vec，
                             // 于是这条规则静默空转、回执还报成功 —— 现按该目标失败记账。
-                            let (names, incomplete) = reg_enum_value_names_pub(*hive, rest);
+                            let (names, lossy, incomplete) = reg_enum_value_names_pub_with_lossy(*hive, rest);
+                            skipped_lossy += lossy;
                             if incomplete {
                                 reg_failed += 1;
                                 crate::engine::log::write_log(
@@ -1169,9 +1186,9 @@ fn cleanup_execute_with_backup_root(
                 // "fail" 计入 failed，界面不再给成功提示）。完整原因走上面的 log::error。
                 let status = if !reg_blocked.is_empty() {
                     "fail"
-                } else if reg_failed == 0 {
+                } else if reg_failed == 0 && skipped_lossy == 0 {
                     "ok"
-                } else if removed > 0 {
+                } else if removed > 0 || skipped_lossy > 0 {
                     "partial"
                 } else {
                     "fail"
@@ -1186,15 +1203,20 @@ fn cleanup_execute_with_backup_root(
                 } else {
                     format!("；{} 个删树目标命中注册表禁删面被拒绝", reg_blocked.len())
                 };
-                let message = if reg_failed == 0 {
-                    format!("已清理 {} 项注册表记录{excl_note}{block_note}", removed)
+                let lossy_note = if skipped_lossy > 0 {
+                    format!("；{skipped_lossy} 个值名含损坏 UTF-16 已跳过（不作删除目标）")
                 } else {
-                    format!("已清理 {} 项注册表记录，{} 项失败{excl_note}{block_note}", removed, reg_failed)
+                    String::new()
+                };
+                let message = if reg_failed == 0 {
+                    format!("已清理 {} 项注册表记录{excl_note}{block_note}{lossy_note}", removed)
+                } else {
+                    format!("已清理 {} 项注册表记录，{} 项失败{excl_note}{block_note}{lossy_note}", removed, reg_failed)
                 };
                 details.push(json!({
                     "id": id, "name": name, "status": status,
                     "freed": 0, "message": message, "fileCount": removed, "residual": reg_failed,
-                    "ruleVer": rule_ver,
+                    "skippedLossy": skipped_lossy, "ruleVer": rule_ver,
                 }));
                 continue;
             }
@@ -1341,7 +1363,7 @@ fn cleanup_execute_with_backup_root(
                     }
                     // 段级 glob 展开（v0.1.6 真机修复：旧实现遇 `*` 直接 Err 且 PS 回退已删）；
                     // 展开后的每个实际目录仍过 reparse 判拒（双保险）
-                    let bases = expand_glob_dirs(&expanded);
+                    let bases = expand_glob_dirs(&expanded, &mut drops.unreadable);
                     // P0-A2（2026-10-16）假绿记账：通配展开为空（段无匹配 / 父目录
                     // 不存在）时，旧路径 files 与 failed 全零 ⇒ 条目落 classify_outcome
                     // 最后出口 ("ok","已清理 0 个文件")，UI 弹「清理完成！释放 0 B」。
@@ -1499,6 +1521,9 @@ let mut freed = 0i64;
     // 一次正常拦截伪装成用户的操作问题。
     let mut protected_blocked = 0i64;
     let mut protected_samples: Vec<String> = Vec::new();
+    // R5a-M01：名字形态闸（尾点/尾空格/保留设备名/相对段）与保护清单分开计数。
+    let mut name_shape_blocked = 0i64;
+    let mut name_shape_samples: Vec<String> = Vec::new();
     // Kudu S2（2026-10-16）：删除瞬间父链变成链接的拒绝，独立计数（与 protected_blocked
     // 同口径：安全闸门动作要留痕、不许混进「被占用」）；按父目录 memo 避免逐文件重走链。
     let mut reparse_blocked = 0i64;
@@ -1551,6 +1576,11 @@ let mut freed = 0i64;
                 recycle_entries.push(json!({"id": id, "path": path, "size": size, "isDir": false}));
                 freed += *size as i64;
                 deleted += 1;
+            } else if let Some(reason) = crate::engine::protect::path_name_shape_block_reason(path) {
+                name_shape_blocked += 1;
+                if name_shape_samples.len() < 5 {
+                    name_shape_samples.push(format!("{path}（{reason}）"));
+                }
             } else if is_path_protected(path) {
                 // 审查 v2-F3：常规清理豁免的是「回收站优先」，**没有**豁免保护路径判定。
                 // 这是全仓唯一执行永久删除的链，保护清单在这里不能缺席 —— 回收站/重试
@@ -1703,6 +1733,7 @@ let mut freed = 0i64;
             denied,
             gone,
             protected_blocked,
+            name_shape_blocked,
             reparse_blocked,
             identity_blocked,
             too_new,
@@ -1768,6 +1799,15 @@ let mut freed = 0i64;
                 ),
             );
         }
+        if name_shape_blocked > 0 {
+            crate::engine::log::write_log(
+                "warn",
+                &format!(
+                    "规则 {id}：{name_shape_blocked} 个目标路径名字形态非法（尾点/尾空格/保留设备名/相对段），已拒绝删除。样本：{}",
+                    name_shape_samples.join("；")
+                ),
+            );
+        }
         if reparse_blocked > 0 {
             crate::engine::log::write_log(
                 "warn",
@@ -1800,6 +1840,7 @@ let mut freed = 0i64;
             // 「关闭相关程序后重试」的误导提示（审计 §4.1）。渲染层目前不消费这个
             // 字段，它先在数据层备着，等前端要单独呈现时不必再改引擎。
             "protectedBlocked": protected_blocked,
+            "nameShapeBlocked": name_shape_blocked,
             // Kudu S2（2026-10-16）：父链变成链接的拒绝同理独立外发、不进 residual
             //（不是「被占用」；渲染层要单独呈现时直接消费该字段）。
             "reparseBlocked": reparse_blocked,
@@ -2564,6 +2605,7 @@ mod cleanup_engine_contract_tests {
             denied: 0,
             gone: 0,
             protected_blocked: protected,
+            name_shape_blocked: 0,
             reparse_blocked: 0,
             identity_blocked: 0,
             too_new: 0,
@@ -2628,6 +2670,7 @@ mod cleanup_engine_contract_tests {
             denied,
             gone,
             protected_blocked: 0,
+            name_shape_blocked: 0,
             reparse_blocked: 0,
             identity_blocked: 0,
             too_new: 0,
@@ -2673,6 +2716,7 @@ mod cleanup_engine_contract_tests {
             denied: 0,
             gone: 0,
             protected_blocked: 0,
+            name_shape_blocked: 0,
             reparse_blocked: reparse,
             identity_blocked: identity,
             too_new: 0,
@@ -3120,6 +3164,7 @@ mod cleanup_engine_contract_tests {
             denied: 0,
             gone: 0,
             protected_blocked: 0,
+            name_shape_blocked: 0,
             reparse_blocked: 0,
             identity_blocked: 0,
             too_new: 0,

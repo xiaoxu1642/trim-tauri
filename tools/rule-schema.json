@@ -1,5 +1,8 @@
 {
   "schemaVersion": 1,
+  "gateOnly": [
+    "residue.matchGroupsMinNonEmpty"
+  ],
   "_说明": [
     "规则库契约表：**只承载词汇表与数值上限**（字段白名单 / 必填 / 枚举 / 上限 / token 登记集）。",
     "判定逻辑不进这张表：注册表禁删面（engine/protect.rs 与 Node 侧独立实现）、target 形态与单星 glob、",

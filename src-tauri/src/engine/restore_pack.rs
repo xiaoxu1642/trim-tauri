@@ -474,17 +474,31 @@ fn batch_dir_trusted(root: &Path, batch_id: &str) -> bool {
 
 /// 列出本机还原包（按 batch_id 倒序，最多 limit 个）。老根只读兜底。
 pub fn list(limit: usize) -> Vec<Value> {
+    list_with_state(limit).0
+}
+
+/// A1-M06：还原包列表的降级版本——返回 (行, 不可读根/目录/清单数)。
+pub fn list_with_state(limit: usize) -> (Vec<Value>, usize) {
     let mut rows: Vec<Value> = Vec::new();
+    let mut unreadable = 0usize;
     for root in paths::backup_read_dirs(SUB) {
         // P0-2B：展示侧同样先判根。junction 根会让链接另一头的目录被列成「本机还原包」，
         // 用户点还原就把字节写到受保护面之外。
         let verdict = protect::inspect_root(&root, paths::data_root_base(&root).as_deref());
         if !verdict.is_trusted() {
             protect::note_root_skipped("还原包列表", &root, &verdict);
+            unreadable += 1;
             continue;
         }
-        let Ok(rd) = std::fs::read_dir(&root) else { continue };
-        for de in rd.flatten() {
+        let Ok(rd) = std::fs::read_dir(&root) else {
+            unreadable += 1;
+            continue;
+        };
+        for de in rd {
+            let Ok(de) = de else {
+                unreadable += 1;
+                continue;
+            };
             let name = de.file_name().to_string_lossy().to_string();
             if !de.path().is_dir() || name.starts_with('.') {
                 continue;
@@ -494,7 +508,10 @@ pub fn list(limit: usize) -> Vec<Value> {
                 continue;
             }
             let manifest = de.path().join(MANIFEST_NAME);
-            let Ok(text) = std::fs::read_to_string(&manifest) else { continue };
+            let Ok(text) = std::fs::read_to_string(&manifest) else {
+                unreadable += 1;
+                continue;
+            };
             let entries = match parse_manifest(&text) {
                 Ok(e) => e,
                 Err(msg) => {
@@ -525,7 +542,7 @@ pub fn list(limit: usize) -> Vec<Value> {
     }
     rows.sort_by(|a, b| b["id"].as_str().unwrap_or("").cmp(a["id"].as_str().unwrap_or("")));
     rows.truncate(limit);
-    rows
+    (rows, unreadable)
 }
 
 /// 还原一个批次。逐条自检：zip 里有没有、哈希对不对、路径准不准、目标是否已存在。

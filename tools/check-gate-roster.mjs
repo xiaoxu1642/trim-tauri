@@ -138,6 +138,22 @@ const SIDE_EFFECT = new Map([
   ['check-positive-controls', 'spawn 全部 REGISTRY 门禁'],
   ['check-headless-cli', 'spawn cargo build + 真实扫描（OPTIONAL）'],
 ]);
+// T1d-M01：这些门禁过去各自用朴素块注释正则。名单是替换面的唯一台账，
+// 同时钉住共享 blankNonCode 的引入，防止下一次改门禁时又长回私有解析器。
+const COMMENT_STRIP_GATES = [
+  'check-assets-used.mjs',
+  'check-css-tokens.mjs',
+  'check-a11y.mjs',
+  'check-power-write-surface.mjs',
+  'check-contrast.mjs',
+  'check-css-hygiene.mjs',
+  'check-html-contract.mjs',
+  'check-positive-controls.mjs',
+  'check-confirm-danger.mjs',
+  'check-first-paint.mjs',
+  'check-subwindow-css.mjs',
+  'check-tests-helper-parity.mjs',
+];
 const RUN = process.argv.includes('--run');
 const TIER_ARG = (process.argv.find((a) => a.startsWith('--tier=')) || '').split('=')[1] || '';
 if (TIER_ARG && TIER_ARG !== 'readonly') {
@@ -202,6 +218,37 @@ for (const key of SIDE_EFFECT.keys()) {
   const src = blankNonCode(readFileSync(p, 'utf8'), 'js');
   if (!SIDE_EFFECT_PRIMITIVES.test(src)) {
     fail(`SIDE_EFFECT 登记的 ${key} 源码（剥注释后）找不到 spawnSync/execFileSync/execSync/child_process ⇒ 登记与事实不符，应从本表移除`);
+  }
+}
+
+// 2f. T1d-M01：注释剥离必须走共享状态机，且 app.js 的抹白跨度要可判红。
+const naiveBlockCommentSrc = String.raw`\/\*[\s\S]*?\*\/`;
+for (const file of COMMENT_STRIP_GATES) {
+  const p = join(TOOLS, file);
+  if (!existsSync(p)) { fail(`T1d-M01 登记的门禁 ${file} 不在盘上`); continue; }
+  const src = readFileSync(p, 'utf8');
+  const code = blankNonCode(src, 'js', { keepStrings: true });
+  if (!/import\s*\{[^}]*\bblankNonCode\b[^}]*\}\s*from\s*['"]\.\/lib\/src-scan\.mjs['"]/.test(code)) {
+    fail(`${file} 未从 tools/lib/src-scan.mjs 引入 blankNonCode（T1d-M01 私有注释解析器会复发）`);
+  }
+  if (code.includes(naiveBlockCommentSrc)) {
+    fail(`${file} 仍含朴素块注释正则 /\\*[\\s\\S]*?\\*/（T1d-M01 禁止第二套解析器）`);
+  }
+}
+{
+  const appJs = join(ROOT, 'src', 'scripts', 'app.js');
+  if (!existsSync(appJs)) {
+    fail('T1d-M01 跨度自检缺少 src/scripts/app.js');
+  } else {
+    const raw = readFileSync(appJs, 'utf8');
+    const spans = [];
+    blankNonCode(raw, 'js', { onBlockComment: (span) => spans.push(span) });
+    const bad = spans.filter((s) => s.length > 200 || s.length > raw.length * 0.05);
+    if (bad.length) {
+      fail(`app.js 块注释抹白跨度异常 ${JSON.stringify(bad)}（>200 字符或 >5%：疑似把行注释里的 /* 当成块开头）`);
+    } else {
+      ok(`app.js 注释跨度自检：${spans.length} 段，最长 ${spans.reduce((n, s) => Math.max(n, s.length), 0)} 字符`);
+    }
   }
 }
 

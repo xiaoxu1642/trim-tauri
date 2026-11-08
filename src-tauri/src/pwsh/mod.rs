@@ -379,7 +379,8 @@ fn run_with_exe(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null())
-        .creation_flags(0x0800_0000)
+        // A5-M01：CREATE_NO_WINDOW | CREATE_SUSPENDED；入 Job 后再恢复。
+        .creation_flags(0x0800_0000 | 0x0000_0004)
         .spawn()
         .map_err(|e| format!("{label} 启动失败: {e}"))?;
 
@@ -392,6 +393,11 @@ fn run_with_exe(
             None
         }
     };
+    if let Err(e) = crate::engine::job::resume_suspended_process(child.id()) {
+        let _ = child.kill();
+        log::write_log("error", &format!("子进程挂起态恢复失败，已终止: {e}"));
+        return Err(format!("{label} 启动失败（无法恢复挂起态）: {e}"));
+    }
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();

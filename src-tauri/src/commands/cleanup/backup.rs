@@ -51,7 +51,10 @@ fn collect_reg_backup_list() -> Value {
     // 当前版本偷偷写了它；总数与总体积按**全量**算，列表只截最近 50 份。
     let mut items: Vec<Value> = Vec::new();
     let mut total_bytes: u64 = 0;
-    for (p, from_legacy) in crate::engine::paths::backup_read_entries(REG_BACKUP_SUB) {
+    let (entries, unreadable) = crate::engine::paths::read_entries_across_roots_state(
+        crate::engine::paths::backup_read_dirs(REG_BACKUP_SUB),
+    );
+    for (p, from_legacy) in entries {
         let Some(name) = p.file_name().and_then(|s| s.to_str()).map(str::to_string) else {
             continue;
         };
@@ -93,16 +96,44 @@ fn collect_reg_backup_list() -> Value {
         "totalCount": total_count,
         "totalBytes": total_bytes,
         "keep": crate::engine::paths::BACKUP_KEEP,
+        "unreadable": unreadable,
+        "degraded": unreadable > 0,
+        "degradedReason": if unreadable > 0 { Some("部分注册表备份目录/文件不可读，列表可能不完整") } else { None },
+        "degradedSource": "cleanup.regBackupList",
     } })
 }
 
 /// cleanup:reg-backup-restore — reg import 把单个备份合并回注册表（主窗专属）。
 /// import 是「合并加回」不是「回滚快照」：只还原备份里存在的键/值，不删除此后产生的新数据。
 #[tauri::command]
-pub fn cleanup_reg_backup_restore<R: tauri::Runtime>(window: WebviewWindow<R>, file: String) -> Value {
+pub async fn cleanup_reg_backup_restore<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    file: String,
+) -> Value {
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
+    tauri::async_runtime::spawn_blocking(move || {
+        cleanup_reg_backup_restore_blocking(
+            file,
+            crate::engine::reg_backup::reg_import_apply_sections,
+        )
+    })
+        .await
+        .unwrap_or_else(|e| {
+            json!({ "success": false, "message": format!("注册表备份还原任务异常: {e}") })
+        })
+}
+
+fn cleanup_reg_backup_restore_blocking(
+    file: String,
+    apply_sections: impl FnOnce(
+        &crate::engine::reg_backup::AdmittedSections,
+    ) -> Result<
+        crate::engine::reg_backup::RegImportStat,
+        crate::engine::reg_backup::RegImportFailure,
+    >,
+) -> Value {
     if !valid_backup_file_name(file.trim()) {
         return json!({ "success": false, "message": "备份文件名非法" });
     }
@@ -132,7 +163,7 @@ pub fn cleanup_reg_backup_restore<R: tauri::Runtime>(window: WebviewWindow<R>, f
     log::flush_sync(); // 写注册表前刷盘
     // A6（v2-R4）：原生 `.reg` 写入替换 `reg.exe import`。四道闸（严格解析 / 受保护面 /
     // 封条核对 / HKLM 提权）原样在上游跑完，执行臂吃闸侧同一份 sections；.reg 文本格式与封条链未动。
-    let imported = crate::engine::reg_backup::reg_import_apply_sections(&sections);
+    let imported = apply_sections(&sections);
     if let Ok(stat) = &imported {
         log::write_log(
             "info",
@@ -231,7 +262,10 @@ pub async fn cleanup_file_backup_list<R: tauri::Runtime>(window: WebviewWindow<R
 fn collect_file_backup_list() -> Value {
     let mut items: Vec<Value> = Vec::new();
     let mut total_bytes: i64 = 0;
-    for (p, from_legacy) in crate::engine::paths::backup_read_entries(FILES_BACKUP_SUB) {
+    let (entries, unreadable) = crate::engine::paths::read_entries_across_roots_state(
+        crate::engine::paths::backup_read_dirs(FILES_BACKUP_SUB),
+    );
+    for (p, from_legacy) in entries {
         let Some(name) = p.file_name().and_then(|s| s.to_str()).map(str::to_string) else {
             continue;
         };
@@ -266,13 +300,17 @@ fn collect_file_backup_list() -> Value {
         "totalCount": total_count,
         "totalBytes": total_bytes,
         "keep": crate::engine::paths::BACKUP_KEEP,
+        "unreadable": unreadable,
+        "degraded": unreadable > 0,
+        "degradedReason": if unreadable > 0 { Some("部分备份目录/清单不可读，列表可能不完整") } else { None },
+        "degradedSource": "cleanup.fileBackupList",
     } })
 }
 
 /// cleanup:file-backup-restore — 把单个备份条目拷回原路径（主窗专属）。
 /// 目标已存在时跳过（合并语义：只还原缺失文件，不覆盖现有数据）。
 #[tauri::command]
-pub fn cleanup_file_backup_restore<R: tauri::Runtime>(
+pub async fn cleanup_file_backup_restore<R: tauri::Runtime>(
     window: WebviewWindow<R>,
     file: String,
     index: usize,
@@ -280,6 +318,14 @@ pub fn cleanup_file_backup_restore<R: tauri::Runtime>(
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
+    tauri::async_runtime::spawn_blocking(move || cleanup_file_backup_restore_blocking(file, index))
+        .await
+        .unwrap_or_else(|e| {
+            json!({ "success": false, "message": format!("文件备份还原任务异常: {e}") })
+        })
+}
+
+fn cleanup_file_backup_restore_blocking(file: String, index: usize) -> Value {
     let fname = file.trim();
     if !valid_files_manifest_name(fname) {
         return json!({ "success": false, "message": "备份清单名非法" });
@@ -389,6 +435,43 @@ mod tests {
         assert!(src.contains(concat!("pub async fn ", "cleanup_file_backup_list")), "必须是 async 命令");
         assert!(src.contains(concat!("spawn_blocking(", "collect_file_backup_list)")), "读盘必须进阻塞池");
         assert!(!src.contains(concat!(".cloned()", ".unwrap_or_default()")), "entries 不得整棵深克隆");
+    }
+
+    /// R4-M01：两条还原命令必须在阻塞池里做文件/注册表 I/O。
+    ///
+    /// 判红自证：把任一命令改回同步 `pub fn`，或去掉对应的
+    /// `spawn_blocking` 包装 ⇒ 本用例红。
+    #[test]
+    fn 还原命令异步且io进阻塞池() {
+        let src = include_str!("backup.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let reg = src
+            .split("pub async fn cleanup_reg_backup_restore")
+            .nth(1)
+            .and_then(|s| s.split("fn cleanup_reg_backup_restore_blocking").next())
+            .expect("找不到清理域注册表还原命令");
+        assert!(reg.contains("spawn_blocking(move ||"), "注册表还原没有进阻塞池");
+        assert!(
+            reg.contains("cleanup_reg_backup_restore_blocking("),
+            "注册表还原没有调用 blocking helper"
+        );
+        assert!(
+            reg.contains("reg_import_apply_sections"),
+            "命令体没有把真实注册表还原执行臂传给 blocking helper"
+        );
+
+        let file = src
+            .split("pub async fn cleanup_file_backup_restore")
+            .nth(1)
+            .and_then(|s| s.split("fn cleanup_file_backup_restore_blocking").next())
+            .expect("找不到清理域文件还原命令");
+        assert!(file.contains("spawn_blocking(move ||"), "文件还原没有进阻塞池");
+        assert!(
+            file.contains("cleanup_file_backup_restore_blocking(file, index)"),
+            "文件还原没有调用 blocking helper"
+        );
     }
 
 }

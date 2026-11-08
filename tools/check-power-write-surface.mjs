@@ -30,6 +30,7 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { gate } from './lib/gate.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 import { ORIGIN, REPO_ROOT } from './ps-origin.mjs';
 
 const require = createRequire(import.meta.url);
@@ -115,11 +116,11 @@ function judgeItem(o) {
   return hits.map((h) => ({ ...h, id: o.id }));
 }
 
-/** 剥注释（// 与 /* *​/ 两种）：注释里的提及不是可执行写面。
- *  T1b-M03（v7.2 C09）：`//` 前不得是 `:`——否则 `https://…` 之后的整行被当注释
- *  擦掉，同行后置的写命令对判据失明（假阴性通道）。 */
-function stripComments(text) {
-  return String(text).replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(?<!:)\/\/[^\n]*/g, ' ');
+/** 只剥注释、保留字符串；语言按扩展名选择，统一走 src-scan 状态机。 */
+function stripComments(text, file = '') {
+  const ext = String(file).slice(String(file).lastIndexOf('.')).toLowerCase();
+  const lang = ext === '.rs' ? 'rs' : ext === '.html' ? 'html' : ext === '.css' ? 'css' : 'js';
+  return blankNonCode(String(text), lang, { keepStrings: true });
 }
 
 // ===========================================================================
@@ -204,7 +205,7 @@ try {
   if (existsSync(mainJs)) files.push(mainJs);
   for (const abs of files) {
     const rel = abs.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
-    const text = stripComments(readFileSync(abs, 'utf8'));
+    const text = stripComments(readFileSync(abs, 'utf8'), abs);
     const hs = [...powercfgHits(text), ...powerNsHits({ text })];
     stats.vendorJs++;
     for (const h of hs) hits.push({ file: rel, ...h });
@@ -269,7 +270,7 @@ try {
   for (const abs of extra) {
     const rel = abs.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
     // 生成副本/只读基线由 P1/P2 路判定（cleanup-fallback 是 cleanup-rules 的派生件）
-    const text = stripComments(readFileSync(abs, 'utf8'));
+    const text = stripComments(readFileSync(abs, 'utf8'), abs);
     const hs = [...powercfgHits(text), ...powerNsHits({ text })];
     stats.roam++;
     stats[routeOf.get(abs)]++;
@@ -286,7 +287,7 @@ try {
     'src-tauri/src/engine/systembin.rs',
   ];
   for (const rel of SRC_FILES) {
-    const text = stripComments(R(rel));
+    const text = stripComments(R(rel), rel);
     stats.src++;
     for (const h of [...powercfgHits(text), ...powerNsHits({ text })]) hits.push({ file: rel, ...h });
   }

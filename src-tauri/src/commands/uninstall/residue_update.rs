@@ -213,6 +213,11 @@ pub(super) fn file_target_problem(target: &str) -> Option<String> {
         let b = target.as_bytes();
         let drive_abs = b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/');
         let unc_abs = target.starts_with("\\\\") && target.trim_start_matches('\\').contains('\\');
+        if unc_abs {
+            // R2a-M02：UNC 上回收站语义不可保证（可能永久删除）；规则库不允许
+            // 静默承诺「可还原」，这里 fail-closed。
+            return Some("UNC 目标无法保证回收站可还原，规则库不允许（fail-closed）".to_string());
+        }
         if !drive_abs && !unc_abs {
             return Some("既不是登记变量的子路径，也不是绝对路径".to_string());
         }

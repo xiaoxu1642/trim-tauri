@@ -10,8 +10,8 @@
       同一档胶囊）与缩略图抽屉均由 cleanup.js 运行时注入；
    ⑥ 媒体查询移到文件末尾：上游放在基础规则之前，同特异性下被后者覆盖。 */
 
-.litebox{--rotate:0deg;--scale:1;--transition-duration:.25s;padding:0;position:fixed;top:0;left:0;width:100%;height:100%;background:#000a;justify-content:center;align-items:center;z-index:1000;pointer-events:none;opacity:0;display:flex!important;transition:opacity var(--transition-duration) ease;max-width:none;max-height:none;margin:0;overflow:hidden;user-select:auto}
-.litebox[open]{opacity:1;pointer-events:all}
+.litebox{--rotate:0deg;--scale:1;--transition-duration:.25s;padding:0;position:fixed;top:0;left:0;width:100%;height:100%;background:#000a;justify-content:center;align-items:center;z-index:1000;pointer-events:none;opacity:0;display:none!important;transition:opacity var(--transition-duration) ease;max-width:none;max-height:none;margin:0;overflow:hidden;user-select:auto}
+.litebox[open]{display:flex!important;opacity:1;pointer-events:all}
 /* stage 包住「会旋转的图片容器」与「不旋转的箭头」；箭头已收进底部工具条，stage 不再留侧边距。 */
 .litebox .lightbox-stage{position:relative;display:inline-flex;max-width:90%;max-height:90vh}
 .litebox .lightbox-container{position:relative;max-width:100%;max-height:90vh;transform-origin:center;transition:transform .3s ease;transform:rotateZ(var(--rotate))}

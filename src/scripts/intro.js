@@ -204,20 +204,31 @@
     try {
       if (window.api?.settings?.load) {
         const resp = await window.api.settings.load();
+        // F3-M09：配置读坏 ≠ 确未配置——前者给错误态+重试，不回落「未启用」也不自动开窗。
+        if (!resp || resp.degraded === true || resp.success === false) {
+          return { key: '', name: '', enabled: false, verified: false, degraded: true, error: (resp && (resp.message || resp.degradedReason)) || '配置读取失败' };
+        }
         const scopes = (resp && resp.data && resp.data.aiScopes) || {};
         const models = (resp && resp.data && resp.data.models) || {};
         const list = (resp && resp.data && resp.data.modelList) || [];
-        const key = scopes.global || 'metaso';
+        const key = scopes.global || '';
+        if (!key) return { key: '', name: '未启用', enabled: false, verified: false, unconfigured: true };
         const meta = list.find(m => m.key === key);
         if (meta) return { key, name: meta.displayName || meta.label, enabled: !!meta.enabled, verified: !!meta.verified };
         const cfg = models[key] || {};
+        if (!meta && !cfg.label && !cfg.customName) {
+          return { key, name: '未启用', enabled: false, verified: false, unconfigured: true };
+        }
         const name = key === 'custom' ? (cfg.customName || '自定义模型')
           : key === 'baidu_pro' ? '百度千帆'
             : (cfg.label || key);
         return { key, name, enabled: !!cfg.enabled, verified: !!cfg.verified };
       }
-    } catch (e) { /* 忽略 */ }
-    return { key: 'metaso', name: '秘塔 AI', enabled: false, verified: false };
+    } catch (e) {
+      // F3-M09：IPC 拒绝同样是「读取失败」，不能静默回落成「未配置」。
+      return { key: '', name: '', enabled: false, verified: false, degraded: true, error: (e && e.message) || '配置读取失败' };
+    }
+    return { key: '', name: '未启用', enabled: false, verified: false, unconfigured: true };
   }
 
   // ==================== 简介面板（三个模块共用） ====================
@@ -318,10 +329,20 @@
         return;
       }
       const modelInfo = await currentModelName(scope);
-      // 该模块所选模型未启用/未验证 → 直接打开「大模型管理」独立窗口引导配置
+      if (modelInfo.degraded) {
+        // F3-M09：配置损坏/读取失败时不自动打开管理窗，给可见错误与重试。
+        contentEl.innerHTML = `
+          <div class="intro-ai-fail">配置读取失败：${escapeHtml(modelInfo.error || '未知错误')}</div>
+          <button class="intro-ai-retry" data-role="retry-read" type="button">重试读取</button>`;
+        contentEl.querySelector('[data-role="retry-read"]')?.addEventListener('click', () => fetchAi(!!force));
+        return;
+      }
+      // 确未配置 → 停在「未启用」，由用户手动打开模型管理（不自动弹窗）。
       if (!modelInfo.enabled) {
-        contentEl.innerHTML = `<div class="intro-ai-fail">该模块所选模型尚未启用，正在打开「大模型管理」设置…</div>`;
-        openModelsWindow();
+        contentEl.innerHTML = `
+          <div class="intro-ai-fail">${modelInfo.unconfigured ? '尚未配置可用模型' : `「${escapeHtml(modelInfo.name)}」未启用`}，请在「设置 - 大模型管理」中配置后重试。</div>
+          <button class="intro-ai-retry" data-role="open-models" type="button">打开大模型管理</button>`;
+        contentEl.querySelector('[data-role="open-models"]')?.addEventListener('click', openModelsWindow);
         return;
       }
       fetchBtn.disabled = true;

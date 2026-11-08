@@ -73,6 +73,16 @@ pub(super) fn expand_pct(s: &str) -> Option<String> {
     Some(out)
 }
 
+/// 远程/设备命名空间闸：这些落点会在任何 `symlink_metadata` / `read_to_string`
+/// 之前触发 UNC 名解析或设备打开，必须先 fail-closed。
+///
+/// `\??\C:\...` 是服务 ImagePath 常见的本机 NT 前缀，调用方可在解析前剥掉；
+/// 这里只拦最终仍以双分隔符开头的形态。正斜杠 UNC 同样拦。
+pub(super) fn is_remote_or_device_path(path: &str) -> bool {
+    let t = path.trim();
+    t.starts_with(r"\\") || t.starts_with("//")
+}
+
 /// 无引号串里「可执行段」的切点：**只认段尾扩展名**（返回切点字节下标）。
 ///
 /// 病根（R2a-M07）：旧写法取「第一个出现的扩展名子串」的位置切，切出来的前缀**不是这条
@@ -118,6 +128,9 @@ pub(super) fn dead_landing(raw: &str) -> Option<String> {
         return None;
     }
     let s = s.strip_prefix(r"\??\").unwrap_or(s);
+    if is_remote_or_device_path(s) {
+        return None;
+    }
     // `\SystemRoot\system32\...` 是服务表里的常见写法（不是 %SystemRoot%）
     let rewritten;
     let s = if s
@@ -150,9 +163,11 @@ pub(super) fn dead_landing(raw: &str) -> Option<String> {
     if head.is_empty() {
         return None;
     }
+    if is_remote_or_device_path(&head) {
+        return None;
+    }
     let b = head.as_bytes();
-    let is_abs = (b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\')
-        || head.starts_with(r"\\");
+    let is_abs = b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\';
     if !is_abs {
         return None;
     }
@@ -161,4 +176,34 @@ pub(super) fn dead_landing(raw: &str) -> Option<String> {
         return None;
     }
     Some(head)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dead_landing, is_remote_or_device_path};
+
+    /// R2b-M02：UNC / 设备命名空间在判定阶段就无证据，绝不进入触盘链。
+    #[test]
+    fn dead_landing_rejects_remote_and_device_paths() {
+        for raw in [
+            r"\\server\share\app.exe",
+            "//server/share/app.exe",
+            r"\\?\C:\Apps\app.exe",
+            r"\\.\C:\Apps\app.exe",
+            r"\??\UNC\server\share\app.exe",
+        ] {
+            assert_eq!(dead_landing(raw), None, "远程/设备落点必须 fail-closed: {raw}");
+        }
+        // 正对照：本机盘符与常见 NT 本机前缀仍可解析。
+        assert_eq!(
+            dead_landing(r"C:\Apps\app.exe").as_deref(),
+            Some(r"C:\Apps\app.exe")
+        );
+        assert_eq!(
+            dead_landing(r"\??\C:\Apps\app.exe").as_deref(),
+            Some(r"C:\Apps\app.exe")
+        );
+        assert!(is_remote_or_device_path(r"\\server\share"));
+        assert!(!is_remote_or_device_path(r"C:\Apps"));
+    }
 }

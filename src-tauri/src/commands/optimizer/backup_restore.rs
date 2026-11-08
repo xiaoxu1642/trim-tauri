@@ -62,16 +62,96 @@ pub(super) fn load_opt_backups_state() -> Result<Value, String> {
 /// 无签名时，「同用户改台账 → 用户点一次还原」就是一条提权任意写；摘要键在 HKLM
 /// （非提权进程写不了），还原前由提权实例重算比对（见 [`restore_preflight`]）。
 /// 本函数是全仓唯一写入口，所以所有写路径都带摘要，不存在「漏签」的分叉。
+/// R3-M01（2026-11-08）：摘要失败必须显式回错；不能再留下“内容已写、封条没写”
+/// 的静默台账。
 pub(super) fn update_opt_backups<F>(f: F) -> Result<Value, String>
 where
     F: FnOnce(&mut Value) -> Result<(), String>,
 {
     let path = opt_backup_file();
+    // R3-M02：写前先核对整本封条；整本 mismatch 时拒绝写入，避免「合法写 B
+    // 把被篡改的 A 一起重新签真」。旧台账（整本封条 ok/缺失）先给现有条目补逐条封条。
+    if path.exists() {
+        let digest = crate::engine::hash::sha256_file(&path).ok();
+        let state = crate::engine::reg_backup::reg_backup_admin_seal_state("optimizer", &path, digest.as_deref());
+        if state == "mismatch" || state == "unreadable" || state == "corrupt" {
+            return Err(format!("优化项备份台账整本封条异常（{state}），拒绝写入；请先核实台账是否被改动"));
+        }
+        if let Ok(old) = load_opt_backups_state() {
+            if let Some(obj) = old.as_object() {
+                for (id, entry) in obj {
+                    match entry_seal_state(id, entry) {
+                        "ok" => {}
+                        "missing" => {
+                            if !seal_entry(id, entry) {
+                                return Err(format!("旧台账条目「{id}」逐条封条写入失败，拒绝继续写入"));
+                            }
+                        }
+                        other => {
+                            return Err(format!("优化项备份台账条目「{id}」封条异常（{other}），拒绝写入"));
+                        }
+                    }
+                }
+            }
+        }
+    }
     let out = crate::security::update_json(&path, f)?;
-    // 摘要失败不阻断本次落盘（备份/清理本身已成功），但该台账此后过不了还原闸 ——
-    // fail-closed 是刻意的，`write_admin_seal_with_digest` 已留 warn。
-    seal_opt_backup_ledger(&path);
+    // 只签本次实际写入/变更的条目；删除条目的旧封条不影响剩余条目的完整性。
+    if let Ok(new) = load_opt_backups_state() {
+        if let Some(obj) = new.as_object() {
+            for (id, entry) in obj {
+                if entry_seal_state(id, entry) != "ok" && !seal_entry(id, entry) {
+                    return Err(format!("台账已写入，但条目「{id}」的管理员摘要写入失败；本次台账不能用于还原"));
+                }
+            }
+        }
+    }
+    if !seal_opt_backup_ledger(&path) {
+        return Err(
+            "台账已写入，但管理员摘要写入失败；本次台账未封条，不能用于还原，请在提权后重试"
+                .to_string(),
+        );
+    }
     Ok(out)
+}
+
+/// R3-M02：逐条条目的管理员摘要（HKLM，域 `optimizer-entry`）。
+fn entry_digest(entry: &Value) -> String {
+    let bytes = serde_json::to_vec(entry).unwrap_or_default();
+    crate::engine::hash::sha256_bytes(&bytes)
+}
+
+fn entry_seal_path(option_id: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("{option_id}.entry.json"))
+}
+
+fn seal_entry(option_id: &str, entry: &Value) -> bool {
+    crate::engine::reg_backup::write_admin_seal_with_digest(
+        "optimizer-entry",
+        &entry_seal_path(option_id),
+        &entry_digest(entry),
+    )
+}
+
+fn entry_seal_state(option_id: &str, entry: &Value) -> &'static str {
+    crate::engine::reg_backup::reg_backup_admin_seal_state(
+        "optimizer-entry",
+        &entry_seal_path(option_id),
+        Some(&entry_digest(entry)),
+    )
+}
+
+/// R3-M01：非提权执行前的值级备份不写台账，返回可继续执行链的 deferred 回执。
+/// 提权重试会再次调用本命令，由管理员会话完成真正的备份与封条。
+fn backup_reg_deferred_receipt(is_admin: bool) -> Option<Value> {
+    (!is_admin).then(|| {
+        json!({
+            "success": true,
+            "count": 0,
+            "deferred": true,
+            "message": "需提权后执行，届时自动补做备份"
+        })
+    })
 }
 
 /// 落盘后补写管理员摘要（R3-K01）。摘要来源可注入：单测据此钉住「签的是刚写下去
@@ -652,6 +732,9 @@ pub async fn optimizer_backup_reg<R: Runtime>(
     if targets.is_empty() {
         return json!({ "success": true, "count": 0 });
     }
+    if let Some(receipt) = backup_reg_deferred_receipt(sysinfo::is_admin()) {
+        return receipt;
+    }
     let Some(values) = read_reg_values(&targets) else {
         log::write_log("error", "优化项注册表备份异常: 读取/解析失败");
         return json!({ "success": false, "message": "读取当前注册表值失败" });
@@ -706,7 +789,7 @@ pub(super) fn seal_refusal_reason(state: &str) -> Option<&'static str> {
 pub(super) fn seal_refusal_message(state: &str) -> &'static str {
     match state {
         "missing" => {
-            "优化项备份台账没有管理员摘要（旧版本生成的台账，或摘要已被清除），无法确认内容未被改动，已拒绝还原；请先重新执行一次该项优化（执行前的自动备份会重新为台账加摘要），再点还原"
+            "优化项备份台账未封条：没有可用的管理员摘要（旧版本生成的台账，或摘要已被清除）。这不是内容被改动的结论；请先重新执行一次该项优化（执行前的自动备份会重新为台账加摘要），再点还原"
         }
         "mismatch" => {
             "优化项备份台账的摘要与管理员记录不一致（台账内容被改动过），已拒绝还原；请检查该台账是否被其它程序修改"
@@ -794,6 +877,30 @@ pub async fn optimizer_restore_reg<R: Runtime>(
     let Some(entry) = entry else {
         return json!({ "success": false, "missing": true, "reason": "absent", "message": "无备份记录" });
     };
+    // R3-M02：逐条封条——整本封条 ok 只证明「上次整本写后没人改过」，
+    // 合法写 B 会重签整本；这条才是 A 条被篡改后仍能拒绝的依据。
+    match entry_seal_state(&option_id, &entry) {
+        "ok" => {}
+        "missing" => {
+            // 整本封条已由 restore_preflight 判 ok：这是升级前的旧条目，补签后继续。
+            if !seal_entry(&option_id, &entry) {
+                return json!({
+                    "success": false,
+                    "restoreRefused": true,
+                    "message": "备份条目逐条封条缺失且补签失败，已拒绝还原"
+                });
+            }
+        }
+        other => {
+            log::write_log("warn", &format!("优化项还原被拒（条目封条 {other}）: {option_id}"));
+            return json!({
+                "success": false,
+                "restoreRefused": true,
+                "ledgerSeal": other,
+                "message": "备份条目与管理员记录不一致（可能被改动），已拒绝还原"
+            });
+        }
+    }
     let values = entry.get("values").and_then(|v| v.as_array()).cloned();
     let Some(values) = values.filter(|a| !a.is_empty()) else {
         return json!({
@@ -1508,6 +1615,15 @@ mod p0_3_presence_tests {
 mod r3_k01_gate_tests {
     use super::*;
 
+    /// R3-M02：逐条摘要必须对条目内容敏感（篡改任一条即换摘要）。
+    #[test]
+    fn r3_m02_entry_digest_changes_on_tamper() {
+        let a = json!({ "at": "t", "values": [1, 2] });
+        let b = json!({ "at": "t", "values": [1, 3] });
+        assert_ne!(entry_digest(&a), entry_digest(&b));
+        assert_eq!(entry_digest(&a), entry_digest(&a.clone()));
+    }
+
     /// 摘要闸的纯判据：只有 `ok` 放行，其余（含不可识别状态）一律拒且拒因可辨。
     #[test]
     fn 台账摘要状态_只有ok放行且拒因可辨() {
@@ -1544,6 +1660,58 @@ mod r3_k01_gate_tests {
         // 非管理员优先于摘要状态（用户先看到「请提权」，而不是一条他无力处理的摘要错）
         let Err(resp) = restore_preflight(false, "missing") else { panic!("非管理员必须拒") };
         assert_eq!(resp["needAdmin"], true, "{resp}");
+    }
+
+    /// R3-M01：未提权备份必须 deferred 且零写入；摘要失败必须显式失败。
+    ///
+    /// 判红自证：
+    /// - 把 `backup_reg_deferred_receipt(false)` 改成恒 `None` ⇒ 前两条红；
+    /// - 把 `update_opt_backups` 的摘要失败分支改回继续 `Ok(out)` ⇒ 结构断言红。
+    #[test]
+    fn 非提权备份延后且摘要失败不得静默() {
+        let deferred = backup_reg_deferred_receipt(false).expect("非提权必须返回 deferred");
+        assert_eq!(deferred["success"], true, "{deferred}");
+        assert_eq!(deferred["deferred"], true, "{deferred}");
+        assert_eq!(deferred["count"], 0, "{deferred}");
+        assert!(
+            backup_reg_deferred_receipt(true).is_none(),
+            "管理员会话不得被 deferred 短路"
+        );
+
+        let missing = seal_refusal_message("missing");
+        assert!(missing.contains("未封条"), "未封条必须与篡改分文案: {missing}");
+        assert!(
+            !missing.contains("内容被改动过"),
+            "未封条不得被指认成内容被篡改: {missing}"
+        );
+        assert!(
+            seal_refusal_message("mismatch").contains("内容被改动过"),
+            "真正 mismatch 仍必须明确指认摘要不符"
+        );
+
+        let prod = include_str!("backup_restore.rs")
+            .split("#[cfg(test)]\nmod r3_k01_gate_tests")
+            .next()
+            .unwrap_or_default();
+        let update = prod
+            .split("pub(super) fn update_opt_backups")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n").next())
+            .expect("找不到 update_opt_backups");
+        assert!(
+            update.contains("if !seal_opt_backup_ledger(&path)")
+                && update.contains("台账未封条"),
+            "摘要失败又退回静默成功：调用方会拿到 unusable 台账"
+        );
+        let command = prod
+            .split("pub async fn optimizer_backup_reg")
+            .nth(1)
+            .and_then(|s| s.split("/// 台账管理员摘要的拒因码").next())
+            .expect("找不到 optimizer_backup_reg");
+        assert!(
+            command.contains("backup_reg_deferred_receipt(sysinfo::is_admin())"),
+            "optimizer_backup_reg 没有拦住非提权台账写入"
+        );
     }
 
     /// 篡改台账 / 旧台账无摘要：摘要状态不可能为 `ok`，闸必须拒（零写入由结构保证）。

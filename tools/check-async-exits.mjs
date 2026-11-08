@@ -472,6 +472,10 @@ for (const c of CONTROLS) {
     : countHandlerViolations(c.code);
   if (hits !== c.want) { ctrlBad++; console.error(`✗ 正向对照失败：${c.label}（实得 ${hits}，应为 ${c.want}）`); }
 }
-if (ctrlBad === 0) g.ok(`正向对照 ${CONTROLS.length} 组通过（busy 三向 + 窗口不越函数体两向 + try 子串 + 内联/具名/on 三腿各正反 + 别处 try 不算 + try/finally 不算 + 嵌套块 + .catch 链 + 射程边界）`);
+g.controlFailed(
+  ctrlBad,
+  CONTROLS.length,
+  '正向对照（busy 三向 + 窗口不越函数体两向 + try 子串 + 内联/具名/on 三腿各正反 + 别处 try 不算 + try/finally 不算 + 嵌套块 + .catch 链 + 射程边界）',
+);
 
 g.finish('check-async-exits: 全部通过（过渡豁免 ' + exempt.size + ' 条，逐条见 TRANSITION）');

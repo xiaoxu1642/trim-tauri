@@ -708,18 +708,27 @@ fn interpolate(s: &str, vars: &VarMap) -> Option<String> {
 /// 单个拼接项 / 实参求值：引号串（含插值）、`$var`、`$var.PSPath|.PNPDeviceID`、数字
 fn eval_term(t: &str, vars: &VarMap) -> Option<Expr> {
     let t = t.trim();
+    // R6c-M01：拼接链按表达式求值（`"a" + "b"` 不是字面量）。
+    if let Some(parts) = split_plus(t) {
+        let mut acc = String::new();
+        for p in parts {
+            match eval_term(p, vars)? {
+                Expr::Str(v) => acc.push_str(&v),
+                _ => return None,
+            }
+        }
+        return Some(Expr::Str(acc));
+    }
     if t.starts_with('\'') {
         return unquote(t).map(Expr::Str);
     }
     if t.starts_with('"') {
-        // 未闭合的双引号不是「按字面理解」，而是 PS 的语法错误（R6c-10）：
-        // 旧实现用 trim_matches('"') 兜底，会把只带前引号的串当成合法字面量。
-        if t.len() < 2 || !t.ends_with('"') {
-            return None;
-        }
+        // R6c-M01：复用 quoted_literal 的「闭合引号之后只允许空白」判据；
+        // 未闭合 / 闭合后还有 token 一律不是字面量。
+        let (inner, '"') = quoted_literal(t)? else { return None; };
         return unquote(t)
             .map(Expr::Str)
-            .or_else(|| interpolate(&t[1..t.len() - 1], vars).map(Expr::Str));
+            .or_else(|| interpolate(inner, vars).map(Expr::Str));
     }
     if let Some(rest) = t.strip_prefix('$') {
         let (name, prop) = match rest.split_once('.') {

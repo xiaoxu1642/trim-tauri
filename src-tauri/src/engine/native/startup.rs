@@ -256,14 +256,18 @@ fn task_enabled_from_xml(text: &str) -> bool {
 /// R5a-L04 三修：根现读 `%SystemRoot%`（系统不在 C: 时旧写死根整块看不见）、
 /// 目录判改 symlink_metadata + is_reparse（跟随链接会把枚举引出 Tasks 树）、
 /// 深度上限 64（与 cleanup.rs ENGINE_WALK_MAX_DEPTH 同档，防环挂死）。
-fn scan_task_files() -> Vec<Value> {
+fn scan_task_files() -> (Vec<Value>, Vec<String>) {
     const TASK_WALK_MAX_DEPTH: usize = 64;
     let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
     let root = std::path::Path::new(&sysroot).join(r"System32\Tasks");
     let mut out = Vec::new();
+    let mut warnings = Vec::new();
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            warnings.push(format!("计划任务目录不可读：{}（该来源可能不完整）", dir.display()));
+            continue;
+        };
         for entry in entries.flatten() {
             let p = entry.path();
             // 只信元数据形态：is_dir() 跟随重解析点，junction 段会把枚举引出任务树
@@ -278,7 +282,10 @@ fn scan_task_files() -> Vec<Value> {
             let Ok(rel) = p.strip_prefix(&root) else { continue };
             let rel_str = rel.to_string_lossy().replace('/', "\\");
             if rel_str.starts_with("Microsoft\\") { continue; }
-            let Ok(bytes) = std::fs::read(&p) else { continue };
+            let Ok(bytes) = std::fs::read(&p) else {
+                warnings.push(format!("计划任务文件不可读：{}", p.display()));
+                continue;
+            };
             let text = decode_task_xml(&bytes);
             if !text.contains("<LogonTrigger") && !text.contains("<BootTrigger") { continue; }
             let task_path = match rel_str.rfind('\\') {
@@ -329,7 +336,7 @@ fn scan_task_files() -> Vec<Value> {
             out.push(row);
         }
     }
-    out
+    (out, warnings)
 }
 
 /// 启动项扫描（原 PS 时代脚本 startup_scan.ps1，已退役）
@@ -399,7 +406,7 @@ fn folder_restore_verdict(backup_path: &str, orig_path: &str) -> Result<(), Stri
 ///
 /// 刻意**不跑** `is_path_protected`：备份根住在 `app_data_dir()` 下，而应用自身
 /// 数据目录是 `configure_from_app` 登记的受保护子树（整棵不许碰）——对备份路径跑
-/// 保护判定恒为 true，合法备份会被全拦（同 `src-tauri/src/commands/appearance.rs:398` 踩过的坑：彼处 `is_path_protected` 恒为 true）。
+/// 保护判定恒为 true，合法备份会被全拦（同 `src-tauri/src/commands/appearance.rs:403` 踩过的坑：彼处 `is_path_protected` 恒为 true）。
 /// 备份区的「可动」由本 containment（只认本域备份根）单独授权。
 fn backup_in_root_verdict(backup_path: &str) -> Result<(), String> {
     let backup_key = crate::engine::paths::path_key(backup_path);
@@ -577,7 +584,7 @@ fn require_scan_origin(item: &Value) -> Result<(), String> {
     match item.get("origin").and_then(|v| v.as_str()) {
         Some("scan") => Ok(()),
         Some("disabled-ledger") => {
-            Err("该项来自本工具的禁用台账而非本次扫描结果，计划任务不支持按台账驱动启停/删除，已拒绝".into())
+            Err("该项来自本工具的禁用台账而非本次扫描结果，执行侧不支持按台账驱动启停/删除，已拒绝".into())
         }
         _ => Err("启动项缺少来源标记（非本次扫描结果），已拒绝".into()),
     }
@@ -596,8 +603,9 @@ fn hive_tag_of(hive: HKEY, subkey: &str) -> &'static str {
 
 /// 计划任务直接解析 Tasks 目录 XML（schtasks /v 逐任务深查实测 60s+，2026-10-06 已替换）。
 /// .lnk 目标解析和文件发布者留空（S2 完善）。
-pub fn startup_scan() -> Result<Vec<Value>, String> {
+pub fn startup_scan() -> Result<(Vec<Value>, Vec<String>), String> {
     let mut results: Vec<Value> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     unsafe {
         // ---------- 注册表 Run/RunOnce（8 路径） ----------
@@ -605,12 +613,16 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
             let sk = to_wide(&subkey);
             let mut hk = HKEY::default();
             if RegOpenKeyExW(*hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+                warnings.push(format!("启动项注册表根不可读：{label}（{subkey}）"));
                 continue;
             }
             let values = reg_enum_values(hk);
             for vp in values {
                 if vp.is_empty() { continue; }
-                let Some((ty, buf)) = reg_query_value(hk, &vp) else { continue; };
+                let Some((ty, buf)) = reg_query_value(hk, &vp) else {
+                    warnings.push(format!("启动项值不可读：{subkey}\\{vp}"));
+                    continue;
+                };
                 let value_type = match ty {
                     REG_SZ => "String",
                     REG_EXPAND_SZ => "ExpandString",
@@ -725,7 +737,10 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
         let appdata = std::env::var("APPDATA").unwrap_or_default();
         for (base, sub, label) in startup_folders() {
             let dir = std::path::Path::new(&base).join(sub);
-            let Ok(entries) = std::fs::read_dir(&dir) else { continue; };
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                warnings.push(format!("启动文件夹不可读：{}（{label}）", dir.display()));
+                continue;
+            };
             let scope = if base == appdata { "HKCU" } else { "HKLM" };
             let sa_hive = if scope == "HKLM" { HKEY_LOCAL_MACHINE } else { HKEY_CURRENT_USER };
             for entry in entries.flatten() {
@@ -783,7 +798,9 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
     // 会为**每个**任务做一次深查（本机数百任务 ⇒ 实测 60s+），而我们要的三件事
     // （触发类型 / 命令行 / 启用态）全部写在任务 XML 文件里 —— 纯文件读，毫秒级。
     // XML 按固定写出形态做子串判读，不引解析依赖（§2 零新增依赖）。
-    results.extend(scan_task_files());
+    let (task_rows, task_warnings) = scan_task_files();
+    results.extend(task_rows);
+    warnings.extend(task_warnings);
 
     // ---------- 合并 disabled.json ----------
     // R5a-L06：与 read_disabled_records 共用同一三态读器；读失败只告警、按无附加项处理
@@ -805,10 +822,11 @@ pub fn startup_scan() -> Result<Vec<Value>, String> {
         Ok(records) => merge_disabled_ledger(&mut results, &records),
         Err(e) => {
             crate::engine::log::write_log("warn", &format!("启动项禁用台账不可读，本次按无附加项处理: {e}"));
+            warnings.push(format!("启动项禁用台账不可读：{e}（禁启用状态可能不准确）"));
         }
     }
 
-    Ok(results)
+    Ok((results, warnings))
 }
 
 /// 把台账行并入扫描结果（R5a-M01 腿②的唯一实现）。
@@ -1264,8 +1282,11 @@ unsafe fn read_approved_blob(hive: HKEY, subkey: &str, value_name: &str) -> Opti
 /// 写 StartupApproved blob，设置/清除 bit0，写后回读校验
 unsafe fn set_approved_bit(hive: HKEY, subkey: &str, value_name: &str, disable: bool) -> Result<(), String> {
     let key = startup_approved_key(hive, subkey);
+    let nm = to_wide_checked(value_name)
+        .map_err(|_| "启动项值名非法（含 NUL 或控制字符）".to_string())?;
     // 确保键存在
-    let sk = to_wide(&key);
+    let sk = to_wide_checked(&key)
+        .map_err(|_| "StartupApproved 键路径非法".to_string())?;
     let mut hk = HKEY::default();
     let mut disp = REG_CREATED_NEW_KEY;
     if RegCreateKeyExW(hive, PCWSTR(sk.as_ptr()), None, PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disp)).is_err() {
@@ -1279,7 +1300,6 @@ unsafe fn set_approved_bit(hive: HKEY, subkey: &str, value_name: &str, disable: 
     });
     if bytes.len() < 12 { bytes.resize(12, 0); }
     if disable { bytes[0] |= 1; } else { bytes[0] &= 0xFE; }
-    let nm = to_wide(value_name);
     if RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_BINARY, Some(&bytes)).is_err() {
         let _ = RegCloseKey(hk);
         return Err("写 StartupApproved blob 失败".into());
@@ -1455,6 +1475,9 @@ enum ToggleOutcome {
 }
 
 unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Value>) -> Result<ToggleOutcome, String> {
+    // 注册表改写与删除都只接受本次扫描现读得到的行。台账内容可写，
+    // 即使值名已过形态闸，也不能让注入行驱动提权写或删。
+    require_scan_origin(item)?;
     let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
     let reg_path = item.get("regPath").and_then(|v| v.as_str()).unwrap_or("");
     let value_name = item.get("valueName").and_then(|v| v.as_str()).unwrap_or("");
@@ -1872,6 +1895,11 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
 
         match source {
             "registry" => {
+                if let Err(reason) = require_scan_origin(item) {
+                    failed += 1;
+                    results.push(json!({"id": id, "name": name, "status": "error", "message": reason}));
+                    continue;
+                }
                 let reg_path = item.get("regPath").and_then(|v| v.as_str()).unwrap_or("");
                 let value_name = item.get("valueName").and_then(|v| v.as_str()).unwrap_or("");
                 if reg_path.is_empty() {
@@ -1893,6 +1921,22 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                     results.push(json!({"id": id, "name": name, "status": "error", "message": e}));
                     continue;
                 }
+                let sk = match to_wide_checked(&subkey) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        failed += 1;
+                        results.push(json!({"id": id, "name": name, "status": "error", "message": "注册表键路径非法（含 NUL 或控制字符），未执行删除"}));
+                        continue;
+                    }
+                };
+                let nm = match to_wide_checked(value_name) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        failed += 1;
+                        results.push(json!({"id": id, "name": name, "status": "error", "message": "启动项值名非法（含 NUL 或控制字符），未执行删除"}));
+                        continue;
+                    }
+                };
                 // 备份整个键到 .reg
                 let safe = safe_name(&name);
                 let seq = DELETE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1933,24 +1977,20 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                 }
                 // 删值
                 unsafe {
-                    let sk = to_wide(&subkey);
                     let mut hk = HKEY::default();
                     if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk).is_err() {
                         failed += 1;
                         results.push(json!({"id": id, "name": name, "status": "error", "message": "无法打开注册表键"}));
                         continue;
                     }
-                    let nm = to_wide(value_name);
                     let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
                     let _ = RegCloseKey(hk);
                     // 回读
-                    let sk2 = to_wide(&subkey);
                     let mut hk2 = HKEY::default();
-                    let still_exists = if RegOpenKeyExW(hive, PCWSTR(sk2.as_ptr()), Some(0), KEY_READ, &mut hk2).is_ok() {
-                        let nm2 = to_wide(value_name);
+                    let still_exists = if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk2).is_ok() {
                         let mut ty = REG_VALUE_TYPE::default();
                         let mut size = 0u32;
-                        let exists = RegQueryValueExW(hk2, PCWSTR(nm2.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_ok();
+                        let exists = RegQueryValueExW(hk2, PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_ok();
                         let _ = RegCloseKey(hk2);
                         exists
                     } else { false };
@@ -2462,7 +2502,7 @@ mod r5a_m01_task_guard_tests {
     ///
     /// 判红自证：把 `require_scan_origin` 改成恒 `Ok(())` ⇒ ②③ 红。
     #[test]
-    fn 任务行只收扫描来源台账行与无标记行都拒() {
+    fn 扫描来源闸_任务与注册表台账行都拒() {
         // ① 扫描现读得到的行 ⇒ 放行
         assert!(require_scan_origin(&json!({ "origin": "scan" })).is_ok());
         // ② 台账并入的行 ⇒ 拒（这正是被注入的那一行）
@@ -2474,6 +2514,73 @@ mod r5a_m01_task_guard_tests {
         assert!(err.contains("台账"), "台账来源必须点名台账: {err}");
         // ③ 无来源标记 ⇒ 拒（fail-closed：来源不可证就不许驱动 task 臂）
         assert!(require_scan_origin(&json!({ "source": "task", "taskPath": "\\" })).is_err());
+        // ④ 注册表删除臂同样不能由台账注入行驱动（R5d-M04）
+        let err = require_scan_origin(&json!({
+            "source": "registry", "origin": "disabled-ledger",
+            "regPath": r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+            "valueName": "ctfmon\0x"
+        }))
+        .unwrap_err();
+        assert!(err.contains("台账"), "注册表台账来源必须点名台账: {err}");
+    }
+
+    /// R5d-M04：批准位写入必须先过名字形态闸，且删除/批准位两臂的来源闸必须真的挂上。
+    ///
+    /// 判红自证：
+    /// - 把 `set_approved_bit` 的 `to_wide_checked(value_name)` 改回 `to_wide`
+    ///   ⇒ 第一条断言红；
+    /// - 删掉 `startup_delete` registry 分支或 `toggle_registry_item` 里的
+    ///   `require_scan_origin(item)` ⇒ 结构断言红。
+    #[test]
+    fn 注册表删除与批准位写入都吃来源和名字形态闸() {
+        let bad = unsafe {
+            set_approved_bit(
+                windows::Win32::System::Registry::HKEY_CURRENT_USER,
+                "Run",
+                "ctfmon\0x",
+                true,
+            )
+        };
+        assert!(bad.is_err(), "含 NUL 的值名不得进入 StartupApproved 写入面");
+
+        let prod = include_str!("startup.rs")
+            .split("#[cfg(test)]\nmod r5a_m01_task_guard_tests")
+            .next()
+            .unwrap_or_default();
+        let delete_registry = prod
+            .split("pub fn startup_delete")
+            .nth(1)
+            .and_then(|s| s.split("\"folder\" =>").next())
+            .and_then(|s| s.split("\"registry\" =>").nth(1))
+            .expect("找不到 startup_delete 的 registry 分支");
+        assert!(
+            delete_registry.contains("require_scan_origin(item)"),
+            "注册表删除臂没有来源闸——台账注入行可驱动提权删除"
+        );
+        assert!(
+            delete_registry.contains("to_wide_checked(value_name)")
+                && delete_registry.contains("to_wide_checked(&subkey)"),
+            "注册表删除臂绕开了名字形态闸——NUL 会截断成前缀名"
+        );
+
+        let toggle = prod
+            .split("unsafe fn toggle_registry_item")
+            .nth(1)
+            .and_then(|s| s.split("unsafe fn toggle_folder_item").next())
+            .expect("找不到 toggle_registry_item");
+        assert!(
+            toggle.contains("require_scan_origin(item)?"),
+            "注册表改写臂没有来源闸——台账注入行可驱动提权写"
+        );
+        let approve = prod
+            .split("unsafe fn set_approved_bit")
+            .nth(1)
+            .and_then(|s| s.split("/// 启动项启用/禁用").next())
+            .expect("找不到 set_approved_bit");
+        assert!(
+            approve.contains("to_wide_checked(value_name)"),
+            "批准位写值绕开了名字形态闸"
+        );
     }
 
     /// R5a-M01 ①+追加：现读核对 —— 这条任务必须真的在本域 `System32\Tasks` 树内，
@@ -2575,7 +2682,7 @@ mod r5a_m01_task_guard_tests {
             include_str!("startup.rs").contains(MERGE_CALLSITE),
             "startup_scan 没有调用 merge_disabled_ledger ⇒ 台账行根本进不了扫描结果"
         );
-        let scanned = startup_scan().expect("扫描应成功");
+        let (scanned, _warnings) = startup_scan().expect("扫描应成功");
         let row = scanned
             .iter()
             .find(|r| r.get("id").and_then(|v| v.as_str()) == Some(evil_id))

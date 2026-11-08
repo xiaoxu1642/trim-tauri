@@ -36,13 +36,15 @@ function extractIdle() {
 function extractPages() {
   const m = appJs.match(/const PAGE_SCRIPTS = \{([\s\S]*?)\n  \};/);
   if (!m) throw new Error('app.js 里找不到 PAGE_SCRIPTS 清单');
-  // 只取脚本路径（块里混有页面 key 等非路径字符串）
+  // 只取脚本路径（块里混有页面 key 等非路径字符串）；T1h-M04：不能再只认 scripts/，
+  // vendor/litebox.js 也是运行时注入件，必须进守卫扫描面。
   return [...m[1].matchAll(/'([^']+)'/g)]
     .map((x) => x[1])
-    .filter((s) => s.startsWith('scripts/') && s.endsWith('.js'));
+    .filter((s) => s.endsWith('.js'));
 }
 
 const files = [...new Set([...extractIdle(), ...extractPages()])];
+const strayPageScripts = extractPages().filter((s) => !s.startsWith('scripts/') && !s.startsWith('vendor/'));
 
 let fail = 0;
 const check = (ok, label, detail = '') => {
@@ -55,6 +57,11 @@ console.log('=== 延迟加载脚本 DOMContentLoaded 守卫门禁 ===\n');
 // 扫描面地板（P0-4）：清单解析成空集时循环 0 次、bad 恒空 ⇒「✓ 0 个延迟加载脚本均带守卫」
 // 是空集假绿。0 对象不允许判绿（AGENTS §4.1）。
 check(files.length > 0, '延迟/按页加载清单非空（0 个 = 扫描面失效）', `解析得 ${files.length} 个脚本`);
+check(
+  strayPageScripts.length === 0,
+  'PAGE_SCRIPTS 的非 scripts/ 条目已纳入扫描或显式登记（T1h-M04）',
+  strayPageScripts.length ? `未登记：${strayPageScripts.join(', ')}` : '仅 scripts/ 与 vendor/',
+);
 
 const bad = [];
 // T1h-L04：注册点计数地板。此前注册点只有个位数命中，写法一变（或清单解析塌陷）
@@ -76,33 +83,44 @@ for (const rel of files) {
     const idx = code.slice(0, m.index).split('\n').length - 1;
     sites++;
     filesWithSite.add(rel);
-    if (/document\.readyState/.test(lines[idx])) { guardedSites++; continue; } // 单行守卫形态
+    let guarded = /document\.readyState/.test(lines[idx]); // 单行守卫形态
     const prev = idx > 0 ? lines[idx - 1] : '';
-    if (/document\.readyState/.test(prev) && /\belse\b/.test(lines[idx])) { guardedSites++; continue; }
+    if (!guarded && /document\.readyState/.test(prev) && /\belse\b/.test(lines[idx])) guarded = true;
     // 向上找所属块的开括号行（右→左扫字符：`}` 计入未进块，`{` 在深度 0 处
     // 即所属块的开括号），开括号行必须含 readyState 守卫
-    let depth = 0;
-    let guarded = false;
-    outer: for (let i = idx - 1; i >= 0; i--) {
-      const l = lines[i];
-      for (let j = l.length - 1; j >= 0; j--) {
-        const c = l[j];
-        if (c === '}') depth++;
-        else if (c === '{') {
-          if (depth === 0) {
-            guarded = /document\.readyState\s*(===?|!==)\s*['"]loading['"]/.test(l);
-            break outer;
+    if (!guarded) {
+      let depth = 0;
+      outer: for (let i = idx - 1; i >= 0; i--) {
+        const l = lines[i];
+        for (let j = l.length - 1; j >= 0; j--) {
+          const c = l[j];
+          if (c === '}') depth++;
+          else if (c === '{') {
+            if (depth === 0) {
+              guarded = /document\.readyState\s*(===?|!==)\s*['"]loading['"]/.test(l);
+              break outer;
+            }
+            depth--;
           }
-          depth--;
         }
       }
     }
-    if (guarded) {
-      guardedSites++;
-    } else {
+    const guardWindow = lines.slice(Math.max(0, idx - 8), idx + 6).join('\n');
+    const gm = /document\.readyState\s*(===?|!==)\s*['"]loading['"]/.exec(guardWindow);
+    const regText = lines.slice(idx, idx + 3).join('\n');
+    const cb = /addEventListener\(\s*['"]DOMContentLoaded['"]\s*,\s*([A-Za-z_$][\w$]*)/.exec(regText)?.[1]
+      || [...regText.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)]
+        .map((x) => x[1])
+        .find((n) => n !== 'addEventListener' && n !== 'document' && n !== 'function');
+    if (!guarded) {
       bad.push(`${rel}:${idx + 1}`);
       break;
     }
+    if (!gm || gm[1] === '!==' || !cb || !new RegExp(`else[\\s\\S]{0,240}\\b${cb}\\s*\\(`).test(guardWindow)) {
+      bad.push(`${rel}:${idx + 1}（readyState 守卫必须是 === 'loading' 且 else 支调用同一个回调 ${cb || '?'}()）`);
+      break;
+    }
+    guardedSites++;
   }
 }
 check(
@@ -172,7 +190,11 @@ function loadScriptViolations(jsText) {
   const out = [];
   const onerr = jsText.match(/s\.onerror\s*=\s*\(\)\s*=>\s*\{([\s\S]*?)\};/);
   if (!onerr) out.push('loadScript 的 onerror 分支没找到（形状变了？同步本门禁）');
-  else if (/_scriptLoaded/.test(onerr[1])) out.push('onerror 分支把 src 计入 _scriptLoaded（失败被记账 = 不可重试）');
+  else {
+    if (/_scriptLoaded/.test(onerr[1])) out.push('onerror 分支把 src 计入 _scriptLoaded（失败被记账 = 不可重试）');
+    if (!/_scriptLoading\.delete\(src\)/.test(onerr[1])) out.push('onerror 分支没有复位 _scriptLoading.delete(src)（失败标记不复位）');
+    if (!/resolve\s*\(\s*false\s*\)/.test(onerr[1])) out.push('onerror 分支没有 resolve(false)（失败与成功同形）');
+  }
   const eps = jsText.match(/async function ensurePageScripts\(page\)\s*\{([\s\S]*?)\n  \}/);
   if (!eps) out.push('ensurePageScripts 没找到（形状变了？同步本门禁）');
   else if (!/if\s*\(ok\)\s*initModuleOf\(src\)/.test(eps[1])) {
@@ -186,6 +208,8 @@ function loadScriptViolations(jsText) {
     }
     if (/IDLE_SCRIPTS\.forEach\(/.test(idle[1]) || !/for\s*\(/.test(idle[1])) {
       out.push('scheduleIdleLoads 的 init 未走数组序（逐条挂 .then = 跟完成序，家族依赖序形同虚设）');
+    } else if (!/await\s+p\b/.test(idle[1]) || /\.then\s*\([^)]*initModuleOf/.test(idle[1])) {
+      out.push('scheduleIdleLoads 仍是 for + .then(init) 的完成序（T1h-M02：必须 await 串行）');
     }
   }
   return out;
@@ -203,9 +227,9 @@ function loadScriptViolations(jsText) {
   const badHits = loadScriptViolations(POSITIVE_CONTROLS.bad);
   const goodHits = loadScriptViolations(POSITIVE_CONTROLS.good);
   check(
-    badHits.length === 4 && goodHits.length === 0,
-    'loadScript 三态 + 数组序 init 判定器自检（违例 4 条全命中 / 合规样本放行）',
-    badHits.length !== 4
+    badHits.length === 5 && goodHits.length === 0,
+    'loadScript 三态 + 数组序 init 判定器自检（违例 5 条全命中 / 合规样本放行）',
+    badHits.length !== 5
       ? `实到 ${badHits.length}：${badHits.join('；')}`
       : goodHits.length
         ? `合规样本被判红：${goodHits.join('；')}`

@@ -42,6 +42,9 @@ import { lineAt } from './lib/src-scan.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(ROOT, 'src');
+
+/** T1h-M05：HTML 注释里的 `<script src>` / `id=` 不是静态集成员。 */
+const stripHtmlComments = (html) => html.replace(/<!--[\s\S]*?-->/g, '');
 const VERBOSE = process.argv.includes('--verbose');
 
 const PAGES = [
@@ -423,7 +426,9 @@ function scanOptionalCalls(code) {
 /** 断言 3a：label → html → script，以及脚本用到的组件全局件确实由本页 HTML 加载。 */
 function judgeWiring(page, htmlText, code) {
   const v = [];
-  const scripts = [...htmlText.matchAll(/<script[^>]*\bsrc="([^"]+)"/g)].map((m) => m[1].replace(/^\.\//, '').replace(/\\/g, '/'));
+  // T1h-M05：注释里的 <script src> / id= 不是静态集成员，先剥 HTML 注释。
+  const html = stripHtmlComments(htmlText);
+  const scripts = [...html.matchAll(/<script[^>]*\bsrc="([^"]+)"/g)].map((m) => m[1].replace(/^\.\//, '').replace(/\\/g, '/'));
   if (!scripts.includes(page.script)) v.push(`本页 HTML 没加载本页脚本 <script src="${page.script}">`);
   const used = new Set([...code.matchAll(/window\.([A-Za-z_$][\w$]*)/g)].map((m) => m[1]));
   for (const g of used) {
@@ -438,7 +443,7 @@ function judgeElementLedger(page, htmlText, code) {
   const v = [];
   const helpers = findHelpers(code);
   if (helpers.length === 0) v.push('本页取元素助手没找到（脚本形状变了，扫描面失明）');
-  const ids = new Set([...htmlText.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
+  const ids = new Set([...stripHtmlComments(htmlText).matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
   const refs = scanElementRefs(code, helpers);
   for (const [id, fn] of refs) if (!ids.has(id)) v.push(`脚本引用了本页 HTML 不存在的 #${id}（${fn}）`);
   const { bindings } = scanOptionalBindings(code, helpers);
@@ -476,7 +481,7 @@ function judgeOptionalCalls(page, code, inventory) {
 function buildCtx(page, opts = {}) {
   const htmlText = opts.htmlText ?? readFileSync(join(SRC, page.html), 'utf8');
   let text = opts.scriptText ?? readFileSync(join(SRC, page.script), 'utf8');
-  const staticIds = new Set([...htmlText.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
+  const staticIds = new Set([...stripHtmlComments(htmlText).matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
   for (const id of opts.dropIds || []) staticIds.delete(id);
   const calls = [];
   const bound = [];

@@ -166,13 +166,17 @@ pub(super) fn start_menu_shortcut_hits(app_name: &str) -> Vec<String> {
         if hits.len() >= NAME_HIT_CAP {
             break;
         }
-        // 迭代下钻，深度 ≤ 5（开始菜单层级浅，防符号链接打穿用 is_symlink 挡）
+        // 迭代下钻，深度 ≤ 5（开始菜单层级浅，防 reparse 点打穿；R2a-M03：
+        // junction/云占位符的 is_symlink=false，判据必须走 0x400 属性位）
         let mut stack = vec![(root, 0usize)];
         while let Some((dir, depth)) = stack.pop() {
             let Ok(rd) = std::fs::read_dir(&dir) else { continue };
             for ent in rd.flatten() {
                 let p = ent.path();
-                if p.is_symlink() {
+                if std::fs::symlink_metadata(&p)
+                    .map(|m| protect::is_reparse(&m))
+                    .unwrap_or(true)
+                {
                     continue;
                 }
                 if p.is_dir() {
@@ -1691,8 +1695,16 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 let ok = row["status"] == "ok";
                 let mode = row["mode"].as_str().unwrap_or("");
                 let scanner_msg = row["message"].as_str().unwrap_or("");
+                let row_path = row["path"].as_str().unwrap_or("");
+                let is_unc = row_path.starts_with("\\\\");
                 let message = if ok {
-                    "已移入回收站".to_string()
+                    // R2a-M02：SHFileOperation 在无回收站/超配额/网络卷会永久删除且仍 rc=0，
+                    // 本层不能承诺「已移入回收站」；只报「已从原位置移除」。
+                    if is_unc {
+                        "已从原位置移除（网络位置不保证可还原）".to_string()
+                    } else {
+                        "已从原位置移除（是否可还原取决于卷/回收站配额）".to_string()
+                    }
                 } else {
                     match mode {
                         "trash-failed" => match row["kind"].as_str() {
@@ -1721,6 +1733,7 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 if !mode.is_empty() {
                     d["mode"] = json!(mode);
                 }
+                d["disposal"] = json!(if !ok { "failed" } else if is_unc { "permanent" } else { "recycled-or-permanent" });
                 details.push(d);
             }
         }

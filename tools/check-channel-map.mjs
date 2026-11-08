@@ -717,6 +717,21 @@ for (const m of adapter.matchAll(JS_METHOD_RE)) {
   const keys = [...obj.matchAll(/([A-Za-z_$][\w$]*)\s*:(?!\s*(?:function|=>))/g)].map((x) => x[1]);
   if (keys.length) jsParams.set(ch, keys);
 }
+// T1i-M01：三元载荷 `cond ? { … } : undefined` 不是以 `{` 紧跟通道名，
+// 上面的方法正则整条抓不到（checkOptimized / residueWindow.openWindow 就是这种形态）。
+// 逐 `invokeChannel('ch',` 找后面的第一个对象字面量，两个分支都收集；无载荷调用跳过。
+for (const m of adapter.matchAll(/invokeChannel\(\s*['"]([^'"]+)['"]\s*,/g)) {
+  const ch = m[1];
+  const restAt = m.index + m[0].length;
+  const braceAt = adapter.indexOf('{', restAt);
+  if (braceAt < 0) continue;
+  const obj = balancedBrace(adapter, braceAt);
+  if (!obj) continue;
+  const keys = [...obj.matchAll(/([A-Za-z_$][\w$]*)\s*:(?!\s*(?:function|=>))/g)].map((x) => x[1]);
+  if (!keys.length) continue;
+  const prev = jsParams.get(ch) ?? [];
+  jsParams.set(ch, [...new Set([...prev, ...keys])]);
+}
 
 const camelToSnake = (s) => s.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase());
 
@@ -1019,7 +1034,9 @@ if (!rustHazard || !jsHazard) {
   //   ① 清单里每个 id 都真在数据层存在（死条目会让这份清单看起来「已核对」，反向掩盖漂移）；
   //   ② 两侧的判据函数都没被退回成「只认清单」（文本锚点钉住，改回去即红）；
   //   ③ 数据层 high 的数量没有塌方（把 risk 批量降级成 medium 是绕开这条闸门的捷径）。
-  const HIGH_FLOOR = 5;
+  // T1i-L04：数据层 high 条目现算（取数命令：node tools/check-channel-map.mjs）；地板提到现算值，并把三条 BCD 高危项钉进必需集。
+  const HIGH_FLOOR = 9;
+  const REQUIRED_HIGH = ['nara_bcd_vsm', 'nara_bcd_boot', 'nara_bcd_lowmem'];
   const optPath = join(TAURI_ROOT, 'src-tauri', 'data', 'optimizer-runtime.json');
   let optIds = null;
   let highIds = null;
@@ -1050,8 +1067,9 @@ if (!rustHazard || !jsHazard) {
     const rustUnion = rustOptSrc.includes('fn needs_high_risk_confirm') && preflightCallsUnion && runDelegates;
     const jsUnion = jsOptSrc.includes('function needsHazardConfirm(opt)')
       && jsOptSrc.includes('needsHazardConfirm(opt)) runParams.confirmedHighRisk');
+    const missingRequiredHigh = REQUIRED_HIGH.filter((id) => !highIds.has(id));
     check(
-      dead.length === 0 && rustUnion && jsUnion && highIds.size >= HIGH_FLOOR,
+      dead.length === 0 && rustUnion && jsUnion && highIds.size >= HIGH_FLOOR && missingRequiredHigh.length === 0,
       `F2. 高危判据三条对拍（清单 ${rustHazard.size} ∪ 数据层 high ${highIds.size}）`,
       !rustUnion || !jsUnion
         ? '判据被退回「只认手写清单」：缺 union 公式锚点（Rust：preflight_reason 内须调 needs_high_risk_confirm 且带 restore 方向豁免，optimizer_run 须委托它；JS：needsHazardConfirm）'
@@ -1059,6 +1077,8 @@ if (!rustHazard || !jsHazard) {
           ? `清单里有数据层不存在的死条目 ${JSON.stringify(dead)}`
           : highIds.size < HIGH_FLOOR
             ? `数据层 risk=high 只剩 ${highIds.size} 项（下限 ${HIGH_FLOOR}）——是否有人批量降级绕过闸门`
+            : missingRequiredHigh.length
+              ? `必需高危项被降档/删除：${missingRequiredHigh.join(', ')}`
             : ''
     );
   }

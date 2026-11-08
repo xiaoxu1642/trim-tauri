@@ -117,13 +117,13 @@ pub(super) unsafe fn reg_query_value(hk: HKEY, name: &str) -> Option<(REG_VALUE_
 /// = 16367 字符，缓冲区不足时 `RegEnumValueW` 报 `ERROR_MORE_DATA` 并回填所需长度，
 /// 旧写法把它当普通错误 break（或按 260 截断），于是超常长的值名被静默截/丢。
 /// 现在按需增长缓冲重试同一条目（有界，见 `ENUM_NAME_CAP`），只有真·正常结束才 `false`。
-pub(super) unsafe fn reg_enum_values_scan(hk: HKEY) -> (Vec<String>, bool) {
+pub(super) unsafe fn reg_enum_values_scan_tagged(hk: HKEY) -> (Vec<(String, bool)>, bool) {
     // RegEnumValueW 的 pcchName 入参是「缓冲区长度」、出参是「含尾 NUL 的所需长度」；
     // 值名合法上界即 KEY_MAX_VALUE_NAME_LEN（16367），再加 NUL 一位。以此为硬上限，
     // 既不再按 260 截断，也不给畸形返回值开无界分配。
     const ENUM_NAME_CAP: usize = 16367 + 1;
     const ERROR_MORE_DATA: u32 = 234;
-    let mut names = Vec::new();
+    let mut names: Vec<(String, bool)> = Vec::new();
     let mut index = 0u32;
     let mut cap = 260usize;
     loop {
@@ -152,16 +152,26 @@ pub(super) unsafe fn reg_enum_values_scan(hk: HKEY) -> (Vec<String>, bool) {
             crate::engine::log::write_log("warn", &format!("注册表值枚举非正常结束（index={index}, err={}）", r.0));
             return (names, true);
         }
-        let name = decode_name_lossy_with_warn(&name_buf[..name_len as usize]);
+        let units = &name_buf[..name_len as usize];
+        // A6-M01：有损名（U+FFFD / 未配对代理项）可以展示，但绝不能作为删除目标。
+        // 这里保留「是否 lossy」这一位，调用方按用途决定丢弃还是计数。
+        let lossy = String::from_utf16(units).is_err();
+        let name = decode_name_lossy_with_warn(units);
         // R5c-M03：**空名是默认值，它是合法值名** —— `RegEnumValueW` 把默认值以空名列出，
         // 删除面 `to_wide_checked("")` 也放行（见单测「空值名合法（= 默认值）」）。
         // 旧实现 `if !name.is_empty()` 在这里丢掉它，`incomplete` 仍是 false ⇒「有值」被
         // 报成「没有值」：`value:"*"` 会漏删默认值，展开结果为空还会被当成「空键 = 目标状态
         // 已达成」记成功。过滤只许留在只读展示包装 [`reg_enum_values`]；本函数的清单契约
         // 是「一个都不丢」，调用方自己按需筛。
-        names.push(name);
+        names.push((name, lossy));
         index += 1;
     }
+}
+
+/// 兼容旧调用方：返回名字（含 lossy 名）与「枚举是否完整」。
+pub(super) unsafe fn reg_enum_values_scan(hk: HKEY) -> (Vec<String>, bool) {
+    let (tagged, incomplete) = reg_enum_values_scan_tagged(hk);
+    (tagged.into_iter().map(|(name, _)| name).collect(), incomplete)
 }
 
 /// 只读枚举出口（右键菜单、路径扫描等「少一条只是显示不全」的调用方）。
@@ -325,15 +335,31 @@ fn reg_delete_subkey_shape_is_malformed(subkey: &str) -> bool {
 /// 从「一个键」换成「整棵子树」，闸必须落在调用之前而不是之后。
 pub fn reg_key_remove_checked(hive: HKEY, subkey: &str, recurse: bool) -> Result<(), u32> {
     use windows::Win32::System::Registry::{RegDeleteTreeW, RegDeleteKeyW};
+    use windows::Win32::Foundation::ERROR_REGISTRY_IO_FAILED;
     if reg_delete_subkey_shape_is_malformed(subkey) {
         return Err(87);
     }
     let sk = to_wide_checked(subkey)?;
     unsafe {
         if recurse {
-            // RegDeleteTreeW 可直接作用于父 hive + 子键路径
-            let e = RegDeleteTreeW(hive, PCWSTR(sk.as_ptr()));
-            return if e.is_ok() { Ok(()) } else { Err(e.0) };
+            // RegDeleteTreeW 只清子键/值；键本身必须再调 RegDeleteKeyW。
+            // 两步都把 2/3（不存在）视为幂等成功，其余错误原样回传。
+            let tree = RegDeleteTreeW(hive, PCWSTR(sk.as_ptr()));
+            if tree.is_err() && !open_key_missing_is_idempotent(tree.0) {
+                return Err(tree.0);
+            }
+            if tree.is_ok() {
+                let key = RegDeleteKeyW(hive, PCWSTR(sk.as_ptr()));
+                if key.is_err() && !open_key_missing_is_idempotent(key.0) {
+                    return Err(key.0);
+                }
+            }
+            // Win32 的 Ok 不等于“键已消失”：删后现读是回执唯一可采信的判据。
+            return if reg_key_exists(hive, subkey) {
+                Err(ERROR_REGISTRY_IO_FAILED.0)
+            } else {
+                Ok(())
+            };
         }
         // 非递归删除只对**最末段**有效：拆出父键与末段
         let Some((parent, last)) = subkey.rsplit_once('\\') else {
@@ -388,7 +414,10 @@ pub fn reg_enum_subkeys_pub(hive: HKEY, subkey: &str) -> Vec<String> {
 ///
 /// 开键失败同样算 `incomplete`（它不是「这个键没有子键」）；枚举中途报错也算。
 pub fn reg_enum_subkeys_pub_scan(hive: HKEY, subkey: &str) -> (Vec<String>, bool) {
-    let sk = to_wide(subkey);
+    let sk = match to_wide_checked(subkey) {
+        Ok(v) => v,
+        Err(_) => return (Vec::new(), true),
+    };
     let mut hk = HKEY::default();
     unsafe {
         if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
@@ -929,15 +958,39 @@ pub fn file_ads_bytes(path: &std::path::Path) -> (u64, usize) {
 /// R5c-M03：清单里**可能出现空名 `""`**（= 默认值）。它是合法值名，删除面同样接受，
 /// 调用方不得把它当「没有值」跳过 —— 跳过就等于对一个「数据放默认值」的键漏删并记成功。
 pub fn reg_enum_value_names_pub(hive: HKEY, subkey: &str) -> (Vec<String>, bool) {
-    let sk = to_wide(subkey);
+    let (names, lossy, incomplete) = reg_enum_value_names_pub_with_lossy(hive, subkey);
+    // 有损名不能精确回写/删除；对「需要完整清单」的调用方按不完整上报，避免静默丢名。
+    (names, incomplete || lossy > 0)
+}
+
+/// A6-M01：值名枚举的删除面版本 —— 额外返回「有损解码名数量」。
+/// 有损名只能展示，不能作为 `RegDeleteValueW` 的目标；调用方必须把它计入 skipped_lossy。
+pub fn reg_enum_value_names_pub_with_lossy(hive: HKEY, subkey: &str) -> (Vec<String>, usize, bool) {
+    let sk = match to_wide_checked(subkey) {
+        Ok(v) => v,
+        Err(_) => return (Vec::new(), 0, true),
+    };
     let mut hk = HKEY::default();
     unsafe {
         if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
-            return (Vec::new(), true);
+            return (Vec::new(), 0, true);
         }
-        let (names, incomplete) = reg_enum_values_scan(hk);
+        let (tagged, incomplete) = reg_enum_values_scan_tagged(hk);
         let _ = RegCloseKey(hk);
-        (names, incomplete)
+        let mut names = Vec::new();
+        let mut lossy = 0usize;
+        for (name, bad) in tagged {
+            if bad {
+                lossy += 1;
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("注册表值名含损坏 UTF-16（U+FFFD/未配对代理项），已从删除目标中跳过：{hive:?}\\{subkey}"),
+                );
+            } else {
+                names.push(name);
+            }
+        }
+        (names, lossy, incomplete)
     }
 }
 
@@ -1227,6 +1280,79 @@ mod tests {
         assert_eq!(to_wide_checked("a\0b"), Err(87), "名字闸必须独立拒 NUL");
     }
 
+    /// R5c-M01 真机验收：递归删空键与非空键后，键本身都必须不存在。
+    ///
+    /// 判红自证：删掉递归分支里的 `RegDeleteKeyW` ⇒ 两次 `reg_key_exists`
+    /// 都仍为 true，本用例红；只删子键的旧实现会在非空样本上复现同一失败。
+    #[test]
+    #[ignore = "真实写注册表（HKCU scratch 键 + Drop 清理），发布前门禁跑"]
+    fn r5c_m01_递归删除后键必须消失() {
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ};
+        // RegDeleteTreeW 在本机叶键上可能顺手让键消失，单看回读无法稳定区分
+        // 「清树」和「删键本身」。契约要求递归分支显式再删键，故把这一行同时钉进真机用例。
+        let prod = include_str!("registry.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let remove = prod
+            .split("pub fn reg_key_remove_checked")
+            .nth(1)
+            .and_then(|s| s.split("pub fn reg_key_remove(").next())
+            .expect("找不到 reg_key_remove_checked");
+        let recurse = remove
+            .split("if recurse {")
+            .nth(1)
+            .and_then(|s| s.split("// 非递归删除").next())
+            .expect("找不到递归删除分支");
+        assert!(
+            recurse.contains("RegDeleteKeyW(hive"),
+            "递归删除缺少 RegDeleteKeyW —— 只清树不能证明键本身被删"
+        );
+        const EMPTY: &str = r"Software\TrimRecursiveDeleteEmptyProbe";
+        const NONEMPTY: &str = r"Software\TrimRecursiveDeleteTreeProbe";
+        struct Probe;
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                let _ = reg_key_remove(HKEY_CURRENT_USER, EMPTY, true);
+                let _ = reg_key_remove(HKEY_CURRENT_USER, NONEMPTY, true);
+            }
+        }
+        let _probe = Probe;
+
+        assert!(
+            super::reg_key_ensure_checked(HKEY_CURRENT_USER, EMPTY).is_ok(),
+            "空键应可创建"
+        );
+        assert_eq!(
+            super::reg_key_remove_checked(HKEY_CURRENT_USER, EMPTY, true),
+            Ok(()),
+            "空键递归删除应收口成功"
+        );
+        assert!(
+            !super::reg_key_exists(HKEY_CURRENT_USER, EMPTY),
+            "递归删除后空键本身必须消失（旧实现只清子项，会留下空键）"
+        );
+
+        let child = format!(r"{NONEMPTY}\Child");
+        assert!(
+            super::reg_key_ensure_checked(HKEY_CURRENT_USER, NONEMPTY).is_ok(),
+            "非空样本父键应可创建"
+        );
+        assert!(
+            reg_restore_write(HKEY_CURRENT_USER, &child, "v", REG_SZ, b"x\0"),
+            "非空样本文应该写入成功"
+        );
+        assert_eq!(
+            super::reg_key_remove_checked(HKEY_CURRENT_USER, NONEMPTY, true),
+            Ok(()),
+            "非空键递归删除应收口成功"
+        );
+        assert!(
+            !super::reg_key_exists(HKEY_CURRENT_USER, NONEMPTY),
+            "递归删除后非空键本身必须消失"
+        );
+    }
+
     /// R5c-M01（B1-2）：**写/删/建面必须吃名字形态闸** —— 源码形态断言。
     ///
     /// 为什么需要这一条：上面两条测的是**闸本体**（`to_wide_checked` 拒 NUL、
@@ -1324,6 +1450,16 @@ mod tests {
         assert!(
             shape_at < first_win32,
             "形态闸必须排在任何 Win32 调用之前（RegDeleteTreeW 之后判就晚了）"
+        );
+        let delete_key = remove_fn
+            .find("RegDeleteKeyW(hive")
+            .expect("递归分支缺少 RegDeleteKeyW —— 只清子项会留下键本身");
+        let readback = remove_fn
+            .find("reg_key_exists(hive, subkey)")
+            .expect("递归删除缺少删后现读，Win32 Ok 不能证明键已消失");
+        assert!(
+            first_win32 < delete_key && delete_key < readback,
+            "递归删除顺序必须是：清树 → 删键本身 → 回读键不存在"
         );
 
         // ② 建面原语
@@ -1685,14 +1821,14 @@ mod tests {
         // 只判**代码行**：本函数体的注释里为了说明旧实现会写出 `is_empty` 这个词，
         // 「注释里提到的写法」不是「代码里做的事」（同 `check-registry-delete-guard` 的
         // 正向对照口径），把它算进来会让否定断言假红。
-        let scan = body_of(prod, "pub(super) unsafe fn reg_enum_values_scan");
+        let scan = body_of(prod, "pub(super) unsafe fn reg_enum_values_scan_tagged");
         let scan_code: String = scan
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            scan_code.contains("names.push(name)"),
+            scan_code.contains("names.push((name, lossy))"),
             "值名枚举层必须把每个值名都收进清单"
         );
         assert!(

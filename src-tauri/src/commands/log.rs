@@ -2,6 +2,7 @@
 
 use tauri::{AppHandle, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
+use serde_json::{Value, json};
 
 use crate::engine::{guard, log};
 
@@ -95,9 +96,15 @@ mod log_ipc_sanitizer_tests {
 
 /// log:read — 默认当天；日期格式白名单防路径穿越；只取末尾 512KB 并丢弃半行
 #[tauri::command]
-pub fn log_read<R: tauri::Runtime>(window: WebviewWindow<R>, date: Option<String>) -> Result<String, String> {
+pub fn log_read<R: tauri::Runtime>(window: WebviewWindow<R>, date: Option<String>) -> Result<Value, String> {
     guard::guard(&window, guard::MAIN)?;
-    Ok(log::read_log(date.as_deref()))
+    let state = log::read_log_state(date.as_deref());
+    Ok(json!({
+        "success": state.error.is_none(),
+        "content": state.content,
+        "degraded": state.degraded,
+        "error": state.error,
+    }))
 }
 
 /// log:export — 原生保存对话框选目标文件后复制当天日志

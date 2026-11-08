@@ -293,7 +293,11 @@ pub fn has_lossy_marker(s: &str) -> bool {
 /// 并把原生 `Path`/`OsString` 交给删除侧（`Sink::item` 因此带上了原始路径）。
 pub fn unix_path(p: &std::path::Path) -> String {
     let mut s = p.to_string_lossy().to_string();
-    if s.starts_with(r"\\?\") {
+    // N1b-M02：`\\?\UNC\server\share\x` 折回普通 UNC，而不是剥成
+    // `UNC\server\share\x`（后者既不是绝对路径，也不再是删除目标）。
+    if s.starts_with(r"\\?\UNC\") {
+        s = format!(r"\\{}", &s[8..]);
+    } else if s.starts_with(r"\\?\") {
         s = s[4..].to_string();
     }
     s.replace('\\', "/")
@@ -561,6 +565,7 @@ mod tests {
     #[test]
     fn unix_path_strips_prefix_and_normalizes_sep() {
         assert_eq!(unix_path(Path::new(r"\\?\C:\a\b")), "C:/a/b");
+        assert_eq!(unix_path(Path::new(r"\\?\UNC\srv\share\a")), "//srv/share/a");
         assert_eq!(unix_path(Path::new(r"C:\x\y.txt")), "C:/x/y.txt");
     }
 

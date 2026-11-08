@@ -179,6 +179,11 @@ pub(super) unsafe fn service_key_delete_block_reason(target: &str) -> Option<Str
         None => return service_key_shape_reject(target),
     };
     let name = name.to_string();
+    // R2b-M01：服务此刻必须已停止。QueryServiceStatus 失败（包括无权限）
+    // 一律按不可删处理；不能只看 Start=disabled/manual 就推断“没在用”。
+    if let Some(reason) = service_runtime_state_block_reason(scm_state(&name)) {
+        return Some(reason);
+    }
     let Some(hk) = open_key_read(windows::Win32::System::Registry::HKEY_LOCAL_MACHINE, &format!(r"{SERVICES_ROOT}\{name}")) else {
         return Some("服务键打不开或已不存在".to_string());
     };
@@ -209,6 +214,21 @@ pub(super) unsafe fn service_key_delete_block_reason(target: &str) -> Option<Str
     }
     // K07：值面四道闸（Type/Start/依赖/反作弊）收进纯函数——唯一实现，可测
     service_key_value_block_reason(&name, &landing, svc_type, start, &depends)
+}
+
+/// 服务运行态闸（纯函数，可穷举）：只有 SCM 明确回报 Stopped 才放行。
+fn service_runtime_state_block_reason(state: Option<u32>) -> Option<String> {
+    match state {
+        Some(1) => None,
+        Some(v) => Some(format!(
+            "服务当前状态是「{}」，未停止的服务键不可删",
+            state_label(Some(v))
+        )),
+        None => Some(
+            "服务当前状态读不到（QueryServiceStatus 失败或服务已不可打开），按不可删处理"
+                .to_string(),
+        ),
+    }
 }
 
 /// 落点存在性三态（K07，纯函数可测）：`Ok` = 存在；`NotFound` = 失踪；
@@ -953,6 +973,62 @@ mod tests {
         }
     }
 
+    /// R2b-M01：运行中 / 过渡态 / 读不到状态一律拒，只有已停止放行。
+    ///
+    /// 判红自证：把 `Some(1)` 之外的放行，或删掉 `None` 分支 ⇒ 本用例红。
+    #[test]
+    fn service_runtime_gate_only_allows_stopped() {
+        assert_eq!(service_runtime_state_block_reason(Some(1)), None, "已停止必须放行");
+        for state in [
+            None,
+            Some(2),
+            Some(3),
+            Some(4),
+            Some(5),
+            Some(6),
+            Some(7),
+            Some(99),
+        ] {
+            let reason = service_runtime_state_block_reason(state)
+                .unwrap_or_else(|| panic!("非 stopped 状态必须拒: {state:?}"));
+            assert!(
+                reason.contains("未停止") || reason.contains("读不到"),
+                "拒因必须说明状态: {reason}"
+            );
+        }
+    }
+
+    /// R2b-M01 挂载点：运行态查询必须排在落点触盘之前。
+    ///
+    /// 判红自证：删掉 `scm_state(&name)`，或把它移到 `symlink_metadata(&landing)`
+    /// 之后 ⇒ 本用例红。
+    #[test]
+    fn service_delete_checks_runtime_before_touching_landing() {
+        let src = include_str!("services_orphan.rs");
+        let body = src
+            .split("pub(super) unsafe fn service_key_delete_block_reason")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n").next())
+            .expect("找不到服务键删除判据");
+        let state = body
+            .find("scm_state(&name)")
+            .expect("服务删除判据没有查询 SCM 状态");
+        let path_gate = body
+            .find("dead_landing(&image_raw)")
+            .expect("服务删除判据没有解析并过滤 ImagePath 落点");
+        let disk = body
+            .find("symlink_metadata(&landing)")
+            .expect("找不到落点触盘");
+        assert!(
+            state < disk,
+            "服务运行态闸必须排在落点触盘之前（{state} vs {disk}）"
+        );
+        assert!(
+            path_gate < disk,
+            "ImagePath 远程/设备路径闸必须排在落点触盘之前（{path_gate} vs {disk}）"
+        );
+    }
+
     /// K07：落点存在性三态——权限/IO 错误**不等于**不存在（旧 `Path::exists()`
     /// 把两者都返回 false，等于把「读不到」当「已失踪」放行）。
     /// 判红自证：把 `classify_landing` 的 Err 分支改成 Missing ⇒ ③ 红。
@@ -1127,7 +1203,17 @@ mod tests {
             let reason = unsafe { service_key_delete_block_reason(&target) };
             assert!(reason.is_some(), "系统服务 {name} 竟然被判成可删 —— 至少一条判据该挡住它");
             let r = reason.unwrap();
-            let expected = ["仍然存在", "系统目录", "boot", "驱动", "依赖", "解析不出", "打不开"];
+            let expected = [
+                "未停止",
+                "状态读不到",
+                "仍然存在",
+                "系统目录",
+                "boot",
+                "驱动",
+                "依赖",
+                "解析不出",
+                "打不开",
+            ];
             assert!(
                 expected.iter().any(|w| r.contains(w)),
                 "{name} 的拒因不在预期集合里，判据可能已退化: {r}"

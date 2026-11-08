@@ -32,6 +32,7 @@ import { fileURLToPath } from 'node:url';
 
 import { gate } from './lib/gate.mjs';
 import { styleLinks } from './lib/html-tags.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(ROOT, 'src');
@@ -197,8 +198,7 @@ const NAME_TRANSITION_MAP = new Map(NAME_TRANSITION);
 
 function stripMarkupComments(text, isJs) {
   if (!isJs) return text.replace(/<!--[\s\S]*?-->/g, ' ');
-  // 与 ⑤ 的剥注释同口径：`://` 前的冒号保护 URL，避免把协议头当行注释。
-  return text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:\w])\/\/.*$/gm, '$1');
+  return blankNonCode(text, 'js', { keepStrings: true });
 }
 // 标签窗口必须走到引号外的 `>` 为止（属性值里可能有空格/模板表达式），
 // 不能像旧实现那样直接 indexOf('>')。
@@ -338,11 +338,14 @@ function analyzeAccessibleNames(rawText, file, isJs) {
   }
   let roleButtonCount = 0;
   let roleButtonNamed = 0;
-  // 逐标签扫 role="button"：标签窗口交给 readTag，属性值里的 `>` 不会截断。
+  // T1d-M03：可访问名断言从 role=button 扩到自绘交互控件六族。
+  // 标签窗口交给 readTag，属性值里的 `>` 不会截断。
+  const ROLE_CONTROLS = new Set(['button', 'checkbox', 'switch', 'radio', 'tab', 'menuitem', 'option']);
   for (const m of text.matchAll(/<[a-zA-Z][\w-]*\b/g)) {
     const tag = readTag(text, m.index);
     const attrs = parseTagAttrs(tag);
-    if ((attrs.role || '').toLowerCase() !== 'button') continue;
+    const role = (attrs.role || '').toLowerCase();
+    if (!ROLE_CONTROLS.has(role)) continue;
     roleButtonCount++;
     const tagName = (tag.match(/^<\s*([a-zA-Z][\w-]*)/) || [])[1] || 'div';
     const named = hasReadableText(attrs['aria-label'] || '') ||
@@ -352,8 +355,8 @@ function analyzeAccessibleNames(rawText, file, isJs) {
     else {
       const cls = ((attrs.class || '').trim().split(/\s+/)[0] || 'anon');
       violations.push({
-        key: `${file}#role=button:${tagName}.${cls}`,
-        why: 'role=button 自绘控件没有可访问名（aria-label / aria-labelledby / 元素内文本皆无）',
+        key: `${file}#role=${role}:${tagName}.${cls}`,
+        why: `role=${role} 自绘控件没有可访问名（aria-label / aria-labelledby / 元素内文本皆无）`,
       });
     }
   }
@@ -394,7 +397,7 @@ const FOCUS_SURFACES = [
   { sel: '.tauri-caption-btn', why: '自绘标题栏按钮' },
 ];
 function cssFocusRules(css) {
-  const clean = css.replace(/\/\*[\s\S]*?\*\//g, ' ');
+  const clean = blankNonCode(css, 'css', { keepStrings: true });
   const out = [];
   for (const m of clean.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
     const selectorText = m[1].trim();
@@ -778,8 +781,7 @@ function frozenRmConstants(code) {
 }
 {
   const scriptFiles = jsFiles.filter((p) => rel(p).startsWith('src/scripts/'));
-  // 本块在 ⑤ 的 strip 之前执行，自带一份等价剥注释（只用于本判据，不跨节复用）。
-  const stripComments = (t) => t.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:\w])\/\/.*$/gm, '$1');
+  const stripComments = (t) => blankNonCode(t, 'js', { keepStrings: true });
   for (const p of scriptFiles) {
     const clean = stripComments(read(p));
     for (const name of frozenRmConstants(clean)) {
@@ -957,7 +959,7 @@ if (tipSites < 10) g.fail(`data-tip 命中 ${tipSites} 处（< 10）⇒ 扫描�
 // ---- ⑤⑥ 真仓扫描 ----
 {
   // ⑤ 可选链重复注册（剥注释）
-  const strip = (t) => t.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:\w])\/\/.*$/gm, '$1');
+  const strip = (t) => blankNonCode(t, 'js', { keepStrings: true });
   let regSites = 0;
   for (const [p, text, isJs] of sources) {
     if (!isJs) continue;

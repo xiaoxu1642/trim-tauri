@@ -72,7 +72,15 @@
     }
     try {
       flushFolded();                 // 汇总行不承诺被这次 read 看见（后端合并窗）
-      const content = await window.api.log.read();
+      const resp = await window.api.log.read();
+      const content = typeof resp === 'string' ? resp : (resp?.content ?? '');
+      if (resp && typeof resp === 'object' && (resp.error || resp.success === false)) {
+        viewer.innerHTML = `<div class="empty-state"><p>读取日志失败: ${escapeHtml(resp.error || '未知错误')}</p></div>`;
+        return;
+      }
+      if (resp && typeof resp === 'object' && resp.degraded) {
+        window.app?.toast?.('warning', '日志读取不完整，已显示可用部分');
+      }
       if (!content.trim()) {
         viewer.innerHTML = '<div class="empty-state"><p>暂无日志记录</p></div>';
         return;

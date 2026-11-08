@@ -375,9 +375,15 @@ pub(crate) fn parse_http_url(raw: &str) -> Option<ParsedUrl> {
         };
         (h, p, false)
     };
+    let host = host.to_ascii_lowercase();
+    // R1a-L07：NUL/控制字符/空白会让 `WinHttpConnect` 按前缀截断，而判定器看到
+    // 的是完整串；解析入口直接拒绝，保证两侧吃同一串。
+    if host.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return None;
+    }
     Some(ParsedUrl {
         scheme,
-        host: host.to_ascii_lowercase(),
+        host,
         port,
         path,
         secure,
@@ -647,6 +653,9 @@ pub(crate) fn is_private_api_url(raw: &str) -> bool {
         return true;
     }
     if u.host.is_empty() {
+        return true;
+    }
+    if u.host.chars().any(|c| c.is_control() || c.is_whitespace()) {
         return true;
     }
     // P1-9 的防 DoS 闸：超过 DNS 名字总长（253）的 host 既不是合法域名也不可能是合法 IP
@@ -1116,7 +1125,13 @@ pub fn settings_load<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Valu
     // 出口统一脱敏兜底（幂等：已是掩码的值不变）
     let data = security::mask_settings(&Value::Object(data));
     // A1-M12：Corrupt 读失败与「没有配置」分开；degraded 只陈述读取健康度。
-    Ok(json!({ "success": true, "data": data, "degraded": degraded }))
+    Ok(json!({
+        "success": true,
+        "data": data,
+        "degraded": degraded,
+        "degradedReason": if degraded { Some("设置读取失败或解密失败，当前按空配置展示") } else { None },
+        "degradedSource": "settings.load"
+    }))
 }
 
 // 审查 v2-F4（彻底方案 · 整链摘除）：`settings:save` 已于 2026-09-26 摘除。
