@@ -152,7 +152,20 @@ say('');
 const out = lines.join('\n');
 console.log(out);
 
-if (mdIdx >= 0 && argv[mdIdx + 1]) fs.writeFileSync(argv[mdIdx + 1], out + '\n');
+if (mdIdx >= 0 && argv[mdIdx + 1]) {
+  const md = path.resolve(ROOT, argv[mdIdx + 1]);
+  // `--md` 只允许写仓内 `docs/`（本机资料区）下的 .md。**校验用相对 ROOT 的分段判断**，
+  // 不拿 docs 目录常量做基准：那会让本文件在干净克隆里把 docs 当数据源（tools-doc-paths 红）。
+  const rel = path.relative(ROOT, md);
+  const insideDocs = rel.split(path.sep)[0] === 'docs' && rel.split(path.sep).length > 1;
+  if (path.isAbsolute(argv[mdIdx + 1]) || rel.startsWith('..') || path.isAbsolute(rel) || !insideDocs || path.extname(md) !== '.md') {
+    console.error(`✗ --md 目标必须位于仓库 docs/ 内且是 .md 文件：${argv[mdIdx + 1]}`);
+    process.exit(1);
+  }
+  fs.mkdirSync(path.dirname(md), { recursive: true });
+  writeFileAtomic(md, out + '\n');
+  console.log(`\n↻ Markdown 表已写 ${path.relative(ROOT, md)}`);
+}
 
 let fail = 0;
 if (WRITE) {

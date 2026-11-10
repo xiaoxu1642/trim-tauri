@@ -8098,9 +8098,9 @@
       ]
     }
   ],
-  "winapp2Version": 260730,
+  "winapp2Version": "260730",
   "_sig": {
     "alg": "ed25519",
-    "sig": "djmhUfO6BJvMyZU+7DcTN5Iz6srzxc25mvd1flfFhnl2NrFTyj1NNp43cFzoXv2nNbtN62YZ3S5UhwjRwW4ZDw=="
+    "sig": "Xg0ALihf92NuRCfVgv52oO5+YMCraZ6dOgC+tyhp50xSOFQEIQkGvM9xRroi0aeaF57zs4Zyt83x8mP3dccdDQ=="
   }
 }

@@ -260,8 +260,17 @@
     return internals.invoke(cmd, args || {}, undefined);
   }
 
-  function pluginInvoke(pluginCmd, extra) {
-    var args = Object.assign({ label: currentLabel() }, extra || {});
+  var WINDOW_PLUGIN_COMMANDS = new Set([
+    'minimize', 'toggle_maximize', 'close', 'start_dragging',
+    'start_resize_dragging', 'is_maximized'
+  ]);
+
+  function pluginInvoke(pluginCmd) {
+    if (!WINDOW_PLUGIN_COMMANDS.has(pluginCmd)) {
+      bridgeLog('warn', 'tauri-api：未登记窗口插件命令 ' + pluginCmd);
+      return Promise.reject(new Error('tauri-api：未登记窗口插件命令 ' + pluginCmd));
+    }
+    var args = { label: currentLabel() };
     return invokeCore('plugin:window|' + pluginCmd, args);
   }
 
@@ -333,7 +342,17 @@
       if (!active) return;
       active = false;
       offPromise.then(function (off) {
-        off().catch(function () { bridgeLog('warn', 'tauri-api：事件退订失败 ' + event); });
+        Promise.resolve(off()).then(function (result) {
+          if (typeof internals.unregisterCallback === 'function') {
+            internals.unregisterCallback(callbackId);
+          }
+          return result;
+        }).catch(function () {
+          if (typeof internals.unregisterCallback === 'function') {
+            internals.unregisterCallback(callbackId);
+          }
+          bridgeLog('warn', 'tauri-api：事件退订失败 ' + event);
+        });
       });
     };
   }
@@ -397,14 +416,15 @@
     },
 
     window: {
-      // A 批备注：close 在 Phase 2 前是硬关窗（无静默收尾）；迁移后走 shutdown 流程
-      minimize: function () { return pluginInvoke('minimize'); },
-      maximize: function () { return pluginInvoke('toggle_maximize'); },
-      close: function () { return pluginInvoke('close'); },
+      // C-05（F2-L06）：删掉 minimize / maximize / close 三个**零调用**包装方法。
+      // 自绘标题栏按钮走的是本文件内的 `pluginInvoke('minimize' / 'toggle_maximize' / 'close')`
+      // 直连（见 caption 按钮处理段），不经由 api.window 这层；包装层留着只会让人
+      // 以为「窗口控制有两条路」，实际其中一条已经没人走。
       onFocusState: function (callback) { return bridgeFocusState(callback); },
       onResized: function (callback) { return bridgeResized(callback); },
-      // 黑闪握手：与 preload 同逻辑（双 rAF + 200ms 竞速），适配层加载即自动执行一次
-      notifyFirstPaint: notifyFirstPaint
+      // 黑闪握手：与 preload 同逻辑（双 rAF + 200ms 竞速），适配层加载即自动执行一次。
+      // C-05（F2-L06）：`notifyFirstPaint` 的**属性**零调用（只有本文件末尾直接调函数），
+      // 属性入口删掉，函数本身留着（末尾那一调是黑闪握手的关键路径，不能动）。
     },
 
     log: {
@@ -791,7 +811,37 @@
     return function () { offs.forEach(function (off) { off(); }); };
   }
 
+  var resizeSubscribers = new Set();
+  var resizeFlushQueued = false;
+  var pendingResizeBounds = null;
+
+  function flushResized() {
+    resizeFlushQueued = false;
+    var bounds = pendingResizeBounds;
+    pendingResizeBounds = null;
+    if (!bounds) return;
+    pluginInvoke('is_maximized').then(function (maximized) {
+      var payload = { width: bounds.width, height: bounds.height, maximized: !!maximized };
+      resizeSubscribers.forEach(function (callback) {
+        try { callback(payload); } catch (e) {
+          bridgeLog('error', 'tauri-api：窗口 resize 订阅回调失败 ' + ((e && e.message) || e));
+        }
+      });
+      syncMaximizeVisual(!!maximized);
+    }).catch(function (e) {
+      bridgeLog('error', 'tauri-api：窗口最大化状态查询失败 ' + ((e && e.message) || e));
+      var payload = { width: bounds.width, height: bounds.height, maximized: false };
+      resizeSubscribers.forEach(function (callback) {
+        try { callback(payload); } catch (e2) {
+          bridgeLog('error', 'tauri-api：窗口 resize 订阅回调失败 ' + ((e2 && e2.message) || e2));
+        }
+      });
+      syncMaximizeVisual(false);
+    });
+  }
+
   function bridgeResized(callback) {
+    resizeSubscribers.add(callback);
     return onTauriWindowEvent('tauri://resize', function (size) {
       // Tauri 给物理像素，Electron 发的是 getContentBounds 逻辑像素
       var scale = window.devicePixelRatio || 1;
@@ -799,12 +849,11 @@
         width: Math.round((size && size.width || 0) / scale),
         height: Math.round((size && size.height || 0) / scale)
       };
-      pluginInvoke('is_maximized').then(function (maximized) {
-        callback({ width: bounds.width, height: bounds.height, maximized: !!maximized });
-        syncMaximizeVisual(!!maximized);
-      }).catch(function () {
-        callback({ width: bounds.width, height: bounds.height, maximized: false });
-      });
+      pendingResizeBounds = bounds;
+      if (!resizeFlushQueued) {
+        resizeFlushQueued = true;
+        Promise.resolve().then(flushResized);
+      }
     });
   }
 
@@ -884,7 +933,7 @@
 
   function injectCaption() {
     if (document.querySelector('.tauri-caption')) return;
-    // 审查 M4：自绘 caption 只给主窗装。两个子窗（models / processManager）建窗时没关原生装饰，标题栏本来就由系统提供，
+    // 审查 M4：自绘 caption 只给主窗装。三个子窗（models / processManager / residue）建窗时没关原生装饰，标题栏本来就由系统提供，
     // 这层叠加件在它们身上只是「点了会去要 close/drag/resize 权限」的空壳——正是它逼着 capabilities 给所有窗口发
     // allow-close；去掉叠加件，权限就能收回主窗一处（见 capabilities/default.json 与 subwindows.json 的拆分）。
     if (currentLabel() !== 'main') return;
@@ -892,9 +941,9 @@
 
     var bar = document.createElement('div');
     bar.className = 'tauri-caption';
-    // 审查 v2-F8：`decorations(false)`（src-tauri/src/lib.rs:736）已排除原生标题栏，这套自绘按钮是最小化/最大化/关闭的**唯一**入口。
+    // 审查 v2-F8：`decorations(false)`（src-tauri/src/lib.rs 主窗 builder）已排除原生标题栏，这套自绘按钮是最小化/最大化/关闭的**唯一**入口。
     // 原先三个按钮都带 `tabindex="-1"`，纯键盘用户完全不可达（`ds.js` 的焦点陷阱选择器也排除 `[tabindex="-1"]`），且
-    // `src/index.html:50` 还留着「由 Windows 原生 `titleBarOverlay` 渲染」的过时注释。这里去掉限制，容器升级为 `role="toolbar"`。
+    // `src/index.html` 的标题栏注释还留着「由 Windows 原生 `titleBarOverlay` 渲染」的过时说法。这里去掉限制，容器升级为 `role="toolbar"`。
     bar.setAttribute('role', 'toolbar');
     bar.setAttribute('aria-label', '窗口控制');
     bar.innerHTML =
@@ -976,7 +1025,11 @@
     document.body.classList.toggle('tauri-maximized', maximized);
   }
   function refreshMaximizeVisual() {
-    pluginInvoke('is_maximized').then(function (m) { syncMaximizeVisual(!!m); }).catch(function () {});
+    pluginInvoke('is_maximized').then(function (m) {
+      syncMaximizeVisual(!!m);
+    }).catch(function (e) {
+      bridgeLog('error', 'tauri-api：窗口最大化状态刷新失败 ' + ((e && e.message) || e));
+    });
   }
 
   function initCaption() {
@@ -1000,8 +1053,12 @@
   // 不留空对象。
 
   // Phase 0 的 window.__trimSpike 探针已随 commands/spike.rs 一并删除：更要紧的是它导出的 `raw: invokeCore` ——
-  // 那等于把「直调任意 Rust 命令」的入口挂在 window 上，绕过上面手工挑选的 window.api 白名单，与本项目
-  // 「preload 只做白名单转发」的安全前提直接冲突。调试要看通道名就读 tools/check-channel-map.mjs 的输出，不要重开这个口子。
+  // 那等于把「直调任意 Rust 命令」的入口挂在 window 上，绕过上面手工挑选的 window.api 白名单。
+  // C-05（F2-L07）口径订正：删掉的是 `__trimSpike.raw` 这个**别名**；平台底层的
+  // `window.__TAURI_INTERNALS__.invoke` 仍然存在（本注释不宣称「平台层被封死」）。
+  // 安全边界靠的是「window.api 白名单 + capability 权限」两道，不是靠删一个别名 ——
+  // 删别名只是别在门口挂一块写着「此路不通」的牌子。
+  // 调试要看通道名就读 tools/check-channel-map.mjs 的输出，不要重开这个口子。
 
   // 渲染层诊断上报（N3，2026-09-29 借鉴杰瑞调机助手的 boot.log 做法）：JS 异常与未处理的 Promise 拒绝此前只在
   // DevTools 里、用户侧完全不可见，白屏与材质不渲染（v2-U4）因此无从诊断，而 AGENTS §4 也不允许随手起前台窗口目检。

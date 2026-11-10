@@ -19,10 +19,15 @@
     // main.css 暗色玻璃 token 已同步删除）
     document.body.classList.add('theme-light');
 
-    // 标题栏是独立系统表面，固定浅色。F3-L01：与 4 份 HTML 的静态 meta theme-color 统一到雾屿底色 token
-    // （main.css 的 --bg-app 同值）—— 静态值首帧即被本行覆盖，两处各写一个离表色等于首帧与稳定态各说各话。
+    // 标题栏是独立系统表面，固定浅色。F3-L12：主题色只有一个真源 —— main.css 的 --bg-app；
+    // 这里从计算样式读出来再写 meta，不再在本文件里抄一份色值（抄一份 = 两处各说各话）。
+    // 4 份 HTML 的静态 meta 由 theme-boot 之外的首帧路径供给，其值与 --bg-app 的对拍由
+    // tools/check-css-tokens.mjs 断言（meta 与 token 不等即判红）。
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', '#F6F4FB');
+    if (meta) {
+      const bgApp = getComputedStyle(document.documentElement).getPropertyValue('--bg-app').trim();
+      if (bgApp) meta.setAttribute('content', bgApp);
+    }
   }
 
   window.theme = {
@@ -102,9 +107,11 @@
             // 材质总开关关闭时按「无材质」落 dataset，与手动选择 none 观感一致（窗口界面升级3）
             document.body.dataset.material = resp.materialEnabled === false ? 'none' : resp.material;
           }
-        } catch (e) {}
+        } catch (e) {
+          window.app?.log?.('warn', '读取窗口材质失败: ' + ((e && e.message) || e));
+        }
       } catch (e) {
-        // 忽略
+        window.app?.log?.('warn', '读取系统信息失败: ' + ((e && e.message) || e));
       }
     }
   }

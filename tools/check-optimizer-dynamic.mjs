@@ -71,11 +71,24 @@ const rustCatalog = R('src-tauri/src/commands/optimizer/catalog.rs');
 // D0 三侧覆盖需要另外两侧的源码：检测侧在 overview.rs，备份侧在 backup_restore.rs。
 const rustOverview = R('src-tauri/src/commands/optimizer/overview.rs');
 const rustBackup = R('src-tauri/src/commands/optimizer/backup_restore.rs');
+const rustExternal = R('src-tauri/src/commands/optimizer/external_scan.rs');
 
 let fail = 0;
 function check(ok, name, detail) {
   console.log(`${ok ? '✓' : '✗'} ${name}${detail ? ' —— ' + detail : ''}`);
   if (!ok) fail++;
+}
+
+// A11（R3b-L04）：账外核对的 8 次注册表读必须离开 async runtime worker。
+// 判据同时钉住「声明是 async」与「函数体内真把读放进 spawn_blocking」；
+// 只改签名而不挪读，或只挪读却改回同步命令，都判红。
+{
+  const fnBody = rustFnBody(rustExternal, 'optimizer_external_scan');
+  const asyncCmd = /pub async fn optimizer_external_scan\b/.test(rustExternal);
+  const blockingRead = /spawn_blocking\(move \|\|[\s\S]*?read_ext_dword\(/.test(fnBody);
+  check(asyncCmd && blockingRead,
+    'A11 账外核对命令异步且注册表读进阻塞池（R3b-L04）',
+    !asyncCmd ? '命令声明不是 pub async fn' : !blockingRead ? '函数体内没有 spawn_blocking 包住 read_ext_dword' : '');
 }
 
 /** 从 `const NAME = {` 起按括号配平切出对象字面量（比按行猜 `};` 稳） */
@@ -156,7 +169,9 @@ function armSlice(body, id) {
   const rest = body.slice(start);
   const pad = `[ \\t]{${indent}}`;
   const next = rest.search(new RegExp(`^${pad}"[a-z0-9_]+"\\s*=>|^${pad}_\\s*=>`, 'm'));
-  return next < 0 ? rest.slice(0, 1200) : rest.slice(0, next);
+  // T1f-L02：不再回退 1200 字符窗口 —— 找不到下一个同缩进臂时直接返回剩余全文，
+  // 由调用方在无臂体时判红，不再用固定窗口掩盖「臂边界识别失败」。
+  return next < 0 ? rest : rest.slice(0, next);
 }
 
 // T1f-M01 正向对照：相邻臂字段不得越界作证（旧 4 空格锚点在此必红）。
@@ -321,21 +336,23 @@ check(
 
     // T1f-L05：`pwsh` 与 `cmd` 必须同语义 —— 旧实现的 hay 里根本没有 `pwsh`，于是
     // 「schtasks /change /disable 写在 pwsh 里」这一类整块收不到，同一句话写进 cmd 才判
-    // reboot。但侧表是**签名数据**：把 pwsh 计入后 telemetry_optimize / tf_nvidia_telemetry
-    // 会从 none 变 reboot，表要重出并重签（数据批次的事，不在本门禁改数据）。
-    // 在那之前不许静默：把已确认的差异逐项登记，**任何新增差异**都判红（要么补侧表，
+    // reboot。主档位重算现已**含 pwsh**（cmd 与 pwsh 同语义），侧表也已按同一口径登记
+    // telemetry_optimize / tf_nvidia_telemetry = reboot（T1f-L06 落地，数据面已同步）。
+    // PWSH_SCOPE_GAP 只登记「仍无法合并到主口径」的差异：任何新增差异都判红（要么补侧表，
     // 要么来这里登记理由），登记项消失也要红（僵尸登记）。
     const PWSH_SCOPE_GAP = new Map([
-      ['telemetry_optimize', 'none→reboot'],
-      ['tf_nvidia_telemetry', 'none→reboot'],
     ]);
     const recomputed = new Map();
     const pwshGap = new Map();
     for (const o of opts) {
-      const base = scopeOf(hayOf(o, false));
-      if (base !== 'none') recomputed.set(o.id, base);
+      // T1f-L06：主档位按「cmd + pwsh 同语义」口径重算 —— 侧表登记的档位必须与
+      // 实际执行面（含 pwsh）一致，否则「写在 pwsh 里的 schtasks」会被算成不用重启。
       const withPwsh = scopeOf(hayOf(o, true));
-      if (withPwsh !== base) pwshGap.set(o.id, `${base}→${withPwsh}`);
+      if (withPwsh !== 'none') recomputed.set(o.id, withPwsh);
+      const base = scopeOf(hayOf(o, false));
+      // T1f-L06：主口径已含 pwsh，pwsh 与 cmd 的差异不再是「待补侧表」而是**已按 pwsh 口径登记**。
+      // 只有当侧表登记的档位仍与 pwsh 口径不一致时，才是真正待处理的差异。
+      if (withPwsh !== base && scopeTbl[o.id] !== withPwsh) pwshGap.set(o.id, `${base}→${withPwsh}`);
     }
     const stale = Object.keys(scopeTbl).filter((id) => !known.has(id));
     const badLabel = Object.entries(scopeTbl).filter(([, v]) => !SCOPE_LABELS.includes(v));

@@ -26,7 +26,7 @@
 //
 // 用法：node tools/check-async-exits.mjs
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gate } from './lib/gate.mjs';
@@ -41,6 +41,9 @@ const MIN_BUSY = 6; // busy 赋值对象地板（单腿）：低于此数说明 
 const MIN_INLINE = 6; // 内联 async 事件处理器对象地板
 const MIN_NAMED = 12; // 具名 async handler（addEventListener(…, IDENT)）对象地板
 const MIN_ON = 2; // on(id,type,IDENT) 具名 async 回调对象地板（撤回重启后删绑定退役后的现盘值；取数命令：node tools/check-async-exits.mjs）
+// T1e-L02：地板改成「现值 − 显式退役量」。任何被判定退役的 on() 绑定都必须显式登记到
+// RETIRED_ON，删除绑定时同步登记才能保持绿；漏登记 ⇒ 地板不达标判红（防「悄悄删事件绑定」）。
+const RETIRED_ON = [];
 // T1e-L08：旧实现把两条腿合并成一个地板（18 + 33 = 51），任一腿归零另一腿仍能过线。
 // 现在三桶各自计对象、各自判地板 —— 单腿失明必须能被看见。
 // 收紧后的具名/on 两桶各留约三成余量：正则整体失效（归零）或半失效都会低于地板。
@@ -69,8 +72,6 @@ const TRANSITION = [
   { file: 'src/scripts/pathbinding.js', kind: 'bare-handler', where: '|constbtn=e.currentTarget|btn.disabled=true', batch: '门禁假绿#4', unit: 'F4a2', reason: '`try { await autoScan(false); } finally { … }` 没有 catch：autoScan reject 会穿过 finally 变成 unhandled（T1e-L06 的实测形状）' },
   { file: 'src/scripts/peripheral.js', kind: 'bare-handler', where: '|if(window.api.peripheralWindow.restoreBackup)toa|constbtn=e.currentTarget', batch: '门禁假绿#4', unit: 'F4a2', reason: '还原外设备份的 confirmDanger 确认件在 try 外，确认组件 reject 时按钮无反馈' },
   { file: 'src/scripts/peripheral.js', kind: 'bare-handler', where: '|if(window.api.peripheralWindow.apply)toast()retu|constbtn=e.currentTarget', batch: '门禁假绿#4', unit: 'F4a2', reason: '恢复 Windows 默认值的 confirmDanger 确认件在 try 外，确认组件 reject 时按钮无反馈' },
-  { file: 'src/scripts/realtime.js', kind: 'bare-handler', where: '|constrow=btn.closest()|constname=row.dataset.name', batch: '门禁假绿#4', unit: 'F4b', reason: '删除单份网速报告的 confirm 确认件在 try 外，确认组件 reject 时「点了没反应」' },
-  { file: 'src/scripts/realtime.js', kind: 'bare-handler', where: '|if(typeofwindow.api.realtime.reportClear==)|window.app.toast()', batch: '门禁假绿#4', unit: 'F4b', reason: '清空全部网速报告的 confirm 确认件在 try 外，确认组件 reject 时按钮无反馈' },
   { file: 'src/scripts/syspanel.js', kind: 'named', where: 'submit', batch: '门禁假绿#4', unit: 'F4c', reason: '新建电源计划弹窗的 submit 用 `try { await onSubmit(val) } finally { … }` 没有 catch：onSubmit reject 会穿过 finally 变成 unhandled（T1e-L06 同形）' },
   { file: 'src/scripts/syspanel.js', kind: 'named', where: 'editorCancel', batch: '门禁假绿#4', unit: 'F4c', reason: '放弃未保存修改的 confirmWarning 确认件在 try 外（函数后续保存段有 catch），确认组件 reject 时「放弃修改」无反馈' },
 ];
@@ -148,6 +149,26 @@ function findBusyViolations(blanked, fns) {
     const tryM = tryRe.exec(blanked);
     const tryAt = tryM ? tryM.index : -1;
     const stop = tryAt < 0 || tryAt >= bound ? bound : tryAt;
+    // F4b-L10 后的合法形状：置位本身已在某个 try 内（先做 DOM/进度准备，再上锁）。
+    // 此时「下一个 try」不再是保护边界，判据改为「该 try 的 finally 是否复位同名标志」；
+    // 仍不放过「try 内上锁、finally 不复位」的焊死形态。
+    const inner = tryBlocksIn(blanked, 0, bound)
+      .filter((t) => m.index > t.start && m.index < t.end)
+      .sort((a, b) => (a.end - a.start) - (b.end - b.start))[0];
+    if (inner) {
+      const tail = blanked.slice(inner.end, Math.min(bound, inner.end + 900));
+      const fm = /\bfinally\b/.exec(tail);
+      let resets = false;
+      if (fm) {
+        const open = blanked.indexOf('{', inner.end + fm.index);
+        if (open >= 0 && open < bound) {
+          const close = skipBraces(blanked, open);
+          resets = new RegExp(`\\b${m[1]}\\s*=\\s*false\\b`).test(blanked.slice(open, close));
+        }
+      }
+      out.push({ index: m.index, name: m[1], bad: !resets });
+      continue;
+    }
     out.push({ index: m.index, name: m[1], bad: /\bawait\b/.test(blanked.slice(from, stop)) });
   }
   return out;
@@ -217,7 +238,16 @@ function uncoveredAwaits(blanked, start, end, nested = []) {
 
 // 内联 async 回调（箭头 / 函数表达式）；`[^,()]*` 匹配被抹白的事件名或裸标识符。
 const AE_INLINE = /addEventListener\(\s*[^,()]*\s*,\s*(?:async\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>|async\s+function\s*[A-Za-z0-9_$]*\s*\([^)]*\))\s*\{/g;
+// T1e-L01：内联事件属性赋值 `el.onclick = async () => { … }` 与 `el.onclick = async function () { … }`
+// 也是同源的 async 事件处理器，必须进 handler 腿逐 await 判 catch 接收者（旧正则只认 addEventListener）。
+const AE_ATTR = /\.(?:onclick|onchange|oninput|onsubmit|ondblclick|onkeydown|onblur|onfocus)\s*=\s*(?:async\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>|async\s+function\s*[A-Za-z0-9_$]*\s*\([^)]*\))\s*\{/g;
 const AE_REF = /addEventListener\(\s*[^,()]*\s*,\s*([A-Za-z_$][\w$]*)\s*\)/g;
+// C-08（F4b-L06）：`guardAsync` 的**实现**必须只有一份。
+// 此前 `optimizer.js` 与 `finder.js` 各有一份逐字相同的实现：改一处漂一处，
+// 且没有任何门禁看得见「又出现了第三份」。现唯一实现在 `ds.js`（`ds.guardAsync = function …`），
+// 业务文件只写 `const guardAsync = ds.guardAsync;` 取用。
+// 判据数的是**实现份数**（带函数体的那种），不是取用点 —— 取用点要多少有多少。
+const RE_GUARD_ASYNC_IMPL = /function\s+guardAsync\s*\(|guardAsync\s*=\s*function\s*\(/g;
 // `on(id, type, handler)` 是本仓子窗的绑定助手（`residue-window.js`）；只在该文件自己
 // 定义了三参 `function on(` 时才启用这条腿，避免把别处的同名调用误认成事件绑定。
 const ON_DEF = /\bfunction\s+on\s*\([^)]*,[^)]*,[^)]*\)/;
@@ -256,6 +286,7 @@ function collectHandlers(code, blanked) {
     inline.push({ kind: 'inline', index: m.index, name: '', bodyStart: open + 1, end: skipBraces(blanked, open) });
   };
   for (const m of blanked.matchAll(AE_INLINE)) pushInline(m);
+  for (const m of blanked.matchAll(AE_ATTR)) pushInline(m);
   if (ON_DEF.test(blanked)) for (const m of blanked.matchAll(ON_INLINE)) pushInline(m);
 
   const bound = [];
@@ -337,13 +368,42 @@ if (namedObjects < MIN_NAMED) {
 if (onObjects < MIN_ON) {
   g.fail(`on() 腿对象地板不成立：只扫到 ${onObjects} 个 on(id,type,IDENT) 的 async 回调（地板 ${MIN_ON}）⇒ ON_REF 失效`);
 }
+if (onObjects + RETIRED_ON.length < MIN_ON) {
+  g.fail(`on() 腿对象地板不成立：现值 ${onObjects} + 退役量 ${RETIRED_ON.length} < 地板 ${MIN_ON} ⇒ ON_REF 失效或删绑定未登记 RETIRED_ON`);
+}
 g.ok(`前端 await/出口对账：busy 对象 ${busyObjects} 个 / 内联 async handler ${inlineObjects} 个 / 具名 async handler ${namedObjects} 个 / on() async 回调 ${onObjects} 个（命中 ${seen.size} 处，登记豁免 ${exempt.size} 条）`);
+
+// C-08（F4b-L06）：`guardAsync` 的实现必须只有一份（唯一真源在 `ds.js`）。
+{
+  const impls = [];
+  for (const abs of walk(SCRIPTS)) {
+    const relPath = relative(ROOT, abs).replace(/\\/g, '/');
+    const text = readFileSync(abs, 'utf8');
+    const n = [...text.matchAll(RE_GUARD_ASYNC_IMPL)].length;
+    if (n) impls.push(`${relPath}×${n}`);
+  }
+  const total = impls.reduce((s, x) => s + Number(x.split('×')[1]), 0);
+  if (total !== 1) {
+    g.fail(`guardAsync 的实现必须全仓只有一份（现算 ${total} 份：${impls.join('、') || '无'}）⇒ 逐字相同的多份实现会各自漂移`);
+  } else {
+    g.ok(`guardAsync 实现唯一（${impls[0]}）`);
+  }
+  // 判红自证：临时造第二份实现 ⇒ 必须判红。
+  {
+    const dup = 'function guardAsync(label, handler) { return handler; }';
+    const count = (t) => [...t.matchAll(RE_GUARD_ASYNC_IMPL)].length;
+    if (count(dup) !== 1) {
+      g.fail('guardAsync 唯一实现判定器失真：合成样本数不出 1 份');
+    }
+  }
+}
 
 // 合成样本正向对照（每次都跑）
 const mk = (body) => `const x = { addEventListener: () => {} };\nfunction run() {\n${body}\n}\n`;
 const mkH = (body) => `const el = { addEventListener: () => {} };\nel.addEventListener('click', async () => {\n${body}\n});\n`;
 const mkN = (body) => `const el = { addEventListener: () => {} };\nel.addEventListener('click', save);\nasync function save() {\n${body}\n}\n`;
 const mkO = (body) => `function on(id, type, handler) { return handler; }\non('btn', 'click', doIt);\nasync function doIt() {\n${body}\n}\n`;
+const mkAttr = (body) => `const el = {};\nel.onclick = async () => {\n${body}\n};\n`;
 const countHandlerViolations = (code) => {
   const blanked = blankSingleQuoted(blankNonCode(code, 'js'));
   const hs = collectHandlers(code, blanked);
@@ -373,8 +433,29 @@ const CONTROLS = [
     code: mk('  isCleaning = true;\n  const entry = pick();\n  await go();\n  try { x(); } finally { isCleaning = false; }'),
     want: 1,
   },
+  {
+    // F4b-L10 的合法形状：先做可抛的准备，再在 try 内上锁，finally 复位。
+    kind: 'busy',
+    label: 'A7 置 busy 已在 try 内且 finally 复位同名标志 ⇒ 不判红',
+    code: mk('  try {\n    prepare();\n    isCleaning = true;\n    await go();\n  } finally { isCleaning = false; }'),
+    want: 0,
+  },
+  {
+    kind: 'busy',
+    label: 'A8 置 busy 在 try 内但 finally 不复位 ⇒ 必须判红',
+    code: mk('  try {\n    isCleaning = true;\n    await go();\n  } finally { cleanup(); }'),
+    want: 1,
+  },
   { kind: 'handler', label: 'B1 普通内联 async handler 无 catch ⇒ 必须判红', code: mkH('  const r = await api.save();'), want: 1 },
   { kind: 'handler', label: 'B2 内联 handler 的 await 被 try/catch 包住 ⇒ 不判红', code: mkH('  try { await api.save(); } catch (e) { log(e); }'), want: 0 },
+  {
+    kind: 'handler', label: 'B6 属性赋值内联 async 处理器无 catch ⇒ 必须判红（T1e-L01）',
+    code: mkAttr('  const r = await api.save();'), want: 1,
+  },
+  {
+    kind: 'handler', label: 'B7 属性赋值内联 async 处理器 await 被 catch 接住 ⇒ 不判红（T1e-L01）',
+    code: mkAttr('  try { await api.save(); } catch (e) { log(e); }'), want: 0,
+  },
   {
     // T1e-L07：双引号事件名在 blankNonCode 后整段变空白，旧 HPAT 的 ['"] 分支永不命中。
     kind: 'handler',
@@ -477,5 +558,106 @@ g.controlFailed(
   CONTROLS.length,
   '正向对照（busy 三向 + 窗口不越函数体两向 + try 子串 + 内联/具名/on 三腿各正反 + 别处 try 不算 + try/finally 不算 + 嵌套块 + .catch 链 + 射程边界）',
 );
+
+// ---------- A2-L03：失败出口不得空 catch / 仅 console ----------
+// 生产代码里这些锚点之后必须出现应用日志/可见提示；C-W2 的三处在途先登记，
+// 落地后本条会因「命中即失效」自动逼回收。
+const SILENT_SITES = [
+  { file: 'src/scripts/cleanup.js', anchor: 'console.warn(`[Trim] 文件清理扫描失败', need: 'window.app?.log', label: '文件清理扫描失败' },
+  { file: 'src/scripts/cleanup.js', anchor: 'console.warn(`[Trim] 文件清理扫描异常', need: 'window.app?.log', label: '文件清理扫描异常' },
+  { file: 'src/scripts/theme.js', anchor: '} catch (e) {}', need: 'log', label: 'theme catch', transition: 'P2/C-W2' },
+];
+{
+  const probe = (text, anchor, need) => {
+    const lines = text.split('\n');
+    const at = lines.findIndex((l) => l.includes(anchor));
+    if (at < 0) return null;
+    return lines.slice(at, at + 10).join('\n').includes(need);
+  };
+  const POS = 'console.warn("x");\nwindow.app?.log("warn", "x");';
+  const NEG = 'console.warn("x");';
+  if (probe(POS, 'console.warn("x")', 'window.app?.log') !== true
+    || probe(NEG, 'console.warn("x")', 'window.app?.log') !== false) {
+    g.fail('A2-L03 正向对照失败：失败出口判定器失真（必须能把「补日志」与「仅 console」分开）');
+  }
+  let silentBad = 0;
+  let silentTransition = 0;
+  for (const site of SILENT_SITES) {
+    const abs = join(ROOT, site.file);
+    if (!existsSync(abs)) { g.fail(`A2-L03：${site.file} 不存在（判定对象缺失）`); silentBad++; continue; }
+    const hit = probe(readFileSync(abs, 'utf8'), site.anchor, site.need);
+    if (hit === null) { g.fail(`A2-L03：${site.file} 找不到锚点「${site.anchor}」⇒ 判据形状漂移`); silentBad++; continue; }
+    if (site.transition) {
+      if (hit) { g.fail(`A2-L03：TRANSITION 条目失效：${site.file}#${site.label}（${site.transition}）⇒ 已补出口，必须回收本行`); silentBad++; }
+      else silentTransition++;
+      continue;
+    }
+    if (!hit) {
+      g.fail(`A2-L03：${site.file} 的 ${site.label} 仍只有 console ⇒ 日志页看不到失败`);
+      silentBad++;
+    }
+  }
+  if (silentBad === 0) g.ok(`A2-L03：失败出口已补应用日志（${SILENT_SITES.length - silentTransition} 处；C-W2 在途 ${silentTransition} 处）`);
+}
+
+// ---------- A2-L06：lockQueryBusy 必须在 finally 释放 ----------
+{
+  const cleanupAbs = join(SCRIPTS, 'cleanup.js');
+  const cleanupSrc = readFileSync(cleanupAbs, 'utf8');
+  const cleanView = blankSingleQuoted(blankNonCode(cleanupSrc, 'js'));
+  const fnOf = (text, name) => splitFunctions(text, 'js').find((f) => f.name === name);
+  const judge = (body) => /lockQueryBusy\s*=\s*true/.test(body)
+    && /finally\s*\{[\s\S]*lockQueryBusy\s*=\s*false/.test(body);
+  const good = 'async function runLockQuery() {\n  lockQueryBusy = true;\n  try { await q(); } catch (e) { } finally { lockQueryBusy = false; }\n}';
+  const bad = 'async function runLockQuery() {\n  lockQueryBusy = true;\n  try { await q(); } catch (e) { }\n  lockQueryBusy = false;\n}';
+  const bodyOf = (text, name) => {
+    const f = fnOf(text, name);
+    return f ? text.slice(f.bodyStart, f.end - 1) : '';
+  };
+  if (!judge(bodyOf(blankSingleQuoted(blankNonCode(good, 'js')), 'runLockQuery'))
+    || judge(bodyOf(blankSingleQuoted(blankNonCode(bad, 'js')), 'runLockQuery'))) {
+    g.fail('A2-L06 正向对照失败：busy 锁释放判定器失真（必须能把 finally 释放与 try 后释放分开）');
+  }
+  let lockBad = 0;
+  for (const name of ['runLockQuery', 'killLockedFromQuery']) {
+    const f = fnOf(cleanView, name);
+    if (!f) { g.fail(`A2-L06：cleanup.js 找不到函数 ${name} ⇒ 判据形状漂移`); lockBad++; continue; }
+    if (!judge(cleanView.slice(f.bodyStart, f.end - 1))) {
+      g.fail(`A2-L06：${name} 的 lockQueryBusy 释放不在 finally ⇒ try 内抛错会把按钮焊死`);
+      lockBad++;
+    }
+  }
+  if (lockBad === 0) g.ok('A2-L06：runLockQuery / killLockedFromQuery 的 busy 锁都在 finally 释放');
+}
+
+// ---------- F4b-L10：运行标志必须在 DOM/进度准备之后置位 ----------
+{
+  const ORDER_SITES = [
+    { file: 'src/scripts/diskbench.js', fn: 'run', before: 'ensureProgressBar()', flag: 'running = true;', label: 'diskbench.run' },
+    { file: 'src/scripts/netcheck.js', fn: 'startCollect', before: 'renderNicProps()', flag: 'collecting = true;', label: 'netcheck.startCollect' },
+  ];
+  const judge = (body, before, flag) => {
+    const b = body.indexOf(before);
+    const f = body.indexOf(flag);
+    return b >= 0 && f >= 0 && b < f;
+  };
+  const good = 'async function run() { ensureProgressBar(); running = true; try { await go(); } finally { running = false; } }';
+  const bad = 'async function run() { running = true; ensureProgressBar(); try { await go(); } finally { running = false; } }';
+  if (!judge(good, 'ensureProgressBar()', 'running = true;') || judge(bad, 'ensureProgressBar()', 'running = true;')) {
+    g.fail('F4b-L10 正向对照失败：运行标志置位顺序判定器失真');
+  }
+  let orderBad = 0;
+  for (const site of ORDER_SITES) {
+    const src = readFileSync(join(ROOT, site.file), 'utf8');
+    const clean = blankSingleQuoted(blankNonCode(src, 'js'));
+    const f = splitFunctions(clean, 'js').find((x) => x.name === site.fn);
+    if (!f) { g.fail(`F4b-L10：${site.file} 找不到函数 ${site.fn} ⇒ 判据形状漂移`); orderBad++; continue; }
+    if (!judge(clean.slice(f.bodyStart, f.end - 1), site.before, site.flag)) {
+      g.fail(`F4b-L10：${site.label} 的运行标志早于 ${site.before} ⇒ 前置步骤抛错会焊死闸门`);
+      orderBad++;
+    }
+  }
+  if (orderBad === 0) g.ok('F4b-L10：diskbench/netcheck 的运行标志都在 DOM/进度准备完成后置位');
+}
 
 g.finish('check-async-exits: 全部通过（过渡豁免 ' + exempt.size + ' 条，逐条见 TRANSITION）');

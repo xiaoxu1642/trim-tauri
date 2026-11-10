@@ -123,13 +123,13 @@ fn parse_bench_arg(raw: Option<&str>, default: u64, name: &str, warn: &mut Vec<S
 /// 白名单外的取值回落默认，但**必须留一条告警**（P1-6E①）。
 /// 抽成函数只为了让它可单测：`--qd 3` 这种「不在档位里」的写法与「畸形字符串」一样，
 /// 都不许悄悄变成 qd=1 的实测数字。
-fn clamp_to_whitelist(
-    got: usize,
-    allowed: &[usize],
-    default: usize,
+fn clamp_to_whitelist<T: Copy + PartialEq + std::fmt::Debug + std::fmt::Display>(
+    got: T,
+    allowed: &[T],
+    default: T,
     name: &str,
     warn: &mut Vec<String>,
-) -> usize {
+) -> T {
     if allowed.contains(&got) {
         return got;
     }
@@ -389,7 +389,15 @@ unsafe fn open_bench_file(path: &str, size: u64, nobuf: bool) -> *mut core::ffi:
     );
     if h.is_null() || h as isize == -1 { return std::ptr::null_mut(); }
     let mut hi = (size >> 32) as i32;
-    SetFilePointer(h, size as i32, &mut hi, 0); // FILE_BEGIN，lpDistanceToMoveHigh: *mut i32
+    // N1c-L03：`SetFilePointer` 的返回值必须判 —— 旧写法 `SetFilePointer(h, ...);`
+    // 直接丢弃返回值，失败（无效句柄 / 越界）时文件指针没落到末尾，
+    // 随后的 `SetEndOfFile` 把**旧长度**当新长度截断，测速文件悄悄变短。
+    // 失败必须立即 Err（返回空句柄由调用方按「打不开」处理）。
+    let moved = unsafe { SetFilePointer(h, size as i32, &mut hi, 0) }; // FILE_BEGIN，lpDistanceToMoveHigh: *mut i32
+    if moved == u32::MAX {
+        windows_sys::Win32::Foundation::CloseHandle(h);
+        return std::ptr::null_mut();
+    }
     if SetEndOfFile(h) == 0 {
         windows_sys::Win32::Foundation::CloseHandle(h);
         return std::ptr::null_mut();
@@ -473,9 +481,11 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
     let qd_req = parse_bench_arg(arg_value(args, "qd"), 1, "qd", &mut arg_warn) as usize;
     let th_req = parse_bench_arg(arg_value(args, "threads"), 1, "threads", &mut arg_warn) as usize;
     let mode = arg_value(args, "mode").unwrap_or("nobuf").to_string();
-    if !BENCH_BLOCKS.contains(&block) || !BENCH_DURATIONS.contains(&duration) {
-        return Err("非法参数（block/duration 不在白名单）".to_string());
-    }
+    // N1c-L05：全部数值参数**统一口径** —— 越界一律 clamp + 告警，不许一部分硬失败、
+    // 一部分软回落。旧形态 block/duration 越界直接 `Err`（整轮跑不成）、qd/threads 越界
+    // 却静默回落默认（照样出数），用户拿到两份口径互斥的失败形态。
+    let block = clamp_to_whitelist(block, &BENCH_BLOCKS, 1048576, "block-bytes", &mut arg_warn);
+    let duration = clamp_to_whitelist(duration, &BENCH_DURATIONS, 8, "duration", &mut arg_warn);
     let qd_req = clamp_to_whitelist(qd_req, &BENCH_QD, 1, "qd", &mut arg_warn);
     let threads = clamp_to_whitelist(th_req, &BENCH_THREADS, 1, "threads", &mut arg_warn);
     // 非固定盘 / 探测失败回落 buf（nobuf 在内存盘、网络盘不可靠）
@@ -552,9 +562,9 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
         // HANDLE 是 *mut c_void 不满足 Send；edition2021 精确捕获会连字段位置一起抓，
         // 包装体也绕不开 → 跨线程一律先转 usize（Send），闭包内再转回 HANDLE（同进程内安全）
         let hs: Vec<usize> = bench.handles.iter().map(|h| *h as usize).collect();
-        let run_stage = |kind: u8, io: usize, ms: u64, seq: u64, offs: &[u64]| -> Result<(u64, u64, u128), String> {
+        let run_stage = |kind: u8, io: usize, ms: u64, seq: u64, offs: &[u64]| -> Result<(u64, u64, u128, u64), String> {
             let start = mono_ms();
-            std::thread::scope(|s| {
+            let acc = std::thread::scope(|s| {
                 let mut js = Vec::new();
                 for hz in &hs {
                     let hz = *hz;
@@ -571,7 +581,12 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
                     }
                 }
                 Ok(acc)
-            })
+            })?;
+            // N1c-L01：吞吐除数必须是**本阶段实测耗时**，不是请求的 `ms`。
+            // 旧写法用请求时长（`phase_ms`）当除数：阶段提前收尾或超时拖尾时，
+            // 真实耗时与请求值不同，MB/s 系统性偏高 —— 同一块盘两次测出两条不可比的曲线。
+            let elapsed_ms = mono_ms().saturating_sub(start);
+            Ok((acc.0, acc.1, acc.2, elapsed_ms))
         };
         let seq_w = run_stage(0, block as usize, phase_ms, seq_per, &[])?;
         bench_progress(on_progress, "seqwrite", 40);
@@ -586,12 +601,16 @@ fn diskbench_core(args: &[String], on_progress: &mut dyn FnMut(&str)) -> Result<
 
         // 口径（v2 §3.1）：MB/s 按真实阶段耗时；iops=4K 随机读 IOPS（保历史可比）；
         // latency=随机读单请求端到端平均（含排队），毫秒
-        let mbs = |b: u64, ms: u64| b as f64 / (1024.0 * 1024.0) / (ms as f64 / 1000.0);
-        let seq_write = mbs(seq_w.0, phase_ms);
-        let seq_read = mbs(seq_r.0, phase_ms);
-        let rand_read = mbs(rd_r.0, half_ms);
-        let rand_write = mbs(wr_r.0, half_ms);
-        let iops = rd_r.1 as f64 / (half_ms as f64 / 1000.0);
+        let mbs = |b: u64, ms: u64| {
+            // 实测耗时为 0（阶段没跑满一毫秒）时按最小单位兜底，避免除零成 inf。
+            let ms = ms.max(1);
+            b as f64 / (1024.0 * 1024.0) / (ms as f64 / 1000.0)
+        };
+        let seq_write = mbs(seq_w.0, seq_w.3);
+        let seq_read = mbs(seq_r.0, seq_r.3);
+        let rand_read = mbs(rd_r.0, rd_r.3);
+        let rand_write = mbs(wr_r.0, wr_r.3);
+        let iops = rd_r.1 as f64 / (rd_r.3.max(1) as f64 / 1000.0);
         let latency = if rd_r.1 > 0 { (rd_r.2 as f64 / rd_r.1 as f64) / 1e6 } else { 0.0 };
         // 审查 v2-M6：`measured:true` 以前是**无条件**写死的。盘被配额/只读/杀软拦下时
         // 每个阶段都是 0 次完成，输出却是 `0 MB/s 且 measured:true`，被当成一次真实测量
@@ -1118,10 +1137,10 @@ fn read_if_table_frame(
             if row.OperStatus != 1 { continue; } // IfOperStatusUp
             let if_type = row.Type; // IF_TYPE（6=以太网，71=802.11 无线）
             if !(if_type == 6 || if_type == 71) { continue; }
-            // InterfaceAndOperStatusFlags（bit0=Hardware,1=Filter,2=Endpoint）：
+            // InterfaceAndOperStatusFlags（bit0=Hardware，bit1=Filter，bit2=ConnectorPresent，bit7=EndPoint）：
             // 只保留硬件接口——对齐 Get-NetAdapter -Physical，排除 WFP 过滤器伪卡
             let flags = row.InterfaceAndOperStatusFlags._bitfield;
-            // 实测（本机）：真卡 flags=0b101（Hardware+Endpoint）、WFP 伪卡=0b10（Filter）→
+            // 实测（本机）：真卡 flags=0b101（Hardware+ConnectorPresent）、WFP 伪卡=0b10（Filter）→
             // 只保留 HardwareInterface=1 且 FilterInterface=0
             if flags & 0x01 == 0 || flags & 0x02 != 0 { continue; }
             let (in_o, out_o) = (row.InOctets, row.OutOctets);
@@ -1196,6 +1215,29 @@ pub fn run_net_sample(args: &[String]) -> i32 {
         }
     };
     let mut sampler = NetSampler::new();
+    // N1c-L02：`--daemon` 真正参与分支 —— 不带参数跑**一轮**采样后退出；
+    // 带 `--daemon` 才常驻（旧形态无条件常驻，于是「跑一次看看」也停不下来，
+    // 调用方只能靠杀进程收场）。
+    let daemon = args.iter().any(|a| a == "--daemon");
+    if !daemon {
+        match sampler.sample_frame() {
+            Some(line) => {
+                if out_line(&line).is_err() {
+                    return 0;
+                }
+            }
+            None => {
+                if let Some(code) = sampler.last_error() {
+                    eprintln!(
+                        "[finder-warn] net-sample 读接口表失败（GetIfTable2 返回 0x{:08X}）——\
+                         这与「本机没有可用网卡」是两种结论",
+                        code as u32
+                    );
+                }
+            }
+        }
+        return 0;
+    }
     // 只在「失败码变化」的那一拍出声：本函数是 1s 一轮的常驻循环，
     // 每拍都写 stderr 会把真留痕淹掉（lib 直调侧由宿主读 last_error，不经过这里）。
     let mut reported: Option<i32> = None;
@@ -2001,5 +2043,132 @@ mod n1b_m01_tests {
         let mut perm = std::fs::metadata(&ro).unwrap().permissions();
         perm.set_readonly(false);
         std::fs::set_permissions(&ro, perm).unwrap();
+    }
+
+    /// N1c-L01：吞吐除数必须是**本阶段实测耗时**，不是请求的 `ms`。
+    ///
+    /// 判红自证：把 `mbs(.., stage.3)` 改回 `mbs(.., phase_ms)` ⇒ 本用例红。
+    #[test]
+    fn n1c_throughput_uses_elapsed() {
+        // ① 生产调用点必须用**本阶段实测耗时**（stage.3），不得用请求值。
+        let src = include_str!("perf.rs");
+        for (stage, name) in [
+            ("seq_w", "seqwrite"),
+            ("seq_r", "seqread"),
+            ("rd_r", "randread"),
+            ("wr_r", "randwrite"),
+        ] {
+            assert!(
+                src.contains(&format!("mbs({stage}.0, {stage}.3)")),
+                "{name} 的吞吐除数必须是本阶段实测耗时（{stage}.3），不得用请求值"
+            );
+        }
+        assert!(
+            !src.lines().any(|l| l.trim_start().starts_with("let seq_write = mbs(seq_w.0, phase_ms)"))
+                && !src.lines().any(|l| l.trim_start().starts_with("let rand_read = mbs(rd_r.0, half_ms)")),
+            "不得用请求时长（phase_ms/half_ms）当吞吐除数"
+        );
+        // ② 口径本身：字节数固定，除数不同 ⇒ 读数必须不同（除零不得产出 inf/NaN）。
+        let mbs = |b: u64, ms: u64| {
+            let ms = ms.max(1);
+            b as f64 / (1024.0 * 1024.0) / (ms as f64 / 1000.0)
+        };
+        let bytes = 64u64 * 1024 * 1024;
+        let by_request = mbs(bytes, 8000);
+        let by_elapsed = mbs(bytes, 4000);
+        assert!(
+            by_elapsed > by_request * 1.9,
+            "实测耗时减半 ⇒ 吞吐必须约翻倍（实测 {by_elapsed} vs 请求 {by_request}）"
+        );
+        assert!(mbs(bytes, 0).is_finite(), "耗时为 0 时不得产出 inf/NaN");
+    }
+
+    /// N1c-L03：`SetFilePointer` 失败必须显式失败，不得继续 `SetEndOfFile`。
+    ///
+    /// 判红自证：把返回值判据去掉 ⇒ 本用例红。
+    #[test]
+    fn n1c_set_file_pointer_failure_is_reported() {
+        let src = include_str!("perf.rs");
+        assert!(
+            src.contains("let moved = unsafe { SetFilePointer"),
+            "SetFilePointer 的返回值必须被接收，不得丢弃"
+        );
+        // 失败分支必须**真的**短路：关句柄 + 返回空句柄（不得继续 SetEndOfFile）。
+        let fail_branch = src
+            .lines()
+            .skip_while(|l| !l.contains("let moved = unsafe { SetFilePointer"))
+            .take(6)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            fail_branch.contains("moved == u32::MAX")
+                && fail_branch.contains("CloseHandle(h)")
+                && fail_branch.contains("return std::ptr::null_mut()"),
+            "SetFilePointer 失败必须短路返回空句柄（不得继续 SetEndOfFile），实得：\n{fail_branch}"
+        );
+    }
+
+    /// N1c-L05：全部数值参数**统一口径** —— 越界一律 clamp + 告警。
+    ///
+    /// 判红自证：把 block/duration 改回「越界直接 Err」⇒ 本用例红。
+    #[test]
+    fn n1c_qd_out_of_range_is_rejected() {
+        // ① 生产调用点：全部数值参数必须**同一口径**（clamp + 告警），
+        // 不许 block/duration 硬失败而 qd/threads 软回落。
+        let src = include_str!("perf.rs");
+        assert!(
+            src.lines().any(|l| l.trim_start().starts_with("let block = clamp_to_whitelist(block,")),
+            "block 越界必须走 clamp_to_whitelist（与 qd/threads 同口径）"
+        );
+        assert!(
+            src.lines().any(|l| l.trim_start().starts_with("let duration = clamp_to_whitelist(duration,")),
+            "duration 越界必须走 clamp_to_whitelist（与 qd/threads 同口径）"
+        );
+        assert!(
+            !src.lines().any(|l| l.trim_start().starts_with("return Err(\"非法参数")),
+            "不得保留「block/duration 越界直接 Err」的旧硬失败口径"
+        );
+        // ② 口径函数本身：越界回落默认 + 一条告警。
+        let mut w: Vec<String> = Vec::new();
+        assert_eq!(clamp_to_whitelist(3usize, &BENCH_QD, 1, "qd", &mut w), 1);
+        assert_eq!(w.len(), 1, "越界必须留一条告警：{w:?}");
+        // block/duration 走**同一**口径（不再一个硬失败一个软回落）。
+        let mut w2: Vec<String> = Vec::new();
+        assert_eq!(clamp_to_whitelist(3u64, &BENCH_BLOCKS, 1048576, "block-bytes", &mut w2), 1048576);
+        assert_eq!(w2.len(), 1, "block 越界必须与 qd 同口径留告警：{w2:?}");
+        let mut w3: Vec<String> = Vec::new();
+        assert_eq!(clamp_to_whitelist(3u64, &BENCH_DURATIONS, 8, "duration", &mut w3), 8);
+        assert_eq!(w3.len(), 1, "duration 越界必须与 qd 同口径留告警：{w3:?}");
+        // 白名单内的取值原样采用且不告警。
+        let mut w4: Vec<String> = Vec::new();
+        assert_eq!(clamp_to_whitelist(4096u64, &BENCH_BLOCKS, 1048576, "block-bytes", &mut w4), 4096);
+        assert!(w4.is_empty(), "命中档位不得造告警：{w4:?}");
+    }
+
+    /// N1c-L02：`--daemon` 必须真正参与分支 —— 不带参数跑一轮就退出。
+    ///
+    /// 判红自证：删掉 `let daemon = ...` 与随后的非 daemon 早退 ⇒ 本用例红。
+    #[test]
+    fn n1c_net_sample_without_daemon_exits() {
+        let src = include_str!("perf.rs");
+        assert!(
+            src.contains("let daemon = args.iter().any(|a| a == \"--daemon\");"),
+            "run_net_sample 必须识别 --daemon"
+        );
+        // 非 daemon 分支必须**真的**早退（跑一轮就 return），不许只是空壳分支。
+        assert!(
+            src.lines().any(|l| l.trim() == "if !daemon {"),
+            "非 daemon 分支的条件必须就是 `if !daemon {{`（不许被其它条件短路掉）"
+        );
+        let branch = src
+            .lines()
+            .skip_while(|l| l.trim() != "if !daemon {")
+            .take(30)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            branch.contains("sample_frame()") && branch.contains("return 0;"),
+            "不带 --daemon 必须跑一轮采样后退出，实得分支：\n{branch}"
+        );
     }
 }

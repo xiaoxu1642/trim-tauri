@@ -16,6 +16,28 @@
     "src-tauri/src/pwsh/mod.rs": 1,
     "native-scanner/src/scan.rs": 3
   },
+  "remove_file": {
+    "src-tauri/src/commands/cleanup/backup.rs": 2,
+    "src-tauri/src/commands/elevate.rs": 5,
+    "src-tauri/src/commands/fonts.rs": 6,
+    "src-tauri/src/commands/optimizer/apply.rs": 3,
+    "src-tauri/src/commands/realtime.rs": 3,
+    "src-tauri/src/commands/runtimes.rs": 10,
+    "src-tauri/src/commands/uninstall/list_run.rs": 3,
+    "src-tauri/src/commands/updater.rs": 3,
+    "src-tauri/src/engine/backup_write.rs": 2,
+    "src-tauri/src/engine/log.rs": 1,
+    "src-tauri/src/engine/native/cleanup.rs": 9,
+    "src-tauri/src/engine/native/startup.rs": 3,
+    "src-tauri/src/engine/native/syspanel.rs": 4,
+    "src-tauri/src/engine/paths.rs": 1,
+    "src-tauri/src/engine/reg_backup.rs": 5,
+    "src-tauri/src/engine/restore_pack.rs": 6,
+    "src-tauri/src/pwsh/mod.rs": 3,
+    "src-tauri/src/security/mod.rs": 4,
+    "native-scanner/src/perf.rs": 1,
+    "native-scanner/src/scan.rs": 2
+  },
   "SHEmptyRecycleBinW": {
     "src-tauri/src/commands/cleanup/recycle_bin.rs": 2
   },
@@ -30,44 +52,23 @@
     "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 9,
     "src-tauri/src/commands/updater.rs": 4,
     "src-tauri/src/engine/hash.rs": 2,
-    "src-tauri/src/engine/native/cleanup.rs": 50,
+    "src-tauri/src/engine/native/cleanup.rs": 51,
     "src-tauri/src/engine/native/contextmenu.rs": 2,
     "src-tauri/src/engine/native/peripheral.rs": 2,
     "src-tauri/src/engine/native/startup.rs": 11,
-    "src-tauri/src/engine/paths.rs": 11,
+    "src-tauri/src/engine/paths.rs": 12,
     "src-tauri/src/engine/protect.rs": 5,
     "src-tauri/src/engine/reg_backup.rs": 14,
     "src-tauri/src/engine/restore_pack.rs": 18,
-    "src-tauri/src/engine/shellicon.rs": 3,
     "src-tauri/src/pwsh/mod.rs": 9,
-    "src-tauri/src/security/mod.rs": 10,
+    "src-tauri/src/security/mod.rs": 11,
     "src-tauri/src/testutil.rs": 2,
     "native-scanner/src/cleanup_scan.rs": 16,
     "native-scanner/src/scan.rs": 26,
     "native-scanner/src/util.rs": 5
   },
-  "remove_file": {
-    "src-tauri/src/commands/elevate.rs": 5,
-    "src-tauri/src/commands/fonts.rs": 3,
-    "src-tauri/src/commands/optimizer/apply.rs": 3,
-    "src-tauri/src/commands/realtime.rs": 3,
-    "src-tauri/src/commands/runtimes.rs": 10,
-    "src-tauri/src/commands/uninstall/list_run.rs": 3,
-    "src-tauri/src/commands/updater.rs": 3,
-    "src-tauri/src/engine/backup_write.rs": 2,
-    "src-tauri/src/engine/log.rs": 1,
-    "src-tauri/src/engine/native/cleanup.rs": 8,
-    "src-tauri/src/engine/native/startup.rs": 3,
-    "src-tauri/src/engine/native/syspanel.rs": 4,
-    "src-tauri/src/engine/reg_backup.rs": 5,
-    "src-tauri/src/engine/restore_pack.rs": 2,
-    "src-tauri/src/pwsh/mod.rs": 3,
-    "src-tauri/src/security/mod.rs": 3,
-    "native-scanner/src/perf.rs": 1,
-    "native-scanner/src/scan.rs": 2
-  },
   "remove_owned_font_copy": {
-    "src-tauri/src/commands/fonts.rs": 3
+    "src-tauri/src/commands/fonts.rs": 4
   },
   "reg_import_apply": {
     "src-tauri/src/commands/optimizer/apply.rs": 1,
@@ -76,7 +77,6 @@
   "reg_key_remove": {
     "src-tauri/src/commands/optimizer/backup_restore.rs": 2,
     "src-tauri/src/commands/optimizer/contract_tests.rs": 1,
-    "src-tauri/src/commands/uninstall/residue.rs": 1,
     "src-tauri/src/engine/native/cleanup.rs": 1,
     "src-tauri/src/engine/native/registry.rs": 7,
     "src-tauri/src/engine/reg_backup.rs": 2
@@ -102,9 +102,11 @@
   },
   "RegDeleteValueW": {
     "src-tauri/src/engine/native/contextmenu.rs": 5,
+    "src-tauri/src/engine/native/peripheral.rs": 1,
     "src-tauri/src/engine/native/process.rs": 1,
     "src-tauri/src/engine/native/registry.rs": 2,
-    "src-tauri/src/engine/native/startup.rs": 1
+    "src-tauri/src/engine/native/runtimes_net.rs": 1,
+    "src-tauri/src/engine/native/startup.rs": 2
   },
   "RegDeleteTreeW": {
     "src-tauri/src/engine/native/registry.rs": 1

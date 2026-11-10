@@ -638,6 +638,9 @@
       el.setAttribute('tabindex', '0');
       el.setAttribute('role', el.getAttribute('role') || 'button');
       el.addEventListener('keydown', (e) => {
+        // C-06（F4a1-L14）：长按按键会连发 keydown（e.repeat），每次都点一次 ⇒
+        // 折叠行被连点成「开→关→开」；一次物理按键只该触发一次。
+        if (e.repeat) return;
         if ((e.key === 'Enter' || e.key === ' ') && e.target === el) {
           e.preventDefault();
           el.click();
@@ -1095,6 +1098,7 @@
               // 有配置但扫不动时如实展示原因，用户才能区分「没配」与「查不到」。
               const why = (fcResp && fcResp.message) || '未知原因';
               console.warn(`[Trim] 文件清理扫描失败（${item.name}）: ${why}`);
+              window.app?.log?.('warn', `文件清理扫描失败（${item.name}）: ${why}`);
               results.push({
                 id,
                 name: item.name,
@@ -1107,6 +1111,7 @@
             }
           } catch (e) {
             console.warn(`[Trim] 文件清理扫描异常（${item.name}）: ${e.message}`);
+            window.app?.log?.('warn', `文件清理扫描异常（${item.name}）: ${(e && e.message) || e}`);
             results.push({
               id,
               name: item.name,
@@ -1477,9 +1482,11 @@
       resp = await window.api.cleanup.queryLocked(path);
     } catch (e) {
       resp = null;
+    } finally {
+      // A2-L06：释放必须在 finally —— try 内任何抛错都不能把查询按钮焊死。
+      lockQueryBusy = false;
+      if (btn) btn.disabled = false;
     }
-    lockQueryBusy = false;
-    if (btn) btn.disabled = false;
     if (!resp || !resp.success) {
       lockQueryPath = '';
       lockQueryProcs = [];
@@ -1505,7 +1512,7 @@
     const ok = await window.app?.confirmDanger?.(
       '结束进程确认',
       `即将强制结束 ${killable.length} 个占用进程：\n${detail}\n\n未保存的数据可能丢失，是否继续？`,
-      '结束进程',
+      '仍然执行',
       '取消',
       '进程结束后请重新查询，确认占用已解除。'
     );
@@ -1520,8 +1527,10 @@
       resp = await window.api.cleanup.killLockedProcesses();
     } catch (e) {
       resp = null;
+    } finally {
+      // A2-L06：与 runLockQuery 同口径；kill 通道 reject 也要恢复可重试态。
+      lockQueryBusy = false;
     }
-    lockQueryBusy = false;
     const killed = resp && Array.isArray(resp.killed) ? resp.killed.length : 0;
     const failed = resp && Array.isArray(resp.failed) ? resp.failed.length : 0;
     if (resp && resp.success) {
@@ -1571,8 +1580,8 @@
     if (highRisk.length > 0) {
       const ok = await window.app?.confirmDanger(
         '高风险操作确认',
-        `您选择了 ${highRisk.length} 个高风险项：\n${highRisk.map(r => '• ' + r.name).join('\n')}`,
-        '确认清理',
+        `您选择了 ${highRisk.length} 个高风险项并确认要清理：\n${highRisk.map(r => '• ' + r.name).join('\n')}`,
+        '仍然执行',
         '取消',
         '删除后可能无法恢复，请确认已了解风险。',
         consequenceItems(highRisk)
@@ -1716,6 +1725,26 @@
     return { allItems, regularItems, fileCleanItems, recycleItems, force, explorerPickIds };
   }
 
+  // F4a1-L18：文件清理成功后收缩本页三份数据（fileCleanData / scanResults / selectedIds）。
+  // 旧实现只删 scanResults/selectedIds，fileCleanData 里仍留着已删文件 → 行内预览按钮
+  // 仍按「有图片」启用，点开就是已删图片。这里按后端逐文件 status 精确收缩。
+  function syncFileCleanAfterExecute(id, data, details) {
+    const okPaths = new Set((details || [])
+      .filter(d => d && d.status === 'ok' && d.path)
+      .map(d => d.path));
+    if (!okPaths.size) return;
+    const files = (data.files || []).filter(f => !okPaths.has(f.path));
+    data.files = files;
+    data.totalSize = files.reduce((sum, f) => sum + (Number(f.size) || 0), 0);
+    const sr = scanResults.get(id);
+    if (sr) sr.size = data.totalSize;
+    if (!files.length) {
+      fileCleanData.delete(id);
+      scanResults.delete(id);
+      selectedIds.delete(id);
+    }
+  }
+
   async function clean() {
     if (isCleaning || confirmInFlight || selectedIds.size === 0) return;
     confirmInFlight = true;
@@ -1820,6 +1849,7 @@
                 freed: d.freed,
                 message: d.message || ''
               })));
+              syncFileCleanAfterExecute(item.id, data, fcResp.data.details);
             } else {
               fcFailed += data.files.length;
               fcDetails.push({
@@ -2080,7 +2110,7 @@
     const confirmed = await window.app?.confirmDanger(
       '删除图片',
       `将删除「${fileName}」。\n文件将进入回收站，可在回收站还原。`,
-      '删除',
+      '仍然执行',
       '取消',
       '删除后本页文件列表与容量统计将实时同步刷新。'
     );
@@ -2109,6 +2139,12 @@
         data.totalSize = Math.max(0, (data.totalSize || 0) - (removed.size || 0));
         const sr = scanResults.get(id);
         if (sr) sr.size = Math.max(0, (sr.size || 0) - (removed.size || 0));
+        if (!data.files.length) {
+          // F4a1-L18：整批文件删空时把 id 一并摘掉，行内预览不再指向已删图片。
+          fileCleanData.delete(id);
+          scanResults.delete(id);
+          selectedIds.delete(id);
+        }
         break;
       }
     }
@@ -2226,9 +2262,11 @@
     for (const btn of liteboxDrawer.querySelectorAll('.lb-thumb')) {
       if (current && btn.getAttribute('data-src') === current) {
         btn.setAttribute('aria-current', 'true');
+        btn.setAttribute('aria-selected', 'true');
         active = btn;
       } else {
         btn.removeAttribute('aria-current');
+        btn.setAttribute('aria-selected', 'false');
       }
     }
     if (active) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
@@ -2252,7 +2290,9 @@
         const source = sources.get(f.path);
         const url = source ? (source.getAttribute('data-src') || '') : '';
         const name = f.name || String(f.path || '').split('\\').pop() || '';
-        const cur = current && url === current ? ' aria-current="true"' : '';
+        const selected = !!(current && url === current);
+        // F4a1-L19：listbox 的 option 必须有 aria-selected，且与高亮同源。
+        const cur = selected ? ' aria-current="true" aria-selected="true"' : ' aria-selected="false"';
         html += `<button class="lb-thumb" type="button" role="option" tabindex="0"${cur} data-path="${escAttr(f.path)}" data-src="${escAttr(url)}" aria-label="${escAttr(name)}" data-tip="${escAttr(name)}"><img alt="" width="96" height="96" data-thumb-src="${escAttr(url)}"></button>`;
       }
     }
@@ -2369,6 +2409,8 @@
         const toggle = () => liteboxDrawerSetOpen(!liteboxDrawerIsOpen);
         counter.addEventListener('click', toggle);
         counter.addEventListener('keydown', (e) => {
+          // C-06（F4a1-L14）：长按按键会连发 keydown（e.repeat），每次都切一次抽屉。
+          if (e.repeat) return;
           if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
           e.preventDefault();
           toggle();
@@ -2655,7 +2697,7 @@
         const ok = await window.app?.confirmDanger?.(
           '整批还原卸载内容',
           `将把还原包「${p.id}」里的 ${p.files || 0} 个文件与 ${p.dirs || 0} 个目录按原路径写回磁盘（合计 ${formatSize(Number(p.bytes) || 0)}）。`,
-          '确认还原',
+          '仍然执行',
           '取消',
           '只写文件，不写注册表（注册表还原在上方「卸载残留注册表备份」那一栏）。目标已存在且内容与备份不同的项会被跳过而不覆盖；受保护路径一律拒绝。'
         );
@@ -2687,7 +2729,7 @@
         const ok = await window.app?.confirmDanger?.(
           '还原卸载残留的注册表备份',
           `将把备份「${b.keyLeaf || b.file}」（${fmtBackupTime(b.mtimeMs)}，目标 ${b.target || '未知'}）通过 reg import 合并回注册表。只加回备份时存在的键/值，不会删除之后产生的新数据。`,
-          '确认还原',
+          '仍然执行',
           '取消',
           '还原会重新写入注册表内容。备份与封条同在本用户可写的目录里，封条只防半截写入与误改，不是防伪凭证；请确认这确实是要恢复的键。'
         );
@@ -2712,7 +2754,7 @@
         const ok = await window.app?.confirmDanger?.(
           '还原注册表备份',
           `将把备份「${b.ruleId || b.file}」（${fmtBackupTime(b.mtimeMs)}）通过 reg import 合并回系统注册表。只加回备份时存在的键/值，不会删除之后产生的新数据。`,
-          '确认还原',
+          '仍然执行',
           '取消',
           '还原会重新写入注册表内容，请确认该备份对应你确实要恢复的清理操作。'
         );
@@ -2742,19 +2784,37 @@
           const ok = await window.app?.confirmDanger?.(
             '还原文件备份',
             `将把「${fmtBackupTime(m.mtimeMs)}」批次的 ${m.count} 个文件逐个拷回原路径。目标位置已存在的文件会自动跳过，不会覆盖。`,
-            '开始还原',
+            '仍然执行',
             '取消',
             '还原只加回文件，不删除任何现有数据。'
           );
           if (!ok) return;
           let restored = 0;
           let skipped = 0;
+          let failed = 0;
+          const failedItems = [];
           for (let i = 0; i < m.count; i++) {
-            const r = await window.api.cleanup.fileBackupRestore(m.file, i);
+            // F4a1-L15：逐条收口。旧实现整批一个 try，第二条 reject 会让后面的
+            // 文件全部不执行且只报一句「还原失败」；现在单条失败只记账，继续下一条。
+            let r = null;
+            try {
+              r = await window.api.cleanup.fileBackupRestore(m.file, i);
+            } catch (e) {
+              failed++;
+              failedItems.push(`#${i}：${(e && e.message) || e}`);
+              continue;
+            }
             if (r && r.success && r.data && r.data.restored) restored++;
-            else skipped++;
+            else if (r && r.success === false) {
+              failed++;
+              failedItems.push(`#${i}：${r.message || '后端拒绝还原'}`);
+            } else skipped++;
           }
-          window.app?.toast(restored ? 'success' : 'info', `还原完成：恢复 ${restored} 个文件，跳过 ${skipped} 个`);
+          window.app?.toast(
+            failed ? 'warning' : (restored ? 'success' : 'info'),
+            `还原完成：恢复 ${restored} 个文件，跳过 ${skipped} 个${failed ? `，失败 ${failed} 个` : ''}`
+          );
+          if (failed) window.app?.log?.('warn', `文件备份还原失败项：${failedItems.slice(0, 5).join('；')}`);
         } catch (e) {
           window.app?.toast('error', '还原失败: ' + (e.message || e));
         }
@@ -2870,19 +2930,21 @@
     // C1-1 占用查询：查询 / 回车提交 / 结束进程（结束为不可逆操作，内部走 confirmDanger）
     document.getElementById('lockQueryBtn')?.addEventListener('click', () => runLockQuery());
     document.getElementById('lockQueryPath')?.addEventListener('keydown', (e) => {
+        // C-06（F4a1-L14）：长按回车会连发 keydown，每次都跑一遍占用查询。
+        if (e.repeat) return;
       if (e.key === 'Enter') { e.preventDefault(); runLockQuery(); }
     });
     document.getElementById('lockKillBtn')?.addEventListener('click', () => killLockedFromQuery());
 
     // P1-12：订阅扫描逐项进度（一次性；ipcRenderer.on 会累积，不能放进 scan）
     if (window.api?.cleanup?.onScanProgress) {
-      window.api.cleanup.onScanProgress(onScanProgress);
+      window.app?.trackSubscription?.(window.api.cleanup.onScanProgress(onScanProgress));
     }
     // 2026-10-12：订阅执行逐项进度（清理大目录耗时长时进度条不再假走 90% 后冻结）
     if (window.api?.cleanup?.onExecuteProgress) {
-      window.api.cleanup.onExecuteProgress(function (payload) {
+      window.app?.trackSubscription?.(window.api.cleanup.onExecuteProgress(function (payload) {
         if (execProgressSink) execProgressSink(payload);
-      });
+      }));
     }
 
     // P1-9：Electron 运行时从 cleanup-rules.json（唯一数据源）加载分类，
@@ -2966,16 +3028,55 @@
         : Promise.resolve(null);
       const [dt, resp] = await Promise.all([pDisk, window.api.cleanup.rules()]);
       if (resp && resp.success && resp.data && Array.isArray(resp.data.groups)) {
+        // A1-M05：数据目录规则验签/读盘失败时后端回退内置副本，回执带 degraded
+        // 与 rulesSource。这里必须消费，否则用户自定义规则静默失效而界面照常。
+        if (resp.data.degraded === true || resp.data.rulesSource === '内置副本') {
+          const why = resp.data.message || '数据目录规则验签或读取失败';
+          setRulesDegradedNotice(`已回退内置规则，用户自定义规则未生效。原因：${why}。`);
+          window.app?.log?.('warn', '清理规则回退内置副本：' + why);
+        } else {
+          clearRulesDegradedNotice();
+        }
         const groups = filterRulesByDiskType(resp.data.groups, dt);
         CATEGORIES = buildCategoriesFromRules(Object.assign({}, resp.data, { groups }));
         rebuildItemIndex(); // CATEGORIES 换血 ⇒ id 索引必须同步重建（性能 v3 ③ 的另一处赋值点）
         ALL_IDS = getAllIds();
         renderCategoryList();
         updateUI();
+      } else if (resp && resp.success === false) {
+        // success=false 没有 data，仍沿用启动时的 FALLBACK；同样要说明来源已降级。
+        const why = resp.message || '无回执';
+        setRulesDegradedNotice(`清理规则读取失败，已使用内置规则；用户自定义规则未生效。原因：${why}。`);
+        window.app?.log?.('warn', '清理规则读取失败，使用内置规则：' + why);
       }
     } catch (e) {
-      // 加载失败静默回退到 FALLBACK，不影响功能
+      // 加载失败仍回退到 FALLBACK，但不许静默：用户需要知道自定义规则没生效。
+      const why = (e && e.message) || e;
+      setRulesDegradedNotice(`清理规则读取失败，已使用内置规则；用户自定义规则未生效。原因：${why}。`);
+      window.app?.log?.('warn', '清理规则读取异常，使用内置规则：' + why);
     }
+  }
+
+  // A1-M05：规则来源降级横幅。页面结构归 index.html，本函数只按需插入一个
+  // `opt-hint` 状态条（不新增样式类，沿用现有 token/排版）。
+  function setRulesDegradedNotice(text) {
+    const list = document.getElementById('categoryList');
+    if (!list || !list.parentNode) return;
+    let el = document.getElementById('cleanupRulesDegraded');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'cleanupRulesDegraded';
+      el.className = 'opt-hint';
+      el.setAttribute('role', 'status');
+      list.parentNode.insertBefore(el, list);
+    }
+    el.textContent = text;
+    el.style.display = '';
+  }
+
+  function clearRulesDegradedNotice() {
+    const el = document.getElementById('cleanupRulesDegraded');
+    if (el) el.style.display = 'none';
   }
 
   window.cleanup = {

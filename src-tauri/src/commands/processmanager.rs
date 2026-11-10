@@ -101,6 +101,10 @@ pub fn process_manager_close_window<R: tauri::Runtime>(window: WebviewWindow<R>)
     guard::guard_readonly(&window)?;
     if let Err(e) = window.close() {
         log::write_log("warn", &format!("关闭「应用进程管理」窗口失败: {e}"));
+        return Ok(json!({
+            "success": false,
+            "message": format!("关闭「应用进程管理」窗口失败: {e}")
+        }));
     }
     Ok(json!({ "success": true }))
 }
@@ -121,4 +125,53 @@ pub fn process_manager_report<R: tauri::Runtime>(
         let _ = main.emit(EVENT_UPDATE, payload);
     }
     Ok(json!({ "success": true }))
+}
+
+#[cfg(test)]
+mod tests {
+    /// R1b-L16：子窗关闭失败必须回 `success:false` + 原因，不得只 warn 后回 `success:true`。
+    /// 为什么用源码契约而不是 invoke：`window.close()` 需要真实 WebviewWindow，
+    /// MockRuntime 里 close 恒成功，命令体分叉只在真机失败时才出现。
+    /// 判红自证：把 close 失败分支改回「只 log::write_log，不 return success:false」⇒ 本条红。
+    #[test]
+    fn r1b_close_window_failure_is_reported() {
+        let pm = include_str!("processmanager.rs");
+        let models = include_str!("models.rs");
+
+        // processManager:close-window —— 截取命令体（到下一个命令注释为止）
+        let pm_start = pm
+            .find("pub fn process_manager_close_window")
+            .expect("processmanager.rs 应有 process_manager_close_window");
+        let pm_end = pm[pm_start..]
+            .find("/// processManager:report")
+            .map(|i| pm_start + i)
+            .expect("process_manager_close_window 之后应有 processManager:report");
+        let pm_body = &pm[pm_start..pm_end];
+        assert!(
+            pm_body.contains("window.close()"),
+            "process_manager_close_window 必须调用 window.close()"
+        );
+        assert!(
+            pm_body.contains("\"success\": false"),
+            "process_manager_close_window 关闭失败必须回 success:false（不能只 warn 后回 true）"
+        );
+
+        // models:close-window —— 截取命令体（到测试模块为止）
+        let m_start = models
+            .find("pub fn models_close_window")
+            .expect("models.rs 应有 models_close_window");
+        let m_end = models[m_start..]
+            .find("#[cfg(test)]")
+            .map(|i| m_start + i)
+            .expect("models_close_window 之后应有 #[cfg(test)]");
+        let m_body = &models[m_start..m_end];
+        assert!(
+            m_body.contains("window.close()"),
+            "models_close_window 必须调用 window.close()"
+        );
+        assert!(
+            m_body.contains("\"success\": false"),
+            "models_close_window 关闭失败必须回 success:false（不能只 warn 后回 true）"
+        );
+    }
 }

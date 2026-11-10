@@ -101,7 +101,7 @@ pub async fn residue_open_window<R: tauri::Runtime>(
     }
     let builder = WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::App(page.into()))
         .title(TITLE)
-        // 1040×760：这轮报告是七个分组 × 长路径 + 证据行，比另外四个子窗宽一档才放得下
+        // 1040×760：这轮报告是七个分组 × 长路径 + 证据行，比另外三个子窗宽一档才放得下
         // 一行完整注册表目标而不折成三行（窄窗会把「判定依据」挤到看不完）
         .inner_size(1040.0, 760.0)
         .min_inner_size(760.0, 520.0)

@@ -29,6 +29,16 @@ const SCAN_ROOTS = [join(ROOT, 'src-tauri', 'src'), join(ROOT, 'native-scanner',
 // T1a-M07：名单唯一真源见 tools/lib/delete-apis.mjs（与 check-delete-exits 共用）。
 const APIS = DELETE_APIS;
 
+function deleteAliases(clean) {
+  const aliases = new Map();
+  for (const api of APIS) {
+    for (const m of clean.matchAll(new RegExp(`\\b(?:use\\s+[^;]*?\\b${api}\\s+as\\s+|let\\s+)([A-Za-z_][A-Za-z0-9_]*)\\s*(?:=[^;]*\\b${api}\\s*;|;)`, 'g'))) {
+      aliases.set(m[1], api);
+    }
+  }
+  return aliases;
+}
+
 
 // ---- 现算调用点：api → { "rel/path.rs": count } ----
 const current = {};
@@ -38,16 +48,28 @@ for (const root of SCAN_ROOTS) {
     scanned++;
     const clean = blankNonCode(readFileSync(f, 'utf8'));
     const rel = relative(ROOT, f).replace(/\\/g, '/');
+    const aliases = deleteAliases(clean);
     for (const api of APIS) {
       const re = new RegExp(`\\b${api}\\s*\\(`, 'g');
       const n = [...clean.matchAll(re)].length;
-      if (n > 0) {
+      const aliasHits = [...aliases.entries()]
+        .filter(([, target]) => target === api)
+        .reduce((sum, [alias]) => sum + [...clean.matchAll(new RegExp(`\\b${alias}\\s*\\(`, 'g'))].length, 0);
+      const hits = n + aliasHits;
+      if (hits > 0) {
         current[api] = current[api] ?? {};
-        current[api][rel] = (current[api][rel] ?? 0) + n;
+        current[api][rel] = (current[api][rel] ?? 0) + hits;
       }
     }
   }
 }
+
+const aliasBad = deleteAliases('use std::fs::remove_file as rm; let f = std::fs::remove_file; rm(p); f(q);');
+if (aliasBad.get('rm') !== 'remove_file' || aliasBad.get('f') !== 'remove_file') {
+  console.error('✗ 正向对照失败：删除 API 别名表没有抓到 use-as / let 绑定');
+  process.exit(1);
+}
+console.log('对照: 删除原语别名两类样本必被现算调用点捕获');
 
 const totalOf = (m) => Object.values(m).reduce((a, o) => a + Object.values(o).reduce((x, y) => x + y, 0), 0);
 const total = totalOf(current);

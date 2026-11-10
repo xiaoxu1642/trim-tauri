@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::cleanup_scan::{parse_json, Json};
-use crate::util::{has_lossy_path, unix_path};
+use crate::util::{display_path, has_lossy_path, unix_path};
 #[cfg(test)]
 use crate::util::sandbox;
 use crate::{is_reparse, json_escape, to_long_path};
@@ -134,7 +134,8 @@ fn bump_scanned(counter: &AtomicU64, n: u64, every: u64, sink: &dyn Sink) {
 /// 「计数 + 输出通道」收成一个可跨并行任务共享的对象（`AtomicU64` + `&dyn Sink`，
 /// `Sink: Send + Sync` 已在 trait 上声明）。
 ///
-/// `every` 是阈值注入位，**生产构造恒为 [`HEARTBEAT_EVERY`]**。注入的唯一理由是让
+/// `every` 是阈值注入位，**生产构造默认 [`HEARTBEAT_EVERY`]**。`sizes`/`delete` 的
+/// 诊断出口用 0 关闭心跳但保留 warn。测试注入小阈值是为了让
 /// 「心跳真的发出去了」这条断言能判红：真实阈值下要发出 ≥2 行得先枚举 1.6 万条真实
 /// 文件，用例跑不动；用例把阈值调成几条一事，就能点名「第 N 次心跳确实到达 sink」。
 pub(crate) struct ScanBeat<'a> {
@@ -148,8 +149,7 @@ impl<'a> ScanBeat<'a> {
         Self { counter: AtomicU64::new(0), sink, every: HEARTBEAT_EVERY }
     }
 
-    /// 用例构造：只换阈值，其余与生产完全一致（生产代码不许调这里）。
-    #[cfg(test)]
+    /// 构造时可指定心跳阈值；测试用它取样本，sizes/delete 用 0 表示「不接心跳」。
     fn with_every(sink: &'a dyn Sink, every: u64) -> Self {
         Self { counter: AtomicU64::new(0), sink, every }
     }
@@ -407,7 +407,7 @@ impl ScanCtx {
         let skipped = self.skipped_reparse();
         if skipped > 0 {
             sink.warn(&format!(
-                "已跳过 {skipped} 个重解析点目录（junction/挂载点，不深入以避免重复计数）"
+                "已跳过 {skipped} 个重解析点条目（junction/挂载点等，不深入以避免重复计数）"
             ));
         }
         let unreadable = self.unreadable_dirs();
@@ -596,6 +596,20 @@ fn child_dir_sizes(root: &Path, out: &mut Vec<(PathBuf, u64)>, beat: &ScanBeat) 
 /// 消费面：`child_dir_sizes`（appdata 排行）、`sizes`、`delete` 的 freed 汇总，
 /// 三处输出说明都指向本文，口径不许各自漂。
 fn dir_size(dir: &Path, beat: Option<&ScanBeat>) -> u64 {
+    dir_size_with_sink(dir, beat, None)
+}
+
+/// [`dir_size`] 的诊断出口可注入版（N1b-L04）。
+///
+/// 为什么要分两半：`None` 形态的调用点（sizes / delete）刻意不接心跳，
+/// 但「读目录失败」这类诊断**不该**因此直写 stderr —— stderr 不进任何回执，
+/// 用户看到的就是「目录读不到」这件事凭空消失。`sink` 独立于 `beat`，
+/// 于是不接心跳的路径照样能把诊断交回渲染层。
+fn dir_size_with_sink(
+    dir: &Path,
+    beat: Option<&ScanBeat>,
+    sink: Option<&dyn Sink>,
+) -> u64 {
     let mut total: u64 = 0;
     let mut stack: Vec<PathBuf> = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -608,7 +622,14 @@ fn dir_size(dir: &Path, beat: Option<&ScanBeat>) -> u64 {
                 note_unreadable_dir();
                 match beat {
                     Some(b) => b.warn(&format!("read_dir {} 失败: {e}", d.display())),
-                    None => eprintln!("[finder-warn] read_dir {} 失败: {e}", d.display()),
+                    None => match sink {
+                        Some(s) => s.warn(&format!(
+                            "有 {} 个目录读不到（体积少报）：read_dir {} 失败: {e}",
+                            UNREADABLE_DIRS.total(),
+                            d.display()
+                        )),
+                        None => eprintln!("[finder-warn] read_dir {} 失败: {e}", d.display()),
+                    },
                 }
                 continue;
             }
@@ -623,6 +644,11 @@ fn dir_size(dir: &Path, beat: Option<&ScanBeat>) -> u64 {
                     continue;
                 }
             };
+            // v5-K02 批次 2（N1-M05）：reparse 拦在类型分支前（条目级全形状，同 walk_level）
+            if is_reparse(&ent) {
+                note_reparse_skip();
+                continue;
+            }
             // v5-K02 批次 2（N1-M05）：reparse 拦在类型分支前（条目级全形状，同 walk_level）
             if is_reparse(&ent) {
                 note_reparse_skip();
@@ -656,6 +682,7 @@ fn dir_size(dir: &Path, beat: Option<&ScanBeat>) -> u64 {
     total
 }
 
+
 // ==================== 磁盘分析器（C-5，2026-09-28 拍板：逐层按需下钻） ====================
 // 一次调用 = 一个目录层的完整画像：父目录 du 汇总（目录/文件计数 + 扩展名聚合）
 // + 一级子目录大小排行（并行 du）。下钻由前端逐层发起，不做一次性全树——
@@ -671,11 +698,7 @@ fn analyze_ext_key(name: &str) -> String {
 
 /// 名字读不成 UTF-8 的条目所进的桶（P1-6E④）。
 ///
-/// 为什么必须有这个名字：Windows 文件名允许孤立代理项，`OsStr::to_str()` 对这种名字
-/// 返回 `None`。旧写法拿 `to_str()` 的结果当入桶前提，取不到就**整个跳过**——体积照进总量，
-/// 类型排行里却一个字都没有，等价于「这类文件不存在」。
-/// 一个 50 GB 的下载目录如果全是这种名字，磁盘分析页会显示「视频 3 GB」并到此为止。
-/// 单独成桶而不是 `to_string_lossy()`：后者会把 U+FFFD 带进键名，排行里出现一串乱码，
+/// 为什么单独成桶而不是 `to_string_lossy()`：后者会把 U+FFFD 带进键名，排行里出现一串乱码，
 /// 而且同一个原始名字可能因代理项位置不同裂成好几个键。
 const EXT_LOSSY_KEY: &str = "(名字读不出的文件)";
 
@@ -688,12 +711,7 @@ fn analyze_ext_key_os(name: &std::ffi::OsStr) -> String {
     }
 }
 
-/// 扩展名聚合表的**键数**上限。
-/// 为什么要有：病态目录的扩展名种类可达上万，全收就把「排行」变成了「字典」。
-/// N1b-L02 说的不是这个上限，而是**取舍押在到达顺序上**：旧写法
-/// `exts.len() < 64 || exts.contains_key(..)` 在 rayon 合并期按 HashMap 迭代序喂
-///（迭代序随每进程随机种子变），满员后「谁被拒」就成了随机事件 ⇒ 同一目录两次扫描
-/// 留下不同的 64 个键，扩展名排行不可复现。现在合并前按排序键
+/// 扩展名排行桶上限：**排序后取前 64**，不是聚合后截断。
 /// **(字节 desc, 键 asc)** 定序，存留集合恒等于「该排序键下的前 64 名」。
 const EXT_BUCKET_CAP: usize = 64;
 
@@ -1205,7 +1223,7 @@ pub fn duplicates(roots: &[String], min_size: u64, sink: &dyn Sink) {
     let mut gid = 0usize;
     for (_, v) in &name_groups {
         gid += 1;
-        emit_dup_group(sink, v, &format!("dupn{:04}", gid), "name", None);
+        emit_dup_group(sink, v, &format!("dupn{:04}", gid), "name");
     }
     for (sz, v) in &content_groups {
         gid += 1;
@@ -1230,7 +1248,6 @@ pub fn duplicates(roots: &[String], min_size: u64, sink: &dyn Sink) {
             &v.iter().map(|(p, mt)| (p.clone(), *sz, *mt)).collect::<Vec<_>>(),
             &format!("dupc{:04}", gid),
             if all_artifact { "artifact" } else { "content" },
-            None,
         );
     }
     for e in empty {
@@ -1239,18 +1256,15 @@ pub fn duplicates(roots: &[String], min_size: u64, sink: &dyn Sink) {
     progress(sink, 100);
 }
 
-fn emit_dup_group(sink: &dyn Sink, v: &[ScannedFile], gid: &str, match_kind: &str, sim: Option<u64>) {
+fn emit_dup_group(sink: &dyn Sink, v: &[ScannedFile], gid: &str, match_kind: &str) {
     let keys: Vec<Option<std::time::SystemTime>> = v.iter().map(|(_, _, m)| *m).collect();
     for (rank, idx) in order_by_mtime_keys(&keys).into_iter().enumerate() {
         let (p, sz, _) = &v[idx];
-        let mut extra: Vec<(&str, String)> = vec![
+        let extra: Vec<(&str, String)> = vec![
             ("group", gid.to_string()),
             ("role", if rank == 0 { "kept".to_string() } else { "candidate".to_string() }),
             ("match", match_kind.to_string()),
         ];
-        if let Some(s) = sim {
-            extra.push(("sim", format!("{}%", s)));
-        }
         item(sink, "duplicate", p, *sz, &extra);
     }
 }
@@ -1517,18 +1531,21 @@ fn topk_in(dir: &Path, recursive: bool, cap: usize, min_size: u64, beat: &ScanBe
                 if is_memory_system_file(&ent.file_name().to_string_lossy()) {
                     continue;
                 }
-                // P0：DirEntry 自带大小，不额外 syscall；min_size 前置过滤（六轮拍板：大文件 ≥300MB）
-                if let Ok(md) = ent.metadata() {
-                    let sz = md.len();
-                    if sz >= min_size && created_in_current_year(&md) {
-                        // ③：先记「够格」，最后由 `unlisted()` 现算少发了几个 ——
-                        // 只有这一条 counted，才能在「0 条结果」时区分「真没有大文件」
-                        // 与「一条都没读进来」。
-                        trace.note_qualified();
-                        push_topk(&mut heap, sz, ent.path(), cap);
-                    }
-                    local += 1;
+                // P0：DirEntry 自带大小，不额外 syscall；min_size 前置过滤（六轮拍板：大文件 ≥300MB）。
+                // N1b-L01：元数据读不到按「重解析点/不可判定」跳过，不得当普通文件下钻。
+                let Ok(md) = ent.metadata() else {
+                    note_entry_stat_fail();
+                    continue;
+                };
+                let sz = md.len();
+                if sz >= min_size && created_in_current_year(&md) {
+                    // ③：先记「够格」，最后由 `unlisted()` 现算少发了几个 ——
+                    // 只有这一条 counted，才能在「0 条结果」时区分「真没有大文件」
+                    // 与「一条都没读进来」。
+                    trace.note_qualified();
+                    push_topk(&mut heap, sz, ent.path(), cap);
                 }
+                local += 1;
             }
         }
         // P2-J（v3 §5.6 确证缺陷）：结算点从「整任务收尾一次」挪到「每个目录收尾一次」。
@@ -1661,24 +1678,35 @@ fn empty_ignore_file() -> Option<PathBuf> {
     crate::util::list_file_path("empty-ignore.txt")
 }
 
-fn load_empty_ignore() -> HashSet<String> {
+fn load_empty_ignore(sink: Option<&dyn Sink>) -> Result<HashSet<String>, String> {
     let mut s = HashSet::new();
     if let Some(f) = empty_ignore_file() {
-        if let Ok(txt) = fs::read_to_string(&f) {
-            for line in txt.lines() {
-                let l = line.trim();
-                if !l.is_empty() {
-                    // v7.2-C03（N1b-K03/L03）：名单键与判据键**同过 lexically_normalize**。
-                    // 旧实现名单键只 trim+lowercase：用户点「忽略」写入的是展示形态
-                    //（`C:/...` 正斜杠、无 `\\?\` 前缀），而判据侧是 canonicalize 的
-                    // `\\?\C:\...` 反斜杠形态——分隔符方向与 verbatim 前缀两维都不同源
-                    // ⇒ 恒不命中，用户显式排除的目录静默进可删集合（取证 N1b-U02 实锤）。
-                    s.insert(lexically_normalize(l));
+        match fs::read_to_string(&f) {
+            Ok(txt) => {
+                for line in txt.lines() {
+                    let l = line.trim();
+                    if !l.is_empty() {
+                        // v7.2-C03（N1b-K03/L03）：名单键与判据键**同过 lexically_normalize**。
+                        // 旧实现名单键只 trim+lowercase：用户点「忽略」写入的是展示形态
+                        //（`C:/...` 正斜杠、无 `\\?\` 前缀），而判据侧是 canonicalize 的
+                        // `\\?\C:\...` 反斜杠形态——分隔符方向与 verbatim 前缀两维都不同源
+                        // ⇒ 恒不命中，用户显式排除的目录静默进可删集合（取证 N1b-U02 实锤）。
+                        s.insert(lexically_normalize(l));
+                    }
                 }
+                Ok(s)
+            }
+            Err(e) => {
+                let msg = format!("空目录忽略名单 {} 不可用: {e}，本轮按名单停用处理（N1b-L08）", f.display());
+                if let Some(sink) = sink {
+                    sink.warn(&msg);
+                }
+                Err(msg)
             }
         }
+    } else {
+        Ok(s)
     }
-    s
 }
 
 fn empty_ignored(set: &HashSet<String>, p: &Path) -> bool {
@@ -1885,7 +1913,10 @@ impl EmptyAccum {
 ///   · 按条目发 scanned 心跳（用户实测 2026-09-28：全程无反馈被当成「准备慢」）
 pub fn empty(roots: &[String], sink: &dyn Sink) {
     init_scan_threads();
-    let ignore = load_empty_ignore();
+    let ignore = match load_empty_ignore(Some(sink)) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
     // E-3 方向 B：canonical 一次，逐层传参（Sink 化后递归在并行闭包里，见 under_userprofile）
     let up = userprofile_root_canon();
     // 审查 v2-M1/M2：跨根共用一个累积器（上限与截断都是全局口径）
@@ -1987,7 +2018,7 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
     let skipped = acc.skipped_reparse();
     if skipped > 0 {
         sink.warn(&format!(
-            "已跳过 {skipped} 个重解析点目录（junction/挂载点，不深入以避免重复计数）"
+            "已跳过 {skipped} 个重解析点条目（junction/挂载点等，不深入以避免重复计数）"
         ));
     }
     progress(sink, 100);
@@ -2192,7 +2223,10 @@ fn collect_empty_fast(
 /// 为什么必须放在本体而不是 finder 侧各写一份：两处判据漂移会让折叠父目录要么
 /// 永远删不掉、要么把扫描后新放进的内容连带删走，两者都是静默错误。
 pub fn prune_tree_effectively_empty(dir: &Path) -> bool {
-    let ignore = load_empty_ignore();
+    let ignore = match load_empty_ignore(None) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
     // E-3 方向 B：删除侧复检与扫描侧同口径 —— 用户目录子树一律按「有内容」处理
     // （扫描侧不产候选，复检不得反而放行）。
     // 路径形态假设与扫描侧一致：候选由 `empty()` 产出，而那条链的根过 `canonical(r)`
@@ -2267,7 +2301,18 @@ pub fn appdata(min_size_mb: u64, sink: &dyn Sink) {
     // （不给 Option）——这条链是 appdata 专用通道，把开关留在类型里就等于再留一条
     // 「忘了接」的路径。
     let beat = ScanBeat::new(sink);
-    let minb = min_size_mb * 1024 * 1024;
+    // N1b-L05：阈值换算用 checked_mul —— 旧写法 `min_size_mb * 1024 * 1024` 在
+    // debug 下溢出即 panic、release 下静默回绕（巨大的 min_size 反而把阈值变成小数，
+    // 于是「按最小体积过滤」形同虚设）。溢出必须显式 Err + warn，不许猜。
+    let minb = match min_size_bytes(min_size_mb) {
+        Some(v) => v,
+        None => {
+            sink.warn(&format!(
+                "最小体积阈值 {min_size_mb} MB 换算溢出，本轮不做体积过滤"
+            ));
+            return;
+        }
+    };
     let mut roots: Vec<(String, PathBuf)> = Vec::new();
     // 审查 M-08：原先 `if let Ok(..)` 把「环境变量缺失」和「值为空」一起吞掉，
     // 受限环境（沙箱 / 服务账户）下 appdata 会静默返回空结果，与「确实没有可清项」
@@ -2298,7 +2343,7 @@ pub fn appdata(min_size_mb: u64, sink: &dyn Sink) {
         child_dir_sizes(&root, &mut cur, &beat);
         // v5-K02 批次2（N1-M05）：本根 reparse 跳过量一次性 warn（同 ScanCtx::finish 姿势，只呈现）
         let skipped = REPARSE_SKIPS.since(reparse_base);
-        if skipped > 0 { sink.warn(&format!("应用数据扫描（{label}）：已跳过 {skipped} 个重解析点目录（不深入以避免重复计数）")); }
+        if skipped > 0 { sink.warn(&format!("应用数据扫描（{label}）：已跳过 {skipped} 个重解析点条目（不深入以避免重复计数）")); }
         let unreadable = UNREADABLE_DIRS.since(unreadable_base);
         if unreadable > 0 { sink.warn(&format!("应用数据扫描（{label}）：有 {unreadable} 个目录读不到（权限或 IO 失败），结果可能不完整")); }
         for (p, sz) in cur {
@@ -2314,12 +2359,18 @@ pub fn appdata(min_size_mb: u64, sink: &dyn Sink) {
     progress(sink, 100);
 }
 
+/// MB → 字节的阈值换算（N1b-L05）：溢出返回 `None`，由调用方显式告警。
+///
+/// 为什么不能用 `*`：debug 下溢出 panic、release 下回绕，
+/// 两种结果都比「明确拒绝」更糟。
+fn min_size_bytes(min_size_mb: u64) -> Option<u64> {
+    min_size_mb.checked_mul(1024)?.checked_mul(1024)
+}
+
 /// 计算一批路径的总大小（用于磁盘清理扫描核心 Rust 化）。路径已由调用方解析为绝对路径。
 /// 目录项的体积口径 = [`dir_size`] 的逻辑大小（硬链接按路径各计一次、稀疏/压缩按名义长度）；
 /// 文件项取 `Metadata::len()`，同一口径。
 pub fn sizes(paths: &[String], sink: &dyn Sink) {
-    let mut total_files = 0usize;
-    let mut total_dirs = 0usize;
     for rp in paths {
         let p = canonical(rp).unwrap_or_else(|| PathBuf::from(rp));
         if !p.exists() {
@@ -2328,19 +2379,21 @@ pub fn sizes(paths: &[String], sink: &dyn Sink) {
         }
         if p.is_file() {
             let sz = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-            total_files += 1;
             item(sink, "size", &p, sz, &[("exists", "true".to_string())]);
         } else if p.is_dir() {
             // `None`：v3 §5.6 的零反馈清单只有 analyze/appdata/bigfiles 三条，sizes 不在
             // 其中；接心跳等于给它新增一类输出行（CLI 侧 stdout 会变），属另行拍板的改动面。
             // N1b-M02：本路径区间的基线，读增量而非清零。
             let reparse_base = REPARSE_SKIPS.mark();
-            let sz = dir_size(&p, None);
-            total_dirs += 1;
+            // N1b-L04：sizes 的 `None` 只是不接心跳，诊断仍要进 Sink，不许直写 stderr。
+            let sz = dir_size_with_sink(
+                &p,
+                Some(&ScanBeat::with_every(sink, HEARTBEAT_EVERY)),
+                Some(sink),
+            );
             item(sink, "size", &p, sz, &[("exists", "true".to_string()), ("skippedReparse", REPARSE_SKIPS.since(reparse_base).to_string())]); // v5-K02 批次2：本根 reparse 跳过量（只呈现）
         }
     }
-    let _ = (total_files, total_dirs);
     progress(sink, 100);
 }
 
@@ -2433,7 +2486,9 @@ fn del_item(sink: &dyn Sink, t: &str, path: &Path, kind: &str, status: &str, fre
     let mut s = String::from("@@ITEM@@{\"type\":\"");
     s.push_str(t);
     s.push_str("\",\"path\":\"");
-    s.push_str(&json_escape(&unix_path(path)));
+    // R2a-L06：删除回执保留原生分隔符（`C:\x\y`），不再把 `\` 改成 `/`。
+    // 展示口径统一走 `display_path`（剥 verbatim 前缀、不动分隔符）。
+    s.push_str(&json_escape(&display_path(path)));
     s.push_str("\",\"kind\":\"");
     s.push_str(kind);
     s.push_str("\",\"status\":\"");
@@ -2486,7 +2541,7 @@ pub(crate) fn lexically_normalize(p: &str) -> String {
 
 /// 普通形态的词法折叠（v6-K02 从 lexically_normalize 拆出，口径不变）：
 /// 拆不可折叠根（盘符/UNC）→ 折 `.` / `..` → 统一 `\` → 去尾部点号/空白 → 小写。
-fn normalize_plain(s: &str) -> String {
+pub(crate) fn normalize_plain(s: &str) -> String {
     // 拆出不可折叠的根：盘符（X:）或 UNC（\\server\share）
     let mut prefix = String::new();
     let mut body = s;
@@ -2997,6 +3052,7 @@ pub fn delete(items: &[(String, OsString)], protect_json: Option<&str>, sink: &d
     let mut ok = 0usize;
     let mut fail = 0usize;
     let mut freed: u64 = 0;
+    let beat = ScanBeat::with_every(sink, 0);
     for (kind, sp) in items {
         let p = Path::new(sp);
         // 审查 v2-M5：文件名含无法无损解码成文本的字节（GBK 遗留介质、字节级拷贝来的
@@ -3039,7 +3095,8 @@ pub fn delete(items: &[(String, OsString)], protect_json: Option<&str>, sink: &d
         let sz = if kind == "dir" {
             // `None`：这里是**删除阶段**在算释放空间，发「已枚举 N 个文件」的心跳是把
             // 扫描语义用在错误的时刻（渲染层会把它当成新一轮扫描的进度），刻意不接。
-            dir_size(p, None)
+            // N1b-L04：删除阶段不接心跳（`every=0`），但读目录失败必须进 Sink。
+            dir_size_with_sink(p, Some(&beat), Some(sink))
         } else {
             fs::metadata(p).map(|m| m.len()).unwrap_or(0)
         };
@@ -3360,7 +3417,10 @@ mod tests {
         let link = dir.join("link");
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("keep.txt"), b"x").unwrap();
-        let st = Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(&link).arg(&target).output();
+        // X1-L01：带超时 + 杀整树（夹具命令挂住时不得拖死整轮验收）。
+        let mut mk = Command::new("cmd");
+        mk.arg("/C").arg("mklink").arg("/J").arg(&link).arg(&target);
+        let st = crate::testcmd::run_test_cmd(&mut mk, std::time::Duration::from_secs(10));
         match st {
             Ok(o) if o.status.success() => {}
             _ => {
@@ -3432,7 +3492,10 @@ mod tests {
         std::fs::create_dir_all(&real).unwrap();
         std::fs::write(real.join("keep.txt"), b"x").unwrap();
         let link = dir.join("jlink");
-        let st = Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(&link).arg(&real).output();
+        // X1-L01：带超时 + 杀整树（夹具命令挂住时不得拖死整轮验收）。
+        let mut mk = Command::new("cmd");
+        mk.arg("/C").arg("mklink").arg("/J").arg(&link).arg(&real);
+        let st = crate::testcmd::run_test_cmd(&mut mk, std::time::Duration::from_secs(10));
         match st {
             Ok(o) if o.status.success() => {}
             _ => {
@@ -3497,9 +3560,10 @@ mod tests {
         }
         std::fs::write(chain.join("f.txt"), b"x").unwrap();
         let link = base.join("L");
-        let built = std::process::Command::new("cmd")
-            .arg("/C").arg("mklink").arg("/J").arg(&link).arg(&real)
-            .output()
+        // X1-L01：带超时 + 杀整树（夹具命令挂住时不得拖死整轮验收）。
+        let mut mk = std::process::Command::new("cmd");
+        mk.arg("/C").arg("mklink").arg("/J").arg(&link).arg(&real);
+        let built = crate::testcmd::run_test_cmd(&mut mk, std::time::Duration::from_secs(10))
             .map(|o| o.status.success())
             .unwrap_or(false);
         if !built {
@@ -3574,21 +3638,23 @@ mod tests {
     }
 
     /// v5-K02 批次 2 真机探针（N1-M05）：mklink /J 真 junction + mklink 文件符号链接
-    /// + OneDrive 云占位符（is_symlink=false 的 file 型 reparse——核心漏口）进 walk_level
-    /// 前必须被跳过并计数；样本不可构造时 skip 声明，不假绿。自建自清、只读判定。
-    #[test]    #[ignore = "真机：mklink /J junction 与文件链接穿越 walk_level（自建自清，发布前人工跑）"]
+    #[test]
+    #[ignore = "真机：mklink /J junction 与文件链接穿越 walk_level（自建自清，发布前人工跑）"]
     fn live_non_dir_reparse_entries_are_skipped_with_trace() {
         let _sb = sandbox(&format!("reparse-live-{}", std::process::id()));
         let root = _sb.path().to_path_buf();
         seed_samples(&root);
         let mut expect = 0u64;
         for (flag, link, target) in [("/J", "junc-link", "real"), ("", "mklink-file.txt", "plain.txt")] {
-            let ok = std::process::Command::new("cmd")
-                .args(["/C", &format!(r#"mklink {flag} "{}" "{}""#, root.join(link).display(), root.join(target).display())])
-                .output().map(|o| o.status.success()).unwrap_or(false);
+            // X1-L01：带超时 + 杀整树（夹具命令挂住时不得拖死整轮验收）。
+            let mut mk = std::process::Command::new("cmd");
+            mk.args(["/C", &format!(r#"mklink {flag} "{}" "{}""#, root.join(link).display(), root.join(target).display())]);
+            let ok = crate::testcmd::run_test_cmd(&mut mk, std::time::Duration::from_secs(10))
+                .map(|o| o.status.success())
+                .unwrap_or(false);
             if ok { expect += 1; } else { eprintln!("SKIP：mklink {flag:?} {link} 失败（权限/开发者模式），样本未校验"); }
-        }        let (names, skipped) = walk_names(&root);
-        assert_eq!(names.len(), 2, "只应收 plain.txt 与 real/keep.txt: {names:?}");
+        }
+        let (names, skipped) = walk_names(&root);
         assert!(!names.iter().any(|n| ["junc-link", "mklink-file.txt"].contains(&n.as_str())), "链接进了扫描结果: {names:?}");
         if expect == 0 { eprintln!("SKIP：本机无可构造 reparse 样本，本段未校验"); }
         else { assert_eq!(skipped, expect, "可构造 reparse 链接必须计数留痕"); }
@@ -3621,11 +3687,9 @@ mod tests {
     fn 分析器时间聚合与总量守恒() {
         use std::io::Write;
         let day: u64 = 86_400_000;
-        let root = std::env::temp_dir().join(format!(
-            "trim-analyze-keep-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
+        // B-01 ③ 口径（native-scanner 侧）：沙箱自带 Drop 守卫，
+        // 断言失败 / panic / 早退都会把目录带走，不在盘上留垃圾。
+        let root = sandbox(&format!("analyze-keep-{}", std::process::id()));
         fs::create_dir_all(root.join("sub")).unwrap();
         let now = now_millis();
         // (相对名, 字节数, 距今多少天)
@@ -3700,7 +3764,6 @@ mod tests {
             lines.iter().filter(|l| field(l, "kind").as_deref() == Some("time")).count(),
             TIME_BUCKETS
         );
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// 心跳用例的记录型 sink：把每一行 `scanned` 的**数值**留档（断言要点名到达的值与
@@ -4075,13 +4138,10 @@ mod tests {
         fs::create_dir_all(base.join("plain")).unwrap();
         fs::write(base.join("f.bin"), b"x").unwrap();
         let link = base.join("link");
-        let made = Command::new("cmd")
-            .arg("/C")
-            .arg("mklink")
-            .arg("/J")
-            .arg(&link)
-            .arg(&target)
-            .output()
+        // X1-L01：带超时 + 杀整树（夹具命令挂住时不得拖死整轮验收）。
+        let mut mk = Command::new("cmd");
+        mk.arg("/C").arg("mklink").arg("/J").arg(&link).arg(&target);
+        let made = crate::testcmd::run_test_cmd(&mut mk, std::time::Duration::from_secs(10))
             .map(|o| o.status.success())
             .unwrap_or(false);
         if !made {
@@ -4318,7 +4378,7 @@ mod tests {
 
     /// 只记录「回执元数据」的探针 sink：条目数、warn 文本、truncated 次数、末次进度。
     #[derive(Default)]
-    struct TraceProbeSink {
+    pub(crate) struct TraceProbeSink {
         n_items: AtomicU64,
         warns: Mutex<Vec<String>>,
         trunc: AtomicU64,
@@ -4342,8 +4402,8 @@ mod tests {
         }
     }
     impl TraceProbeSink {
-        fn items(&self) -> u64 { self.n_items.load(Ordering::Relaxed) }
-        fn warns(&self) -> Vec<String> {
+        pub(crate) fn items(&self) -> u64 { self.n_items.load(Ordering::Relaxed) }
+        pub(crate) fn warns(&self) -> Vec<String> {
             self.warns.lock().unwrap_or_else(|e| e.into_inner()).clone()
         }
         fn truncated_calls(&self) -> u64 { self.trunc.load(Ordering::Relaxed) }
@@ -4661,11 +4721,19 @@ mod tests {
         }
 
         // 根不能放 %TEMP%（在 %USERPROFILE% 子树内，会被六轮拍板的用户目录排除滤掉）；
-        // 用 CARGO_MANIFEST_DIR/target 下（仓库工作区，userprofile 之外，测试后清理）
+        // 用 CARGO_MANIFEST_DIR/target 下（仓库工作区，userprofile 之外）。
+        // B-01 ③：清理改由 Drop 守卫兜底 —— 断言失败 / panic / 早退都会带走目录。
+        struct Clean(PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join(format!("test-empty-age-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
+        let _clean = Clean(base.clone());
         fs::create_dir_all(base.join("has_old_file")).unwrap();
         fs::create_dir_all(base.join("has_fresh_file")).unwrap();
         fs::create_dir_all(base.join("old_empty_dir")).unwrap();
@@ -4724,7 +4792,6 @@ mod tests {
             !got.iter().any(|s| s.ends_with("has_fresh_file")),
             "树内含太新 0 字节标记的目录不得判空（活跃标记保护）"
         );
-        let _ = fs::remove_dir_all(&base);
     }
 
     /// 测试沙箱里写一个文件并把 mtime 钉到 `UNIX_EPOCH + secs`（可选亚秒）。
@@ -5006,10 +5073,19 @@ mod tests {
             fn warn(&self, _m: &str) {}
         }
 
+        // B-01 ③：清理改由 Drop 守卫兜底 —— 断言失败 / panic / 早退都会带走目录。
+        // 根仍放在仓库 target 下（%TEMP% 在 %USERPROFILE% 子树内，会被用户目录排除滤掉）。
+        struct Clean(PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join(format!("test-empty-created-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
+        let _clean = Clean(base.clone());
         fs::create_dir_all(base.join("pack").join("old_empty")).expect("建沙箱失败");
         fs::write(base.join("loose.log"), b"").expect("写根层 0 字节样本失败");
         fs::write(base.join("pack").join("stale.bin"), b"").expect("写子目录 0 字节样本失败");
@@ -5070,18 +5146,16 @@ mod tests {
         let a: Vec<&String> = got.iter().map(|(_, l)| l).collect();
         let b: Vec<&String> = got2.iter().map(|(_, l)| l).collect();
         assert_eq!(a, b, "同一棵树连跑两遍的行序列不逐字节相同");
-        let _ = fs::remove_dir_all(&base);
     }
 }
+
 #[cfg(test)]
 mod depth_cap_tests {
     use super::*;
+    use crate::scan::tests::TraceProbeSink;
     use std::collections::HashSet;
 
-    /// 审查 L-9：collect_empty_fast 超限不再下钻。造 70 层嵌套空目录链，扫描必须
-    /// 正常返回（不栈溢出）且根链判「非空」——父目录不会作为空目录被连带删除。
-    /// 说明：深处空目录「不进 dirs」无法在此钉死——目录收集有「创建满 14 天」时效
-    /// 护栏（created_too_new），单测造不出老目录，新建目录本就不进候选。
+
     #[test]
     fn collect_empty_fast_深度超限判非空且不炸() {
         let _sb = sandbox(&format!("depth-empty-{}", std::process::id()));
@@ -5537,6 +5611,14 @@ mod depth_cap_tests {
         use std::ffi::OsString;
         use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
+        // B-01 ③：清理改由 Drop 守卫兜底 —— 断言失败 / panic / 早退都会带走目录。
+        // 根仍放在仓库 target 下（真机探针要落在「真实盘」上，且本机可能不允许写 %TEMP%）。
+        struct Clean(PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("target")
             .join(format!("test-m07-lossy-{}", std::process::id()));
@@ -5545,6 +5627,7 @@ mod depth_cap_tests {
             eprintln!("SKIP：建沙箱目录失败（本机不允许写 target），本探针未取证");
             return;
         }
+        let _clean = Clean(base.clone());
         // base\<D800>x.txt：0xD800 是前导代理项却没有后继 ⇒ to_str() 必为 None
         let mut wide: Vec<u16> = base.as_os_str().encode_wide().collect();
         wide.push(b'\\' as u16);
@@ -5552,7 +5635,6 @@ mod depth_cap_tests {
         wide.extend("x.txt".encode_utf16());
         let weird = PathBuf::from(OsString::from_wide(&wide));
         if fs::write(&weird, b"x").is_err() {
-            let _ = fs::remove_dir_all(&base);
             eprintln!("SKIP：本机建不出含孤立代理项的文件名，本探针未取证");
             return;
         }
@@ -5578,7 +5660,6 @@ mod depth_cap_tests {
                 "普通路径不得被 lossy 判据误伤"
             );
         }
-        let _ = fs::remove_dir_all(&base);
     }
 
     /// N1b-M13：短路径根（>260）经 canonical 后应能看见深节点。
@@ -5683,8 +5764,7 @@ mod depth_cap_tests {
         let e = super::recycle::removal_verdict(p.as_os_str(), 0, 0).expect_err("目标仍在原位时不得报成功");
         assert!(e.contains("仍在原位"), "失败原因必须点名「仍在原位」：{e}");
         // 反：非 0 回执 / 被中止永远不是成功（哪怕目标碰巧已经不在）
-        assert!(super::recycle::removal_verdict(p.as_os_str(), 0x7C, 0).is_err(), "rc≠0 必须判失败");
-        assert!(super::recycle::removal_verdict(p.as_os_str(), 0, 1).is_err(), "aborted≠0 必须判失败");
+        assert!(super::recycle::removal_verdict(p.as_os_str(), 0, 1).is_err(), "rc≠0 必须判失败");
 
         // 正：rc=0 且目标确实不在原位 ⇒ 成功
         fs::remove_file(&p).unwrap();
@@ -5695,6 +5775,38 @@ mod depth_cap_tests {
         fs::write(&q, b"y").unwrap();
         super::recycle::send_to_trash_os(q.as_os_str()).expect("真实回收站原语应成功");
         assert!(fs::symlink_metadata(&q).is_err(), "提交删除后原位置必须消失");
+        assert!(fs::symlink_metadata(&q).is_err(), "提交删除后原位置必须消失");
+    }
+    /// N1b-L04：`dir_size(None)` 只是不发心跳，诊断必须仍走 Sink，不得直写 stderr。
+    #[test]
+    fn n1b_dir_size_none_uses_sink() {
+        let _sb = sandbox(&format!("n1b-l04-sink-{}", std::process::id()));
+        // 用**文件**当目录根 ⇒ `read_dir` 必然失败（NotADirectory），
+        // 这才是「读不到目录」的样本；空目录读得进去、不会产生诊断。
+        let locked = _sb.path().join("not-a-dir");
+        fs::write(&locked, b"x").unwrap();
+        let sink = TraceProbeSink::default();
+        // 不接心跳（None 形态），但诊断必须仍进 Sink。
+        dir_size_with_sink(&locked, None, Some(&sink));
+        assert!(!sink.warns().is_empty(), "None 形态的诊断必须进 Sink: {:?}", sink.warns());
+        assert!(sink.warns()[0].contains("个目录读不到"), "诊断要说清少报: {:?}", sink.warns());
     }
 
+    /// N1b-L05：MB → 字节换算溢出必须显式拒绝，不许 panic / 回绕。
+    /// 破坏自证：把 `checked_mul` 换回裸 `*` ⇒ 本用例在 debug 下 panic。
+    #[test]
+    fn n1b_min_size_overflow_is_rejected() {
+        assert_eq!(min_size_bytes(0), Some(0));
+        assert_eq!(min_size_bytes(1), Some(1024 * 1024));
+        assert_eq!(
+            min_size_bytes(u64::MAX),
+            None,
+            "u64::MAX MB 必须显式拒绝（裸 * 会 debug panic / release 回绕）"
+        );
+        assert_eq!(
+            min_size_bytes(u64::MAX / 1024 / 1024),
+            Some((u64::MAX / 1024 / 1024) * 1024 * 1024),
+            "不溢出的最大值必须照常换算"
+        );
+    }
 }

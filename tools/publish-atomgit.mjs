@@ -82,7 +82,7 @@ const read = (p) => readFileSync(p, 'utf8');
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
 function decodeMinisignEnvelope(text, kind) {
-  const b64 = String(text ?? '').trim();
+  const b64 = String(text ?? '');
   if (!b64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) {
     throw new Error(`${kind} 不是单层 base64`);
   }

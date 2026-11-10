@@ -54,6 +54,10 @@ const check = (ok, label, detail = '') => {
 
 console.log('=== CSP meta 一致性门禁 ===\n');
 
+if (htmls.length < 4) {
+  check(false, `HTML 份数地板（现算 ${htmls.length} 份 < 4；缺子窗 html 时逐字相等不能顶账）`);
+}
+
 const missing = [...csps.entries()].filter(([, v]) => v === null).map(([k]) => k);
 check(missing.length === 0, `${htmls.length} 份 HTML 均带 CSP meta`, missing.length ? `缺失 ${JSON.stringify(missing)}` : '');
 

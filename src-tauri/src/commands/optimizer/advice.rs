@@ -20,6 +20,10 @@ pub async fn optimizer_genadvice<R: Runtime>(
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
+    let _ = options();
+    if let Some(response) = catalog_load_failure() {
+        return response;
+    }
     let option_id = option_id.unwrap_or_default();
     let Some(opt) = find_option(&option_id) else {
         return json!({ "success": false, "message": "未知的优化选项" });

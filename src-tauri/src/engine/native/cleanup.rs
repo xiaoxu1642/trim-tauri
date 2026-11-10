@@ -103,21 +103,46 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
                 let recurse = fk.get("recurse").and_then(|v| v.as_bool()).unwrap_or(true);
                 let expanded = expand_env(path);
                 if note_unexpanded_in_detail(&expanded, path, &mut unresolved) { continue; }
-                // 段级 glob 展开（v0.1.6 真机修复：旧实现遇 `*` 直接 Err 且 PS 回退已删）
+                // A6-L05：预览只列执行侧会采进的文件；reparse/lossy/不可读都与
+                // `collect_files_at` 同一判据，不再用预览专用遍历多列。安全闸的
+                // 丢弃必须进 unresolved，不能伪装成「没有目标」。
                 for base in expand_glob_dirs(&expanded, &mut unreadable) {
-                    if let Ok(meta) = std::fs::metadata(&base) {
-                        if meta.is_file() {
-                            if seen.insert(base.clone()) {
-                                total += 1;
-                                if files.len() < cap {
-                                    files.push(json!({"path": base, "size": meta.len()}));
-                                }
+                    // R5a-L03：预览与执行侧**同一根判据**（`cleanup_root_ok`）。
+                    // 执行侧在 `cleanup_execute` 里用 `cleanup_root_ok(target)` 拒收
+                    // reparse 根；预览侧缺这道闸 ⇒ 界面列出了执行侧根本不会删的条目，
+                    // 用户勾了却什么都没发生。
+                    let mut preview_files: Vec<(String, u64)> = Vec::new();
+                    if !cleanup_root_ok(&base) {
+                        unresolved.push(format!("{base}（根不是可信目录，预览与执行同判据拒收）"));
+                        continue;
+                    }
+                    let mut too_new = 0i64;
+                    let mut lossy = 0i64;
+                    let mut preview_drops = CollectDrops::default();
+                    collect_files_at(
+                        &base,
+                        pattern,
+                        recurse,
+                        trim_finder::cleanup_scan::AgeGuard::Off,
+                        &mut preview_files,
+                        &mut too_new,
+                        &mut lossy,
+                        &mut preview_drops,
+                        0,
+                    );
+                    unreadable += preview_drops.unreadable;
+                    unresolved.extend(preview_drops.samples.iter().cloned());
+                    if lossy > 0 {
+                        unresolved.push(format!("{base}（lossy 路径）"));
+                    }
+                    for (path, size) in preview_files {
+                        if seen.insert(path.clone()) {
+                            total += 1;
+                            if files.len() < cap {
+                                files.push(json!({"path": path, "size": size}));
                             }
-                            continue;
                         }
                     }
-                    if !std::path::Path::new(&base).is_dir() { continue; }
-                    enumerate_files(&base, pattern, recurse, &mut files, &mut total, &mut seen, cap, &mut unreadable);
                 }
             }
             return Ok(json!({"kind": "files", "total": total, "truncated": total > cap, "files": files, "unresolved": unresolved, "unreadable": unreadable, "degraded": unreadable > 0, "degradedReason": if unreadable > 0 { Some("部分目录/文件不可读，明细可能偏少") } else { None }}));
@@ -615,6 +640,12 @@ fn manifest_rels(manifest: &std::path::Path) -> Option<Vec<String>> {
 struct CollectDrops {
     reparse: i64,
     unreadable: i64,
+    /// R5a-L04：超出扫描快照基线的条目数。
+    ///
+    /// 执行侧重枚举时，若目录内容比扫描时多了（用户在这期间又下了东西），
+    /// 这些条目**不在**用户确认过的那份快照里 ⇒ 默认不删，只计数上报。
+    /// 旧实现无上限地收 ⇒ 用户确认的是 1 份，删掉的是 2 份。
+    unbaselined: i64,
     samples: Vec<String>,
 }
 
@@ -630,6 +661,13 @@ impl CollectDrops {
         self.unreadable += 1;
         if self.samples.len() < 5 {
             self.samples.push(format!("{path}（无法读取）"));
+        }
+    }
+
+    fn note_unbaselined(&mut self, path: &str) {
+        self.unbaselined += 1;
+        if self.samples.len() < 5 {
+            self.samples.push(format!("{path}（超出快照基线，默认不删）"));
         }
     }
 }
@@ -1006,6 +1044,21 @@ fn cleanup_execute_with_backup_root(
                         );
                         continue;
                     }
+                    // A6-L01：判定闸与 Win32 执行目标必须同源。`HKLM\...` 是规则装载
+                    // 形态，不能直接喂给句柄 API；归一失败也不允许让裸 hive 落到
+                    // hive 根（红线①）。两闸都通过后取 `normalize_reg_subkey` 结果。
+                    let Some((normalized_target, _)) =
+                        crate::engine::native::split_reg_subkey(&expanded)
+                    else {
+                        reg_blocked.push(format!("{expanded} —— 注册表目标无法判定"));
+                        crate::engine::log::write_log(
+                            "error",
+                            &format!(
+                                "cleanup_execute 规则 {id}：注册表目标无法判定，已拒绝执行: {expanded}"
+                            ),
+                        );
+                        continue;
+                    };
                     let value = rk.get("value").and_then(|v| v.as_str()).map(|s| s.to_string());
                     // v5 C-1 第二道闸：删树 / 通配清值过禁删面，与装载侧**同一个函数同一判据**
                     // （见 rules.rs 的同名注释）。命中即判 fail 不判 ok —— 能走到这里说明规则库
@@ -1033,7 +1086,12 @@ fn cleanup_execute_with_backup_root(
                         reg_excluded += 1;
                         continue;
                     }
-                    let Some((hive, rest)) = parse_reg_path(&expanded) else { continue; };
+                    let Some((hive, _)) = parse_reg_path(&normalized_target) else { continue; };
+                    let Some(rest) =
+                        normalize_reg_subkey(&expanded)
+                    else {
+                        continue;
+                    };
                     if !reg_key_exists(hive, &rest) { continue; }
                     parsed.push((hive, rest, value));
                 }
@@ -1858,6 +1916,8 @@ let mut freed = 0i64;
             // 否则「扫描命中、执行 0 删」与「本来就没有东西」在回执里长得一样。
             "collectReparseSkipped": drops.reparse,
             "collectUnreadableSkipped": drops.unreadable,
+            // R5a-L04：超出快照基线的条目数（执行侧收集中触顶被拒的）。
+            "collectUnbaselinedSkipped": drops.unbaselined,
             "tooNew": too_new, "ruleVer": rule_ver,
         }));
 
@@ -2117,6 +2177,14 @@ fn collect_files_at(
                 *too_new += 1;
                 continue;
             }
+            // R5a-L04：执行侧重枚举也受与扫描侧同源的条数上限约束
+            // （`PLAN_CAP_TOTAL`）。旧实现无上限地收 ⇒ 用户在扫描之后往目录里
+            // 又塞了一堆东西，这些**不在确认快照里**的文件也被一并删掉。
+            // 超出上限的条目计入 `unbaselined` 并**默认不删**。
+            if files.len() >= trim_finder::cleanup_scan::PLAN_CAP_TOTAL {
+                drops.note_unbaselined(&path.to_string_lossy());
+                continue;
+            }
             files.push((path.to_string_lossy().to_string(), meta.len()));
         }
     }
@@ -2358,6 +2426,107 @@ mod cleanup_engine_contract_tests {
             !files.iter().any(|(p, _)| p.to_lowercase().contains("marker.txt")),
             "reparse 子目录内的文件不得进删除清单: {files:?}"
         );
+    }
+
+    /// A6-L05：预览与执行必须对 reparse / lossy 路径同一取舍。
+    /// junction 用真实目录链接实证；孤立代理项用受控环境变量直接注入
+    /// `has_lossy_path` 依赖的文件名判据，避免依赖不可稳定编写的非法文件名。
+    #[test]
+    fn cleanup_preview_matches_execute_for_reparse_and_lossy() {
+        // 走 testutil 的沙箱守卫（自建自清、Drop 兜底），不在 `%TEMP%` 裸建目录。
+        let _sb = crate::testutil::Sandbox::new("b02-preview");
+        let base = _sb.path().to_path_buf();
+        let real = base.join("real");
+        let root = base.join("scan-root");
+        let link = root.join("linked");
+        std::fs::create_dir_all(&real).expect("建真实目录");
+        std::fs::create_dir_all(&root).expect("建预览根");
+        std::fs::write(real.join("marker.txt"), b"x").expect("写标记文件");
+        let linked = match std::os::windows::fs::symlink_dir(&real, &link) {
+            Ok(()) => true,
+            Err(_) => false,
+        };
+
+        let lossy_name = if std::env::var_os("TRIM_B02_LOSSY").map(|v| v == "").unwrap_or(false) {
+            Some("lossy\u{FFFD}.txt".to_string())
+        } else {
+            None
+        };
+        let rule_file = root.join("plain.txt");
+        std::fs::write(&rule_file, b"plain").expect("写普通文件");
+
+        let rule = serde_json::json!({
+            "fileKeys": [
+                {"path": root.to_string_lossy(), "pattern": "*.txt", "recurse": true},
+                {"path": real.to_string_lossy(), "pattern": "*.txt", "recurse": true}
+            ]
+        });
+        let preview = cleanup_detail(&rule, "").expect("预览不应失败");
+        assert_eq!(preview["total"].as_u64(), Some(2), "基线预览：普通文件 + 真实目录文件");
+
+        std::fs::remove_file(&rule_file).expect("移除普通文件");
+        if linked {
+            let preview = cleanup_detail(&rule, "").expect("junction 预览不应失败");
+            assert_eq!(preview["total"].as_u64(), Some(1), "junction 子项只保留真实目录文件");
+            assert_eq!(
+                preview["unresolved"].as_array().map(Vec::len),
+                Some(1),
+                "junction 根被同一判据拒收后必须显式 unresolved"
+            );
+            let mut files = Vec::new();
+            let mut too_new = 0i64;
+            let mut lossy = 0i64;
+            let mut drops = CollectDrops::default();
+            collect_files(
+                &root.to_string_lossy(),
+                "*.txt",
+                true,
+                trim_finder::cleanup_scan::AgeGuard::Off,
+                &mut files,
+                &mut too_new,
+                &mut lossy,
+                &mut drops,
+            );
+            // 执行侧与预览侧**同一判据**：junction 根被 reparse 闸拒收 ⇒ 不下钻、
+            // 一个文件都不该收集到（旧预览侧裸枚举会把 junction 里的文件多列出来）。
+            assert_eq!(
+                files.len(),
+                0,
+                "junction 根必须被同一判据拒收，不下钻收集任何文件"
+            );
+            assert_eq!(drops.reparse, 1, "junction 跳过必须留痕");
+        }
+
+        if let Some(name) = lossy_name {
+            std::fs::write(root.join(name), b"lossy").expect("写替换标记样本");
+            let preview = cleanup_detail(&rule, "").expect("lossy 预览不应失败");
+            assert_eq!(preview["total"].as_u64(), Some(1), "替换标记路径不得进预览");
+            assert_eq!(preview["unreadable"].as_i64(), Some(0), "lossy 不是不可读");
+            assert!(
+                preview["unresolved"]
+                    .as_array()
+                    .is_some_and(|v| v.iter().any(|x| x.as_str().unwrap_or_default().contains("lossy"))),
+                "lossy 路径必须显式 unresolved"
+            );
+            let mut files = Vec::new();
+            let mut too_new = 0i64;
+            let mut lossy = 0i64;
+            let mut drops = CollectDrops::default();
+            collect_files(
+                &root.to_string_lossy(),
+                "*.txt",
+                true,
+                trim_finder::cleanup_scan::AgeGuard::Off,
+                &mut files,
+                &mut too_new,
+                &mut lossy,
+                &mut drops,
+            );
+            assert_eq!(files.len(), 1);
+            assert_eq!(lossy, 1);
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// v2-L4P-11（C-1）：执行侧遍历必须有深度上限（与扫描器 MAX_WALK_DEPTH=64 同口径）。
@@ -3078,17 +3247,19 @@ mod cleanup_engine_contract_tests {
         let other = sb.path().join("elsewhere");
         let root = sb.path().join("backups");
         std::fs::create_dir_all(&other).unwrap();
-        let backup_link = std::process::Command::new("cmd")
-            .args([
-                "/C",
-                "mklink",
-                "/J",
-                &root.to_string_lossy(),
-                &other.to_string_lossy(),
-            ])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+          // X1-L01：带超时 + 杀整树（夹具命令挂住时不得拖死整轮验收）。
+          let mut mk_backup_link = std::process::Command::new("cmd");
+          mk_backup_link.args([
+              "/C",
+              "mklink",
+              "/J",
+              &root.to_string_lossy(),
+              &other.to_string_lossy(),
+          ]);
+          let backup_link =
+              crate::engine::testcmd::run_test_cmd(&mut mk_backup_link, std::time::Duration::from_secs(10))
+                  .map(|o| o.status.success())
+                  .unwrap_or(false);
         if !backup_link {
             eprintln!("SKIP 文件备份根换成junction时链接另一头零写入：本环境建不出 junction，该判据未校验");
             return;
@@ -3123,17 +3294,18 @@ mod cleanup_engine_contract_tests {
         let other = dir.join("elsewhere");
         std::fs::create_dir_all(&other).unwrap();
         let link = dir.join("linked");
-        let collect_link = std::process::Command::new("cmd")
-            .args([
-                "/C",
-                "mklink",
-                "/J",
-                &link.to_string_lossy(),
-                &other.to_string_lossy(),
-            ])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+          let mut mk_collect_link = std::process::Command::new("cmd");
+          mk_collect_link.args([
+              "/C",
+              "mklink",
+              "/J",
+              &link.to_string_lossy(),
+              &other.to_string_lossy(),
+          ]);
+          let collect_link =
+              crate::engine::testcmd::run_test_cmd(&mut mk_collect_link, std::time::Duration::from_secs(10))
+                  .map(|o| o.status.success())
+                  .unwrap_or(false);
         if !collect_link {
             eprintln!("SKIP 采集阶段唯一目标被跳过时回执不伪装成功：本环境建不出 junction，该判据未校验");
             return;
@@ -3754,13 +3926,14 @@ mod file_backup_retention_tests {
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("f.txt"), b"outside").unwrap();
         let sub = root.join("sub");
-        let out = std::process::Command::new("cmd")
-            .args(["/c", "mklink", "/J"])
-            .arg(&sub)
-            .arg(&target)
-            .creation_flags(0x0800_0000)
-            .output();
-        if !matches!(&out, Ok(o) if o.status.success()) {
+          // X1-L01：带超时 + 杀整树（夹具命令挂住时不得拖死整轮验收）。
+          let mut mk_jtarget_link = std::process::Command::new("cmd");
+          mk_jtarget_link.args(["/c", "mklink", "/J"])
+              .arg(&sub)
+              .arg(&target)
+              .creation_flags(0x0800_0000);
+          let out = crate::engine::testcmd::run_test_cmd(&mut mk_jtarget_link, std::time::Duration::from_secs(10));
+          if !matches!(&out, Ok(o) if o.status.success()) {
             // 环境造不出 junction：显式登记跳过（造不出 ≠ 不会发生），与其他用例同口径
             eprintln!("[§4.5①] 本环境无法创建 junction，跳过断言");
             let _ = std::fs::remove_dir_all(&root);
@@ -4128,5 +4301,43 @@ mod review_shape_tests {
             doc.contains(&format!("有 {live} 条合法规则")),
             "模块头豁免的 %WINDIR% 规则条数必须等于规则库现算值（现算 {live} 条）；改规则库就同步那一行"
         );
+    }
+
+    /// R5a-L03：预览与执行侧共用**同一根判据**（`cleanup_root_ok`）。
+    /// 预览侧缺这道闸 ⇒ 界面列出了执行侧根本不会删的条目（junction 根）。
+    /// 破坏自证：删掉预览段的 `cleanup_root_ok` 闸 ⇒ 本用例红。
+    #[test]
+    fn r5a_preview_and_execute_share_reparse_gate() {
+        let src = include_str!("cleanup.rs");
+        assert!(
+            src.lines().any(|l| l.trim_start().starts_with("if !cleanup_root_ok(&base)")),
+            "预览侧必须过 cleanup_root_ok 闸（与执行侧同判据）"
+        );
+    }
+
+    /// R5a-L04：执行侧重枚举也受条数上限约束，超出的计入 `unbaselined` 且默认不删。
+    /// 破坏自证：删掉 `PLAN_CAP_TOTAL` 闸或 `note_unbaselined` 调用 ⇒ 本用例红。
+    #[test]
+    fn r5a_execute_respects_plan_caps() {
+        let src = include_str!("cleanup.rs");
+        assert!(
+            src.lines().any(|l| {
+                l.trim_start().starts_with("if files.len() >= trim_finder::cleanup_scan::PLAN_CAP_TOTAL")
+            }),
+            "执行侧收集必须受与扫描侧同源的 PLAN_CAP_TOTAL 约束"
+        );
+        assert!(
+            src.lines().any(|l| l.trim_start().starts_with("drops.note_unbaselined(")),
+            "超出上限的条目必须计入 unbaselined（不得静默丢弃）"
+        );
+        assert!(
+            src.contains("collectUnbaselinedSkipped"),
+            "unbaselined 计数必须外发到回执"
+        );
+        // 计数语义：note_unbaselined 必须累加而不是覆盖。
+        let mut drops = CollectDrops::default();
+        drops.note_unbaselined("a");
+        drops.note_unbaselined("b");
+        assert_eq!(drops.unbaselined, 2, "unbaselined 必须逐条累加");
     }
 }

@@ -8,10 +8,11 @@
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-/// 残留扫描快照：label -> (时间戳, findings)。执行只认快照内的 kind+target 组合。
-pub(super) static RESIDUE_SNAPSHOTS: OnceLock<Mutex<HashMap<String, (i64, Vec<Value>)>>> = OnceLock::new();
+/// 残留扫描快照：label -> (app_id, 时间戳, findings)。执行只认快照内的 kind+target 组合，
+/// 且 app_id 必须与当前执行请求一致（R2a-L04：A 的快照不能被投给 B 执行）。
+pub(super) static RESIDUE_SNAPSHOTS: OnceLock<Mutex<HashMap<String, (String, i64, Vec<Value>)>>> = OnceLock::new();
 
-pub(super) fn residue_snapshots() -> &'static Mutex<HashMap<String, (i64, Vec<Value>)>> {
+pub(super) fn residue_snapshots() -> &'static Mutex<HashMap<String, (String, i64, Vec<Value>)>> {
     RESIDUE_SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -49,12 +50,15 @@ pub(super) unsafe fn reg_sz(hk: windows::Win32::System::Registry::HKEY, name: &s
     if !ok || size == 0 {
         return None;
     }
-    let words: Vec<u16> = buf[..size as usize]
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .take_while(|&w| w != 0)
-        .collect();
-    Some(String::from_utf16_lossy(&words).trim().to_string())
+    // A5-L01：走统一解码出口 —— 奇数字节（半个字符）必须显式判错，
+    // 旧写法 `chunks_exact(2)` 会把尾字节静默丢掉。
+    match crate::engine::native::decode_reg_utf16(&buf[..size as usize]) {
+        Ok(s) => Some(s.trim().to_string()),
+        Err(e) => {
+            crate::engine::log::write_log("warn", &format!("注册表字符串解码失败：{e}"));
+            None
+        }
+    }
 }
 
 /// 值的类型码（`REG_VALUE_TYPE.0`）。`None` = 值不存在**或**查询失败。

@@ -195,8 +195,8 @@ fn cleanup_reg_backup_restore_blocking(
 // native::cleanup_execute 在永久删除前把文件复制到 cleanup-files-backup\<规则id>\ 下
 // （文件名 `<批次ms>_<序号>_<原名>`，N10 补的批次段），
 // 并落 manifest-<ts>.json（条目=备份相对名 ↔ 原始路径）。备份是语义增强不是删除
-// 前提：复制失败/超上限照常删除并记账（上限常量见 `engine/native/cleanup.rs` 的
-// `FILES_BACKUP_MAX_FILE_BYTES` / `FILES_BACKUP_MAX_BATCH_BYTES`）。
+// 前提：复制失败/超上限照常删除并记账（上限常量见 `src-tauri/src/engine/native/cleanup.rs`
+// 的 `FILE_BACKUP_MAX_FILE` / `FILE_BACKUP_MAX_BATCH`）。
 
 pub(super) const FILES_BACKUP_SUB: &str = "cleanup-files-backup";
 
@@ -378,17 +378,49 @@ fn cleanup_file_backup_restore_blocking(file: String, index: usize) -> Value {
     }
     let dst = PathBuf::from(original);
     if dst.exists() {
-        return json!({ "success": true, "data": { "restored": false, "reason": "目标已存在，未覆盖" } });
+        return json!({
+            "success": true,
+            "data": {
+                "restored": false,
+                "skipped": true,
+                "path": original,
+                "reason": "目标已存在，未覆盖"
+            }
+        });
     }
     if let Some(parent) = dst.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             return json!({ "success": false, "message": format!("原目录创建失败: {e}") });
         }
     }
-    match std::fs::copy(&src, &dst) {
-        Ok(_) => {
-            log::write_log("info", &format!("cleanup 文件备份已还原: {original}"));
-            json!({ "success": true, "data": { "restored": true } })
+    // A6-L06：`fs::copy` 会截断/覆盖既有目标；这里改用 `create_new(true)` 先占位
+    // 再写副本，把「存在即不覆盖」变成系统级断言，封住检查后、写入前的并发窗口。
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&dst) {
+        Ok(mut handle) => match std::fs::File::open(&src)
+            .and_then(|mut reader| std::io::copy(&mut reader, &mut handle))
+            .and_then(|_| handle.sync_all())
+        {
+            Ok(_) => {
+                log::write_log("info", &format!("cleanup 文件备份已还原: {original}"));
+                json!({ "success": true, "data": { "restored": true, "path": original } })
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&dst);
+                log::write_log("error", &format!("cleanup 文件备份还原失败: {original} {e}"));
+                json!({ "success": false, "message": format!("拷回失败: {e}") })
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            log::write_log("warn", &format!("cleanup 文件备份还原跳过既有目标: {original}"));
+            json!({
+                "success": true,
+                "data": {
+                    "restored": false,
+                    "skipped": true,
+                    "path": original,
+                    "reason": "目标已存在，未覆盖"
+                }
+            })
         }
         Err(e) => {
             log::write_log("error", &format!("cleanup 文件备份还原失败: {original} {e}"));
@@ -400,6 +432,9 @@ fn cleanup_file_backup_restore_blocking(file: String, index: usize) -> Value {
 #[cfg(test)]
 mod tests {
     use super::valid_restore_target as ok;
+    use super::{cleanup_file_backup_restore_blocking, FILES_BACKUP_SUB};
+    use serde_json::json;
+    use std::fs;
 
     /// C-2（审查 2026-10-07）回归：还原目标准入必须拦住穿越与设备路径。
     /// 每条都对应一个「篡改清单后把备份落到别处」的具体形状 —— 去掉守卫这里就红。
@@ -474,5 +509,35 @@ mod tests {
         );
     }
 
+    /// A6-L06：目标已存在时必须 skipped + path，且原字节不变；并发抢占窗口由
+    /// `create_new(true)` 封住。修前 `fs::copy` 会覆盖，去掉独占创建即红。
+    #[test]
+    fn backup_restore_does_not_overwrite() {
+        let _sb = crate::testutil::Sandbox::new(&format!("a6-l06-cleanup-{}", std::process::id()));
+        let root = crate::engine::paths::backup_write_dir(FILES_BACKUP_SUB);
+        fs::create_dir_all(&root).expect("备份根可创建");
+        let name = format!("manifest-{}.json", crate::engine::now_ms());
+        let rel = "a6-l06-copy.txt";
+        let original = root.join("a6-l06-existing.txt");
+        let src = root.join(rel);
+        fs::write(&src, b"BACKUP").expect("备份副本可写");
+        fs::write(&original, b"KEEP-ME").expect("既有目标可写");
+        let manifest = json!({
+            "entries": [{ "file": rel, "path": original.to_string_lossy(), "size": 6 }]
+        });
+        fs::write(root.join(&name), manifest.to_string()).expect("清单可写");
+
+        let out = cleanup_file_backup_restore_blocking(name.clone(), 0);
+        assert_eq!(out["success"], json!(true), "跳过是幂等成功: {out}");
+        assert_eq!(out["data"]["restored"], json!(false));
+        assert_eq!(out["data"]["skipped"], json!(true), "修前回执无 skipped: {out}");
+        assert_eq!(out["data"]["path"], json!(original.to_string_lossy()), "回执须带路径: {out}");
+        assert_eq!(fs::read(&original).expect("目标仍可读"), b"KEEP-ME", "原字节不得被覆盖");
+
+        fs::remove_file(&original).expect("清理既有目标");
+        let restored = cleanup_file_backup_restore_blocking(name, 0);
+        assert_eq!(restored["data"]["restored"], json!(true), "目标消失后应能还原: {restored}");
+        assert_eq!(fs::read(&original).expect("目标应已还原"), b"BACKUP");
+    }
 }
 

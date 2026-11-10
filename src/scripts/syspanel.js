@@ -1116,7 +1116,8 @@
     };
     ctrl.footer.querySelector('[data-modal-cancel]').addEventListener('click', () => ctrl.close());
     okBtn.addEventListener('click', submit);
-    input?.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+      // C-06（F4a1-L14）：长按回车会连发 keydown ⇒ 重复提交。
+      input?.addEventListener('keydown', (e) => { if (e.repeat) return; if (e.key === 'Enter') submit(); });
   }
 
   /** 头部「新建电源计划」（2026-10-15 用户裁定：入口收在卡片头部，模板在弹窗里选，
@@ -1179,7 +1180,8 @@
     };
     ctrl.footer.querySelector('[data-modal-cancel]').addEventListener('click', () => ctrl.close());
     okBtn.addEventListener('click', submit);
-    nameInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+      // C-06（F4a1-L14）：长按回车会连发 keydown ⇒ 重复提交。
+      nameInput?.addEventListener('keydown', (e) => { if (e.repeat) return; if (e.key === 'Enter') submit(); });
   }
 
   function onRenamePower(guid, name) {
@@ -1230,7 +1232,7 @@
       `即将删除「${name}」；删除后该方案的设置无法从 Trim 内恢复（需要保留可先导出为 .powrplan）。\n\n必须知道：\n`
         + '· 微软内置三档与当前正在使用的方案不可删除；\n'
         + '· 若它正被其他工具引用（如厂商性能模式），删除后那些工具可能读取失败。',
-      '仍然删除',
+      '仍然执行',
       '取消',
       '此操作会从系统中永久移除该电源方案。',
     );
@@ -1322,7 +1324,7 @@
       '即将从系统移除内置「高性能」方案；移除前会自动把它导出为备份文件（之后可用「还原高性能」导回）。\n\n必须知道：\n'
         + '· 还原时系统会重新分配方案 GUID（同名等效方案，设置一致）；\n'
         + '· 若其它工具引用高性能方案，隐藏后那些工具可能读取失败。',
-      '仍然隐藏',
+      '仍然执行',
       '取消',
       '删除后该方案将从系统移除（备份保留在 Trim 数据目录）。',
     );
@@ -1464,6 +1466,7 @@
       dcVisible: dump.platformRole === 'mobile' || dump.platformRole === 'slate',
       collapsed: new Set(), // 默认全部折叠：初始先塞全部组名，点开再删
       selectedKey: '',
+      settings: new Map(),
       saving: false,
     };
     for (const g of dump.subgroups || []) {
@@ -1471,6 +1474,7 @@
       for (const s of g.settings || []) {
         const key = pwrKey(s.subgroupGuid, s.guid);
         editor.origin.set(key, { ac: s.valueAc, dc: s.valueDc });
+        editor.settings.set(key, s);
         const zhEntryForSearch = pwrZh(s.guid);
         editor.searchText.set(key, [
           s.name, zhEntryForSearch?.name, s.description, zhEntryForSearch?.desc,
@@ -1777,7 +1781,7 @@
         ${editor.dcVisible ? controlHtml('dc', '使用电池（DC）') : ''}
       </div>
       ${metaHtml}
-      <div id="syspanelPwrCompare"></div>
+      <div id="syspanelPwrCompare" aria-live="polite"></div>
       ${recHtml}
       ${failed ? '<div class="syspanel-pwr-unlock-note">系统拒绝解锁此设置（受保护项），当前不可编辑。</div>' : ''}
     `;
@@ -1811,13 +1815,23 @@
         const msg = String((e && e.message) || e);
         window.app?.log?.('warn', `电源方案对照读取异常（${s.guid}）：${msg}`);
         editor?.compareCache.set(key, { loading: false, rows: null, msg });
+        if (editor && editor.selectedKey === key) {
+          const m2 = document.getElementById('syspanelPwrCompare');
+          if (m2) renderCompare(m2, key, null, msg);
+        }
       });
   }
 
   function renderCompare(mount, key, rows, msg) {
     if (!editor) return;
     if (rows === null) {
-      mount.innerHTML = `<div class="empty-state"><p>电源方案对照读取失败：${window.ds.esc(msg || '未知原因')}</p></div>`;
+      mount.innerHTML = `<div class="empty-state"><p>读取失败，点此重试</p><button type="button" class="btn btn-secondary btn-small" data-role="pwrCompareRetry">重试</button></div>`;
+      mount.querySelector('[data-role="pwrCompareRetry"]')?.addEventListener('click', () => {
+        mount.innerHTML = '';
+        editor.compareCache.delete(key);
+        const setting = editor.settings?.get(key);
+        if (setting) ensureCompare(key, setting);
+      });
       return;
     }
     if (!rows.length) { mount.innerHTML = ''; return; }
@@ -2055,7 +2069,7 @@
       if (resp && resp.success) {
         exitEditor();
         await loadPower();
-        pwrToast('info', n > 0 ? '已放弃修改，设置恢复到进入编辑前的状态' : '已退出编辑');
+        pwrToast('info', n > 0 ? '关闭编辑；已写入的值不会自动回滚' : '已退出编辑');
       } else {
         const d = (resp && resp.data) || {};
         const items = (d.failed || []).map((f) => f.message).filter(Boolean).join('；');
@@ -2094,6 +2108,17 @@
           ? `已保存 ${written} 条修改，并切换为当前方案`
           : `已保存 ${written} 条修改`);
       } else {
+        // 部分写入失败：保留当前 dirty 会话，用户可修正失败项后重试；
+        // 已写入值以后端快照为准，不做前端伪回滚。
+        if (editor) {
+          editor.partial = true;
+          setEditorBusy(false);
+          const failedKeys = new Set((resp?.data?.failed || [])
+            .map((f) => pwrKey(f.subgroupGuid, f.settingGuid))
+            .filter(Boolean));
+          for (const key of failedKeys) editor.failedKeys.add(key);
+          renderEditor();
+        }
         // stopped 语义：已写入的不回滚，停在哪一条就报哪一条（不假装整体成功）
         const d = (resp && resp.data) || {};
         const written = (d.written || []).length;
@@ -2198,8 +2223,19 @@
     const rerenderRows = (list) => { if (tbody) tbody.innerHTML = renderRows(list); };
     document.getElementById('btnSyspanelPfAdd')?.addEventListener('click', () => {
       const list = collectPfForm();
-      list.push({ drive: 'D:', initialMb: 0, maxMb: 4096 });
-      rerenderRows(list);
+      window.api?.system?.diskList?.().then((resp) => {
+        const drives = (resp && resp.success && Array.isArray(resp.data) ? resp.data : [])
+          .map((d) => String(d).trim().toUpperCase())
+          .filter((d) => /^[A-Z]:$/.test(d));
+        const used = new Set(list.map((e) => String(e.drive || '').trim().toUpperCase()));
+        const next = drives.find((d) => !used.has(d)) || drives[0];
+        if (next) list.push({ drive: next, initialMb: 0, maxMb: 4096 });
+        else window.app?.toast?.('warning', '没有可用的本地卷，请手动填写盘符');
+        rerenderRows(list);
+      }).catch((e) => {
+        window.app?.toast?.('error', '读取卷列表失败：' + ((e && e.message) || e));
+        rerenderRows(list);
+      });
     });
     tbody?.addEventListener('click', (e) => {
       const b = e.target.closest('[data-pf-remove]');
@@ -2229,14 +2265,25 @@
       if (!driveEl || !initEl || !maxEl) return;
       list.push({
         drive: driveEl.value.trim(),
-        initialMb: Number(initEl.value) || 0,
-        maxMb: Number(maxEl.value) || 0,
+        initialMb: initEl.value.trim() === '' ? NaN : Number(initEl.value),
+        maxMb: maxEl.value.trim() === '' ? NaN : Number(maxEl.value),
       });
     });
     return list;
   }
 
   async function applyPagefile(managed, entries) {
+    if (!managed) {
+      const driveRe = /^[A-Z]:$/;
+      const invalid = entries.some((e) => !driveRe.test(String(e.drive || '').trim().toUpperCase())
+        || !Number.isInteger(Number(e.initialMb)) || Number(e.initialMb) < 0
+        || !Number.isInteger(Number(e.maxMb)) || Number(e.maxMb) < 0
+        || Number(e.maxMb) < Number(e.initialMb));
+      if (invalid) {
+        window.app?.toast?.('error', '虚拟内存配置无效：盘符须为 A-Z:，MB 值须为非负整数且最大值不小于初始值');
+        return;
+      }
+    }
     if (!window.api?.syspanel?.pagefileApply) {
       window.app?.toast?.('warning', '当前环境不支持写虚拟内存');
       return;
@@ -2251,7 +2298,7 @@
         + '· 需要重启才生效；\n'
         + '· 全部关完会让物理内存耗尽时直接蓝屏，Trim 参数校验层会拒这种配置；\n'
         + '· 改前当前配置已备份，可通过导入备份 JSON 手动回退。',
-      '我已了解，应用',
+      '仍然执行',
       '取消',
       '此操作会修改 HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management。'
     );

@@ -286,29 +286,8 @@ fn panic_payload(p: &(dyn std::any::Any + Send)) -> String {
 #[tauri::command]
 pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options: Option<Value>) -> Result<Value, String> {
     // 审查 v2-L17：测速要独占读盘、属"会动系统资源"的写侧通道，且唯一调用方是主窗的
-    // `diskbench.js`（`app.js` 页面表）⇒ 收 MAIN，不用放行五窗的 readonly 档。
+    // `diskbench.js`（`app.js` 页面表）⇒ 收 MAIN，不用放行全部四个窗口 label 的 readonly 档。
     guard::guard(&window, guard::MAIN)?;
-    // v7.2 `R1d-M09`：单飞闸**在入口就占位**。
-    // 原生测速是独占读盘的长任务，旧写法没有互斥：连点两次（或两条命令并发）会同时压在
-    // 同一块盘上，两份结果都「成功」却都不可信，进度事件还互相插。
-    // 占位放在所有校验之前是刻意的：本命令的早退出口有五条（路径不存在/非普通目录/
-    // 不在白名单/剩余空间不足/超时），放后面就等于「早退路径根本不占位」⇒ 既守不住
-    // 「一场测速正在进行时新请求立刻被拒」，也让释放责任无法用 RAII 统一承担。
-    if DISKBENCH_RUNNING
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        log::write_log("warn", "磁盘测速已有一场在跑，本次请求已拒绝（单飞）");
-        return Ok(json!({
-            "success": false,
-            "busy": true,
-            "message": "已有一次磁盘测速在进行，请等待其结束后再试",
-        }));
-    }
-    // Drop 里放位：五条早退出口与 panic 路径都不用各写一遍 store(false)。
-    // R1d-M10：guard 所有权要交给工作线程——超时出口不能放位，否则野线程还在独占读盘，
-    // 第二场立刻被放行。早退路径仍由本作用域的 guard 负责释放。
-    let run_guard = RunGuard;
     let opts = options.unwrap_or_else(|| json!({}));
 
     let requested = opts
@@ -325,7 +304,8 @@ pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options:
     // 云占位符那类 is_symlink 判 false 的目标，一旦当成普通目录去测速会把负载压到别的存储上。
     let resolved = match std::fs::symlink_metadata(&requested) {
         Ok(meta) if meta.is_dir() && !crate::engine::protect::is_reparse(&meta) => {
-            canonical(Path::new(&requested)).unwrap_or_else(|| PathBuf::from(&requested))
+            canonical(Path::new(&requested))
+                .ok_or_else(|| "测速路径无法规范化，已拒绝".to_string())?
         }
         Ok(_) => return Ok(json!({ "success": false, "message": "测速路径必须是普通目录" })),
         Err(_) => return Ok(json!({ "success": false, "message": "测速路径不可访问" })),
@@ -342,6 +322,23 @@ pub async fn diskbench_run<R: tauri::Runtime>(window: WebviewWindow<R>, options:
             "message": "测速路径受限，请选择用户目录（如下载、文档、桌面）或临时目录下的路径",
         }));
     }
+
+    // R1d-L01：路径存在、普通目录、白名单与空间预检都定住以后才占单飞位；
+    // 失败路径不得留下「测速进行中」。真实测速仍是独占读盘长任务，必须互斥。
+    if DISKBENCH_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        log::write_log("warn", "磁盘测速已有一场在跑，本次请求已拒绝（单飞）");
+        return Ok(json!({
+            "success": false,
+            "busy": true,
+            "message": "已有一次磁盘测速在进行，请等待其结束后再试",
+        }));
+    }
+    // Drop 里放位：panic 路径不用各写一遍 store(false)。R1d-M10：guard 所有权要交给
+    // 工作线程——超时出口不能放位，否则野线程还在独占读盘，第二场立刻被放行。
+    let run_guard = RunGuard;
 
     // SP-1：剩余空间预检（实测不可用则跳过）
     if let Some(free) = free_bytes(&resolved) {
@@ -578,6 +575,53 @@ mod p1_6e_diskbench_param_tests {
         assert!(!d_msg.contains("超时"), "线程结束不是超时: {d_msg}");
         assert!(t_msg.contains("超时"), "超时那条要说得出来是超时: {t_msg}");
         assert_eq!((t_level, d_level), ("warn", "error"), "线程异常要按 error 记账");
+    }
+
+    /// R1d-L01：路径校验失败必须发生在单飞占位之前；无效路径连调两次也不能
+    /// 表现成「上一场还在进行」。
+    /// 判红自证：把 CAS 块移回入口，源序断言立即红。
+    #[test]
+    fn r1d_diskbench_singleflight_after_validation() {
+        let src = include_str!("diskbench.rs");
+        let cas = src.find("compare_exchange(false, true").expect("单飞 CAS 必须仍在源里");
+        let probe = |needle: &str, label: &str| -> usize {
+            let mut pos = 0usize;
+            while let Some(idx) = src[pos..].find(needle) {
+                let absolute = pos + idx;
+                if absolute < src.find("#[cfg(test)]").unwrap_or(src.len()) {
+                    return absolute;
+                }
+                pos = absolute + 1;
+            }
+            panic!("{label}必须仍在源里");
+        };
+        let requested = probe("if requested.is_empty()", "路径存在校验");
+        let resolved = probe("symlink_metadata(&requested)", "普通目录校验");
+        let whitelist = probe("if !is_diskbench_allowed_path(&resolved)", "白名单校验");
+        assert!(requested < cas, "路径存在校验必须先于单飞 CAS");
+        assert!(resolved < cas, "普通目录校验必须先于单飞 CAS");
+        assert!(whitelist < cas, "白名单校验必须先于单飞 CAS");
+    }
+
+    /// R1d-L02：canonicalize 失败只能拒，不能把带 `..` 的原串交给白名单判定。
+    /// 判红自证：恢复 canonical 失败回落，第一条断言红。
+    #[test]
+    fn r1d_diskbench_rejects_uncanonical_path() {
+        let src = include_str!("diskbench.rs");
+        let implementation_end = src.find("#[cfg(test)]").unwrap_or(src.len());
+        let implementation = &src[..implementation_end];
+        assert!(
+            implementation.contains(r#".ok_or_else(|| "测速路径无法规范化，已拒绝".to_string())?"#),
+            "canonicalize 失败必须直接拒"
+        );
+        assert!(
+            !implementation.contains("canonical(Path::new(&requested)).unwrap_or_else"),
+            "不得回落未归一串"
+        );
+
+        let user = std::env::var("USERNAME").unwrap_or_default();
+        let probe = format!(r"C:\Users\{user}\..\..\Windows");
+        assert!(probe.contains(r"\..\..\"), "验收探针必须保留未折叠形态: {probe}");
     }
 
     /// R1d-L05：清理只许删「本场 `create_dir` 占位成功」的那个目录，

@@ -148,6 +148,7 @@ if (r.error) {
 // helper 定义（is_reparse_target）、条件过滤全部算进去 —— 判据必须能区分「哪一处被改」。
 const scanRs = readFileSync(join(SRC, 'scan.rs'), 'utf8');
 const cleanRs = readFileSync(join(SRC, 'cleanup_scan.rs'), 'utf8');
+const cleanCode = blankNonCode(cleanRs, 'rs', { keepStrings: true });
 
 /** 逐行判定：这一行是不是「命中即丢弃」的 reparse 跳过分支 */
 function isSkipBranch(line) {
@@ -264,26 +265,27 @@ check(
 // 与执行侧行为（engine/native/cleanup.rs），这里钉**双侧接线 + 旧形态绝迹**：
 // 行为用例碰不到「有人把调用换回扩展名推断但没删测试」的组合，静态面补上。
 const execCleanupRs = readFileSync(join(REPO_ROOT, 'src-tauri/src/engine/native/cleanup.rs'), 'utf8');
+const execCleanupCode = blankNonCode(execCleanupRs, 'rs', { keepStrings: true });
 check(
   /pub fn classify_exclude_entry\(/.test(cleanRs) &&
     /fn classify_exclude_entry[\s\S]{0,700}?symlink_metadata/.test(cleanRs),
   'E9a. excludePaths 分类器存在且按磁盘实况（symlink_metadata）判',
 );
-const e9b = (cleanRs.match(/classify_exclude_entry\(&ep/g) || []).length;
+const e9b = (cleanCode.match(/classify_exclude_entry\(&ep/g) || []).length;
 check(
   e9b === 1,
   'E9b. 扫描侧 excludePaths 循环走分类器（恰好 1 处接线）',
   `实际 ${e9b} 处`,
 );
-const e9c = (execCleanupRs.match(/classify_exclude_entry\(&ep/g) || []).length;
+const e9c = (execCleanupCode.match(/classify_exclude_entry\(&ep/g) || []).length;
 check(
   e9c === 1,
   'E9c. 执行侧 excludePaths 循环走分类器（恰好 1 处接线）',
   `实际 ${e9c} 处`,
 );
 check(
-  !cleanRs.includes('if Path::new(&ep).extension().is_some()') &&
-    !execCleanupRs.includes('if std::path::Path::new(&ep).extension().is_some()'),
+  !cleanCode.includes('if Path::new(&ep).extension().is_some()') &&
+    !execCleanupCode.includes('if std::path::Path::new(&ep).extension().is_some()'),
   'E9d. 「按扩展名分类 excludePaths」的旧形态在两侧均已绝迹',
 );
 
@@ -294,9 +296,9 @@ check(
 // ② 7 处字段接线一个不少（少一处 = 那个字段的 0 命中重新失明）。
 // v7.2-C03（N1a-L02）：excludeKeys[].path 接线随读取点整组摘除（字段已进
 // itemBannedKeys 单一真源、门禁 A2 禁回潮），接线数 8 → 7。
-const e10calls = (cleanRs.match(/report_unexpanded_token\(/g) || []).length;
+const e10calls = (cleanCode.match(/report_unexpanded_token\(/g) || []).length;
 check(
-  /fn report_unexpanded_token\(/.test(cleanRs) && e10calls === 8,
+  /fn report_unexpanded_token\(/.test(cleanCode) && e10calls === 8,
   'E10a. 未解析 token 统一留痕出口存在，7 处字段接线全部在位（含定义共 8 处）',
   `实际 ${e10calls} 处`,
 );
@@ -310,7 +312,7 @@ for (const field of [
   'configured',
 ]) {
   check(
-    cleanRs.includes(`"${field}"`),
+    cleanCode.includes(`"${field}"`),
     `E10b. 字段「${field}」的留痕接线在位`,
   );
 }
@@ -320,13 +322,13 @@ for (const field of [
 // 保护侧 is_path_protected 按 CWD 折叠它 ⇒ 保护闸门比对的对象 ≠ 实际删除的对象。
 // 修复 = 判据单点化（trim_finder::is_drive_relative）+ 两侧在枚举前统一拒绝。
 // 这里钉判据定义与两侧接线数；行为面由 tests/ 的「盘符相对」用例与执行侧端到端用例承担。
-const e11scan = (cleanRs.match(/is_drive_relative\(/g) || []).length;
+const e11scan = (cleanCode.match(/is_drive_relative\(/g) || []).length;
 check(
-  /pub fn is_drive_relative\(/.test(cleanRs) && e11scan === 8,
+  /pub fn is_drive_relative\(/.test(cleanCode) && e11scan === 8,
   'E11a. 判据单点定义 + 扫描侧 7 处接线（expand_glob_dirs 咽喉 / detect 三处 / detect 候选档 / candidatesPs / pathPs 主路径）',
   `实际 ${e11scan} 处`,
 );
-const e11exec = (execCleanupRs.match(/is_drive_relative\(/g) || []).length;
+const e11exec = (execCleanupCode.match(/is_drive_relative\(/g) || []).length;
 check(
   e11exec === 2,
   'E11b. 执行侧 2 处接线（fileKey 分支 / 目录型分支，均在 cleanup_root_ok 之前）',

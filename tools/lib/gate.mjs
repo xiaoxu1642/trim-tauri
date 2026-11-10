@@ -51,6 +51,7 @@ export function gate(self) {
       process.exit(1);
     }
     if (successMsg) console.log(successMsg);
+    process.exit(0);
   };
 
   /**

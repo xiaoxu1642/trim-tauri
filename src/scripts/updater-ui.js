@@ -29,6 +29,10 @@
     via: '',
     sha256: '',
     savedTo: '',
+    // A1-L01：安装包保存回执与成功路径分开，null 不能沿用上一轮路径
+    saveError: '',
+    // A1-L01：安装包保存回执与成功路径分开，null 不能沿用上一轮路径
+    saveError: '',
     // F4c-L05：签名被拒标记必须进状态表。回流载荷不带该键时 Object.assign 不会清它，
     // 上一次的拒绝就会冒充这一次的失败原因（把网络错误渲染成「已阻止」）
     sigFailed: false
@@ -450,6 +454,7 @@
         + (state.via ? '（经 ' + viaLabel(state.via) + '）' : '')
         + (state.sha256 ? '。\n安装包 SHA-256：' + state.sha256 : '')
         + (state.savedTo ? '\n安装包已存到：' + state.savedTo : '')
+        + (state.saveError ? '\n安装包保存失败：' + state.saveError : '')
         + '\n点击「立即重启」将关闭 Trim 并执行文件替换，完成后自动启动新版本。';
     } else if (kind === 'error') {
       $('.upd-error-msg', root).textContent = state.message || '检查更新失败，请稍后重试。';
@@ -579,7 +584,9 @@
     try {
       res = await window.api.updater.check();
     } catch (e) {
-      res = { skipped: false, error: e && e.message };
+      // F4c-L17：回流丢失兜底必须与真实失败同态，不能让下一轮后台检查冒充手动弹窗。
+      res = { ok: false, skipped: false, error: e && e.message };
+      pendingManual = false;
     }
     // 开发环境/重复检查被主进程短路时没有状态回流，直接在此恢复行状态并提示
     if (res && res.skipped) {
@@ -702,6 +709,11 @@
         activeManual = pendingManual;
         // F4c-L05：每轮检查开始先清签名标记，避免上一轮的拒绝污染本轮的错误文案
         state.sigFailed = false;
+      }
+      // A1-L01：`savedTo:null` 显式表示本轮没有可用安装包，不能被 Object.assign 略过。
+      if (s && Object.prototype.hasOwnProperty.call(s, 'savedTo')) {
+        state.savedTo = s.savedTo || '';
+        state.saveError = s.saveError || '';
       }
       Object.assign(state, s);
       render();

@@ -452,6 +452,31 @@ fn error_action_of(cmd: &Cmd) -> Option<ErrorAction> {
     }
 }
 
+/// `$ErrorActionPreference` 的已实现语义。
+///
+/// PowerShell 变量名大小写不敏感；只认字符串字面量。`Continue` 与 `Stop` 都按
+/// 「非静默」处理（原生面无法复刻错误流显示差异，但失败都必须报错）。
+/// 其余取值显式 Err —— 由 `compile` 交回 PsInline 逐字解释，绝不猜相近语义。
+fn error_action_preference(vars: &VarMap) -> Result<Option<ErrorAction>, String> {
+    let Some((_name, expr)) = vars
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("ErrorActionPreference"))
+    else {
+        return Ok(None);
+    };
+    let Expr::Str(v) = expr else {
+        return Err("$ErrorActionPreference 不是字符串字面量，交回 PowerShell 解释".into());
+    };
+    let v = v.trim();
+    if v.eq_ignore_ascii_case("SilentlyContinue") || v.eq_ignore_ascii_case("Ignore") {
+        Ok(Some(ErrorAction::Silent))
+    } else if v.eq_ignore_ascii_case("Stop") || v.eq_ignore_ascii_case("Continue") {
+        Ok(Some(ErrorAction::Loud))
+    } else {
+        Err(format!("$ErrorActionPreference 取值不支持原生接管: {v}"))
+    }
+}
+
 /// 命名参数分支的「位置实参必须为空」闸（R6c-L04）。
 ///
 /// 为什么要有：`param()` 只认 `-Name X` 形态，源语句里多出来的位置 token 会被
@@ -514,9 +539,16 @@ fn validate_branch_params(cmd: &Cmd, allowed: &[&str]) -> Result<ErrorAction, St
 /// 显式的 `-ErrorAction Stop|Continue` 优先于重定向（PS 里 `2>$null` 只丢错误流
 /// 输出，不改变 `-ErrorAction Stop` 的终止语义）。不认识的取值 → Err，
 /// 由 `compile` 交回 PsInline 逐字执行。
-fn task_silent(cmd: &Cmd, redir_silent: bool) -> Result<bool, String> {
+fn task_silent(cmd: &Cmd, redir_silent: bool, vars: &VarMap) -> Result<bool, String> {
     match error_action_of(cmd) {
-        None => Ok(redir_silent),
+        None => match error_action_preference(vars)? {
+            None => Ok(redir_silent),
+            Some(ErrorAction::Silent) => Ok(true),
+            Some(ErrorAction::Loud) => Ok(false),
+            Some(ErrorAction::Unknown) => {
+                Err("$ErrorActionPreference 取值不认识，交回 PowerShell 解释".into())
+            }
+        },
         Some(ErrorAction::Silent) => Ok(true),
         Some(ErrorAction::Loud) => Ok(false),
         Some(ErrorAction::Unknown) => Err(format!(
@@ -540,7 +572,7 @@ fn task_silent(cmd: &Cmd, redir_silent: bool) -> Result<bool, String> {
 /// （→ PsInline 逐字执行）。原因很具体：这里返回 `Err` 会让
 /// `data_layer_coverage_report` 的「编译失败必须为 0」硬断言红掉，而一个
 /// 「我看不懂的形态」不该被报成「数据层坏了」。
-fn parse_task_pipe(raw: &str) -> Option<Result<Vec<PsOp>, String>> {
+fn parse_task_pipe(raw: &str, vars: &VarMap) -> Option<Result<Vec<PsOp>, String>> {
     let parts = split_pipes(raw);
     if parts.len() != 2 {
         return None;
@@ -585,10 +617,27 @@ fn parse_task_pipe(raw: &str) -> Option<Result<Vec<PsOp>, String>> {
         // 不认识的取值 → 不接管，交回 PsInline 逐字执行
         return None;
     }
-    let silent = matches!(getter_ea, Some(ErrorAction::Silent))
-        || matches!(setter_ea, Some(ErrorAction::Silent))
-        || getter_redir
-        || setter_redir;
+    let pref = match error_action_preference(vars) {
+        Ok(p) => p,
+        // 不认识的偏好值不接管，交回 PsInline 逐字执行
+        Err(_) => return None,
+    };
+    let explicit_silent = matches!(getter_ea, Some(ErrorAction::Silent))
+        || matches!(setter_ea, Some(ErrorAction::Silent));
+    let explicit_loud = matches!(getter_ea, Some(ErrorAction::Loud))
+        || matches!(setter_ea, Some(ErrorAction::Loud));
+    let silent = if explicit_silent {
+        true
+    } else if explicit_loud {
+        false
+    } else {
+        match pref {
+            Some(ErrorAction::Silent) => true,
+            Some(ErrorAction::Loud) => false,
+            Some(ErrorAction::Unknown) => return None,
+            None => getter_redir || setter_redir,
+        }
+    };
     Some(Ok(vec![PsOp::TaskChange {
         path: task_path,
         name: task_name,
@@ -1441,7 +1490,7 @@ pub fn compile(body: &str) -> Result<Vec<PsOp>, String> {
 /// 逐条要求见 [`pnp_standard_shape`]。
 fn recognize_pnp(body: &str) -> Option<PsOp> {
     // 标准形态判定（形不对就整条不接管，交回通用解析/PsInline 兜底）
-    let enable = pnp_standard_shape(body)?;
+    let (enable, _list_src, shape_names) = pnp_standard_shape(body)?;
     // K08（v6）：带对账的解析——任何名字被丢弃（截断/展开串/未闭合）即 Err，
     // 交回通用解析/PsInline 兜底（脚本原文照跑，名单不会缺项）；绝不按部分名单执行
     // 还回执「全做了」（旧实现在名字含 `)` 时只解析出前 16/25 个，剩下 9 个静默没做）。
@@ -1449,6 +1498,18 @@ fn recognize_pnp(body: &str) -> Option<PsOp> {
         Ok(n) if !n.is_empty() => n,
         _ => return None,
     };
+    // R6c-L02：`pnp_standard_shape` 已证明脚本里只有一个名单数组，且 foreach
+    // 的列表来源就是它；这里再把两套解析结果对齐，防止「形状解析」与
+    // 「名字数组解析」对同一段脚本给出不同答案。
+    let mut expected: Vec<String> = Vec::new();
+    for n in shape_names {
+        if !expected.contains(&n) {
+            expected.push(n);
+        }
+    }
+    if names != expected {
+        return None;
+    }
     Some(PsOp::PnpSetState { names, enable })
 }
 
@@ -1461,7 +1522,7 @@ fn recognize_pnp(body: &str) -> Option<PsOp> {
 /// ④ 该语句是标准三段管道：`Get-PnpDevice … | Where-Object { … } | Disable|Enable-PnpDevice …`；
 /// ⑤ `Where-Object` 条件 token **精确**等于现行标准形态
 ///    （`$_.FriendlyName -eq $n -and $_.Status -eq "OK"`）——`-ne`、少一个守卫都不许。
-fn pnp_standard_shape(body: &str) -> Option<bool> {
+fn pnp_standard_shape(body: &str) -> Option<(bool, String, Vec<String>)> {
     let stmts: Vec<&str> = split_statements(body)
         .into_iter()
         .map(str::trim)
@@ -1472,6 +1533,7 @@ fn pnp_standard_shape(body: &str) -> Option<bool> {
     // 旧判据是「以 `$` 开头且含 `=`」，于是 `$x = Stop-Service Y` 这种**带副作用的赋值**
     // 会被当成无害赋值 —— 整段体随即被单条 `PnpSetState` 接管，那条命令静默消失。
     let mut shape_vars = VarMap::new();
+    let mut list_assignments: Vec<(String, Vec<String>)> = Vec::new();
     for st in &stmts {
         if st.starts_with("foreach (") {
             if foreach_stmt.is_some() {
@@ -1480,7 +1542,15 @@ fn pnp_standard_shape(body: &str) -> Option<bool> {
             }
             foreach_stmt = Some(st);
         } else if let Some((name, expr)) = parse_assign(st, &shape_vars) {
+            // R6c-L01：带 `$ErrorActionPreference` 的脚本不接管 PnP —— 该算子没有
+            // 静默位，继续接管会让偏好静默消失。交回通用解析/PsInline 逐字执行。
+            if name.eq_ignore_ascii_case("ErrorActionPreference") {
+                return None;
+            }
             // 按语句顺序累积：后面的赋值允许引用前面的变量（与 parse_block 同语义）
+            if let Expr::List(items) = &expr {
+                list_assignments.push((name.clone(), items.clone()));
+            }
             shape_vars.insert(name, expr);
         } else {
             // 其余语句只允许是**可求值的**赋值；夹带别的操作即形态不认识
@@ -1497,11 +1567,36 @@ fn pnp_standard_shape(body: &str) -> Option<bool> {
         return None;
     }
     let head = &head_txt[open_paren + 1..close_paren];
-    let (var, _list_src) = head.split_once(" in ")?;
+    let (var, list_src) = head.split_once(" in ")?;
     let var = var.trim().strip_prefix('$')?.to_string();
     if var.is_empty() || var.contains(char::is_whitespace) {
         return None;
     }
+    let list_src = list_src.trim().to_string();
+    // R6c-L02：列表来源必须与名字数组同源。`@(...)` 内联数组允许，但脚本里
+    // 不能再有第二个数组；变量来源则必须恰好是这个变量，且它是唯一一个
+    // 名单数组。任何不确定形态都拒绝接管。
+    let list = if let Some(src_var) = list_src.strip_prefix('$') {
+        if list_assignments.len() != 1 {
+            return None;
+        }
+        let (name, items) = &list_assignments[0];
+        if !name.eq_ignore_ascii_case(src_var) {
+            return None;
+        }
+        items.clone()
+    } else if list_src.starts_with("@(") {
+        if !list_assignments.is_empty() {
+            return None;
+        }
+        let (_, expr) = parse_assign(&format!("$__pnp_inline = {list_src}"), &shape_vars)?;
+        match expr {
+            Expr::List(items) => items,
+            _ => return None,
+        }
+    } else {
+        return None;
+    };
     // foreach 体：恰好一条语句
     let body_part = &fe[head_end..];
     let open = body_part.find('{')?;
@@ -1565,7 +1660,7 @@ fn pnp_standard_shape(body: &str) -> Option<bool> {
         return None;
     }
     validate_branch_params(&setter, &[]).ok()?;
-    Some(enable)
+    Some((enable, list_src, list))
 }
 
 /// token 比较：引号写法等价（`"OK"` 与 `'OK'` 同义），其余逐字（大小写不敏感）。
@@ -1837,8 +1932,37 @@ fn render_var(rest: &str, vars: &VarMap) -> Result<String, String> {
     }
 }
 
+/// R6c-L01：单条语句的入口包装。
+///
+/// 先读当前 `$ErrorActionPreference`，再解析语句。偏好为静默时，只有本身支持
+/// 静默语义的原生算子才允许接管；其余显式 Err，交回 PsInline 逐字执行 ——
+/// 原生臂与 PowerShell 臂的语义不能分叉。
+fn parse_statement(stmt: &str, vars: &mut VarMap) -> Result<Vec<PsOp>, String> {
+    let pref = error_action_preference(vars)?;
+    let ops = parse_statement_inner(stmt, vars)?;
+    if matches!(pref, Some(ErrorAction::Silent)) {
+        for op in &ops {
+            if !op_supports_silent_preference(op) {
+                return Err(
+                    "该原生算子不支持 $ErrorActionPreference=SilentlyContinue，交回 PowerShell 解释"
+                        .into(),
+                );
+            }
+        }
+    }
+    Ok(ops)
+}
+
+fn op_supports_silent_preference(op: &PsOp) -> bool {
+    match op {
+        PsOp::TaskChange { .. } | PsOp::PsInline { .. } => true,
+        PsOp::GuardedKeyExists { ops, .. } => ops.iter().all(op_supports_silent_preference),
+        _ => false,
+    }
+}
+
 /// 单条语句 → 0..n 个操作；赋值语句会**就地更新** vars（后续语句要用）
-fn parse_statement(
+fn parse_statement_inner(
     stmt: &str,
     vars: &mut VarMap,
 ) -> Result<Vec<PsOp>, String> {
@@ -1862,7 +1986,7 @@ fn parse_statement(
     // A5（v2-R4）：`Get-ScheduledTask … | Disable/Enable-ScheduledTask` → 原生 TaskChange。
     // 不匹配时返回 None，继续走下面既有的管道/语句路径（不改变任何既有行为）。
     if raw.trim_start().starts_with("Get-ScheduledTask") && raw.contains('|') {
-        if let Some(r) = parse_task_pipe(raw) {
+        if let Some(r) = parse_task_pipe(raw, vars) {
             return r;
         }
     }
@@ -1986,7 +2110,7 @@ fn parse_statement(
                 Some(p) => Some(lit(p, "-TaskPath")?),
                 None => None,
             };
-            let silent = task_silent(&cmd, redir_silent)?;
+            let silent = task_silent(&cmd, redir_silent, vars)?;
             Ok(vec![PsOp::TaskChange {
                 path,
                 name,
@@ -2032,7 +2156,8 @@ fn parse_statement(
                 "/enable" | "/ENABLE" => false,
                 other => return Err(format!("schtasks 未知动作: {other}")),
             };
-            Ok(vec![PsOp::TaskChange { path: None, name, disable, silent: redir_silent }])
+            let silent = task_silent(&cmd, redir_silent, vars)?;
+            Ok(vec![PsOp::TaskChange { path: None, name, disable, silent }])
         }
         other => Err(format!("不支持的 cmdlet: {other}")),
     }
@@ -3437,5 +3562,116 @@ mod tests {
             "删值失败要说清是权限问题并点名路径: {denied}"
         );
         assert!(value_remove_err("S", "V", 13).contains("长度"), "13 = 长度不符");
+    }
+
+    /// R6c-L01：`$ErrorActionPreference` 必须进入解释器的原生语义。
+    ///
+    /// 修前红：该赋值被当普通变量吞掉 ⇒ 下面 `silent: true` 的断言红，
+    /// 且 `SvcStop`/`TaskChange` 会照常产出（偏好被静默忽略）。
+    #[test]
+    fn r6c_error_action_preference_is_honored() {
+        let silent = "$ErrorActionPreference = 'SilentlyContinue'\n\
+                      Disable-ScheduledTask -TaskPath '\\TrimR6c' -TaskName 'Probe'";
+        let ops = compile(silent).expect("SilentlyContinue 样本必须能编译");
+        assert_eq!(
+            ops,
+            vec![PsOp::TaskChange {
+                path: Some("\\TrimR6c".into()),
+                name: "Probe".into(),
+                disable: true,
+                silent: true,
+            }],
+            "$ErrorActionPreference=SilentlyContinue 必须让任务算子静默"
+        );
+
+        let stop = "$ErrorActionPreference = 'Stop'\n\
+                    Disable-ScheduledTask -TaskPath '\\TrimR6c' -TaskName 'Probe'";
+        let ops = compile(stop).expect("Stop 样本必须能编译");
+        assert_eq!(
+            ops,
+            vec![PsOp::TaskChange {
+                path: Some("\\TrimR6c".into()),
+                name: "Probe".into(),
+                disable: true,
+                silent: false,
+            }],
+            "$ErrorActionPreference=Stop 必须保持非静默"
+        );
+
+        // 失败原生算子的终态：SilentlyContinue 吞掉「跑起来但失败」，
+        // Stop 保持 Err。用纯判定函数验证，不真的改本机任务。
+        let failed = native::TaskRun::RanFailed {
+            exit_code: Some(1),
+            message: "任务改不动".into(),
+        };
+        assert!(
+            task_op_result(true, &failed).is_ok(),
+            "SilentlyContinue 下失败原生算子不得报错"
+        );
+        assert!(
+            task_op_result(false, &failed).is_err(),
+            "Stop 下失败原生算子必须报错"
+        );
+
+        // 不支持静默语义的原生算子不得照常产出：显式 Err 或交回 PsInline。
+        let unsupported = "$ErrorActionPreference = 'SilentlyContinue'\nStop-Service -Name Fax -Force";
+        match compile(unsupported) {
+            Ok(ops) => assert!(
+                ops.iter().all(|o| !matches!(o, PsOp::SvcStop { .. })),
+                "不支持静默语义的原生算子不得产出 SvcStop: {ops:?}"
+            ),
+            Err(_) => {}
+        }
+
+        // 未实现的偏好值不得被当默认语义接管。
+        let inquire = "$ErrorActionPreference = 'Inquire'\nDisable-ScheduledTask -TaskName 'Probe'";
+        match compile(inquire) {
+            Ok(ops) => assert!(
+                ops.iter().all(|o| !matches!(o, PsOp::TaskChange { .. })),
+                "不认识的偏好值不得按默认语义接管: {ops:?}"
+            ),
+            Err(_) => {}
+        }
+    }
+
+    /// R6c-L02：PnP 接管必须保证 `foreach` 的列表来源就是名单数组本身。
+    ///
+    /// 修前红：`pnp_standard_shape` 丢弃 `_list_src`，`parse_name_array_checked`
+    /// 会把脚本里**所有** `@(...)` 的名字拼在一起 ⇒ 两个数组的样本仍被接管。
+    #[test]
+    fn r6c_foreach_requires_same_name_array() {
+        fn produces_pnp(src: &str) -> bool {
+            match compile(src) {
+                Ok(ops) => ops.iter().any(|o| matches!(o, PsOp::PnpSetState { .. })),
+                Err(_) => false,
+            }
+        }
+
+        let body = r#"Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -eq $n -and $_.Status -eq "OK" } | Disable-PnpDevice -Confirm:$false -ErrorAction SilentlyContinue"#;
+        let same = format!("$names = @(\"Dev A\")\nforeach ($n in $names) {{ {body} }}");
+        assert!(produces_pnp(&same), "同源名单必须仍被接管: {same}");
+
+        let two_other = format!(
+            "$names = @(\"Dev A\")\n$other = @(\"Dev B\")\nforeach ($n in $other) {{ {body} }}"
+        );
+        assert!(
+            !produces_pnp(&two_other),
+            "foreach 列表来源与名单数组不一致时必须拒绝: {two_other}"
+        );
+
+        let two_first = format!(
+            "$names = @(\"Dev A\")\n$other = @(\"Dev B\")\nforeach ($n in $names) {{ {body} }}"
+        );
+        assert!(
+            !produces_pnp(&two_first),
+            "脚本含两个 @(...) 时不得猜用哪个数组: {two_first}"
+        );
+
+        if let Ok(ops) = compile(&two_other) {
+            assert!(
+                ops.iter().all(|o| !matches!(o, PsOp::PnpSetState { .. })),
+                "来源不一致的脚本不得产出 PnpSetState: {ops:?}"
+            );
+        }
     }
 }

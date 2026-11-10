@@ -14,11 +14,22 @@ use std::sync::OnceLock;
 // P0-2A/B：根级 reparse 判据的唯一真源在 protect，本文件只负责把「根 ⇄ 可信基」
 // 这一层关系算出来（data_root_base），不复制判据。
 use super::protect;
+use super::log;
 
 const APP_NAME: &str = "Trim";
 /// 与 tauri.conf.json identifier 一致（升级链不断，D5）
 pub const IDENTIFIER: &str = "com.xiaoxu.trim";
 const PORTABLE_MARKER: &str = "Trim.portable";
+
+/// 保留期裁剪的执行结果（A-03）：`removed` 是真正送进回收站的份数，
+/// `failed` 是读目录失败这类「裁剪没做成」的条数，`reason` 带失败坐标
+/// （目录 + 原因），供调用方写日志时不必自己再拼一遍。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PruneOutcome {
+    pub removed: usize,
+    pub failed: usize,
+    pub reason: Option<String>,
+}
 
 /// 从旧数据目录一次性搬迁的文件清单。
 /// 判据只有一条：**丢了用户就恢复不了 / 要重做** 的才进这里。
@@ -367,23 +378,65 @@ pub fn resolve_backup_file(sub: &str, name: &str) -> Option<PathBuf> {
 /// 两者必须同生同死：只删主文件会留下孤儿封条，而封条本身也以 `.reg` 结尾……不，封条名是
 /// `x.reg.meta.json`，不以 `.reg` 结尾，所以不会被当主文件计数；反过来若只删封条，主文件
 /// 就变成"无据可查"，还原侧会按 `missing` 拒 —— 那比留下孤儿更糟。
-pub fn prune_backups(dir: &Path, keep: usize) {
+pub fn prune_backups(dir: &Path, keep: usize) -> PruneOutcome {
     prune_backups_ext(dir, keep, &["reg"])
+}
+
+/// 回收站投递的留痕闸（B-01 ③）。
+///
+/// 三个裁剪出口原来都是 `let _ = send_to_trash_os(...)`：投递失败（回收站不可用、
+/// 目标被占用、用户取消）被静默吞掉，而「已裁份数」照加 ⇒ 上报裁掉了其实没裁。
+/// 这里改成失败必留 warn（带路径与原因），投递成功才计入已裁份数。
+///
+/// 投递动作走闭包入参：真机回收站在测试里几乎不会失败，闭包注入是唯一能证明
+/// 「失败必留痕」而不是「静默 `let _ =`」的手段。
+///
+/// 返回值：`Ok(())` = 已投递；`Err(warn 行)` = 投递失败，那一行**已经由
+/// [`log::write_log`] 写出**（测试进程只返回不落盘），调用方拿它当失败原因。
+fn trash_or_warn<F>(path: &Path, label: &str, send: F) -> Result<(), String>
+where
+    F: FnOnce(&std::ffi::OsStr) -> Result<(), String>,
+{
+    match send(path.as_os_str()) {
+        Ok(()) => Ok(()),
+        Err(reason) => Err(log::write_log(
+            "warn",
+            &format!("{label} {} 投递回收站失败: {reason}", path.display()),
+        )),
+    }
 }
 
 /// [`prune_backups`] 的形状泛化版（v5 批次 9，D1-M04）：按扩展名清单计数。
 /// 原 `prune_backups` 只数 `.reg`——pagefile-backups 全是 `.json`，`prune_backups(50)`
 /// 对它恒空转（上限从未生效，盘上 9 个 .json 无界涨）。封条名 `x.reg.meta.json`
 /// 以 .reg 开头**不以 .reg 结尾** ⇒ 泛化后同样不参与计数，孤儿封条语义不变。
-pub fn prune_backups_ext(dir: &Path, keep: usize, extensions: &[&str]) {
+pub fn prune_backups_ext(dir: &Path, keep: usize, extensions: &[&str]) -> PruneOutcome {
     // P0-2A：先判根再 read_dir。子项各自的 reparse 判定（下方 `reparse` 闭包）挡不住
     // 「根被换成 junction」——那时 read_dir 已经在链接另一头，子项全是别人的文件。
     let verdict = protect::inspect_root(dir, data_root_base(dir).as_deref());
     if !verdict.is_trusted() {
         protect::note_root_skipped("按扩展名计数裁剪", dir, &verdict);
-        return;
+        // A-03：根闸拒绝也是「裁剪没做成」，必须计入失败并带原因，
+        // 否则调用方看不到「这批备份没裁」，静默 return 就是原缺陷本身。
+        let reason = format!("{}: 根判定未通过（{}）", dir.display(), verdict.reason());
+        log::write_log("warn", &format!("保留期裁剪失败 {reason}"));
+        return PruneOutcome {
+            removed: 0,
+            failed: 1,
+            reason: Some(reason),
+        };
     }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        log::write_log(
+            "warn",
+            &format!("保留期裁剪失败 {}: {}", dir.display(), "读取失败"),
+        );
+        return PruneOutcome {
+            removed: 0,
+            failed: 1,
+            reason: Some(format!("{}: 读取失败", dir.display())),
+        };
+    };
     let mut names: Vec<String> = rd
         .flatten()
         .filter_map(|e| e.file_name().to_str().map(String::from))
@@ -396,6 +449,9 @@ pub fn prune_backups_ext(dir: &Path, keep: usize, extensions: &[&str]) {
         })
         .collect();
     names.sort();
+    let mut removed = 0usize;
+    let mut failed = 0usize;
+    let mut reason: Option<String> = None;
     while names.len() > keep {
         let oldest = names.remove(0);
         // v2-L4P-33（C-5）：引擎级裁剪出口一律回收站优先（AGENTS §3）。目录受 v2-M19
@@ -411,11 +467,29 @@ pub fn prune_backups_ext(dir: &Path, keep: usize, extensions: &[&str]) {
                 .unwrap_or(true) // 读不到元数据按 reparse 处理（宁可不清，不误投）
         };
         if !reparse(&main) {
-            let _ = trim_finder::scan::recycle::send_to_trash_os(main.as_os_str());
+            match trash_or_warn(&main, "保留期裁剪", |p| {
+                trim_finder::scan::recycle::send_to_trash_os(p)
+            }) {
+                Ok(()) => removed += 1,
+                Err(line) => {
+                    failed += 1;
+                    reason.get_or_insert(line);
+                }
+            }
         }
         if !reparse(&seal_path) {
-            let _ = trim_finder::scan::recycle::send_to_trash_os(seal_path.as_os_str());
+            if let Err(line) = trash_or_warn(&seal_path, "保留期裁剪封条", |p| {
+                trim_finder::scan::recycle::send_to_trash_os(p)
+            }) {
+                failed += 1;
+                reason.get_or_insert(line);
+            }
         }
+    }
+    PruneOutcome {
+        removed,
+        failed,
+        reason,
     }
 }
 
@@ -425,14 +499,24 @@ pub fn prune_backups_ext(dir: &Path, keep: usize, extensions: &[&str]) {
 /// 的写入形状都是 `{13位ms}[_]…`，扩展名开放 ⇒ 按 stamp 前缀过滤，只裁自己写的文件；
 /// `disabled.json` 这类不带 stamp 的文件永不参与计数。回收站优先与 reparse 拒同
 /// [`prune_backups`]。
-pub fn prune_stamped_files(dir: &Path, keep: usize) {
+pub fn prune_stamped_files(dir: &Path, keep: usize) -> PruneOutcome {
     // P0-2A：与 prune_backups_ext 同一道根判定（判据同源，见 protect::inspect_root）。
     let verdict = protect::inspect_root(dir, data_root_base(dir).as_deref());
     if !verdict.is_trusted() {
         protect::note_root_skipped("按时间戳计数裁剪", dir, &verdict);
-        return;
+        return PruneOutcome::default();
     }
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        log::write_log(
+            "warn",
+            &format!("保留期裁剪失败 {}: {}", dir.display(), "读取失败"),
+        );
+        return PruneOutcome {
+            removed: 0,
+            failed: 1,
+            reason: Some(format!("{}: 读取失败", dir.display())),
+        };
+    };
     let stamp_re = |n: &str| {
         n.len() >= 13
             && n.as_bytes()[..13].iter().all(|b| b.is_ascii_digit())
@@ -444,6 +528,9 @@ pub fn prune_stamped_files(dir: &Path, keep: usize) {
         .filter(|n| !n.starts_with('.') && stamp_re(n))
         .collect();
     names.sort();
+    let mut removed = 0usize;
+    let mut failed = 0usize;
+    let mut reason: Option<String> = None;
     while names.len() > keep {
         let oldest = names.remove(0);
         let p = dir.join(&oldest);
@@ -451,8 +538,21 @@ pub fn prune_stamped_files(dir: &Path, keep: usize) {
             .map(|m| crate::engine::protect::is_reparse(&m))
             .unwrap_or(true);
         if !reparse {
-            let _ = trim_finder::scan::recycle::send_to_trash_os(p.as_os_str());
+            match trash_or_warn(&p, "按时间戳计数裁剪", |p| {
+                trim_finder::scan::recycle::send_to_trash_os(p)
+            }) {
+                Ok(()) => removed += 1,
+                Err(line) => {
+                    failed += 1;
+                    reason.get_or_insert(line);
+                }
+            }
         }
+    }
+    PruneOutcome {
+        removed,
+        failed,
+        reason,
     }
 }
 
@@ -529,25 +629,105 @@ pub fn local_state_candidates() -> Vec<PathBuf> {
 /// 审查 v2-L2 订正措辞：隔离度**不是本函数施加的** —— 全仓没有任何 ACL API 调用
 /// （`SetNamedSecurityInfo`/`CreateSecurityDescriptor` 实测 0 命中，`set_permissions`
 /// 在 Windows 上只能改只读位），实际保护来自 `%APPDATA%` 的**每用户默认 DACL**
-/// （只有当前用户与 SYSTEM 可写）。本函数只做两件事：建目录、拒把脚本写进被
-/// reparse（符号链接/联接点）替换过的目录。
+/// （只有当前用户与 SYSTEM 可写）。本函数只做三件事：建目录、拒把脚本写进被
+/// reparse（符号链接/联接点）替换过的目录、目录元数据读不到时具名拒（B-01 ②）。
 /// 不用 %TEMP%：那是全局可写目录，提权后执行脚本存在 TOCTOU 本地提权窗口（审查 A1）。
 pub fn temp_script_dir() -> Result<PathBuf, String> {
     let dir = app_data_dir().join("tmp");
     if !dir.exists() {
         std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时脚本目录失败: {e}"))?;
     }
-    // 目录若被替换为符号链接/联接点，脚本内容可能被导向任意位置。
-    // 审查 L12：判 reparse 属性位而不是 is_symlink —— 后者漏掉非 mount-point 类 tag
-    // （云占位符/其它 reparse），而这里被穿透的后果是提权脚本写到别处。
-    if let Ok(meta) = std::fs::symlink_metadata(&dir) {
-        if super::protect::is_reparse(&meta) {
-            return Err("临时脚本目录已被替换（符号链接/联接点），已拒绝写入".into());
-        }
-    }
+    temp_script_dir_verdict(&dir)?;
     Ok(dir)
 }
 
+/// 临时脚本目录的**双检**判定（R7-L03，可测形态）。
+///
+/// 抽成独立函数是为了可测：`temp_script_dir` 依赖真实 `app_data_dir()`，
+/// 而这里要能在沙箱里造出「路径是普通目录、但打开后指向别处」的形态。
+///
+/// B-01 ②：元数据读不到必须**具名拒**。旧形态是 `if let Ok(meta) = …`，
+/// 读失败被当成「不是 reparse」直接放行 —— 与 `protect::inspect_root`
+/// 的「读不到即不信任」不同口径，等于给「判定时刻目录被删/被换」留了活门。
+fn temp_script_dir_verdict(dir: &std::path::Path) -> Result<(), String> {
+    let meta = std::fs::symlink_metadata(dir)
+        .map_err(|e| format!("临时脚本目录元数据不可读，已拒绝写入: {e}"))?;
+    if super::protect::is_reparse(&meta) {
+        return Err("临时脚本目录已被替换（符号链接/联接点），已拒绝写入".into());
+    }
+    // R7-L03：按**目录句柄**再判一次。`symlink_metadata` 判的是「路径现在指向的那个
+    // 目录」，而创建临时脚本与判定之间存在时间窗：此刻是普通目录、下一刻被换成
+    // junction ⇒ 后续写入落到链接另一头（提权脚本写到别处）。
+    // 句柄判的是「打开后真正指向的那个对象」，与路径解析无关。
+    let handle_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    if let Some(final_path) = final_path_by_handle(&handle_dir) {
+        if !same_fs_path(&final_path, &handle_dir) {
+            return Err("临时脚本目录的实际落点与预期不符（目录被换成了链接），已拒绝写入".into());
+        }
+    }
+    Ok(())
+}
+
+
+/// 两个文件系统路径是否指向**同一个**目录（R7-L03 的比较口径）。
+///
+/// `GetFinalPathNameByHandleW` 给的是 `\\?\C:\...` 形态，`canonicalize()` 给的是
+/// `C:\...`；两者都要归一（去 `\\?\` 前缀、去尾分隔符、转小写）才能比。
+fn same_fs_path(a: &str, b: &std::path::Path) -> bool {
+    let norm = |s: &str| {
+        let s = s.trim_start_matches(r"\\?\");
+        let s = s.trim_end_matches(['\\', '/']);
+        s.to_ascii_lowercase()
+    };
+    norm(a) == norm(&b.to_string_lossy())
+}
+/// 按**目录句柄**取最终路径（R7-L03）。
+///
+/// 路径判据（`symlink_metadata` / `canonicalize`）说的都是「路径现在指向谁」，
+/// 而句柄判据说的是「打开之后真正是谁」—— 两者在「判定与使用之间被换掉」时结论相反。
+/// 取不到（权限/平台不支持）时返回 `None`：宁可少一道复核，也不把正常路径判死。
+#[cfg(windows)]
+fn final_path_by_handle(dir: &std::path::Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, GetFinalPathNameByHandleW, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_MODE,
+        GETFINALPATHNAMEBYHANDLE_FLAGS, OPEN_EXISTING,
+    };
+
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    // FILE_FLAG_BACKUP_SEMANTICS：目录要靠它才能打开（无此标志 CreateFileW 拒目录）。
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            0,
+            FILE_SHARE_MODE(1 | 2 | 4),
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+    }
+    .ok()?;
+    let mut buf = vec![0u16; 1024];
+    let len = unsafe { GetFinalPathNameByHandleW(handle, &mut buf, GETFINALPATHNAMEBYHANDLE_FLAGS(0)) } as usize;
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    if len == 0 || len >= buf.len() {
+        return None;
+    }
+    let text = String::from_utf16_lossy(&buf[..len]);
+    // 形如 `\\?\C:\Users\...\tmp` —— 去掉 `\\?\` 前缀便于与 dir 比较。
+    Some(text.trim_start_matches(r"\\?\").to_string())
+}
+
+/// 非 Windows 平台无句柄判据，直接跳过（该平台也不是 Trim 的目标平台）。
+#[cfg(not(windows))]
+fn final_path_by_handle(_dir: &std::path::Path) -> Option<String> {
+    None
+}
 /// 名单类文件（每行一条路径）的一次性搬迁（N2）。
 ///
 /// 为什么单独一条、且**不走** `MIGRATION_FILES` 那条闸门：那份迁移只在「新根没有
@@ -1076,7 +1256,7 @@ mod tests {
             seal.push_str(".meta.json");
             std::fs::write(dir.join(seal), b"{}").unwrap();
         }
-        prune_backups(&dir, 3);
+        let _prune_result = prune_backups(&dir, 3);
         let mut left: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
@@ -1098,13 +1278,32 @@ mod tests {
 
         // 孤儿封条（主文件已被用户删掉）不得占保留额度：只数 .reg
         std::fs::write(dir.join("1700000009_orphan.reg.meta.json"), b"{}").unwrap();
-        prune_backups(&dir, 3);
+        let _prune_result2 = prune_backups(&dir, 3);
         assert_eq!(
             std::fs::read_dir(&dir).unwrap().flatten().count(),
             7,
             "三份主文件 + 三份封条 + 一份孤儿封条，孤儿不参与计数"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A-03 判红样本：文件路径当目录传入时，保留期裁剪必须显式记失败，不得静默返回。
+    /// 判红自证：恢复 `read_dir` 失败的静默 `return` ⇒ 本用例红。
+    #[test]
+    fn prune_backups_reports_read_error() {
+        let file = lib_test_data_root().join("cleanup-reg-backup").join("prune-read-error");
+        std::fs::create_dir_all(file.parent().unwrap()).expect("创建判红样本目录失败");
+        std::fs::write(&file, b"not-a-directory").expect("写入判红样本失败");
+        let outcome = prune_backups_ext(&file, 3, &["reg"]);
+        std::fs::remove_file(&file).expect("清理判红样本失败");
+        assert_eq!(outcome.removed, 0, "读目录失败时不得报成删过东西");
+        assert_eq!(outcome.failed, 1, "读目录失败必须计入失败数");
+        let reason = outcome.reason.expect("失败必须带原因");
+        assert!(
+            reason.contains(&file.to_string_lossy().into_owned()),
+            "失败原因必须带目录坐标: {reason}"
+        );
+        assert!(!reason.is_empty(), "失败原因不得为空");
     }
 
     /// 还原侧的跨根定位：新根优先，新根缺失才回老根；两处都没有 ⇒ None（不得凭空缺路径 import）
@@ -1232,13 +1431,12 @@ mod tests {
 
         // ② 老根是 junction → outside
         let legacy_link = root.join("legacy");
-        let made = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(&legacy_link)
-            .arg(&outside)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+          // X1-L01：带超时 + 杀整树（夹具命令挂住时不得拖死整轮验收）。
+          let mut mk_legacy_link = std::process::Command::new("cmd");
+          mk_legacy_link.args(["/C", "mklink", "/J"]).arg(&legacy_link).arg(&outside);
+          let made = crate::engine::testcmd::run_test_cmd(&mut mk_legacy_link, std::time::Duration::from_secs(10))
+              .map(|o| o.status.success())
+              .unwrap_or(false);
         assert!(made, "夹具：本机建不出 junction，②无法钉住（受限环境请直接判失败）");
         let got = read_entries_across_roots(vec![new.clone(), legacy_link.clone()]);
         let names: Vec<String> = got
@@ -1277,7 +1475,7 @@ mod tests {
     /// 内自建 `junction → 真目录`，把裁剪入口指向 junction，要求真目录内容一字不动。
     ///
     /// 覆盖的是两条**通用实现**：`prune_backups_ext`（被 reg/pagefile/startup 等多条保留期
-    /// 链共用，方案 E2 明写「判一处即收多处」）与 `prune_stamped_files`。其余 12 个入口
+    /// 链共用，方案 E2 明写「判一处即收多处」）与 `prune_stamped_files`。其余入口
     /// 走的是同一道 `protect::inspect_root`，由 `check-delete-root-guard` 的函数体扫描
     /// 逐个点名（含 caller 判定），不再各写一份真机探针。
     ///
@@ -1304,13 +1502,12 @@ mod tests {
         for i in 0..5u64 {
             std::fs::write(real.join(format!("170000000{i}_k_{i}.reg")), b"REG").unwrap();
         }
-        let built = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(&link)
-            .arg(&real)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+          // X1-L01：带超时 + 杀整树（夹具命令挂住时不得拖死整轮验收）。
+          let mut mk_prune_link = std::process::Command::new("cmd");
+          mk_prune_link.args(["/C", "mklink", "/J"]).arg(&link).arg(&real);
+          let built = crate::engine::testcmd::run_test_cmd(&mut mk_prune_link, std::time::Duration::from_secs(10))
+              .map(|o| o.status.success())
+              .unwrap_or(false);
         if !built {
             eprintln!("SKIP：本机建不出 junction（受限环境），裁剪穿链档未校验");
             return;
@@ -1325,5 +1522,105 @@ mod tests {
         prune_stamped_files(&link, 3);
         let left = std::fs::read_dir(&real).unwrap().flatten().count();
         assert_eq!(left, 5, "junction 另一头的 5 份备份必须原样完好，实得 {left}");
+    }
+
+    /// R7-L03：临时脚本目录必须**双检** —— 路径判据 + 句柄判据。
+    ///
+    /// 旧形态只判路径：判定与真正写脚本之间存在时间窗，目录被换成 junction ⇒
+    /// 提权脚本写到链接另一头。句柄判据（`GetFinalPathNameByHandleW`）说的是
+    /// 「打开后真正指向谁」，与路径解析无关。
+    /// 判红自证：把 `temp_script_dir_verdict` 里的句柄判据去掉 ⇒ 本用例红。
+    #[test]
+    fn temp_dir_swap_between_check_and_create_is_rejected() {
+        let root = sandbox("temp-dir-swap");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).expect("创建真实目录失败");
+
+        // ① 正常目录必须放行。
+        assert!(
+            temp_script_dir_verdict(&real).is_ok(),
+            "普通目录必须放行：{:?}",
+            temp_script_dir_verdict(&real)
+        );
+
+        // ② junction（指向别处）必须被**路径判据**拒收。
+        #[cfg(windows)]
+        {
+            let link = root.join("link");
+            let linked = std::os::windows::fs::symlink_dir(&real, &link).is_ok();
+            if linked {
+                let err = temp_script_dir_verdict(&link)
+                    .expect_err("junction 目录必须被拒收");
+                assert!(
+                    err.contains("已被替换") || err.contains("实际落点"),
+                    "拒因必须说清是链接形态：{err}"
+                );
+            } else {
+                println!("SKIP：本机无创建目录符号链接权限，junction 形态未取证");
+            }
+        }
+
+        // ③ 句柄判据必须真的在跑（形态断言）：最终路径与预期不一致时必须拒。
+        let src = include_str!("paths.rs");
+        let verdict_body = src
+            .split("fn temp_script_dir_verdict")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n").next())
+            .unwrap_or_default();
+        assert!(
+            !verdict_body.is_empty(),
+            "必须存在双检判定函数（路径判据 + 句柄判据）"
+        );
+        assert!(
+            verdict_body.contains("final_path_by_handle(&handle_dir)"),
+            "句柄判据必须在双检函数里（去掉它 ⇒ 目录被换掉就写进去了）"
+        );
+        assert!(
+            src.contains("GetFinalPathNameByHandleW"),
+            "必须用句柄取最终路径"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// B-01 ②：临时脚本目录的元数据读不到必须**具名拒**。
+    ///
+    /// 旧形态是 `if let Ok(meta) = symlink_metadata(…)`，读失败被当成「不是 reparse」
+    /// 直接放行 —— 与 `protect::inspect_root` 的「读不到即不信任」不是同一口径。
+    /// 判红自证：把 `temp_script_dir_verdict` 里的 `map_err` 改回 `if let Ok(...)` ⇒
+    /// 本用例红（不存在的路径会被当成「可写」放行）。
+    #[test]
+    fn 临时脚本目录元数据不可读时具名拒() {
+        let missing = sandbox("temp-meta").join("not-exist");
+        let err = temp_script_dir_verdict(&missing)
+            .expect_err("元数据读不到必须拒收，不得当成不是 reparse 放行");
+        assert!(
+            err.contains("元数据不可读"),
+            "拒因必须具名（元数据不可读）: {err}"
+        );
+        assert!(
+            err.contains("已拒绝写入"),
+            "拒因必须说清已拒绝写入: {err}"
+        );
+    }
+
+    /// B-01 ③：回收站投递失败必须留 warn（带路径与原因），且不得计入已裁份数。
+    ///
+    /// 判红自证：把 `trash_or_warn` 的 Err 分支改回 `Ok(())`（吞掉失败）⇒ 本用例红。
+    #[test]
+    fn 回收站投递失败必留warn且不计已裁() {
+        let target = std::path::PathBuf::from(r"C:\注入样本\backup.reg");
+        assert!(
+            trash_or_warn(&target, "保留期裁剪", |_p| Ok(())).is_ok(),
+            "投递成功必须记为已裁"
+        );
+        let err = trash_or_warn(&target, "保留期裁剪", |_p| Err("注入失败".to_string()))
+            .expect_err("投递失败必须留痕，不得静默吞掉");
+        assert!(err.contains("[WARN]"), "失败必须以 warn 级别留痕: {err}");
+        assert!(err.contains("注入失败"), "留痕必须带失败原因: {err}");
+        assert!(
+            err.contains(&target.to_string_lossy().into_owned()),
+            "留痕必须带路径: {err}"
+        );
     }
 }

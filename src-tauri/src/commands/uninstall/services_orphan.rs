@@ -674,10 +674,8 @@ pub(super) unsafe fn service_findings(
             let n = e.name.to_lowercase();
             n.len() >= 2 && uninstall_alive_names.iter().any(|d| d == &n || d.contains(&n) || n.contains(d.as_str()))
         };
-        let process_running = process_dirs
-            .as_ref()
-            .map(|set| set.contains(&landing.to_ascii_lowercase()))
-            .unwrap_or(false);
+        // R2b-L01：完整 landing 文件路径比对（集合同时收镜像文件路径与父目录）。
+        let process_running = super::ownership::process_running(process_dirs, landing);
         let signals = ServiceSignals {
             landing_resolved: true,
             landing_exists,

@@ -7,7 +7,7 @@
 //!
 //! 覆盖面对应原 CDP 脚本用例：
 //! - **快速组（默认跑）**：形状校验 + 负例拦截（白名单/快照闸门/掩码语义）。
-//! - **重/外呼组（`#[ignore]`）**：真实 PowerShell、真实扫盘、真实网络探测，
+//! - **重/外呼组（`#[ignore]`）**：真实扫盘、真实网络探测、真实进程枚举，
 //!   由 `cargo test --test ipc_smoke -- --ignored` 作为发布前门禁执行。
 //!
 //! 命令清单来自 `trim_tauri_lib::build_app`——与生产入口共用同一份 `generate_handler!`，
@@ -196,9 +196,9 @@ fn memory_info_reports_total() {
 }
 
 /// memory:processes 形状：真实列进程，`processes` 必须是非空数组。
-/// 成本：真实 PowerShell 枚举进程（外呼 + 秒级）。
+/// 成本：原生枚举全量进程（毫秒级、非外呼）。
 #[test]
-#[ignore = "走真实 PowerShell 枚举进程（外呼 + 秒级），发布前门禁跑"]
+#[ignore = "走原生枚举全量进程（毫秒级、非外呼），发布前门禁跑"]
 fn memory_processes_non_empty() {
     let _data = probe_guard();
     let w = main_window();

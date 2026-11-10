@@ -105,10 +105,10 @@
   }
   state.maximized = false;
   if (window.api?.window?.onResized) {
-    window.api.window.onResized((bounds) => {
+    window.app?.trackSubscription?.(window.api.window.onResized((bounds) => {
       state.maximized = !!(bounds && bounds.maximized);
       applyMaximizedLayout();
-    });
+    }));
   }
 
   function renderDisks(disks) {
@@ -286,6 +286,8 @@
       card.addEventListener('click', go);
       // 键盘可达：role=button + tabindex=0，Enter/Space 触发
       card.addEventListener('keydown', (e) => {
+          // C-06（F4a1-L14）：长按会连发 keydown ⇒ 卡片被反复跳转。
+          if (e.repeat) return;
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); }
       });
     });

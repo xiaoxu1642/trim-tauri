@@ -41,6 +41,69 @@ function syncProblems({ schemaOpt, rustDays, jsDays, jsRiskKeys, dataRisks, side
 
 console.log('=== 优化域标量 ⇄ 契约表同步门禁 ===\n');
 
+// ---------------------------------------------------------------------------
+// T1f-L04：侧表版本统一钉在一张表里。
+// 旧实现各门禁各钉一份（optimizer-dynamic 钉 scope 的 version、optimizer-security 钉
+// security 的 version、optimizer-subitem-contract 与本门禁各钉一次 schemaVer），
+// 同一个「版本」概念散在 4 个文件里（取数命令：`rg -n 'sideTableSchemaVer|TABLE_VERSION' tools/`），
+// 改一处忘另一处不会被任何门禁发现。
+// 这里建唯一真源：逐项解析各侧表的 version / schemaVer，与本表不相等即红。
+// 表项 = { file, field, value, source }：source 说明该版本的出处（契约表键或「按现值钉住」）。
+// ---------------------------------------------------------------------------
+const SIDE_TABLE_VERSION_PINS = [
+  { file: 'src-tauri/data/optimizer-scope.json', field: 'version', value: 1, source: '按现值钉住（rule-schema 无对应键）' },
+  { file: 'src-tauri/data/optimizer-security.json', field: 'version', value: 1, source: '按现值钉住（rule-schema 无对应键）' },
+  { file: 'src-tauri/data/optimizer-subitems.json', field: 'schemaVer', value: 1, source: '契约表 optimizer.sideTableSchemaVer' },
+  { file: 'src-tauri/data/optimizer-groups.json', field: 'schemaVer', value: 1, source: '契约表 optimizer.sideTableSchemaVer' },
+  { file: 'src-tauri/data/optimizer-nara-panel.json', field: 'schemaVer', value: 1, source: '契约表 optimizer.sideTableSchemaVer' },
+  { file: 'src-tauri/data/optimizer-privacy-panel.json', field: 'schemaVer', value: 1, source: '契约表 optimizer.sideTableSchemaVer' },
+  { file: 'src-tauri/data/optimizer-defaults.json', field: 'schemaVer', value: 1, source: '契约表 optimizer.sideTableSchemaVer' },
+  { file: 'src-tauri/data/optimizer-provenance.json', field: 'schemaVer', value: 1, source: '契约表 optimizer.sideTableSchemaVer' },
+  { file: 'src-tauri/data/optimizer-writes.json', field: 'schemaVer', value: 1, source: '契约表 optimizer.sideTableSchemaVer' },
+];
+
+/** 逐项解析侧表版本并与钉表比对；返回问题列表（纯判定器，真仓与合成对照共用）。 */
+function pinProblems(pins, readJson, schemaSideVer) {
+  const out = [];
+  for (const pin of pins) {
+    let doc;
+    try {
+      doc = readJson(pin.file);
+    } catch (e) {
+      out.push(`${pin.file} 读不到或不是合法 JSON：${String(e.message).slice(0, 60)}`);
+      continue;
+    }
+    const got = doc?.[pin.field];
+    if (got === undefined) {
+      out.push(`${pin.file} 没有 ${pin.field} 字段（版本闸失效）`);
+      continue;
+    }
+    // source 写「契约表」的项，期望值随契约表走；写「按现值钉住」的项用表内 value。
+    const want = pin.source.startsWith('契约表') ? schemaSideVer : pin.value;
+    if (got !== want) out.push(`${pin.file} ${pin.field}=${got} ≠ ${pin.source}期望 ${want}`);
+  }
+  return out;
+}
+
+{
+  // 正向对照：齐全放行，任一字段漂移判红，缺字段判红，读不到文件判红。
+  const fakeRead = (map) => (f) => map[f];
+  const good = Object.fromEntries(SIDE_TABLE_VERSION_PINS.map((p) => [p.file, { [p.field]: p.value }]));
+  const pinBad = pinProblems(SIDE_TABLE_VERSION_PINS, fakeRead(good), 1);
+  check(pinBad.length === 0, '对照：侧表版本齐全样本放行', pinBad.join('；'));
+  const drifted = { ...good };
+  const firstPin = SIDE_TABLE_VERSION_PINS[0];
+  drifted[firstPin.file] = { [firstPin.field]: firstPin.value + 1 };
+  check(pinProblems(SIDE_TABLE_VERSION_PINS, fakeRead(drifted), 1).length > 0,
+    '对照：任一侧表版本漂移必须判红');
+  const missingField = { ...good };
+  missingField[firstPin.file] = {};
+  check(pinProblems(SIDE_TABLE_VERSION_PINS, fakeRead(missingField), 1).some((x) => x.includes('没有')),
+    '对照：侧表缺版本字段必须判红');
+  check(pinProblems(SIDE_TABLE_VERSION_PINS, fakeRead({}), 1).length > 0,
+    '对照：侧表文件读不到必须判红');
+}
+
 // ---- 正向对照：齐全放行，五类漂移各自判红 ----
 {
   const base = {
@@ -88,6 +151,17 @@ check(
   `2. 跨端标量 ⇄ schema（Rust ${rustDays} / JS ${jsDays} / risk 键 ${jsRiskKeys.length} / 目录 ${dataRisks.length} 项 / 侧表 v${subJson.schemaVer}）`,
   problems.join('；'),
 );
+
+// ---- 3. 侧表版本统一钉表（T1f-L04）----
+{
+  const readJson = (rel) => JSON.parse(read(...rel.split('/')));
+  const pinIssues = pinProblems(SIDE_TABLE_VERSION_PINS, readJson, opt.sideTableSchemaVer);
+  check(
+    pinIssues.length === 0,
+    `3. 优化域侧表版本 ⇄ 统一钉表（${SIDE_TABLE_VERSION_PINS.length} 张表）`,
+    pinIssues.join('；'),
+  );
+}
 
 console.log('');
 if (fail > 0) {

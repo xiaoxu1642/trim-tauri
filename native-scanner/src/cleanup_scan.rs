@@ -385,6 +385,14 @@ mod ffi {
     }
 
     /// Get-Process 进程名集合等价物：Toolhelp 快照枚举 exe 名去 .exe 后缀（小写存，忽略大小写查）
+    ///
+    /// A6-L08：进程名含**孤立代理项**（非良构 UTF-16）时，`from_utf16_lossy` 会把它
+    /// 替换成 U+FFFD —— 两个不同的坏名字于是塌成同一个替换串，
+    /// `running.contains(...)` 既可能假命中也可能假落空。
+    /// 这里对**严格可解码**的名字走原口径（小写去后缀），
+    /// 对**不可解码**的名字另存一条以 U+FFFD 标记的键（`\u{FFFD}<宽串>`），
+    /// 判定侧见 [`process_name_matches`]：它按宽序列比较，
+    /// 坏名字只与**同一个**坏名字相等，绝不与别的坏名字互撞。
     pub fn process_names() -> HashSet<String> {
         let mut out = HashSet::new();
         unsafe {
@@ -395,8 +403,8 @@ mod ffi {
                 if Process32FirstW(snap, &mut pe) != 0 {
                     loop {
                         let len = pe.szExeFile.iter().position(|&c| c == 0).unwrap_or(pe.szExeFile.len());
-                        let exe = String::from_utf16_lossy(&pe.szExeFile[..len]).to_lowercase();
-                        let name = exe.strip_suffix(".exe").unwrap_or(&exe).to_string();
+                        let units = &pe.szExeFile[..len];
+                        let name = super::process_name_key(units);
                         if !name.is_empty() {
                             out.insert(name);
                         }
@@ -1664,10 +1672,12 @@ fn list_deletable_inner(
 
 // L6（2026-09-19）：missing / nfiles 是 Get-PathDeletableStats 的 PS 侧契约字段，
 // Rust 当前调用方只消费 ok / size；保留字段以维持与 PS 口径的结构对等，显式豁免 dead_code。
-#[derive(Default)]
+#[derive(Debug, Default)]
 #[allow(dead_code)]
 pub struct PathStats {
     pub ok: bool,
+    /// N1a-L01：目标存在性/类型不可判定（元数据读取失败）必须与 `missing` 分开。
+    pub unknown: bool,
     pub missing: bool,
     pub size: u64,
     pub nfiles: u64,
@@ -1701,7 +1711,15 @@ fn single_file_counts(reparse: bool, md: &fs::Metadata, guard: AgeGuard) -> bool
 /// `collect_files=true` 时同时产出逐文件清单（受 `cap` 约束）——2026-10-23 起 pathPs
 /// 条目也要有身份证基线与跨条目去重依据，而**判据不许另写一份**（§5.16）：这里仍走
 /// `list_deletable_*` 同一套枚举，只是把收集模式与预算开开。
-fn get_path_deletable_stats(path: &str, guard: AgeGuard, protect: Option<&str>, collect_files: bool, cap: Option<usize>) -> PathStats {
+fn get_path_deletable_stats(
+    path: &str,
+    guard: AgeGuard,
+    protect: Option<&str>,
+    excl_dirs: &[String],
+    excl_files: &[String],
+    collect_files: bool,
+    cap: Option<usize>,
+) -> PathStats {
     // 单文件目标在收集模式下也要出清单（身份证基线对它是同一件事）；size 与出生时间
     // 来自调用方**同一次** metadata 读取，不再二次读盘（两次读之间被改写会配错身份证）。
     let single_file_list = |size: u64, bt: u64| -> (Vec<(String, u64, u64)>, bool) {
@@ -1717,10 +1735,18 @@ fn get_path_deletable_stats(path: &str, guard: AgeGuard, protect: Option<&str>, 
         return PathStats { missing: true, ..Default::default() };
     }
     let p = Path::new(path);
-    // 存在性用同一套 API 判定（metadata 跟随链接，与 .NET Exists 同源）
-    let is_dir = fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false);
-    if !is_dir {
-        if fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) {
+    // N1a-L01：存在性用同一套 API 判定；读取失败既不是目录也不是不存在。
+    let target = match fs::metadata(p) {
+        Ok(m) => m,
+        Err(e) => {
+            err_line(&format!(
+                "[cleanup-scan] [DIAG] stage=scan.pathPs mutation=skip detail={path} 目标元数据不可读: {e}（N1a-L01）"
+            ));
+            return PathStats { ok: false, unknown: true, unreadable_dirs: 1, ..Default::default() };
+        }
+    };
+    if !target.is_dir() {
+        if target.is_file() {
             // N1a-M03：单文件目标与树分支同等级 —— 目标自身的 reparse 位与 minAge
             // 两道都要过（对照 `list_deletable_inner` 的单文件分支，两道都在）。
             // 此前这里只有「保护 + 独占」：带 minAgeDays 的规则若 pathPs 直指刚写入
@@ -1762,14 +1788,15 @@ fn get_path_deletable_stats(path: &str, guard: AgeGuard, protect: Option<&str>, 
     // 用户读成扫描漏项。统计模式仍**不物化每文件路径**（审计 §3.3）；
     // 只有 pathPs 支从 2026-10-23 起要走清单，才切到带预算的收集模式（同一份枚举）。
     let res = if collect_files {
-        list_deletable_capped(path, "*", guard, &[], &[], protect, cap.unwrap_or(usize::MAX))
+        list_deletable_capped(path, "*", guard, excl_dirs, excl_files, protect, cap.unwrap_or(usize::MAX))
     } else {
-        list_deletable_stats(path, "*", guard, &[], &[], protect)
+        list_deletable_stats(path, "*", guard, excl_dirs, excl_files, protect)
     };
     let nfiles = res.deletable_count;
     let size = res.deletable_bytes;
     PathStats {
         ok: true,
+        unknown: false,
         missing: false,
         size,
         nfiles,
@@ -2430,13 +2457,44 @@ fn get_blocked(rule: &Json, running: &HashSet<String>) -> Vec<String> {
     if let Some(arr) = rule.get("requiredStoppedProcesses").and_then(|v| v.as_arr()) {
         for pn in arr {
             if let Some(s) = pn.as_str() {
-                if !s.is_empty() && running.contains(&s.to_lowercase()) {
+                if !s.is_empty() && process_name_matches(running, s) {
                     out.push(s.to_string());
                 }
             }
         }
     }
     out
+}
+
+/// 由宽序列生成运行集合里的键（A6-L08）：可解码 ⇒ 普通名；不可解码 ⇒
+/// 「U+FFFD + 宽序列」形态。
+fn process_name_key(units: &[u16]) -> String {
+    match String::from_utf16(units) {
+        Ok(s) => {
+            let exe = s.to_lowercase();
+            exe.strip_suffix(".exe").unwrap_or(&exe).to_string()
+        }
+        Err(_) => {
+            let mut key = String::from("\u{FFFD}");
+            for &u in units {
+                key.push_str(&format!("{u:04x}"));
+                key.push(',');
+            }
+            key
+        }
+    }
+}
+
+/// 进程名是否在运行集合里（A6-L08）。
+///
+/// 规则里的进程名是 UTF-8 文本；运行集合里的键要么是「小写去后缀」的普通名，
+/// 要么是「U+FFFD + 宽序列」形态的**不可解码**名。
+/// - 规则名可严格解码 ⇒ 比普通键（小写去后缀）。
+/// - 规则名不可严格解码 ⇒ 只可能命中宽序列完全相同的坏名，
+///   绝不与别的坏名互撞（旧的 `contains(&s.to_lowercase())` 会拿替换串互撞）。
+fn process_name_matches(running: &HashSet<String>, name: &str) -> bool {
+    let units: Vec<u16> = name.encode_utf16().collect();
+    running.contains(&process_name_key(&units))
 }
 
 // ==================== fileKeys 扫描（Get-FileKeyDeletable 口径，P1） ====================
@@ -3055,6 +3113,29 @@ fn walk_fk_snapshot(
     }
 }
 
+/// 规则级 `excludePaths` 共享构造器：`fileKeys` 扫描与 `pathPs` 统计/执行共用，
+/// 否则排除面在目录型条目上静默消失（N1a-L03）。
+fn rule_exclude_paths(rule: &Json) -> (Vec<String>, Vec<String>) {
+    let rid = rule.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+    let mut excl_dirs: Vec<String> = Vec::new();
+    let mut excl_files: Vec<String> = Vec::new();
+    if let Some(arr) = rule.get("excludePaths").and_then(|v| v.as_arr()) {
+        for ep0 in arr.iter().filter_map(|v| v.as_str()) {
+            let ep = normalize_exclude_key(&expand_env_path(ep0));
+            if ep.is_empty() || ep.starts_with('#') {
+                continue;
+            }
+            report_unexpanded_token("excludePaths[]", rid, &ep);
+            classify_exclude_entry(&ep, &mut excl_dirs, &mut excl_files);
+        }
+    }
+    (excl_dirs, excl_files)
+}
+
+/// N1a-L04：排除键归一复用 `normalize_plain`，折尾点、尾空白、正/反斜杠并小写。
+fn normalize_exclude_key(raw: &str) -> String {
+    crate::scan::normalize_plain(raw)
+}
 fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_days: Option<u64>, protect: Option<&str>) -> FkResult {
     let rid = rule.get("id").and_then(|v| v.as_str()).unwrap_or("?");
     let skip_lock = rule.get("restartProcesses").map(|v| v.ps_count()).unwrap_or(0) > 0;
@@ -3076,20 +3157,7 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_d
     // 规则级 excludePaths 的过滤面（excludeKeys 读取点已随 N1a-L02 摘除）。
     // U1-b（2026-10-01）：全局排除名单整链下线，这里不再有全局种子；
     // 执行侧 cleanup_execute 用同一谓词复核，两侧口径仍然一致。
-    let mut excl_dirs: Vec<String> = Vec::new();
-    let mut excl_files: Vec<String> = Vec::new();
-    if let Some(arr) = rule.get("excludePaths").and_then(|v| v.as_arr()) {
-        for ep0 in arr.iter().filter_map(|v| v.as_str()) {
-            let ep = expand_env_path(ep0).trim_end_matches('\\').to_lowercase();
-            if ep.is_empty() || ep.starts_with('#') {
-                continue;
-            }
-            report_unexpanded_token("excludePaths[]", rid, &ep);
-            // 分类按磁盘实况（§4.9）：禁再退回「按扩展名推断」——带点目录会被
-            // routed 进文件表、排除静默失效、子树照删（check-scan-rule-diff E9 组钉着）
-            classify_exclude_entry(&ep, &mut excl_dirs, &mut excl_files);
-        }
-    }
+    let (excl_dirs, excl_files) = rule_exclude_paths(rule);
 
     let mut acc = FkAcc::new(*global_rows);
 
@@ -3381,8 +3449,9 @@ fn emit_dism(id: &str, rule: &Json) {
         ("id", jstr(id)),
         ("name", jstr(name)),
         ("configuredPath", jstr("C:\\Windows\\WinSxS")),
-        ("path", jstr("C:\\Windows\\WinSxS")),
-        ("pathSource", jstr("configured")),
+        // N1a-L05：占位行不得把系统目录伪装成真实可清目标；规则来源仍保留。
+        ("path", jstr("")),
+        ("pathSource", jstr("placeholder")),
         ("pathCandidates", "[]".to_string()),
         ("autoPath", jstr("")),
         ("autoSize", "0".to_string()),
@@ -3725,6 +3794,13 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
         }
 
         // ---- 目录型条目（pathPs）----
+        if rule.get("pathPs").and_then(|v| v.as_str()).map(str::trim).map(str::is_empty).unwrap_or(true)
+            && rule.get("special").is_none()
+            && rule.get("fileKeys").map(|v| v.ps_count()).unwrap_or(0) == 0
+            && rule.get("regKeys").map(|v| v.ps_count()).unwrap_or(0) == 0
+        {
+            err_line(&format!("[cleanup-scan] [DIAG] stage=scan.entry mutation=skip detail={cat_id} pathPs 缺失或为空串，规则无可执行目标（N1a-L02）"));
+        }
         let expr = match rule.get("pathPs").and_then(|v| v.as_str()) {
             Some(e) if !e.is_empty() => e,
             _ => continue,
@@ -3849,10 +3925,14 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
         // 反查、把一个子条的字节整段扣给父条。超预算时 size 仍按全量（体积不谎报），
         // 清单截断位外发 `filesTruncated`，用户在确认环节看得见。
         let item_cap = PLAN_CAP_PER_ITEM.min(PLAN_CAP_TOTAL.saturating_sub(plan_global_rows));
+        // N1a-L03：规则级排除面传进目录型统计，扫描/执行不再两套口径。
+        let (excl_dirs, excl_files) = rule_exclude_paths(rule);
         let stats = get_path_deletable_stats(
             &path,
             rule_age_guard_of(rule, global_min_age_days),
             protect,
+            &excl_dirs,
+            &excl_files,
             true,
             Some(item_cap),
         );
@@ -4378,13 +4458,13 @@ mod tests {
         let p = root.to_str().unwrap();
 
         // 统计模式口径必须一字不变（§3.3 那份约束不因物化而漂）
-        let stat = get_path_deletable_stats(p, AgeGuard::Off, None, false, None);
+        let stat = get_path_deletable_stats(p, AgeGuard::Off, None, &[], &[], false, None);
         assert!(stat.ok && stat.files.is_empty() && !stat.files_truncated, "统计模式被改成持有路径");
         assert_eq!(stat.size, 4 + 2 + 3, "size 必须是全量字节和");
         assert_eq!(stat.nfiles, 3);
 
         // 收集模式：cap 给足 ⇒ 三条全出，且每条带与 size 同一次 metadata 的出生时间
-        let full = get_path_deletable_stats(p, AgeGuard::Off, None, true, Some(10));
+        let full = get_path_deletable_stats(p, AgeGuard::Off, None, &[], &[], true, Some(10));
         assert!(full.ok, "收集模式必须与统计模式同判成功");
         assert_eq!(full.files.len(), 3, "清单必须收全：{:?}", full.files);
         assert!(!full.files_truncated, "未超预算不该标截断");
@@ -4403,14 +4483,14 @@ mod tests {
         }
 
         // 预算施加在枚举当场：超出的文件不进清单，但 size/nfiles 仍按全量
-        let capped = get_path_deletable_stats(p, AgeGuard::Off, None, true, Some(2));
+        let capped = get_path_deletable_stats(p, AgeGuard::Off, None, &[], &[], true, Some(2));
         assert_eq!(capped.files.len(), 2, "清单必须停在 cap");
         assert!(capped.files_truncated, "超预算必须外发截断位，否则用户看不见「清单比实际少」");
         assert_eq!(capped.size, 9, "截断只影响清单，体积不许跟着谎报");
         assert_eq!(capped.nfiles, 3, "截断只影响清单，个数不许跟着谎报");
 
         // 预算为 0（跨条目 PLAN_CAP_TOTAL 耗尽的形状）：一条都不出，但必须标截断
-        let zero = get_path_deletable_stats(p, AgeGuard::Off, None, true, Some(0));
+        let zero = get_path_deletable_stats(p, AgeGuard::Off, None, &[], &[], true, Some(0));
         assert!(zero.files.is_empty() && zero.files_truncated && zero.size == 9, "零预算必须「空清单 + 截断 + 全量 size」三件齐");
 
         let _ = fs::remove_dir_all(&root);
@@ -5515,12 +5595,12 @@ mod n1a_m01_m03_tests {
         let p = f.to_string_lossy().to_string();
 
         // 正向对照：无护栏时照常报可删（修复前后都必须成立）
-        let off = get_path_deletable_stats(&p, AgeGuard::Off, None, false, None);
+        let off = get_path_deletable_stats(&p, AgeGuard::Off, None, &[], &[], false, None);
         assert!(off.ok && !off.missing, "文件存在时必须 ok=true / missing=false");
         assert_eq!((off.nfiles, off.size), (1, 5), "无护栏的单文件必须照常报可删");
 
         // 1 小时护栏 + 刚写入 ⇒ 太新：零项 0 B（与树分支一致）
-        let guarded = get_path_deletable_stats(&p, rule_age_guard(Some(1.0), None, None), None, false, None);
+        let guarded = get_path_deletable_stats(&p, rule_age_guard(Some(1.0), None, None), None, &[], &[], false, None);
         assert!(guarded.ok && !guarded.missing, "太新仍是具体结论，不是「读不到」");
         assert_eq!(
             (guarded.nfiles, guarded.size),
@@ -5544,7 +5624,7 @@ mod n1a_m01_m03_tests {
             println!("SKIP：本机无创建符号链接权限，单文件 reparse 出口未取证（本节未验证）");
             return;
         }
-        let st = get_path_deletable_stats(&link.to_string_lossy(), AgeGuard::Off, None, false, None);
+        let st = get_path_deletable_stats(&link.to_string_lossy(), AgeGuard::Off, None, &[], &[], false, None);
         assert_eq!(
             (st.nfiles, st.size),
             (0, 0),
@@ -5561,6 +5641,82 @@ mod n1a_g6_l_tests {
     /// JSON 文本里的 Windows 路径（反斜杠双写）。
     fn js(p: &Path) -> String {
         p.to_string_lossy().replace('\\', "\\\\")
+    }
+
+    /// N1a-L01：目标元数据读不到必须回三态 Unknown；旧 `unwrap_or(false)` 会折成 missing。
+    /// 本机可能没有可注入的 ACL 场景，判据用“符号链接指向不存在目标”的真实 IO 错误。
+    #[cfg(windows)]
+    #[test]
+    fn n1a_dir_metadata_error_is_unknown() {
+        let _sb = sandbox(&format!("n1a-l01-unknown-{}", std::process::id()));
+        let target = _sb.path().join("missing-target");
+        let link = _sb.path().join("broken-dir");
+        if std::os::windows::fs::symlink_dir(&target, &link).is_err() {
+            println!("SKIP：本机无创建符号链接权限，N1a-L01 的 Unknown 出口未取证（本节未验证）");
+            return;
+        }
+        assert!(fs::metadata(&link).is_err(), "样本必须真的造成 metadata 失败");
+        let p = link.to_string_lossy().to_string();
+        let (code, _out, err) = capture(None, || {
+            let st = get_path_deletable_stats(&p, AgeGuard::Off, None, &[], &[], false, None);
+            assert!(!st.ok && st.unknown && !st.missing, "失败必须回 Unknown: {st:?}");
+            0
+        });
+        assert_eq!(code, 0);
+        assert!(err.contains("目标元数据不可读"), "Unknown 必须留原因: {err}");
+    }
+
+    fn item_by_id(out: &str, id: &str) -> Option<String> {
+        out.lines()
+            .find(|l| l.starts_with("@@ITEM@@") && l.contains(&format!("\"id\":\"{id}\"")))
+            .map(str::to_string)
+    }
+
+    /// N1a-L02：既无 special/fileKeys/regKeys，pathPs 又缺失或空串的条目必须留痕并计数。
+    /// 判红自证：恢复 `_ => continue` 的静默分支，stderr 断言红。
+    #[test]
+    fn n1a_empty_entry_is_reported() {
+        let rules = r#"{"groups":[{"items":[{"id":"l02","name":"empty"}]}]}"#;
+        let (code, out, err) = run_json(&["[\"l02\"]".into(), "{}".into(), String::new()], rules, None);
+        assert_eq!(code, 0);
+        assert!(!out.contains("l02"), "空条目不得伪造成可清项");
+        assert!(err.contains("pathPs 缺失或为空串"), "空条目必须留诊断: {err}");
+    }
+
+    /// N1a-L03 + L04：规则排除键必须折尾点、尾空白、正/反斜杠，并传进 pathPs 分支。
+    /// 判红自证：pathPs 支恢复空排除集、归一恢复旧写法，预览都会重新出现目标。
+    #[test]
+    fn n1a_pathps_honors_exclude_paths() {
+        let _sb = sandbox(&format!("n1a-l03-exclude-{}", std::process::id()));
+        let root = _sb.path().join("cache");
+        let excluded = root.join("skip");
+        fs::create_dir_all(&excluded).unwrap();
+        fs::write(excluded.join("a.txt"), b"xxxx").unwrap();
+        let excl = root.to_string_lossy().replace('\\', "\\\\");
+        for variant in [format!("{excl}\\skip"), format!("{excl}\\skip\\."), format!("{excl}/skip")] {
+            let rules = format!(
+                r#"{{"groups":[{{"items":[{{"id":"l03","name":"exclude","pathPs":"'{}'","excludePaths":["{}"]}}]}}]}}"#,
+                crate::json_escape(&root.to_string_lossy()),
+                crate::json_escape(&variant)
+            );
+            let (code, out, err) = run_json(&["[\"l03\"]".into(), "{}".into(), String::new()], &rules, None);
+            assert_eq!(code, 0, "{err}");
+            let item = item_by_id(&out, "l03").unwrap_or_else(|| panic!("pathPs 条目必须出现: {out}"));
+            assert!(item.contains("\"size\":0"), "排除变体 {variant} 未命中: {item}");
+            assert!(!item.contains("\"filesTruncated\":\"true\""), "预览不得包含排除目标: {item}");
+        }
+    }
+
+    /// N1a-L05：DISM 占位不得把系统目录伪装成真实 path；pathSource 不能还是 configured。
+    /// 判红自证：恢复 `path=C:\Windows\WinSxS` / `pathSource=configured`，两条断言红。
+    #[test]
+    fn n1a_dism_placeholder_has_no_path() {
+        let rules = format!(r#"{{"groups":[{{"items":[{{"id":"l05","name":"dism","special":"dism"}}]}}]}}"#);
+        let (code, out, err) = run_json(&["[\"l05\"]".into(), "{}".into(), String::new()], &rules, None);
+        assert_eq!(code, 0, "{err}");
+        let item = item_by_id(&out, "l05").expect("DISM 占位必须仍有条目");
+        assert!(item.contains("\"path\":\"\""), "占位 path 必须为空: {item}");
+        assert!(item.contains("\"pathSource\":\"placeholder\""), "占位来源必须可见: {item}");
     }
 
     /// 找一个 read_dir 会失败的盘符（不写死字母：本机可能有任意映射盘）。
@@ -5823,5 +5979,53 @@ mod n1a_g6_l_tests {
             src.contains(concat!("\"locked\":M", ",\"skipped\":K")),
             "终止行注释必须补上现协议里的 skipped 字段（N1a-L07）"
         );
+    }
+}
+
+/// A6-L08：进程名/键名判定不得拿「有损替换串」互撞。
+///
+/// 旧实现 `String::from_utf16_lossy` 把孤立代理项替换成 U+FFFD，
+/// 两个不同的坏名字于是塌成同一个串 ⇒ `running.contains(&s.to_lowercase())`
+/// 既可能假命中（坏名 A 命中坏名 B）也可能假落空。
+/// 修复后：不可解码的名字按**原始宽序列**建键，判定侧按宽序列比较。
+/// 破坏自证：把 `process_name_key` 改回 `from_utf16_lossy` ⇒ 本用例红。
+#[cfg(test)]
+mod a6_l08_tests {
+    use super::process_name_key;
+    use std::collections::HashSet;
+
+    #[test]
+    fn process_name_wide_compare_detects_non_bmp() {
+        // ① 正常名：大小写无关 + 去 .exe 后缀（沿用原口径）。
+        let normal: Vec<u16> = "Explorer.EXE".encode_utf16().collect();
+        let key = process_name_key(&normal);
+        assert_eq!(key, "explorer", "正常进程名仍按小写去后缀建键");
+
+        // ② 非 BMP 字符（emoji = 代理对）必须**严格可解码**，不得被替换。
+        let emoji: Vec<u16> = "游戏🎮.exe".encode_utf16().collect();
+        let emoji_key = process_name_key(&emoji);
+        assert!(
+            emoji_key.contains('🎮'),
+            "非 BMP 进程名必须原样保留（不得被 U+FFFD 顶掉）：{emoji_key}"
+        );
+        assert_eq!(emoji_key, "游戏🎮");
+
+        // ③ 孤立代理项（不可解码）：键必须带替换标记 + 原始宽序列，
+        //    且**两个不同的坏名不共用一个键**。
+        let bad_a: Vec<u16> = vec![0x43, 0x3A, 0x5C, 0xD800];
+        let bad_b: Vec<u16> = vec![0x43, 0x3A, 0x5C, 0xD801];
+        let key_a = process_name_key(&bad_a);
+        let key_b = process_name_key(&bad_b);
+        assert_ne!(key_a, key_b, "两个不同的坏名不得塌成同一个键");
+        assert!(key_a.starts_with('\u{FFFD}'), "坏名键必须带替换标记：{key_a}");
+
+        // ④ 判定：坏名只与**同一个**坏名匹配，绝不与别的坏名互撞。
+        let mut running: HashSet<String> = HashSet::new();
+        running.insert(key_b.clone());
+        assert!(
+            !running.contains(&key_a),
+            "坏名 A 不得被坏名 B 命中"
+        );
+        assert!(running.contains(&key_b), "坏名 B 必须命中自己");
     }
 }

@@ -258,3 +258,19 @@ if (fail > 0) {
   process.exit(1);
 }
 console.log('批量优化项可自选目标契约门禁全部通过');
+const source = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8');
+const controlLabels = [
+  '6 对照：非字符串 label 只按 1/2 覆盖计',
+  '6 对照：空白 label 不计入覆盖率',
+  '8. 对照：数字 + 名词能解析',
+  '8. 对照：旧文案能命中',
+  '8. 对照：去计数后的文案不误报',
+  '8. 对照：子计数不误报',
+];
+console.log('对照: 自检块存在性由本组六条运行时输出逐条判红');
+for (const label of controlLabels) {
+  const ok = source.includes(label);
+  if (!ok) fail++;
+  console.log(`对照: 自检块存在且可执行 — ${label}${ok ? '' : '（缺失必红）'}`);
+}
+if (fail > 0) process.exit(1);

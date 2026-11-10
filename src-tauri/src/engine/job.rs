@@ -7,6 +7,10 @@
 use windows::Win32::Foundation::HANDLE;
 
 /// 一次性 Job Object 句柄；Drop 只关句柄（**不**杀成员）。
+///
+/// 可见性保持 `pub(crate)`：`u_a5_process_handle_contracts` 钉住了这个形状
+/// （「ProcessJob 必须是 pwsh/systembin 共用实现」—— 可见性放开等于把它变成公共 API）。
+/// 集成测试需要收树能力时走 [`kill_process_tree`] 这条**函数式出口**，不碰类型可见性。
 pub(crate) struct ProcessJob(HANDLE);
 
 impl ProcessJob {
@@ -107,4 +111,20 @@ impl Drop for ProcessJob {
             let _ = windows::Win32::Foundation::CloseHandle(self.0);
         }
     }
+}
+
+/// **杀掉某个 PID 的整棵进程树**（A14 / X1-L01 一族）。
+///
+/// 为什么是函数而不是把 `ProcessJob` 暴露成 `pub`：集成测试
+/// （`src-tauri/tests/*.rs`）编译时 `cfg(test)` 对被依赖 crate 不生效，
+/// 长跑探针（如「holder powershell 独占持有文件」）需要收树能力；
+/// 而 `u_a5_process_handle_contracts` 钉住了 `ProcessJob` 的 `pub(crate)` 可见性
+/// （它是 pwsh/systembin 的**共用实现**，不是公共 API）。
+/// 函数式出口让集成测试能收树，同时不改变类型的可见性契约。
+///
+/// 语义：把该 PID 拉进一个新 Job 并立即终止 —— 效果是「连同子孙一起收掉」。
+/// 进程已经退出时按「已收掉」处理（不报错）。
+pub fn kill_process_tree(pid: u32) -> Result<(), String> {
+    let job = ProcessJob::create_for(pid)?;
+    job.terminate()
 }

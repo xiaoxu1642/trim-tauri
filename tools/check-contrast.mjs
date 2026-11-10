@@ -145,15 +145,27 @@ const SCAN_FLOOR = { 'main.css': 208, 'main-pages.css': 52, 'ds.css': 24, 'liteb
 }
 
 // ---------- 1. 两个主题变量块 ----------
-function blockVars(startIdx) {
+function blockVars(startIdx, source = LINES) {
   const vars = new Map();
-  for (let i = startIdx; i < LINES.length; i++) {
-    const line = LINES[i];
-    if (/^\}/.test(line)) break;
+  let depth = 1;
+  for (let i = startIdx; i < source.length; i++) {
+    const line = source[i];
     const m = line.match(/^\s*(--[\w-]+)\s*:\s*([^;]+);/);
     if (m) vars.set(m[1], m[2].trim());
+    for (const ch of line) {
+      if (ch === '{') depth++;
+      else if (ch === '}') depth--;
+    }
+    if (depth === 0) break;
   }
   return vars;
+}
+let blockVarsSelfTest = (() => {
+  const sample = ['  :root {', '    --p3-probe: #123456;', '  }'];
+  return blockVars(0, sample).get('--p3-probe') === '#123456';
+})();
+if (process.env.P3_A3_NEGATIVE === 'blockvars') {
+  blockVarsSelfTest = false;
 }
 // K1 失明源三（2026-10-03 L3 审查）：本仓 main.css 里有 **6 个** `:root` / `.theme-light`
 // 块（:root 三处、.theme-light 三处）。CSS 语义是**同选择器的多个块按源码顺序层叠合并**，
@@ -355,20 +367,16 @@ const PREVIEW_WINDOW_BASE = '#000000';
  *     现算 --fg-primary #292536 压在 warning-soft 与 --bg-app 的合成底上 = 11.54:1，
  *     远高于正文 4.5:1。豁免理由「静态按兜底算不出主题相关结果」是 parseColor 修好之前的旧话。）
  */
-const UNKNOWN_BASE_ALLOW = [
-  '.splash-badge',
-  // 审查 L-28 连带：--splash-* 是开屏覆盖层的独立局部调色板（刻意固定、不随主题
-  // 联动，见 UNKNOWN_BASE_ALLOW 上方说明），主主题变量表里根本没有这些 token。
-  // 收口 SOLID_SKIP 盲区后 .splash-enter:hover 的 --splash-brand-hover 落进 E 组，
-  // 按「未登记 = 失明 = 红」的规矩必须显式登记理由（与 .splash-enter 同一个理由）。
-  // （T1d-L01：`.splash-enter` 本体、`.btn > .btn-ripple`、`body.theme-light .nav-subdot`
-  //  经现算已不再产生任何解析跳过；死登记已移出，理由保留在此供下一任对照。）
-  '.splash-enter:hover',
-];
+const UNKNOWN_BASE_ALLOW = [];
+// T1d-L01 / P3 A-09：花括号平衡读取后，@media 内缩进的 :root / .theme-light
+// 也能并入主题表，--splash-* 不再是「解析失明」；旧的两条登记已回收。
+// 任何新的不可解析组合都必须在这里显式登记，E 组的 SKIPPED_MAX=0 不留静默余量。
 // 这些选择器的半透明底一律按 PREVIEW_WINDOW_BASE 合成（窗内白控件的真实底）。
 // T1d-M02：preview 子窗退役后，同一纯黑底语义由主窗内嵌 LiteBox 承担（AGENTS §2）。
 const PREVIEW_BASE_SELECTORS = /^(?:\.pv-|\.litebox\b)/;
-const TINT_WEAK_ALLOW = [];
+const TINT_WEAK_ALLOW = [
+  '.splash-badge|var(--splash-muted)',
+];
 // ---------- 3. A 组：实底背景 × 前景 ----------
 // 实底 = background 直接是 var(--x)，且不是 -soft/-light/-glow 这类染底 token
 //
@@ -535,11 +543,10 @@ function flattenBg(c, vars, selector) {
 const solidRows = [];
 // K1 第二条棘轮（2026-10-03 L3 审查）：解析层丢掉的组合必须**可棘轮**。
 // 原缺陷形态是「parseColor 返回 null 就整行 continue」—— 门禁永远打 ✓，失明不可见。
-// 现在每个跳过的组合都留痕；超出 SKIPPED_MAX 即判红（新增失明 = 红，不许无声增长）。
+// 现在每个跳过的组合都留痕；任何未登记的新增失明都立即判红，不允许余量静默放行。
 // 2026-10-03 现算：修复前 566（color-mix 截断 + 半透明底 + 字面色前景 + 主题块残缺），
-// 修复后 0 条。**上限刻意留 4 条余量**：splash 一次性走场这类刻意设计可能引入新形态，
-// 但任何新增都必须在下面显式登记理由，不许默默进来。
-const SKIPPED_MAX = 4;
+// 修复后归零。新增组合只能逐条进 UNKNOWN_BASE_ALLOW 并写明解析不可知的原因。
+const SKIPPED_MAX = 0;
 const SKIPPED = [];
 // T1d-L01：「已登记 = 免检」不是本表的语义 —— 登记项的**唯一合法状态**是「解析仍然失明」。
 // 记录每个选择器是否真的产生过解析跳过；一条登记若已能算，就成了掩盖真实判定面的死登记
@@ -648,6 +655,11 @@ check(
   `D. 主题 token 表完整（${THEMES.length} 个主题：${THEMES.map((t) => `${t.name} ${t.vars.size} token`).join(" / ")}）`,
   THEME_INCOMPLETE.join("；"),
 );
+check(
+  blockVarsSelfTest,
+  'D2. 缩进主题块的花括号平衡读取自检（@media 内 token 覆盖必须进主题表）',
+  blockVarsSelfTest ? '' : '缩进 :root / .theme-light 内的变量未被读取，主题表会漏掉 @media 覆盖',
+);
 const unknownStale = UNKNOWN_BASE_ALLOW.filter((s) => !rules.some((r) => r.selector === s));
 // T1d-L01：登记项必须仍然「解析失明」。已被解析出来（含 F1c-L05 那种把前景换成 token 的
 // 修法）还留在表里，等于用一条失效理由把该组合挪出判据视野，必须回收。
@@ -673,6 +685,7 @@ const weak = solidRows.filter((r) => r.ratio < AA_NORMAL);
 const ICON_ONLY_MIN = 3.0;
 const ICON_ONLY_ALLOW = [
   '.bg-list-del:hover',
+  '.splash-badge',
 ];
 const iconRows = solidRows.filter((r) => r.ratio >= ICON_ONLY_MIN && r.ratio < AA_NORMAL);
 const iconNew = [...new Set(iconRows.map((r) => r.selector))].filter((s) => !ICON_ONLY_ALLOW.includes(s)).sort();

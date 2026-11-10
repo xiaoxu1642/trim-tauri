@@ -1,5 +1,8 @@
 // maintenance.js - 系统维护修复组（P2-16）
-// 17 项修复任务：分类计数标签 + 任务卡片 + 每项独立确认 + 实时输出面板。
+// 数据源 maintenance:tasks（维护任务侧表），页面按 `hiddenFromMaintenance` 过滤后呈现
+// （被收拢进永劫专项面板的网络类任务不在本页出现；取数命令：读
+// src-tauri/data/maintenance-tasks.json 与 optimizer-nara-panel.json 的 hiddenFromMaintenance）。
+// 任务卡片 + 每项独立确认 + 实时输出面板。
 // 批量操作：复选框勾选 + 「执行选中」/「全部执行」+ 进度与成功/失败反馈 + 取消。
 // 数据源为主进程 maintenance:tasks（PowerShell 脚本模块），渲染层不硬编码任务逻辑。
 (function () {
@@ -436,6 +439,8 @@
     // 审查 v2-M11：同一条任务从「网络自检」页走是红色确认（`netcheck.js` 对 netstack/dns
     // 走 confirmDanger），从本页走却只是普通 confirm ⇒ **确认等级按出口不一致**，用户从哪
     // 个点进去决定了他被提醒的强度。判据统一取数据层的 `admin` 位（会改系统、需提权＝红档）。
+    // C-07（F4a2-L44）口径订正：统一的是**判据**（数据层 admin 位），不是两侧的**档位** ——
+    // `dns` 在网检页仍是红档（那里写死了 confirmDanger），属对端待收口；本页按 admin 位判。
     // 红色确认件缺失时按"拒绝执行"收口（fail-closed）：宁可不跑，不能降级成普通确认。
     // v5 P2：占位必须发生在确认**之前**。旧写法 `running = taskId` 在 await 之后，而按钮
     // 禁用读的是 `busy = !!running || !!batch` ⇒ 确认弹窗期间同页所有「执行」按钮仍可点，
@@ -491,7 +496,7 @@
     );
     if (!ok) return;
 
-    batch = { total: list.length, done: 0, ok: 0, fail: 0, cancelRequested: false, outputStarted: false };
+    batch = { total: list.length, done: 0, ok: 0, fail: 0, paused: 0, cancelRequested: false, outputStarted: false };
     showOutput(`批量执行 ${list.length} 项 · 输出`);
     batch.outputStarted = true;
     appendOutput(`===== 批量执行开始：共 ${list.length} 项 =====`);
@@ -532,7 +537,7 @@
         if (st === 'elevating') {
           // 提权已获同意，应用即将以管理员身份重启——剩余批次已持久化，中止循环
           appendOutput('—— 应用即将以管理员身份重启，批量已暂停，重启后将自动恢复勾选 ——');
-          batch.fail++;
+          batch.paused++;
           batch.done++;
           running = null;
           updateBatchbar();
@@ -545,11 +550,11 @@
       }
 
       const cancelled = batch.cancelRequested;
-      const summary = `成功 ${batch.ok} 项 · 失败 ${batch.fail} 项${cancelled ? ' · 已取消剩余' : ''}`;
+      const summary = `成功 ${batch.ok} 项 · 失败 ${batch.fail} 项 · 已暂停 ${batch.paused} 项${cancelled ? ' · 已取消剩余' : ''}`;
       appendOutput(`===== 批量执行结束：${summary} =====`);
       window.app?.toast?.(
         cancelled ? 'warning' : (batch.fail ? 'warning' : 'success'),
-        cancelled ? `批量执行已取消（${summary}）` : (batch.fail ? `批量执行完成：${summary}` : `批量执行全部完成：${summary}`),
+        cancelled ? `批量执行已暂停（${summary}）` : (batch.fail ? `批量执行完成：${summary}` : `批量执行全部完成：${summary}`),
         1000
       );
     } catch (e) {
@@ -640,7 +645,7 @@
       document.getElementById('btnMaintRunAll')?.addEventListener('click', () => runBatch('all'));
       document.getElementById('btnMaintCancelBatch')?.addEventListener('click', cancelBatch);
       if (window.api?.maintenance?.onOutput) {
-        window.api.maintenance.onOutput(onOutput);
+        window.app?.trackSubscription?.(window.api.maintenance.onOutput(onOutput));
       }
     }
     // C3：先拉永劫专项面板侧表（fire-and-forget 但要在 loadTasks 回来之前）

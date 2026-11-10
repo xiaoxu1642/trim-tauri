@@ -21,6 +21,8 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 // 需要正向对照的找违规型门禁清单（新增必须登记，带理由）
 const REGISTRY = [
   { file: 'check-delete-exits.mjs', reason: '删除出口枚举：剥离/命中两向自检' },
+  { file: 'check-delete-callsites.mjs', runtimeControl: true, reason: 'P3 A-02：删除原语别名两类样本必须被现算调用点捕获；运行时统一前缀 对照: 由本批补齐' },
+  { file: 'check-ps-extraction.mjs', runtimeControl: true, reason: 'P3 A-02：文本层只归一 CRLF、不 trim；运行时统一前缀 对照: 证明首尾空白漂移可判红' },
   { file: 'check-finder-scan-notes.mjs', reason: 'P1-04 finder 扫描提示条目：真实回执对照（丢根 2 + 根截断 ⇒ 两条提示）/ 零值对照（丢根 0 + 未截断 ⇒ 无提示）/ 字段名对照（把 rootsTruncated 读成 truncated ⇒ 文案必判红）/ 调用点不许悬空；实现直接切自 src/scripts/finder.js，不复制第二份' },
   { file: 'check-escape-delegation.mjs', reason: 'escape 委托：非委托样本自检' },
   { file: 'check-html-contract.mjs', reason: 'HTML 合同：内联 script 样本自检' },
@@ -28,7 +30,7 @@ const REGISTRY = [
   { file: 'check-cleanup-aggregates.mjs', reason: '磁盘清理页体积汇总单一口径（dedupSize）：三个判定器（judgeAggregates 累加形态 / judgeDedupShape 本体形态 / judgeCallSites 调用点）与实仓扫描共用同一实现——12 条累加形态样本（F1 reduce 内联相加 / F2 sizeNumber 映射后紧跟 reduce 相加 / F3 体外 += / F3b 体外 x = x + / F4 两条体积相加写进 Map 各配违例并**逐条断言命中数**、同页两形态必须报 2 条、模板串插值里的累加必抓、正则字面量字符类不得让扫描器原地打转（真挂过）、dedupSize 体内累加与计数类 reduce、注释里的违例形态三类合规样本必须 0 命中）+ 5 条本体样本（S1 引用 overlapsWith / S2 扣减走 sizeNumber / S3「两端都在集合内」的门 / S4 非负兜底，逐条被摘必红、齐备本体 0 问题）+ 3 条计数与解析对照（四处调用点数得全、声明自身不计入、无本体必须返回 null）；真仓侧豁免台账双向咬合：两条锚点各命中 1 处并各认领一条违规，登记不命中即红；**调用点地板与页内 sizeNumber 扫描面地板两组靠真仓现算兜底**（无合成盘上样本）' },
   { file: 'check-rule-schema-sync.mjs', reason: '契约表⇄Rust 装载侧：5 条判定器自检（干净样本 / token 注入 / 缺键查询 / 路径漂移 / 剥离失败）' },
   { file: 'check-elapsed-facts.mjs', manual: true, reason: 'E4 耗时字段：7 条违规样本自检（B 反向判定 / C 失败路径计时）' },
-  { file: 'check-optimizer-write-contract.mjs', reason: 'v6-K20：G 组 20 条样本喂**生产同一份**判据（judgeSideTableDiff / judgeStoreSeparation / judgeOptionKeys / judgeProvenanceCoverage / judgeDefaultItem；含 2 条干净样本防判据永远红）——生产与对照不再有两套实现，「全通过」日志已移到 G 组之后' },
+  { file: 'check-optimizer-write-contract.mjs', runtimeControl: true, reason: 'v6-K20：G 组样本按现算总数喂**生产同一份**判据（judgeSideTableDiff / judgeStoreSeparation / judgeOptionKeys / judgeProvenanceCoverage / judgeDefaultItem；含干净样本防判据永远红）——生产与对照不再有两套实现，「全通过」日志已移到 G 组之后' },
   { file: 'check-subwindow-init.mjs', reason: '副窗初始化：residue 页两条正向对照（注入坏绑定 + 抽掉真实 id）；models/process 页一条坏绑定对照，抽件对照因无 warn 通道显式 SKIP 并计入汇总' },
   { file: 'check-subwindow-css.mjs', reason: '子窗 CSS 按需：S1 样式表序列 / S2 引用面 / S3 层叠翻转 / S4 token 真源四组各配正反样本 + 解析器形状对照（@media 内层与花括号字符串）+ S3b ds.css⇄main.css 同特异度棘轮对照（新增键必抓、收缩不误红、消失键可计数；基线由 --emit-ds-pairs 现算回填，不手抄、不走环境变量）' },
   { file: 'check-a11y.mjs', reason: '可达性四断言：勾选框三属性 / aria-live 宿主 / data-tip 反 title / RM 归零覆盖面各配正反样本自检 + 三类扫描面地板' },
@@ -55,10 +57,10 @@ const REGISTRY = [
   { file: 'check-tests-helper-parity.mjs', reason: 'X1-M06：tests/ 底座 helper 单一真源——判定器抽 auditContent 纯函数（剥注释后判本地重复定义 / 调用未接真源），6 条合成样本与之共用同一实现（抄 fn main_window() 与 pub async fn invoke() 必红、use common 与全路径 common:: 放行、调 helper 未接真源必红、注释里的定义不误伤）；另设真源清单地板防塌缩恒绿' },
   // T1b-M02（v7.2 C09）：三条其实已带对照块、却因理由句写「缺合成样本」滞留 PENDING——
   // 对照块坏了没人红。迁入 REGISTRY 后受第 1/2 组实跑核验。
-  { file: 'check-item-intro.mjs', reason: '对拍型：item-intro.json 多形态 ⇄ 前端消费口径（内置对照块随跑随验，2026-10-20 从 PENDING 迁入）' },
+  { file: 'check-item-intro.mjs', runtimeControl: true, reason: '对拍型：item-intro.json 多形态 ⇄ 前端消费口径（内置对照块随跑随验，2026-10-20 从 PENDING 迁入）' },
   { file: 'check-test-sandbox.mjs', reason: 'D 轮（2026-10-25）新增：测试沙箱必须走自删守卫。判定器 judge() 与门禁共用同一实现，内置三向合成对照——未登记新文件 / 计数上升 / 守卫实现整体消失，任一失效即红；另钉守卫本体活性（impl Drop + remove_dir_all 缺一即红，防「①全绿而守卫已被掏空」）' },
-  { file: 'check-optimizer-security.mjs', reason: '找违规型：扩库夹带关闭安全组件即红（内置对照块随跑随验，2026-10-20 从 PENDING 迁入；T1f-M02 起 sc disabled / Set-Service / 变量数组 / 结构化 service / restore 步逐形态有正反样本）' },
-  { file: 'check-optimizer-groups-sidecar.mjs', reason: '对拍型：分类侧表 ⇄ 渲染层兜底常量（内置 6 条对照样本随跑随验，2026-10-20 从 PENDING 迁入）' },
+  { file: 'check-optimizer-security.mjs', runtimeControl: true, reason: '找违规型：扩库夹带关闭安全组件即红（内置对照块随跑随验，2026-10-20 从 PENDING 迁入；T1f-M02 起 sc disabled / Set-Service / 变量数组 / 结构化 service / restore 步逐形态有正反样本）' },
+  { file: 'check-optimizer-groups-sidecar.mjs', runtimeControl: true, reason: '对拍型：分类侧表 ⇄ 渲染层兜底常量（内置 6 条对照样本随跑随验，2026-10-20 从 PENDING 迁入）' },
   { file: 'check-assets-used.mjs', reason: 'T1d-M06：资源引用判定抽 referenceHits，注释提及不计 / 真实字符串引用命中 / vendor 已排除三向对照随跑随验' },
   { file: 'check-data-parity.mjs', reason: 'T1b-M05：第 6 组 prune 覆盖改用 blankNonCode，注释-only token 必红的正向对照随跑随验' },
   { file: 'check-optimizer-dynamic.mjs', reason: 'T1f-M01：armSlice 按本臂实际缩进切边界，相邻 match 臂字段不得越界作证的正向对照随跑随验' },
@@ -70,7 +72,7 @@ const REGISTRY = [
   { file: 'check-fixture-freshness.mjs', reason: '夹具新鲜度：比对器 isFresh 正反合成样本钉方向（反相 = 全绿假象）；主断言「盘上 ⇄ 生成器导出逐字节」的手改破坏由真破坏验证兜底' },
   // B0（2026-10-24 全仓重审方案 §4 A-6…A-9）：四道「先让后续修复能被判红」的施工前置门禁，
   // 各自内置合成对照块且每次运行都跑，落地即入本表受第 1/2 组实跑核验。
-  { file: 'check-degraded-consumption.mjs', reason: 'A-6 degraded 消费契约：发射面现算 ⇄ 通道表三态（consumed/pending/exempt）双向咬合——consumed 的 anchor 必须在源文件命中、pending 兑现后不回收必红；对照块验证「status 白名单判定本身不失真」（非法值恰好 1 个）。B1 已把 paths_load 从 pending 转 consumed，转换当天门禁即要求锚点存在' },
+  { file: 'check-degraded-consumption.mjs', runtimeControl: true, reason: 'A-6 degraded 消费契约：发射面现算 ⇄ 通道表三态（consumed/pending/exempt）双向咬合——consumed 的 anchor 必须在源文件命中、pending 兑现后不回收必红；对照块验证「status 白名单判定本身不失真」（非法值恰好 1 个）。B1 已把 paths_load 从 pending 转 consumed，转换当天门禁即要求锚点存在' },
   { file: 'check-delete-root-guard.mjs', reason: 'A-7 删除根守卫：5 组合成样本与真仓扫描共用同一 build() 判据（read_dir+删除且无 inspect_root 必红、caller 先判根放行、**只在注释里写判定仍必红**、1 跳穿透必红、纯枚举工具放行）；TRANSITION 豁免表双向咬合（代码补上判定但台账未回收 ⇒ 红）+ 对象地板 5 条' },
   { file: 'check-ignored-isolation.mjs', reason: 'A-8 ignored 探针隔离：4 组合成样本与真仓解析共用同一判据（第 45 行才定根必红、注释里的属性不算属性、定根在首语句放行、纯函数不误报）；与 `cargo test -- --ignored --list` 的条数对账靠对象地板兜底' },
   { file: 'check-async-exits.mjs', reason: 'A-9 前端 await/出口：3 组合成样本与真仓扫描共用同一判据（置 busy 后 try 前有 await 必红、置 busy 立刻 try 放行、**await 只出现在注释里不得判红**——反向也要成立）；EXEMPT 台账双向咬合' },
@@ -84,6 +86,9 @@ const REGISTRY = [
   // violations()；退役 id / 退役标题 / 轮次术语三类命中都必须报红并点名条目与字段。
   { file: 'check-user-copy-policy.mjs', reason: 'P1-a 用户文案纪律：合规样本放行、指向退役项 + 夹带轮次术语的样本必红（对照块每次运行都跑）；真仓扫描走同一判据，命中即点名条目与字段；判定只作用在活跃目录（item-intro.json 故意保留已退役项介绍，不在判据面内）' },
   { file: 'check-treemap-layout.mjs', reason: 'T1d-L07：squarified 布局数学性质带内置对照（面积和/包含关系/最坏长宽比三组，破坏判据即红）；2026-11-01 从 PENDING 迁入' },
+  { file: 'check-silent-catch.mjs', reason: 'P2（A2-L03 / F3-L16 / F4c-L18）：前端空 catch / 仅 console 的失败出口等于「失败无声」——回执丢了、提示没了，用户只看到界面没反应。本门禁钉住「失败出口必须留痕（log / toast）」，带内置 good/bad 正向对照（判据失真即红）' },
+  { file: 'check-material-parity.mjs', reason: 'R6b-L24：MATERIALS 去 none ⇄ 四张 data-material 卡片 ⇄ none 与总开关关闭态等价；内置卡片/枚举/开关三类反样本，判据失真即红' },
+  { file: 'check-optimizer-subitem-contract.mjs', runtimeControl: true, expectedControlLines: 6, reason: 'T1f-L05：可自选目标契约已有运行时自检对照；PENDING 迁 REGISTRY 后删掉任一自检块必红' },
 ];
 
 // MUST_RUN 里尚未配「内置正向对照自检」的存量门禁（T1-M05，2026-10-09 现算 33 条）。
@@ -95,19 +100,16 @@ const PENDING_CONTROLS = [
   { name: 'check-channel-map', reason: '对拍型：桥接表 ⇄ Rust 通道集合双向比对，缺「删/添一侧必须红」的合成样本' },
   { name: 'check-guard-tiers', reason: '对拍型：档位表 ⇄ 命令体 guard 调用逐条核对，缺合成样本' },
   // check-layering 已于 2026-10-18 v6 P2 配好判定器自检并迁入 REGISTRY（本表只减不增）。
-  { name: 'check-delete-callsites', reason: '棘轮+地板：超基线/扫描面归零即红；缺「人为加一行 remove_file 必须红」的合成样本' },
   // check-fail-closed 已于 2026-10-18 v6 P2 配好 A/B 判定器自检并迁入 REGISTRY（本表只减不增）。
   { name: 'check-residue-rule-contract', reason: '对拍型：卸载残留规则库 ⇄ 执行侧契约，缺合成样本' },
   { name: 'check-scan-rule-diff', reason: '差分型：规则改动 → 命中集差分（按设计 spawn cargo test，重编译成本高），对照方案待定' },
   { name: 'check-ps-callsites', reason: '对拍型：PS 调用点 ⇄ 三张登记表（含超时秒数逐点核对），缺合成样本' },
-  { name: 'check-ps-extraction', reason: '对拍型：JS 源 ⇄ .ps1 正文逐字（文本层 + --run 行为层双档），缺「单字节漂移必须红」样本' },
   { name: 'check-csp-consistency', reason: '对拍型：meta CSP ⇄ 三子窗副本逐字一致，缺合成样本' },
   // check-css-tokens 已于 2026-10-18 v6 P2 配好三组判定器自检并迁入 REGISTRY（本表只减不增）。
   // check-asset-size 已于 2026-10-14 v3 P2-I 配好内置正向对照并迁入 REGISTRY（本表只减不增）。
   // check-item-intro / check-optimizer-security / check-optimizer-groups-sidecar
   // 已于 2026-10-20（T1b-M02）证实各自带对照块，迁入 REGISTRY（本表只减不增）。
   { name: 'check-desktop-entry', reason: '对拍型：桌面入口 ⇄ 发布暂存目录合并状态，缺合成样本' },
-  { name: 'check-optimizer-subitem-contract', reason: '对拍型：可自选目标契约 ⇄ 侧表，缺合成样本' },
   // T1a-M13：上面这条曾逐字重复登记（PENDING 计数虚高、条数等式对不上 MUST_RUN
   // 且 Set 差集看不见重复）。重复行已删，dup 断言见下方断言 4b。
   { name: 'check-version-sync', reason: '对拍型：版本号四处一致，缺「单处漂移必须红」样本' },
@@ -133,6 +135,7 @@ console.log('=== 正向对照管辖门禁 ===\n');
 // 「对照」）——写得出这行 = 判定器真有可判红的对照样本。
 const missingSelfTest = [];
 const brokenRun = [];
+const runtimeControlMissing = [];
 // v5 批次 9（门禁候选 4）：manual: true = 该门禁的对照形态是「人工/真破坏验证」
 // （自检形态不在机检识别集内），显式登记而非静默漏判；机检条目数收口见第 1 组断言。
 const manualEntries = [];
@@ -150,26 +153,17 @@ for (const e of REGISTRY) {
     continue;
   }
   const clean = blankNonCode(text, 'js', { keepStrings: true });
-  // 两种真实对照形态都要认：
-  // ① check(/g.fail( 调用窗口内含「对照/正向/判红」（check 常跨行 ⇒ 起点后 400 字符窗口）；
-  // ② fail-closed 对照串（`正向对照失败` 等 console.error+exit 形态，如
-  //    check-escape-delegation / check-html-contract——字符串字面量在代码里，剥注释后仍在）。
-  // T1a-M12：魔法词分支要求同文件存在「对照失败的失败载体」——g.fail / check(false) /
-  // process.exit(1) 三者之一。纯 console.error 的恒真桩（探针 P8 形态：对照失败只打印、
-  // 退出码恒 0）不再被认成有对照；g.fail 委托形态（failed++ ⇒ finish 收口）认可。
+  if (!e.runtimeControl) {
+    manualEntries.push(e.file);
+    continue;
+  }
   const hasExplicitSelfTest =
     /\bPOSITIVE_CONTROLS\s*=/.test(clean) &&
     /\bexpect\s*:/.test(clean) &&
     /\bc\.expect\s*\(\s*c\.run\s*\(\s*\)\s*\)/.test(clean);
-  const hasRealControl =
-    hasExplicitSelfTest ||
-    (/正向对照失败|本门禁失效|必须判红|必须放行|永远不会被测坏|坏成永远放行|判定器没抓住|判定器误红|判据失灵/.test(clean) &&
-      /\bg\.fail\s*\(|process\.exit\(\s*1\s*\)|process\.exit\(main\(\)\)|check\(\s*false/.test(clean)) ||
-    [...clean.matchAll(/(?:^|\n)\s*(?:check|g\.fail)\s*\(/g)].some(
-      (m) => /对照|正向|判红/.test(clean.slice(m.index, m.index + 400)),
-    );
-  if (!hasRealControl) {
-    missingSelfTest.push(`${e.file}（${e.reason}）—— 剥注释后无任何 check/fail 型对照断言行`);
+  const hasRuntimeControlOutput = /console\.log\(\s*['"]对照:/.test(clean);
+  if (!hasRuntimeControlOutput && !hasExplicitSelfTest) {
+    missingSelfTest.push(`${e.file}（${e.reason}）—— 剥注释后无统一前缀 对照: 的运行时输出`);
     continue;
   }
   // T1a-L09：spawn 无 timeout ⇒ 任一登记门禁挂住（等子进程/网络）会让本管辖门禁
@@ -177,6 +171,10 @@ for (const e of REGISTRY) {
   const r = spawnSync(process.execPath, [p, ...(e.selfTestArgs || [])], {
     cwd: ROOT, encoding: 'utf8', timeout: 5 * 60 * 1000,
   });
+  const controlLines = `${r.stdout || ''}`.split('\n').filter((line) => line.startsWith('对照:'));
+  if (controlLines.length < (e.expectedControlLines ?? 1)) {
+    runtimeControlMissing.push(`${e.file} 运行时输出 ${controlLines.length} 行 对照:，少于登记 ${e.expectedControlLines ?? 1} 行`);
+  }
   if (r.status !== 0) {
     brokenRun.push(`${e.file} 执行 exit ${r.status ?? 'null'}${r.error ? `（${r.error.code}）` : ''}`);
   }
@@ -188,8 +186,13 @@ for (const e of REGISTRY) {
 }
 check(
   missingSelfTest.length === 0,
-  `1. ${REGISTRY.length - manualEntries.length} 个机检型门禁均内置真实对照断言（剥注释后可判）+ ${manualEntries.length} 个显式登记人工/真破坏验证`,
+  `1. ${REGISTRY.filter((e) => e.runtimeControl && !e.manual).length} 道运行时对照门禁均输出统一前缀 对照:（剥注释后可判）+ ${manualEntries.length} 道沿用既有机检/人工验证`,
   missingSelfTest.join('；'),
+);
+check(
+  runtimeControlMissing.length === 0,
+  '1b. 登记门禁运行时统一前缀 对照: 达到登记条数（对照行必须来自真实执行路径）',
+  runtimeControlMissing.join('；'),
 );
 check(
   brokenRun.length === 0,

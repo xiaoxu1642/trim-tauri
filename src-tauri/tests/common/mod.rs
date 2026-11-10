@@ -8,7 +8,7 @@
 //! 用法（tests/<name>.rs 顶部）：
 //! ```text
 //! mod common;
-//! use common::{main_window, invoke, ipc_fire_no_assert};
+//! use common::{main_window, invoke};
 //! ```
 //!
 //! 约束（与 ipc_smoke.rs 文件头一致，改动前先读那里）：
@@ -161,17 +161,7 @@ impl TestDataGuard {
     }
 }
 
-/// C08（v7.2 X1-M05）：清空全部快照槽（测试底座隔离出口）。
-///
-/// 槽是进程级 static，并行用例共用同一 label 槽——helper 只给出口，
-/// **并发语义由调用方声明**：快照类断言（依赖「某窗最近一次扫描」的用例）
-/// 不得对同一 label 并发跑；确实要并行的域先确认各自的 `domain_key` 不同。
-pub fn reset_snapshots() {
-    trim_tauri_lib::engine::snapshot::clear_all();
-}
-
-/// C08（v7.2 X1-M04）：**缺样本的统一出口**——打印跳过标记、记入进程台账，
-/// 返回 `true`（调用方据此 `return`：本条不判红，也不冒充通过）。
+/// C08（v7.2 X1-M04）：**缺样本的统一出口**——打印跳过标记。
 ///
 /// 修的是同一份文件里两个相反方向的病态：
 /// - 真机组（`--ignored`）：本机没有样本时 `assert!(!x.is_empty())` 直接判红，
@@ -179,15 +169,12 @@ pub fn reset_snapshots() {
 /// - 快速组：缺文件时 `Err(_) => {}` 静默只剩形状断言，用例自述的回归目的
 ///   （如条数对拍）根本没跑，却与跑全了的一样计 ok（§4.1 定义的碰巧绿）。
 ///
-/// 台账（进程级 Vec）让「本轮哪些判据无对象」可点名；`eprintln!` 带
-/// `⚠ [skip-sample]` 前缀，发布前门禁按仓库约定 `--nocapture` 跑即可见。
-pub fn skip_and_record(what: &str) -> bool {
-    static SKIPPED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// A14（X1-L02）：删掉返回 `true` 与进程级台账 —— 全部 10 处调用点（取数命令：
+/// `rg -n 'skip_and_record\(' src-tauri/tests`）都是
+/// 「调用后 `return`」，返回值没人读；台账写进去也从不被读（唯一出口是 stderr）。
+/// `eprintln!` 带 `⚠ [skip-sample]` 前缀，发布前门禁按仓库约定 `--nocapture` 跑即可见。
+pub fn skip_and_record(what: &str) {
     eprintln!("⚠ [skip-sample] {what}");
-    if let Ok(mut v) = SKIPPED.lock() {
-        v.push(what.to_string());
-    }
-    true
 }
 
 /// 四个子窗 label（剔除主窗），从 `engine::guard::APP_WINDOWS` 派生——
@@ -204,22 +191,6 @@ pub fn sub_windows() -> Vec<&'static str> {
     // 二进制里生效，单独 `cargo test --test ipc_smoke` 时无兜底）。
     assert!(!list.is_empty(), "APP_WINDOWS 里没有任何子窗 —— 子窗档位断言会退化成 0 对象假绿");
     list
-}
-
-/// 经真实 IPC 调用链发一条命令（**不取回执**——只用于「别被拒杀」的档位场景）。
-///
-/// X1-L01（v7.2 C08）：本 helper **不构成断言**——回执被整体丢弃，
-/// 「命令跑没跑、成没成」一概不知。原名叫 `ipc`，与同文件的 `invoke` /
-/// `invoke_text` 摆在一起时，读起来像第三条取证通道，`AGENTS.md` §4.2 的
-/// 单一真源清单也曾据此把它当断言件引用。改名 `ipc_fire_no_assert` 让
-/// 「不开火验证」写在名字上：调用它之后必须另配 `invoke_text` +
-/// `assert_guard_passed`（或明确的负例断言），否则该场景等于没测。
-///
-/// 现算全仓 0 引用（保留是为档位场景的「只求不拒杀」形态留件，不是死代码——
-/// 一旦出现调用方而没配断言，这条注释就是它的对照判据）。
-pub fn ipc_fire_no_assert(window: &WebviewWindow<MockRuntime>, cmd: &str, args: Value) {
-    let req = ipc_request(cmd, args);
-    let _ = get_ipc_response(window, req);
 }
 
 /// 经真实 IPC 调用链发一条命令并取回返回体（JSON）。
@@ -285,6 +256,72 @@ pub fn message_of(res: &Value) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string()
+}
+
+/// 跑一个子进程并等待结束；超时则杀整棵树并返回 `Err`。
+///
+/// X1-L01（v7.2 X1 一族）：测试里裸 `Command::new(...).output()` 没有超时，
+/// 被测命令占住管道时整轮 `cargo test` 会永久挂住（CI 上表现为「卡住」而不是「一条红」）。
+/// 生产侧的同一纪律由 `engine::pwsh::run_inbox_script` 收口，测试侧收在这里。
+///
+/// 单一真源在 `trim_tauri_lib::engine::testcmd`（库内测试与集成测试共用同一实现）；
+/// 本函数只是把它包一层，省得每个调用点都写 `run_test_cmd(&mut cmd, dur)`。
+pub fn run_cmd(cmd: &mut std::process::Command, timeout: std::time::Duration) -> std::result::Result<std::process::Output, String> {
+    trim_tauri_lib::engine::testcmd::run_test_cmd(cmd, timeout)
+        .map_err(|e| e.to_string())
+}
+
+/// `run_cmd` 的常见时限：本地 `reg.exe` / `cmd /C` 是毫秒级，10s 足够且不会挂住整轮验收。
+pub const CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// HKCU 探针键守卫（A14 / X1-L05）：建 `HKCU\Software\Trim\<sub>` 并在离开作用域时删掉整键。
+///
+/// 为什么要有：此前探针用 `reg delete /v <值名>` 收尾 —— **只删值，键壳留着**，
+/// 于是 `HKCU\Software\Trim\m2-binary-probe` 这类空键在盘上越攒越多；
+/// 写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的那批更糟：
+/// 收尾只删值名，值名写错一次就永久留一条自启项（用户看到的是「我什么时候装过这个」）。
+///
+/// 语义：
+/// - 构造时**先清残留**（同名键可能来自上一次被强杀的跑批）再 `reg_key_ensure` 建出来；
+/// - `Drop` 删**整键**（不是删值）——探针在自己的键下，不碰任何系统键；
+/// - 只动 `HKCU\Software\Trim\` 这棵子树，不写 `CurrentVersion\Run` 等真实系统位置。
+///
+/// ⚠ 用它写的必须是**探针自己的键**。若被测行为要求写 `CurrentVersion\Run`
+/// （如启动项启用/禁用），那类用例仍要写真实键 —— 但必须用**独立值名**，
+/// 收尾删值并核对键内不再有该值名。
+pub struct TrimProbeKey {
+    sub: String,
+}
+
+impl TrimProbeKey {
+    /// 建 `HKCU\Software\Trim\<sub>` 探针键（清残留 → 建键），离开作用域即删。
+    pub fn new(sub: &str) -> Self {
+        use trim_tauri_lib::engine::native::{reg_key_ensure, reg_key_remove};
+        let full = format!("Software\\Trim\\{sub}");
+        // 先清残留：上一次跑批被强杀时键还留在盘上，直接建会把上次的值当本次夹具。
+        let _ = reg_key_remove(
+            trim_tauri_lib::engine::native::hive_hkcu(),
+            &full,
+            true,
+        );
+        assert!(
+            reg_key_ensure(trim_tauri_lib::engine::native::hive_hkcu(), &full),
+            "探针键建不出来：HKCU\\{full}"
+        );
+        TrimProbeKey { sub: full }
+    }
+
+    /// 探针键的完整子键路径（`Software\Trim\<sub>`）。
+    pub fn sub(&self) -> &str {
+        &self.sub
+    }
+}
+
+impl Drop for TrimProbeKey {
+    fn drop(&mut self) {
+        use trim_tauri_lib::engine::native::{hive_hkcu, reg_key_remove};
+        let _ = reg_key_remove(hive_hkcu(), &self.sub, true);
+    }
 }
 
 /// 构造一条最小可用的 InvokeRequest。

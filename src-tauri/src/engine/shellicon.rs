@@ -100,6 +100,34 @@ pub fn guard_icon_source(path: &Path) -> Option<&'static str> {
     if raw.starts_with("::") {
         return Some("外壳命名空间路径（:: 前缀）不作为图标来源");
     }
+    // R6b-M16：UNC（`\\server\share` / `//server/share` / `\\?\UNC\server\share`）
+    // 必须拒 —— 它让外壳去**另一台机器**取图标，既不是本机路径语义，
+    // 也会把「点一下图标」变成一次网络往返（离线时外壳可能长时间挂住）。
+    // 这一条必须拦在归一化之前：归一化会把 UNC 折成「本机 UNC 形态」而放行。
+    // 设备路径（`\\.\PhysicalDrive0` / `\\?\Volume{...}`）**不是 UNC** ——
+    // 它们交给 `normalize_for_compare` 的 fail-closed 分支（「路径形态无法判定」），
+    // 不能被这里提前吞成 UNC 文案，否则测试与日志都分不清是哪种形态。
+    let raw_norm = raw.replace('/', "\\");
+    // `\\?\C:\...` 是 verbatim **本机盘符**路径（合法图标来源，不能当 UNC 拒）；
+    // `\\?\UNC\...` 才是远程共享。
+    let verbatim_local = raw_norm
+        .strip_prefix("\\\\?\\")
+        .map(|rest| {
+            let bytes = rest.as_bytes();
+            bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+        })
+        .unwrap_or(false);
+    if raw_norm.starts_with("\\\\")
+        && !verbatim_local
+        && !raw_norm.starts_with("\\\\.\\")
+        && !raw_norm.starts_with("\\\\?\\Volume")
+    {
+        return Some("UNC / 远程共享路径不作为图标来源");
+    }
+    // R6b-M16：UNC（`\\server\share` / `//server/share` / `\\?\UNC\server\share`）
+    // 必须拒 —— 它让外壳去**另一台机器**取图标，既不是本机路径语义，
+    // 也会把「点一下图标」变成一次网络往返（离线时外壳可能长时间挂住）。
+    // 这一条必须拦在归一化之前：归一化会把 UNC 折成「本机 UNC 形态」而放行。
     let n = crate::engine::protect::normalize_for_compare(&raw);
     if !n.ok {
         return Some("路径形态无法判定（设备路径 / 不可折回命名空间），已拒绝");
@@ -240,11 +268,14 @@ fn cache_key(channel: &str, path: &Path) -> Option<String> {
                 .ok()?
                 .duration_since(std::time::UNIX_EPOCH)
                 .ok()?
-                .as_secs(),
+                // R6b-L21：旧写法截成**秒** ⇒ 同一秒内改过的文件（安装器批量落盘、
+                // 更新替换）会命中上一轮的图标缓存，用户看到的是旧图标。
+                // 改用纳秒精度，键随每次落盘变化。
+                .as_nanos(),
             meta.len(),
         )
     } else {
-        (0, 0)
+        (0u128, 0)
     };
     let lowered = path.to_string_lossy().to_lowercase();
     let full = crate::engine::hash::sha256_bytes(
@@ -529,6 +560,14 @@ mod tests {
             let got = guard_icon_source(Path::new(h));
             assert!(got.is_some(), "命名空间约束放过了 {h:?}");
         }
+        // R6b-M16：UNC 现在属于**被拒**一类（旧口径把它算合法放行，已被本轮取代）——
+        // 图标请求会去另一台机器取，等于把「点一下图标」变成一次网络往返。
+        for unc in [r"\\srv\share\app.dll", r"//srv/share/app.dll"] {
+            assert!(
+                guard_icon_source(Path::new(unc)).is_some(),
+                "UNC 必须被图标闸拒绝：{unc:?}"
+            );
+        }
         // 两条公开入口自己也要在**触盘之前**把它拒掉，且点名理由
         let dev = first_icon_data_url(Path::new(r"\\.\PhysicalDrive0")).unwrap_err();
         assert!(dev.contains("图标来源不受信"), "PE 通道未走闸门: {dev}");
@@ -543,7 +582,6 @@ mod tests {
             r"C:\Program Files\Some App\app.exe".to_string(),
             r"C:\Some Dir\icon.ico".to_string(),
             r"C:\Program Files\Some App".to_string(),
-            r"\\srv\share\app.dll".to_string(),
         ];
         if has_windir {
             // SystemRoot 取不到时不塞这条：拼出来的是「\System32\…」这种非绝对串，
@@ -587,8 +625,8 @@ mod tests {
 
     #[test]
     fn 缓存键区分通道且对内容变化敏感() {
-        let dir = std::env::temp_dir().join(format!("trim-icache-key-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let _sb = crate::testutil::Sandbox::new(&format!("icache-key-{}", std::process::id()));
+        let dir = _sb.path().to_path_buf();
         let p = dir.join("app.exe");
         std::fs::write(&p, b"hello").unwrap();
 
@@ -620,13 +658,12 @@ mod tests {
         // 不存在的目标没有键——调用方走直接提取透传原错误，不许拿残键乱命中
         assert!(cache_key("shell", &dir.join("nope.exe")).is_none());
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn 损坏缓存按未命中处理并删除() {
-        let dir = std::env::temp_dir().join(format!("trim-icache-corrupt-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let _sb = crate::testutil::Sandbox::new(&format!("icache-corrupt-{}", std::process::id()));
+        let dir = _sb.path().to_path_buf();
         std::fs::write(dir.join("abcd.png"), b"not a png").unwrap();
         assert!(cached_png(&dir, "abcd").is_none(), "非 PNG 字节不许当命中交出去");
         assert!(!dir.join("abcd.png").exists(), "损坏缓存必须被删，否则这个键永远命中坏文件");
@@ -634,13 +671,12 @@ mod tests {
         std::fs::write(dir.join("beef.png"), PNG_MAGIC).unwrap();
         assert!(cached_png(&dir, "beef").is_some(), "魔数合法即视为可服务（读取侧只设魔数闸）");
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn 超水位回收最旧且不碰外来文件() {
-        let dir = std::env::temp_dir().join(format!("trim-icache-prune-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let _sb = crate::testutil::Sandbox::new(&format!("icache-prune-{}", std::process::id()));
+        let dir = _sb.path().to_path_buf();
         let name = |i: usize| format!("{i:016x}.png");
         for i in 0..(CACHE_PRUNE_THRESHOLD + 10) {
             std::fs::write(dir.join(name(i)), PNG_MAGIC).unwrap();
@@ -662,7 +698,6 @@ mod tests {
         assert!(dir.join(name(CACHE_PRUNE_THRESHOLD + 9)).exists(), "最新缓存必须保留");
         assert!(outsider.exists(), "外来文件不许动");
 
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 实机端到端（发布前门禁）：同一路径第二次提取必须来自磁盘缓存。
@@ -685,5 +720,95 @@ mod tests {
 
         let second = file_icon_data_url(&target).expect("二次提取失败");
         assert_eq!(first, second, "同键两次结果必须逐字节一致（第二次应来自缓存）");
+    }
+
+    /// R6b-L21：图标缓存键必须区分**同秒内**的不同 mtime。
+    ///
+    /// 旧写法把 mtime 截成秒 ⇒ 同一秒里落盘/替换的两个文件（同 size）算出同一个键，
+    /// 用户看到的是上一轮的旧图标。
+    /// 判红自证：把 `as_nanos()` 改回 `as_secs()` ⇒ 本用例红。
+    #[test]
+    fn icon_cache_key_distinguishes_subsecond_mtime() {
+        let _sb = crate::testutil::Sandbox::new(&format!("icon-key-{}", std::process::id()));
+        let dir = _sb.path().to_path_buf();
+        let a = dir.join("a.bin");
+        let b = dir.join("b.bin");
+        std::fs::write(&a, b"12345678").expect("写样本失败");
+        std::fs::write(&b, b"12345678").expect("写样本失败");
+
+        let key_a = cache_key("shell", &a).expect("键生成失败");
+        // 把 b 的 mtime 推到与 a 同一秒内、但纳秒不同。
+        let meta_a = std::fs::metadata(&a).expect("读元数据失败");
+        let mtime_a = meta_a.modified().expect("读 mtime 失败");
+        let bumped = mtime_a + std::time::Duration::from_nanos(500);
+        set_mtime_exact(&b, bumped);
+
+        let key_b = cache_key("shell", &b).expect("键生成失败");
+        assert_ne!(
+            key_a, key_b,
+            "同秒内不同纳秒的两个同尺寸文件必须算出不同缓存键"
+        );
+
+    }
+
+
+    /// 测试辅助：把文件修改时间拨到指定时刻（SetFileTime，100ns 精度）。
+    #[cfg(windows)]
+    fn set_mtime_exact(p: &std::path::Path, t: std::time::SystemTime) {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{CloseHandle, FILETIME, GENERIC_WRITE};
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, SetFileTime, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_SHARE_MODE, OPEN_EXISTING,
+        };
+        let wide: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let h = unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                GENERIC_WRITE.0,
+                FILE_SHARE_MODE(1 | 2),
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
+                None,
+            )
+        }
+        .expect("CreateFileW 失败");
+        let units = t
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("时间须在 Unix 纪元之后")
+            .as_nanos() as u64
+            / 100
+            + 116_444_736_000_000_000;
+        let ft = FILETIME {
+            dwLowDateTime: (units & 0xFFFF_FFFF) as u32,
+            dwHighDateTime: (units >> 32) as u32,
+        };
+        unsafe {
+            SetFileTime(h, Some(&ft), Some(&ft), Some(&ft)).expect("SetFileTime 失败");
+            let _ = CloseHandle(h);
+        }
+    }
+    /// R6b-M16：图标来源闸必须拒 UNC（`\\` / `//` 前缀）。
+    ///
+    /// UNC 会让外壳去**另一台机器**取图标 —— 不是本机路径语义。
+    /// 判红自证：把 `guard_icon_source` 的 UNC 判据去掉 ⇒ 本用例红。
+    #[test]
+    fn icon_source_rejects_unc() {
+        for unc in [
+            r"\\server\share\app.exe",
+            r"//server/share/app.exe",
+            r"\\?\UNC\server\share\app.exe",
+        ] {
+            let reason = guard_icon_source(std::path::Path::new(unc))
+                .expect("UNC 路径必须被图标闸拒绝");
+            assert!(!reason.is_empty(), "拒因不得为空串");
+        }
+        // 本机绝对路径必须放行（闸不能收紧过头打死正常图标）。
+        assert!(
+            guard_icon_source(std::path::Path::new(r"C:\Windows\System32\shell32.dll")).is_none(),
+            "本机绝对路径必须放行"
+        );
     }
 }

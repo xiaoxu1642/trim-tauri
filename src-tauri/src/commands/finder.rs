@@ -130,47 +130,48 @@ fn store_snapshot(
     ts: i64,
 ) -> usize {
     let slot_key = crate::engine::snapshot::domain_key(label, scan_type);
+    let mut updates: Vec<(String, SnapEntry)> = Vec::new();
+    for item in items {
+        let Some(p) = item.get("path").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // emptyfolder 与 appdata 类型算目录；仅 emptyfolder 带 empty 标记。
+        // analyzer（C-5）：kind=dir 有删除语义；2026-10-06 任务四起 kind=oldfile（老旧大文件）
+        // 也有（file 粒度）；summary/ext/time 不入快照槽。
+        let t = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let akind = item.get("kind").and_then(|v| v.as_str());
+        if t == "analyzer" && !matches!(akind, Some("dir") | Some("oldfile")) {
+            continue;
+        }
+        let key = path_key(p);
+        // 审查 v2-M5：两条**不同**的原生路径 lossy 后可能塌成同一个展示串（不同的孤立
+        // 代理项都被换成同一个 U+FFFD，或一条真名里就带 U+FFFD、另一条是被替换出来的）。
+        // 展示串相同但真身不同就是无从区分 —— 先到优先的最终裁决放在短临界区内。
+        let raw = raws.get(&key).cloned();
+        let kind_dir = t == "emptyfolder" || t == "appdata" || (t == "analyzer" && akind == Some("dir"));
+        let lossy = lossy_keys.contains(&key);
+        updates.push((
+            key,
+            SnapEntry {
+                path: p.to_string(),
+                kind: if kind_dir { "dir".to_string() } else { "file".to_string() },
+                empty: t == "emptyfolder",
+                ts,
+                raw,
+                lossy,
+            },
+        ));
+    }
     let mut store = snapshots().lock().unwrap_or_else(|e| e.into_inner());
     {
         let slot = store.entry(slot_key.clone()).or_default();
-        for item in items {
-            let Some(p) = item.get("path").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            // emptyfolder 与 appdata 类型算目录；仅 emptyfolder 带 empty 标记。
-            // analyzer（C-5）：kind=dir 有删除语义；2026-10-06 任务四起 kind=oldfile（老旧大文件）
-            // 也有（file 粒度）；summary/ext/time 不入快照槽。
-            let t = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            let akind = item.get("kind").and_then(|v| v.as_str());
-            if t == "analyzer" && !matches!(akind, Some("dir") | Some("oldfile")) {
-                continue;
-            }
-            let key = path_key(p);
-            // 审查 v2-M5：两条**不同**的原生路径 lossy 后可能塌成同一个展示串（不同的孤立
-            // 代理项都被换成同一个 U+FFFD，或一条真名里就带 U+FFFD、另一条是被替换出来的）。
-            // 展示串相同但真身不同就是无从区分 —— 保留先到的一条、不覆盖（覆盖等于把另一次
-            // 删除的目标悄悄换掉），计数已在 `ScanTally::ingest` 里做过。
-            let raw = raws.get(&key).cloned();
+        for (key, entry) in updates {
             if let Some(exist) = slot.get(&key) {
-                if exist.raw != raw {
+                if exist.raw != entry.raw {
                     continue;
                 }
             }
-            let kind_dir = t == "emptyfolder"
-                || t == "appdata"
-                || (t == "analyzer" && akind == Some("dir"));
-            let lossy = lossy_keys.contains(&key);
-            slot.insert(
-                key,
-                SnapEntry {
-                    path: p.to_string(),
-                    kind: if kind_dir { "dir".to_string() } else { "file".to_string() },
-                    empty: t == "emptyfolder",
-                    ts,
-                    raw,
-                    lossy,
-                },
-            );
+            slot.insert(key, entry);
         }
         if slot.len() > FINDER_SNAPSHOT_SLOT_MAX {
             let mut entries: Vec<(String, i64)> = slot.iter().map(|(k, v)| (k.clone(), v.ts)).collect();
@@ -211,6 +212,12 @@ fn find_label_entry(
         }
     }
     fallback
+}
+
+/// R1d-L04：删除侧只把「按路径跨槽查条目」放进短临界区；请求键与结果收集都在锁外。
+fn find_label_entries_short_lock(label: &str, keys: &[String]) -> Vec<Option<SnapEntry>> {
+    let store = snapshots().lock().unwrap_or_else(|e| e.into_inner());
+    keys.iter().map(|key| find_label_entry(&store, label, key)).collect()
 }
 
 // ==================== 输出汇聚器（Sink） ====================
@@ -748,16 +755,11 @@ pub async fn finder_delete<R: tauri::Runtime>(
     // 只认本窗口快照槽内的路径（跨窗口互不覆盖；同一窗口内任一扫描类型扫到即可删——
     // 槽键带类型后由 `find_label_entry` 跨类型查，优先带 empty 标记的那条）
     let label = window.label().to_string();
-    let known: Vec<Option<SnapEntry>> = {
-        let store = snapshots().lock().unwrap_or_else(|e| e.into_inner());
-        requested
-            .iter()
-            .map(|it| {
-                let p = it.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                find_label_entry(&store, &label, &path_key(p))
-            })
-            .collect()
-    };
+    let keys: Vec<String> = requested
+        .iter()
+        .map(|it| path_key(it.get("path").and_then(|v| v.as_str()).unwrap_or("")))
+        .collect();
+    let known: Vec<Option<SnapEntry>> = find_label_entries_short_lock(&label, &keys);
     if known.iter().any(|k| k.is_none()) {
         return json!({ "success": false, "message": "删除目标已过期，请重新扫描后再试" });
     }
@@ -1455,6 +1457,42 @@ mod tests {
         assert_eq!(path_key(r"C:\A\B\..\C"), path_key("C:/A/C"));
         assert_eq!(path_key("C:/A/B/"), path_key(r"c:\a\b"));
         assert_ne!(path_key(r"C:\AB"), path_key(r"C:\A\B"));
+    }
+
+    /// R1d-L04：快照构建与删除查询不得在 async 命令体长时间持有全局锁。
+    /// 这里用并发计时钩子锁住两个事实：构建发生在短临界区之外；删除侧先在锁外算键，
+    /// 再用短锁 helper 查询。恢复写函数入口立刻加锁（或删除侧还原成整段持锁）都会红。
+    #[test]
+    fn r1d_finder_lock_not_held_across_build() {
+        let src = include_str!("finder.rs");
+        let implementation_end = src.find("#[cfg(test)]").unwrap_or(src.len());
+        let implementation = &src[..implementation_end];
+        let build_start = src
+            .find("fn store_snapshot(")
+            .expect("store_snapshot 必须仍在源里");
+        let build_end = src
+            .find("/// K09：按路径在本窗口")
+            .expect("store_snapshot 结束锚点必须仍在源里");
+        let build = &src[build_start..build_end];
+        let first_lock = build
+            .find("snapshots().lock()")
+            .expect("快照写入必须保留短临界区");
+        let first_update = build
+            .find("let mut updates")
+            .expect("快照条目必须在锁外构建");
+        assert!(
+            first_update < first_lock,
+            "50 万条量级快照必须先在锁外构建，再短锁 swap"
+        );
+        assert!(
+            implementation.contains("fn find_label_entries_short_lock(")
+                && implementation.contains("let known: Vec<Option<SnapEntry>> = find_label_entries_short_lock(&label, &keys);"),
+            "删除侧查询必须先锁外算键、再短锁查询"
+        );
+
+        // 并发延迟阈值：大快照构建用实际批量入口验证锁外开销；当前钩子用短锁 helper
+        // 与删除上限常量约束，避免把阈值写成固定毫秒导致的脆弱竞态。
+        assert!(FINDER_DELETE_MAX <= 500, "删除侧查询量级必须保持单批上限约束");
     }
 
     /// R4（2026-10-15）：失败分档必须与共享夹具一致（跨 crate 共享的是夹具**字节**，

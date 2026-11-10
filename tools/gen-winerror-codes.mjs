@@ -39,6 +39,7 @@ for (const c of WINERROR_CODES) {
   seen.add(c.code);
   for (const k of ['title', 'detail']) {
     if (typeof c[k] !== 'string' || c[k].trim().length === 0) fail(`${c.code} 缺 ${k}`);
+    if (/^\s|\s$/u.test(c[k])) fail(`${c.code} 的 ${k} 不得以空白开头或结尾`);
   }
 }
 

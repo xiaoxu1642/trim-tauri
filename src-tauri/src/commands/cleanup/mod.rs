@@ -1,4 +1,6 @@
-//! cleanup 域（C 批）：cleanup 16 条通道（规则库 / 扫描 / 执行 / 占用检测 / 明细；模块总 17，另含 `cleanup_allow_preview_assets`）
+//! cleanup 域（C 批）：规则库 / 扫描 / 执行 / 占用检测 / 明细。
+//! 通道清单见各文件的 `#[tauri::command]`，以 `lib.rs` 的 `generate_handler!` 为准
+//! （这里不写死条数：命令增减后注释里的数字就会变成假账）。
 //!
 //! 对照 Electron `main.js` 1188-2042（含规则在线更新 1560-1786）。
 //!

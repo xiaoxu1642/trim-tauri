@@ -832,13 +832,10 @@ use super::residue_update::*;
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("keep.txt"), b"x").unwrap();
-        let st = Command::new("cmd")
-            .arg("/C")
-            .arg("mklink")
-            .arg("/J")
-            .arg(&link)
-            .arg(&target)
-            .output();
+        // X1-L01：带超时 + 杀整树（夹具命令挂住时不得拖死整轮验收）。
+        let mut mk_j12_link = Command::new("cmd");
+        mk_j12_link.arg("/C").arg("mklink").arg("/J").arg(&link).arg(&target);
+        let st = crate::engine::testcmd::run_test_cmd(&mut mk_j12_link, std::time::Duration::from_secs(10));
         if !matches!(st, Ok(o) if o.status.success()) {
             eprintln!("[J12] 建 junction 失败（需管理员/开发者模式），本用例跳过（未校验）");
             return;
@@ -1172,7 +1169,7 @@ use super::residue_update::*;
         residue_snapshot_put(label, "dead", vec![json!({ "kind": "reg_key", "target": "HKCU\\Software\\X" })]);
         let both: Vec<String> = residue_snapshots()
             .lock()
-            .map(|g| g.get(label).cloned().unwrap_or_default().1)
+            .map(|g| g.get(label).cloned().unwrap_or_default().2)
             .unwrap_or_default()
             .iter()
             .map(|f| f["target"].as_str().unwrap_or("").to_string())
@@ -1181,7 +1178,7 @@ use super::residue_update::*;
         residue_snapshot_put(label, "dead", vec![json!({ "kind": "reg_key", "target": "HKCU\\Software\\Y" })]);
         let after: Vec<String> = residue_snapshots()
             .lock()
-            .map(|g| g.get(label).cloned().unwrap_or_default().1)
+            .map(|g| g.get(label).cloned().unwrap_or_default().2)
             .unwrap_or_default()
             .iter()
             .map(|f| f["target"].as_str().unwrap_or("").to_string())
@@ -1293,7 +1290,7 @@ use super::residue_update::*;
         assert_eq!(accepted[0]["target"].as_str(), Some(r"HKCU\Software\app0"));
         let stored: Vec<Value> = residue_snapshots()
             .lock()
-            .map(|g| g.get(label).cloned().unwrap_or_default().1)
+            .map(|g| g.get(label).cloned().unwrap_or_default().2)
             .unwrap_or_default();
         assert_eq!(stored.len(), SNAPSHOT_CAP, "槽内总量必须正好是容量上限，不得超");
         // 用**执行侧同一个判据**核（snapshot_has）——测试不另写一份比较（§5.16/N6）
@@ -1549,7 +1546,7 @@ use super::residue_update::*;
     fn r2a_m02_身份现读先于第一个变更() {
         let prod = include_str!("residue.rs").split("#[cfg(test)]").next().unwrap_or("");
         let i_id = prod.find("let identity = residue_identity(&").expect("找不到归属身份现读点");
-        let i_del = prod.find("reg_key_remove(hive, rest, true)").expect("找不到卸载键删除调用点");
+        let i_del = prod.find("reg_key_remove_checked(hive, rest, true)").expect("找不到卸载键删除调用点");
         assert!(
             i_id < i_del,
             "身份必须在删键之前现读：删完再读 DisplayName 恒空，最常见那一批永远学不到（M02）"

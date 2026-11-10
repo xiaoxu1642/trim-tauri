@@ -538,7 +538,7 @@ const BG_PATH_MAX_LEN: usize = 1024;
 /// 目录约束由删除闸（`appearance_bg_delete`）承担，这里只判形状。
 fn is_bg_path_shape(raw: &str) -> bool {
     !raw.trim().is_empty()
-        && raw.len() <= BG_PATH_MAX_LEN
+        && !paths::exceeds_char_len(raw, BG_PATH_MAX_LEN)
         && !raw.chars().any(|c| c.is_control())
         && bg_ext_ok(raw)
 }
@@ -1133,5 +1133,18 @@ mod tests {
             !src_contains(src, &["已知联动缺口", "：`bg-list`"]),
             "模块头又出现了「已知联动缺口」的旧结论"
         );
+    }
+
+    /// R1a-L05：背景图路径长度上限与引擎一致，按字符数判定。
+    #[test]
+    fn r1a_appearance_path_length_uses_chars() {
+        let prefix = r"C:\b\中文\";
+        let ext = ".jpg";
+        let value = format!(
+            "{prefix}{}{ext}",
+            "路".repeat(BG_PATH_MAX_LEN - prefix.chars().count() - ext.chars().count())
+        );
+        assert_eq!(value.chars().count(), BG_PATH_MAX_LEN);
+        assert!(is_bg_path_shape(&value), "1024 个字符的中文路径必须放行");
     }
 }

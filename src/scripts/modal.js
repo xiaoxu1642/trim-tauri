@@ -267,7 +267,7 @@
           <button class="btn ${severity === 'danger' ? 'btn-danger' : (severity === 'warning' ? 'btn-warning' : 'btn-primary')}" data-confirm="ok" type="button">${escapeHtml(confirmText)}</button>`,
         // ⚠️ 焦点落点：统一落在**主按钮**（含高危的红色「仍然执行」）。原口径是高危聚焦「取消」（B10，防回车误触），
         // 2026-10-03 用户实测后推翻：能走到这一步的前提是已经主动点了「立即执行」、确认意愿已表达，
-        // 这时把焦点扣在「取消」上，等于用默认焦点替用户拒绝 —— 用户按回车���
+        // 这时把焦点扣在「取消」上，等于用默认焦点替用户拒绝 —— 用户按回车
         // （肌肉记忆）就变成「拒绝」，表现为「怎么点都不执行」。风险并未丢失，护栏换了更强的位置：① 按钮本身是红色 +
         // 文案是「仍然执行」，不是无脑回车能滑过去的「确定」；② Esc 与点击遮罩/取消键都仍是取消；③ 警示文案由
         // dangerHint 结构化渲染在正文下方，不需要靠焦点位置强调。
@@ -315,10 +315,47 @@
   }
 
   // M2（v3.6.5）M2-6：统一销毁契约（destroy 解绑 MutationObserver + DOMContentLoaded）
+  // C-06（F4a1-L13）：**高危确认的按钮文案单一真源**。
+  //
+  // 为什么按钮不能写动作名（清理 / 删除 / 还原 / 结束进程…）：AGENTS §3 定的高危确认
+  // 口径是「红色按钮 + 『仍然执行』措辞 + 结构化警示 + Esc/遮罩/取消可退」。
+  // 红色按钮上的字一旦写成动作名，用户会把它读成「这是一个『清理』按钮」，
+  // 而不是「这一步不可逆，你确认要执行」——护栏的位置对了，牌子却挂错了。
+  // 动作名（清理/登记/清空回收站…）应当放进**正文**，由正文说清「将要做什么」。
+  //
+  // 例外：按钮直陈其名确实更少歧义的动作（如「清空回收站」——用户要清的是那个具名容器），
+  // 在 tools/check-confirm-danger.mjs 的 DANGER_BUTTON_EXCEPTIONS 里登记理由。
+  var DANGER_CONFIRM_TEXT = '仍然执行';
+
+  // 正文里的动作措辞表：给「确认要 XX」这类正文用同一份字，避免各处自己拼。
+  var DANGER_ACTION_PHRASES = {
+    '清理': '确认要清理',
+    '删除': '确认要删除',
+    '还原': '确认要还原',
+    '恢复': '确认要恢复',
+    '卸载': '确认要卸载',
+    '结束进程': '确认要结束该进程',
+    '重启': '确认要重启',
+    '禁用': '确认要禁用',
+    '隐藏': '确认要隐藏',
+    '应用': '确认要应用',
+    '修复': '确认要修复',
+    '执行': '确认要执行',
+    '创建': '确认要创建',
+    '清空': '确认要清空'
+  };
+
+  // 取动作短语：未登记的动作按原样拼「确认要 XX」。
+  function dangerActionPhrase(action) {
+    return DANGER_ACTION_PHRASES[action] || ('确认要' + action);
+  }
+
   window.modal = {
     create,
     confirm,
     closeAll,
+    DANGER_CONFIRM_TEXT: DANGER_CONFIRM_TEXT,
+    dangerActionPhrase: dangerActionPhrase,
     destroy: stopObserver,
     consumeCreateFailure: function () {
       var failure = _createFailure;

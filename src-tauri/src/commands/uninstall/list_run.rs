@@ -19,7 +19,16 @@ use super::appx::*;
 /// nsis（卸载器名含 uninst/uninstall）> unknown。同时抽出 MSI 产品码 {GUID}。
 pub(super) fn detect_installer(key_name: &str, uninstall_string: &str) -> (&'static str, Option<String>) {
     let us = uninstall_string.to_lowercase();
-    if us.contains("msiexec") {
+    // R2b-L06：`msiexec` 只认**首 token 的 basename**，不再整串 contains——
+    // `MyMsiexecTool.exe` / `C:\Tools\msiexec-helper.exe` 不是 MSI 引擎。
+    let first_basename = uninstall_string
+        .trim()
+        .split_whitespace()
+        .next()
+        .map(|s| s.trim_matches('"'))
+        .and_then(|s| s.rsplit(['\\', '/']).next())
+        .unwrap_or("");
+    if first_basename.eq_ignore_ascii_case("msiexec.exe") || first_basename.eq_ignore_ascii_case("msiexec") {
         let guid = uninstall_string
             .find('{')
             .and_then(|s| uninstall_string[s..].find('}').map(|e| uninstall_string[s..=s + e].to_string()));
@@ -487,19 +496,88 @@ pub async fn uninstall_list<R: tauri::Runtime>(
     .await
     .unwrap_or_else(|e| Err(format!("枚举异常: {e}")));
     match apps {
-        Ok((list, stats)) => json!({
-            "success": true,
-            "data": {
-                "apps": list,
-                "unreadableKeys": stats.unreadable_keys,
-                "missingDisplayName": stats.missing_display_name,
-                "degraded": stats.unreadable_keys > 0,
-                "degradedReason": if stats.unreadable_keys > 0 { Some("部分卸载键不可读，列表可能不完整") } else { None },
-                "degradedSource": "uninstall.listRun"
-            }
-        }),
+        Ok((list, stats)) => uninstall_list_receipt(list, stats),
         Err(e) => json!({ "success": false, "message": e }),
     }
+}
+
+#[cfg(test)]
+mod p2_list_receipt_tests {
+    use super::*;
+
+    /// R2b-L03：枚举子键打不开时回执必须带 `skipped/partial/notes`，列表可被判为截断。
+    #[test]
+    fn r2b_uninstall_list_reports_skipped_subkey() {
+        let receipt = uninstall_list_receipt(
+            Vec::new(),
+            UninstallReadStats { unreadable_keys: 2, missing_display_name: 1 },
+        );
+        assert_eq!(receipt["success"], json!(true));
+        assert_eq!(receipt["data"]["skipped"], json!(2), "skipped 必须等于打不开的子键数");
+        assert_eq!(receipt["data"]["partial"], json!(true), "有跳过的子键必须判 partial");
+        let notes = receipt["data"]["notes"].as_array().expect("notes 必须是数组");
+        assert!(notes.iter().any(|n| n.as_str().unwrap_or("").contains("截断")), "{notes:?}");
+        let clean = uninstall_list_receipt(Vec::new(), UninstallReadStats::default());
+        assert_eq!(clean["data"]["partial"], json!(false));
+        assert_eq!(clean["data"]["skipped"], json!(0));
+        assert!(clean["data"]["notes"].as_array().unwrap().is_empty());
+    }
+
+    /// R2b-L06：`msiexec` 判定必须按首 token 的 basename 边界，不得整串 contains。
+    #[test]
+    fn r2b_msiexec_detection_is_token_based() {
+        assert_ne!(
+            detect_installer("", "MyMsiexecTool.exe /uninstall").0,
+            "msi",
+            "名字里含 msiexec 的第三方工具不是 MSI 引擎"
+        );
+        assert_eq!(
+            detect_installer("", r"C:\Tools\msiexec-helper.exe /x").0,
+            "unknown",
+            "basename 只是前缀相同也不是 MSI"
+        );
+        let (kind, guid) = detect_installer(
+            "",
+            r#""C:\Windows\System32\msiexec.exe" /X{12345678-1234-1234-1234-1234567890AB}"#,
+        );
+        assert_eq!(kind, "msi");
+        assert_eq!(guid.as_deref(), Some("{12345678-1234-1234-1234-1234567890AB}"));
+        assert_eq!(detect_installer("", "msiexec /x {ABC}").0, "msi", "裸 msiexec 也要认");
+    }
+}
+
+/// 卸载列表回执（R2b-L03）：枚举子键打不开时必须让列表**可被判为截断**。
+///
+/// 旧回执只有 `degraded/degradedReason`，没有 `skipped/partial/notes`：
+/// 前端/调用方无法把「少扫了几个键」与「这台机器只有这些程序」分开。
+pub(super) fn uninstall_list_receipt(list: Vec<Value>, stats: UninstallReadStats) -> Value {
+    let mut notes: Vec<String> = Vec::new();
+    if stats.unreadable_keys > 0 {
+        notes.push(format!(
+            "{} 个卸载键打不开（权限或 IO 失败），列表可能被截断——不是「本机只有这些程序」",
+            stats.unreadable_keys
+        ));
+    }
+    if stats.missing_display_name > 0 {
+        notes.push(format!(
+            "{} 个卸载键读不到 DisplayName，已按非程序条目跳过",
+            stats.missing_display_name
+        ));
+    }
+    json!({
+        "success": true,
+        "data": {
+            "apps": list,
+            "unreadableKeys": stats.unreadable_keys,
+            "missingDisplayName": stats.missing_display_name,
+            "skipped": stats.unreadable_keys,
+            "partial": stats.unreadable_keys > 0,
+            "notes": notes,
+            "degraded": stats.unreadable_keys > 0,
+            "degradedReason": if stats.unreadable_keys > 0 { Some("部分卸载键不可读，列表可能不完整") } else { None },
+            "degradedSource": "uninstall.listRun"
+        }
+    })
 }
 
 // ==================== uninstall:run ====================
@@ -1325,7 +1403,7 @@ pub(super) fn watch_uninstaller(
             ),
         );
         return (
-            crate::engine::native::reg_key_exists(hive, key_path),
+            key_state_present_or_unknown(crate::engine::native::reg_key_exists_state(hive, key_path)),
             WatchEnd::TimedOutUnverified,
         );
     }
@@ -1334,9 +1412,17 @@ pub(super) fn watch_uninstaller(
     let mut stable = 0u32;
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
-        // 键消失 = 卸载完成（最早、最可靠的完成信号）
-        if !crate::engine::native::reg_key_exists(hive, key_path) {
-            return (false, WatchEnd::Settled);
+        // 键消失 = 卸载完成（最早、最可靠的完成信号）。
+        // R5c-v8-L04：只有「确认不存在」才能判完成；读不出来不得当成已消失。
+        match crate::engine::native::reg_key_exists_state(hive, key_path) {
+            crate::engine::native::KeyState::Missing => return (false, WatchEnd::Settled),
+            crate::engine::native::KeyState::Unknown(code) => {
+                log::write_log(
+                    "warn",
+                    &format!("卸载监视：卸载键存在性读不出来（win32={code}），本轮不判完成，继续按进程证据监视"),
+                );
+            }
+            crate::engine::native::KeyState::Exists => {}
         }
         let snap = process_snapshot();
         let parents: std::collections::HashMap<u32, u32> =
@@ -1382,12 +1468,18 @@ pub(super) fn watch_uninstaller(
         }
         if std::time::Instant::now() > deadline {
             return (
-                crate::engine::native::reg_key_exists(hive, key_path),
+                key_state_present_or_unknown(crate::engine::native::reg_key_exists_state(hive, key_path)),
                 if any { WatchEnd::TimedOutRunning } else { WatchEnd::TimedOutUnverified },
             );
         }
     }
-    (crate::engine::native::reg_key_exists(hive, key_path), WatchEnd::Settled)
+    (key_state_present_or_unknown(crate::engine::native::reg_key_exists_state(hive, key_path)), WatchEnd::Settled)
+}
+
+/// 监视收尾的「键还在吗」：Unknown（权限/IO）按**还在**处理，绝不把读不出来
+/// 当成卸载完成。纯函数，单测直接喂三态。
+fn key_state_present_or_unknown(state: crate::engine::native::KeyState) -> bool {
+    !matches!(state, crate::engine::native::KeyState::Missing)
 }
 
 /// 卸载域·执行原厂卸载（方案 M2 + 用户拍板 2026-09-28）。
@@ -1410,7 +1502,13 @@ pub async fn uninstall_run<R: tauri::Runtime>(
             return json!({ "success": false, "message": "包全名格式非法" });
         }
         let fullname = fullname.to_string();
-        let res = tauri::async_runtime::spawn_blocking(move || {
+        let res = tauri::async_runtime::spawn_blocking(move || -> Result<(), AppxRemoveOutcome> {
+            // R2b-L04：执行侧重新枚举当前用户注册包；`removable`/当前用户注册都以
+            // **此刻**的清单为准，不把列表侧字段当执行准入门票。
+            let listed = enum_appx_packages().map_err(|e| {
+                AppxRemoveOutcome::Failed(format!("执行前重新枚举 Appx 失败，未执行卸载: {e}"))
+            })?;
+            appx_exec_admissible(&fullname, &listed).map_err(AppxRemoveOutcome::Failed)?;
             log::flush_sync();
             remove_appx(&fullname)
         })

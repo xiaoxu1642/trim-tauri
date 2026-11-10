@@ -94,6 +94,12 @@ const cases = [
   { label: '路径含 .. 段', ok: false, mutate: (p) => set(p, 'rules.0.residue.0.target', '%APPDATA%\\Acme\\..\\..\\Editor') },
   { label: 'target 首尾含空白', ok: false, mutate: (p) => set(p, 'rules.0.residue.0.target', ' %APPDATA%\\Acme\\Editor') },
   { label: '路径中第二个变量替换', ok: false, mutate: (p) => set(p, 'rules.0.residue.0.target', '%APPDATA%\\Acme\\%USERNAME%') },
+  // T1g-L02（2026-11-10）：路径段数上限的反例 —— 33 段（契约表 residue.limits.maxSegments=32）。
+  // 为什么必须进夹具：段数上限此前只有 Node 侧内存自检（check-residue-rule-contract 的 F 组
+  // 与 Rust 侧 residue_update.rs 各自的实现），共享夹具里没有任何一条用例钉住它 ——
+  // 两侧谁把「段数」判据改成软阈值，夹具都不会红。段数从 **body**（去掉 %TOKEN% 之后）数，
+  // 两侧同口径；目标长度必须留在 maxTargetLen 之内，否则先被长度判据拦掉、测不到段数。
+  { label: 'target 33 段超上限（maxSegments=32）', ok: false, mutate: (p) => set(p, 'rules.0.residue.0.target', '%APPDATA%\\' + Array.from({ length: 33 }, (_, i) => `s${i}`).join('\\')) },
   { label: 'note 缺失', ok: false, mutate: (p) => del(p, 'rules.0.residue.0.note') },
   { label: '规则 id 含非法字符', ok: false, mutate: (p) => set(p, 'rules.0.id', 'acme editor/1') },
   { label: '规则 id 重复', ok: false, mutate: (p) => { p.rules.push(structuredClone(p.rules[0])); } },
@@ -277,6 +283,7 @@ function triggerFor(label) {
     [/^相对路径/, '既不是登记变量的子路径'],
     [/^路径含 \.\./, '含空段'],
     [/^target 首尾/, '首尾含空白'],
+    [/^target 33 段/, '路径段数'],
     [/^路径中第二个变量/, '第二个变量替换'],
     [/^note 缺失/, 'residue.note 缺失'],
     [/^规则 id 含非法/, '规则 id 缺失'],
@@ -313,8 +320,7 @@ for (const c of packages.filter((x) => !x.ok)) {
 
 const doc = {
   _generatedBy: 'tools/gen-residue-fixture.mjs',
-  _note:
-    '卸载残留规则库契约夹具：Rust 运行期校验器与 Node 门禁各自独立实现断言，用同一组正反例钉口径（方案 §4.3 / §6.1）。改判定必须两侧同改并在此补用例。',
+  _note: '本文件由 gen-residue-fixture 生成；补用例改生成器，不要手改',
   regVectors,
   runValueVectors,
   packages,
@@ -331,6 +337,10 @@ export function fixtureText() {
 // fixtureText()，不许有落盘副作用（同 gen-finder-delete-modes 的纪律）。
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   if (process.argv.includes('--check')) {
+    if (!fs.existsSync(OUT)) {
+      console.error(`✗ 夹具缺失 ${path.relative(ROOT, OUT)} ⇒ 本节未校验，按失败处理（重跑：node tools/gen-residue-fixture.mjs）`);
+      process.exit(1);
+    }
     const have = fs.readFileSync(OUT, 'utf8');
     if (have !== docText) {
       console.error('✗ 盘上 residue-contract.json 与生成器输出不一致——夹具被手改或用例改后未重跑。重跑：node tools/gen-residue-fixture.mjs');

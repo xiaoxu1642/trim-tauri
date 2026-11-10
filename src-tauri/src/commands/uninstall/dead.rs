@@ -26,7 +26,14 @@ pub(super) const SNAPSHOT_CAP: usize = 400;
 /// 截掉的是**尾部 = 这一次刚扫出来的候选**，而命令仍把那一批全量回给渲染层 ⇒
 /// 「面板看得见、快照里没有」，用户勾完点删除整批判过期。现在按剩余容量当场取舍并
 /// 返回接受的子集，容量语义从"悄悄丢"变成"调用方拿得到事实"，也就此不再有保头砍尾这第二种答案。
+#[cfg(test)]
 pub(super) fn residue_snapshot_put(label: &str, origin: &str, findings: Vec<Value>) -> Vec<Value> {
+    residue_snapshot_put_for(label, "", origin, findings)
+}
+
+/// 与 [`residue_snapshot_put`] 相同，但把本次扫描的 `app_id` 一并绑定进快照槽（R2a-L04）。
+/// 生产扫描链一律走本函数；旧入口保留给既有测试与不关心 app_id 的调用方。
+pub(super) fn residue_snapshot_put_for(label: &str, app_id: &str, origin: &str, findings: Vec<Value>) -> Vec<Value> {
     // v4 P2-F（R2-M02）：origin 由**本函数**逐条打标 —— 生产侧此前 0 处赋值（候选对象
     // 里根本没有该字段），而下面的分桶过滤按 `origin != Some(origin)` 判：没有字段 ⇒
     // `None != Some(_)` 恒真 ⇒ 旧条目永不被清 ⇒ 重扫只累加。在入口统一打标后，
@@ -43,7 +50,7 @@ pub(super) fn residue_snapshot_put(label: &str, origin: &str, findings: Vec<Valu
     let mut store = residue_snapshots().lock().unwrap_or_else(|e| e.into_inner());
     let mut merged: Vec<Value> = store
         .get(label)
-        .map(|(_, f)| {
+        .map(|(_, _, f)| {
             f.iter()
                 .filter(|x| x.get("origin").and_then(Value::as_str) != Some(origin))
                 .cloned()
@@ -53,7 +60,7 @@ pub(super) fn residue_snapshot_put(label: &str, origin: &str, findings: Vec<Valu
     let room = SNAPSHOT_CAP.saturating_sub(merged.len());
     let accepted: Vec<Value> = findings.into_iter().take(room).collect();
     merged.extend(accepted.iter().cloned());
-    store.insert(label.to_string(), (crate::engine::now_ms(), merged));
+    store.insert(label.to_string(), (app_id.to_string(), crate::engine::now_ms(), merged));
     accepted
 }
 

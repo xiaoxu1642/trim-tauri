@@ -16,7 +16,8 @@ mod common;
 
 use common::{
     assert_guard_rejected, ensure_test_data_root, invoke, invoke_text, main_window,
-    probe_guard, skip_and_record, sub_windows, window_with_label, GUARD_REJECT_MARK,
+    probe_guard, run_cmd, skip_and_record, sub_windows, window_with_label, CMD_TIMEOUT,
+    GUARD_REJECT_MARK,
 };
 use serde_json::{json, Value};
 use trim_tauri_lib::engine::guard::APP_WINDOWS;
@@ -151,8 +152,8 @@ fn paths_file_icon_rejects_remote_namespace_before_touching_shell() {
     let w = main_window();
     let mut reached: Vec<String> = Vec::new();
     for (probe, expect_in_reason) in [
-        (r"\\srv\share\app\tool.exe", "本机盘符命名空间"),
-        (r"\\?\UNC\srv\share\a.dll", "本机盘符命名空间"),
+        (r"\\srv\share\app\tool.exe", "UNC"),
+        (r"\\?\UNC\srv\share\a.dll", "UNC"),
         ("::{42aedc87-2188-41fd-b9a3-0c966feabec1}", ":: 前缀"),
     ] {
         let res = invoke(&w, "paths_file_icon", json!({ "filePath": probe }));
@@ -184,7 +185,7 @@ fn paths_file_icon_tier_stays_readonly_and_unknown_label_still_rejected() {
         common::assert_guard_passed(
             &text,
             &format!("子窗 {label} 调 paths:file-icon"),
-            &["本机盘符命名空间"],
+            &["本机盘符命名空间", "UNC"],
         );
         reached_labels.push(label);
     }
@@ -246,7 +247,7 @@ fn readonly_channel_passes_guard_from_every_subwindow() {
         );
         reached.push(label);
     }
-    assert_eq!(reached, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
+    debug_assert_eq!(reached, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 }
 
 // ==================== P2-13：UI 偏好键后端真源（get-prefs / set-pref） ====================
@@ -339,7 +340,7 @@ fn settings_get_prefs_reaches_every_subwindow() {
         assert!(text.contains("success"), "{label} 窗应越过档位进入命令体，回执 {text}");
         reached.push(label);
     }
-    assert_eq!(reached, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
+    debug_assert_eq!(reached, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 }
 
 /// 负例：白名单外的键必须在**落盘前**被拒（防渲染层被注入后借偏好通道往 settings.json
@@ -420,7 +421,7 @@ fn appearance_prefs_tier_is_main_window_only() {
             &format!("{label} 窗写外观偏好必须被拒杀（放宽=把写用户外观暴露给子窗）"),
         );
     }
-    assert_eq!(reached, vec!["main"], "本用例循环面只有 main，此处仅作可读汇总（X1-M03）实到 {reached:?}");
+    debug_assert_eq!(reached, vec!["main"], "本用例循环面只有 main，此处仅作可读汇总（X1-M03）实到 {reached:?}");
 }
 
 /// 形状闸的反向对照（全部**零副作用**：拒发生在落盘之前 ⇒ 进快速组）。
@@ -527,7 +528,7 @@ fn appearance_set_pref_accepts_legal_values_roundtrip() {
         assert_eq!(res["success"], json!(true), "{key}={value} 是合法形状，必须被收: {res}");
         reached.push(key.to_string());
     }
-    assert_eq!(reached.len(), legal.len(), "循环体内已逐条断言，此处仅作长度汇总（X1-M03）实到 {reached:?}");
+    debug_assert_eq!(reached.len(), legal.len(), "循环体内已逐条断言，此处仅作长度汇总（X1-M03）实到 {reached:?}");
 
     let read = invoke(&w, "appearance_get_prefs", json!({}));
     for (key, value) in legal {
@@ -685,7 +686,7 @@ fn uninstall_run_is_main_only_and_passes_guard_from_main() {
         assert_guard_rejected(&text, &format!("{label} 窗调卸载命令必须被来源校验拒杀"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
+    debug_assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
     let w = main_window();
     let res = invoke(&w, "uninstall_run", json!({ "appId": GHOST_APP_ID }));
     assert_eq!(res["success"], json!(false), "不存在的卸载键不得假装成功: {res}");
@@ -707,7 +708,7 @@ fn uninstall_modify_is_main_only_and_passes_guard_from_main() {
         assert_guard_rejected(&text, &format!("{label} 窗调修改/修复命令必须被来源校验拒杀"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
+    debug_assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
     let w = main_window();
     let res = invoke(&w, "uninstall_modify", json!({ "appId": GHOST_APP_ID }));
     assert_eq!(res["success"], json!(false), "不存在的卸载键不得假装成功: {res}");
@@ -878,7 +879,7 @@ fn reg_backup_channels_are_main_only() {
         assert_guard_rejected(&restore, &format!("{label} 窗调卸载域备份还原必须被拒杀"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
+    debug_assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 
     let w = main_window();
     let list = invoke(&w, "uninstall_reg_backup_list", json!({}));
@@ -915,7 +916,7 @@ fn dir_size_channel_is_main_only_and_refuses_non_absolute() {
         assert_guard_rejected(&text, &format!("{label} 窗调体积兜底必须被拒杀"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
+    debug_assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 
     let w = main_window();
     // `"."` 而不是随便一个相对串：它**一定**存在，所以去掉绝对路径闸后这条必然变绿，
@@ -962,7 +963,7 @@ fn restore_reg_recognises_retired_ids_but_still_refuses_unknown() {
         assert_guard_rejected(&text, &format!("{label} 窗调优化项还原必须被拒杀"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
+    debug_assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 
     let w = main_window();
     let unknown = invoke(&w, "optimizer_restore_reg", json!({ "optionId": "trim-不存在的选项" }));
@@ -994,9 +995,17 @@ fn restore_reg_recognises_retired_ids_but_still_refuses_unknown() {
         .expect("挑得出一个本机无备份的退役 id");
     let res = invoke(&w, "optimizer_restore_reg", json!({ "optionId": id }));
     assert_eq!(res["success"], json!(false), "无备份记录不该报成功: {res}");
+    let msg = common::message_of(&res);
     assert!(
-        !common::message_of(&res).contains("未知的优化选项"),
+        !msg.contains("未知的优化选项"),
         "退役 id {id} 必须被还原通道认得（这条就是 v2-M14 的接线点），回执 {res}"
+    );
+    // A14（X1-L04）：正向 needle —— 只断「不含未知选项」的话，「退役 id 被当成未知项拒绝」
+    // 也算绿。这条必须同时钉住「回执说的是备份这件事」，
+    // 取值以 backup_restore.rs 的实际文案为准（无备份记录 ⇒ message 含「备份」）。
+    assert!(
+        msg.contains("备份"),
+        "退役 id {id} 的回执必须点名备份这件事（当前文案：{msg:?}），回执 {res}"
     );
 }
 
@@ -1292,7 +1301,7 @@ fn batch_pack_channels_are_main_only() {
         assert_guard_rejected(&restore, &format!("{label} 窗调整批还原必须被拒杀（它往磁盘写文件）"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
+    debug_assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 
     let w = main_window();
     let list = invoke(&w, "uninstall_batch_list", json!({}));
@@ -1376,7 +1385,7 @@ fn cleanup_reg_backup_restore_shares_the_uninstall_domain_gates() {
         assert_guard_rejected(&r, &format!("{label} 窗调清理域备份还原必须被拒杀"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
+    debug_assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 
     // ② 命令边界两个早退面（零触盘、不依赖备份根内容）
     let w = main_window();
@@ -1472,7 +1481,7 @@ fn batch_preflight_is_readonly_for_all_app_windows() {
         );
         reached.push(label);
     }
-    assert_eq!(reached, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
+    debug_assert_eq!(reached, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 }
 
 /// R1-1.4 / R1-1.5：空 ids 与未知 id 的**fail-closed** 形状。
@@ -1710,7 +1719,7 @@ fn syspanel_power_edit_command_is_main_only() {
             rejected.push(format!("{label}:{cmd}"));
         }
     }
-    assert_eq!(
+    debug_assert_eq!(
         rejected.len(),
         sub_windows().len() * cases.len(),
         "循环体内已逐命令断言，此处仅作数量汇总（X1-M03）"
@@ -1721,14 +1730,15 @@ fn syspanel_power_edit_command_is_main_only() {
 /// 优化页只在主窗 ⇒ 档位必须 MAIN，子窗被拒。正向特征（主窗能通过来源校验）
 /// 由同域 uninstall_modify 的同族形态覆盖；这里按模板纪律只点子窗拒绝侧。
 #[test]
-fn optimizer_stale_dismiss_is_main_only() {    let mut rejected: Vec<&str> = Vec::new();
+  fn optimizer_stale_dismiss_is_main_only() {
+      let mut rejected: Vec<&str> = Vec::new();
     for label in sub_windows() {
         let w = window_with_label(label);
         let text = invoke_text(&w, "optimizer_stale_dismiss", json!({ "ids": ["x"] }));
         assert_guard_rejected(&text, &format!("{label} 窗调 optimizer_stale_dismiss 必须被来源校验拒杀"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
+    debug_assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 }
 
 /// 账外核对（2026-10-15 拍板）：只读但只被主窗优化页消费 ⇒ 按 D5 判据取 MAIN，子窗被拒杀。
@@ -1742,7 +1752,7 @@ fn optimizer_external_scan_is_main_only() {
         assert_guard_rejected(&text, &format!("{label} 窗调 optimizer_external_scan 必须被来源校验拒杀"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
+    debug_assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 }
 
 /// 2026-10-04 磁盘清理审计 §5.6：item-detail 的 path 形参必须与扫描快照同源。
@@ -1941,7 +1951,7 @@ fn optimizer_restore_frequency_subwindows_always_rejected() {
         );
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
+    debug_assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 }
 
 /// 2026-10-06 任务四：空目录忽略名单三命令 —— 档位与负例。
@@ -1966,7 +1976,7 @@ fn finder_ignore_list_guard_tiers_and_negative_cases() {
         }
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
+    debug_assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
     let w = main_window();
     // ② 不存在的目录：在读取 / 写盘之前拒绝
     // X1-M03（v7.2 C08）补拒因点名：只断 success:false 分不清「存在性闸拦住了」与
@@ -2006,7 +2016,7 @@ fn quickcmds_run_is_main_only() {
         );
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
+    debug_assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
     let w = main_window();
     let res = invoke(&w, "quickcmds_run", json!({ "id": "__trim_smoke_unknown__" }));
     assert_eq!(res["success"], json!(false), "主窗越过档位后未知 id 必须被白名单拒: {res}");
@@ -2026,6 +2036,11 @@ fn quickcmds_run_is_main_only() {
 /// 本用例自建 HKCU Run 探针值 → 走 `startup_toggle` 真实注册表路径 → 断言
 /// StartupApproved 批准位 bit0 翻转 → 还原 → 清理（Drop 守卫，断言失败也会清）。
 /// 数组读器一旦退回对象版，第一条断言即红（回执 message 变为「台账读取失败」）。
+  ///
+  /// A14（X1-L05）：收尾从「删值了就算」改成「删值 + **回读核对**」——
+  /// 值名写错一次就永久留一条自启项，而用户看到的是「我什么时候装过这个」。
+  /// 键路径仍是 `CurrentVersion\Run`（被测行为就是走真实启动项路径，
+  /// 批准位推导也锁死在该路径），所以本条只保证**值**不残留，不保证键不残留。
 #[test]
 #[ignore = "真写 HKCU Run 探针值 + StartupApproved blob（自建自清），发布前门禁跑"]
 fn startup_toggle_registry_probe_disable_and_enable() {
@@ -2041,11 +2056,20 @@ fn startup_toggle_registry_probe_disable_and_enable() {
     struct ProbeCleanup;
     impl Drop for ProbeCleanup {
         fn drop(&mut self) {
+              use trim_tauri_lib::engine::native::{hive_hkcu, read_reg_binary_opt};
             for key in [SA_KEY, RUN_KEY] {
-                let _ = std::process::Command::new("reg")
-                    .args(["delete", &format!(r"HKCU\{key}"), "/v", NAME, "/f"])
-                    .output();
+                let mut c = std::process::Command::new("reg");
+                c.args(["delete", &format!(r"HKCU\{key}"), "/v", NAME, "/f"]);
+                let _ = run_cmd(&mut c, CMD_TIMEOUT);
             }
+              // 回读核对：值必须真的没了（删值失败要看得见，不能默默留一条自启项）。
+              for key in [SA_KEY, RUN_KEY] {
+                  let left = read_reg_binary_opt(hive_hkcu(), key, NAME);
+                  assert!(
+                      left.is_none(),
+                      "探针值 {NAME} 仍留在 HKCU\\{key}（删值失败）⇒ 用户会看到一条来源不明的自启项"
+                  );
+              }
         }
     }
     let _cleanup = ProbeCleanup;
@@ -2114,36 +2138,47 @@ fn startup_toggle_runonce_probe_uses_backup_delete() {
     const NAME: &str = "TrimProbeRunOnceX";
     let full_key = || format!(r"HKCU\{RUNONCE_KEY}");
     let reg_query = || {
-        std::process::Command::new("reg")
-            .args(["query", &full_key(), "/v", NAME])
-            .output()
-            .expect("reg.exe 可执行")
-            .status
-            .success()
+            let mut c = std::process::Command::new("reg");
+            c.args(["query", &full_key(), "/v", NAME]);
+            run_cmd(&mut c, CMD_TIMEOUT)
+                .expect("reg.exe 可执行")
+                .status
+                .success()
     };
 
     struct ProbeCleanup;
     // Drop 守卫：尽力复原（启用回写走台账/清账），再删掉探针值，断言失败也不留痕。
+      // A14（X1-L05）：删完**回读核对** —— 值名写错一次就永久留一条自启项。
     impl Drop for ProbeCleanup {
         fn drop(&mut self) {
             let _ = trim_tauri_lib::engine::native::startup_toggle(&[runonce_probe_item()], true);
-            let _ = std::process::Command::new("reg")
-                .args(["delete", &format!(r"HKCU\{RUNONCE_KEY}"), "/v", NAME, "/f"])
-                .output();
+                let mut c = std::process::Command::new("reg");
+                c.args(["delete", &format!(r"HKCU\{RUNONCE_KEY}"), "/v", NAME, "/f"]);
+                let _ = run_cmd(&mut c, CMD_TIMEOUT);
+              let left = trim_tauri_lib::engine::native::read_reg_binary_opt(
+                  trim_tauri_lib::engine::native::hive_hkcu(),
+                  RUNONCE_KEY,
+                  NAME,
+              );
+              assert!(
+                  left.is_none(),
+                  "探针值 {NAME} 仍留在 HKCU\\{RUNONCE_KEY}（删值失败）⇒ 盘上留一条来源不明的自启项"
+              );
         }
     }
     let _cleanup = ProbeCleanup;
 
-    let _ = std::process::Command::new("reg")
-        .args(["delete", &full_key(), "/v", NAME, "/f"])
-        .output();
-    let st = std::process::Command::new("reg")
-        .args([
+        let mut pre = std::process::Command::new("reg");
+        pre.args(["delete", &full_key(), "/v", NAME, "/f"]);
+        let _ = run_cmd(&mut pre, CMD_TIMEOUT);
+        let mut add = std::process::Command::new("reg");
+        add.args([
             "add", &full_key(), "/v", NAME, "/t", "REG_SZ", "/d",
             r"C:\Windows\System32\notepad.exe", "/f",
-        ])
-        .status()
-        .expect("reg.exe 可执行");
+        ]);
+        let st = run_cmd(&mut add, CMD_TIMEOUT)
+            .expect("reg.exe 可执行")
+            .status;
     assert!(st.success(), "建探针 RunOnce 值失败");
 
     let res = startup_toggle(&[runonce_probe_item()], false).expect("禁用不应整批失败");
@@ -2229,24 +2264,23 @@ fn u_r5a_same_name_run_and_runonce_no_cross_account() {
     const RUNONCE_DATA: &str = r"C:\Windows\System32\mspaint.exe";
 
     let reg_delete = |key: &str| {
-        let _ = std::process::Command::new("reg")
-            .args(["delete", key, "/v", NAME, "/f"])
-            .output();
+          let mut c = std::process::Command::new("reg");
+          c.args(["delete", key, "/v", NAME, "/f"]);
+          let _ = run_cmd(&mut c, CMD_TIMEOUT);
     };
     let reg_add = |key: &str, data: &str| {
-        std::process::Command::new("reg")
-            .args(["add", key, "/v", NAME, "/t", "REG_SZ", "/d", data, "/f"])
-            .output()
-            .expect("reg.exe 可执行")
-            .status
-            .success()
+          let mut c = std::process::Command::new("reg");
+          c.args(["add", key, "/v", NAME, "/t", "REG_SZ", "/d", data, "/f"]);
+          run_cmd(&mut c, CMD_TIMEOUT)
+              .expect("reg.exe 可执行")
+              .status
+              .success()
     };
     // 值本体走 reg.exe 回读：断言对象必须是注册表真实状态，不是 startup_toggle 的回执
     let value_of = |key: &str| -> Option<String> {
-        let out = std::process::Command::new("reg")
-            .args(["query", key, "/v", NAME])
-            .output()
-            .ok()?;
+          let mut c = std::process::Command::new("reg");
+          c.args(["query", key, "/v", NAME]);
+          let out = run_cmd(&mut c, CMD_TIMEOUT).ok()?;
         if !out.status.success() {
             return None;
         }
@@ -2268,10 +2302,22 @@ fn u_r5a_same_name_run_and_runonce_no_cross_account() {
             let (r, o) = r5a_same_name_items();
             let _ = trim_tauri_lib::engine::native::startup_toggle(&[r, o], true);
             for key in [SA_KEY, RUN_KEY, RUNONCE_KEY] {
-                let _ = std::process::Command::new("reg")
-                    .args(["delete", &format!(r"HKCU\{key}"), "/v", NAME, "/f"])
-                    .output();
+                  let mut c = std::process::Command::new("reg");
+                  c.args(["delete", &format!(r"HKCU\{key}"), "/v", NAME, "/f"]);
+                  let _ = run_cmd(&mut c, CMD_TIMEOUT);
             }
+              // A14（X1-L05）：回读核对三处探针值确已删除（删值失败要看得见）。
+              for key in [SA_KEY, RUN_KEY, RUNONCE_KEY] {
+                  let left = trim_tauri_lib::engine::native::read_reg_binary_opt(
+                      trim_tauri_lib::engine::native::hive_hkcu(),
+                      key,
+                      NAME,
+                  );
+                  assert!(
+                      left.is_none(),
+                      "探针值 {NAME} 仍留在 HKCU\\{key}（删值失败）⇒ 盘上留一条来源不明的自启项"
+                  );
+              }
         }
     }
     let _guard = Cleanup;
@@ -2467,7 +2513,7 @@ fn cleanup_query_locked_is_main_only() {
         assert_guard_rejected(&text, &format!("{label} 窗调占用查询必须被来源校验拒杀（主窗档）"));
         rejected.push(label);
     }
-    assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
+    debug_assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 }
 
 /// C1-1 占用查询：主窗 + 不存在的路径必须「明说路径不存在」，不许装「无占用」——
@@ -2529,8 +2575,24 @@ fn cleanup_query_locked_probe_names_locking_process() {
     impl Drop for ProbeCleanup {
         fn drop(&mut self) {
             if let Some(mut c) = self.child.take() {
-                let _ = c.kill();
-                let _ = c.wait();
+                  // X1-L01：杀整棵进程树（holder powershell 的子孙一并收掉），
+                  // 再兜底杀本体。函数式出口，不改 ProcessJob 的可见性契约。
+                  let _ = trim_tauri_lib::engine::job::kill_process_tree(c.id());
+                  let _ = c.kill();
+                  // X1-L01：wait 也要有上界 —— kill 失败时不得把整轮验收挂死。
+                  let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                  loop {
+                      match c.try_wait() {
+                          Ok(Some(_)) => break,
+                          Ok(None) => {
+                              if std::time::Instant::now() >= deadline {
+                                  break;
+                              }
+                              std::thread::sleep(std::time::Duration::from_millis(20));
+                          }
+                          Err(_) => break,
+                      }
+                  }
             }
             let _ = std::fs::remove_dir_all(&self.dir);
         }
@@ -2544,9 +2606,13 @@ fn cleanup_query_locked_probe_names_locking_process() {
     );
     let child = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+          .stdout(std::process::Stdio::null())
+          .stderr(std::process::Stdio::null())
         .spawn()
         .expect("启动 holder powershell 失败");
     let holder_pid = child.id() as i64;
+      // X1-L01：holder 故意长跑（它的被测语义就是占住文件 120 秒），不能套
+      // run_test_cmd 的超时；收树放在 Drop 里（kill_process_tree 杀整棵树）。
     let _cleanup = ProbeCleanup { child: Some(child), dir: dir.clone() };
 
     // 独占探测（与 file_deletable 同口径）：失败 = 文件已被持有
@@ -2812,14 +2878,27 @@ fn u_r1b_context_menu_cache_read_write_share_domain_lock() {
         src.contains("static CM_CACHE_LOCK: std::sync::Mutex<()>"),
         "本域必须有自有的缓存锁（§5.28）"
     );
+    // 生产面（`#[cfg(test)]` 之前）计数：测试区自己也会取一次锁做并发断言，
+    // 那不是「写段」的一部分，混进来会把契约数字算错。
+    let prod_src = match src.find("mod tests {") {
+        Some(i) => &src[..i],
+        None => src.as_str(),
+    };
     let guard_needle = "let _g = cm_cache_guard();";
     let mut guard_at: Vec<usize> = Vec::new();
     let mut from = 0usize;
-    while let Some(i) = src[from..].find(guard_needle) {
+    while let Some(i) = prod_src[from..].find(guard_needle) {
         guard_at.push(from + i);
         from = from + i + guard_needle.len();
     }
-    assert_eq!(guard_at.len(), 2, "两处写入段各取一次锁（scan 全量写 / toggle 回写）");
+    // P2/R1b-L14：缓存**命中臂**的 `snapshot::set` 也必须持同一把域内锁
+    // （否则 scan 插在命中臂的读与写之间，回写的仍是旧快照）。
+    // 于是持锁点从「scan 全量写 / toggle 回写」两处变成再加「命中臂」。
+    assert_eq!(
+        guard_at.len(),
+        3,
+        "三处写段各取一次锁（scan 全量写 / toggle 回写 / 缓存命中臂回写）"
+    );
     let mut save_at: Vec<usize> = Vec::new();
     from = 0;
     while let Some(i) = src[from..].find("save_cache(&") {
@@ -3031,7 +3110,11 @@ fn u_ctfmon_startup_chain_guard_live() {
 
     const NAME: &str = "ctfmon";
     const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-    let reg = |args: &[&str]| std::process::Command::new("reg").args(args).output();
+      let reg = |args: &[&str]| {
+          let mut c = std::process::Command::new("reg");
+          c.args(args);
+          run_cmd(&mut c, CMD_TIMEOUT)
+      };
 
     // X1-K01：守卫必须带「我建过什么」的状态。旧写法在前置检查**之前**就挂上 Drop，
     // 本机已有真实 ctfmon 值时走 skip 分支 return，Drop 照样执行 reg delete ——
@@ -3044,9 +3127,19 @@ fn u_ctfmon_startup_chain_guard_live() {
             if !self.created {
                 return;
             }
-            let _ = std::process::Command::new("reg")
-                .args(["delete", RUN_KEY, "/v", "ctfmon", "/f"])
-                .output();
+              let mut c = std::process::Command::new("reg");
+              c.args(["delete", RUN_KEY, "/v", "ctfmon", "/f"]);
+              let _ = run_cmd(&mut c, CMD_TIMEOUT);
+              // A14（X1-L05）：回读核对 —— 删值失败要看得见，不能默默留一条自启项。
+              let left = trim_tauri_lib::engine::native::read_reg_binary_opt(
+                  trim_tauri_lib::engine::native::hive_hkcu(),
+                  r"Software\Microsoft\Windows\CurrentVersion\Run",
+                  "ctfmon",
+              );
+              assert!(
+                  left.is_none(),
+                  "探针值 ctfmon 仍留在 {RUN_KEY}（删值失败）⇒ 盘上留一条来源不明的自启项"
+              );
         }
     }
 

@@ -11,9 +11,9 @@ use crate::engine::{guard, log};
 /// 本文件曾各留一份私有实现且与真源不同义，§5.16/N6 明令禁止这种「两份恰好都不致命」。
 const LOG_MESSAGE_MAX: usize = 1000;
 
-/// log:write — 渲染层日志入口（五个窗都可调）。
+/// log:write — 渲染层日志入口（四个窗口 label 都可调）。
 ///
-/// 入参全部按不可信处理并带上窗口 label —— 否则主窗与四个子窗的日志混在一起分不清是谁
+/// 入参全部按不可信处理并带上窗口 label —— 否则主窗与三个子窗的日志混在一起分不清是谁
 /// 报的（子窗没有 logger.js，直连本通道）。
 /// 清洗**直调 `engine::log` 的单一真源**：本文件曾各留一份私有 `sanitize_log_level` /
 /// `sanitize_log_message`，与真源不同义（只折 `is_whitespace` ⇒ NUL 等控制符原样进日志行；

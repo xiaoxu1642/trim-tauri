@@ -342,7 +342,7 @@ fn run_cmd(program: &str, args: &[&str]) -> bool {
 
 /// 当前服务状态码（`SERVICE_STOPPED`=1 / `SERVICE_RUNNING`=4）；查不到返回 None。
 fn service_state(name: &str) -> Option<u32> {
-    unsafe { super::services::service_status(name).map(|(s, _)| s) }
+    unsafe { super::services::service_status(name) }
 }
 
 /// 请求停止服务并**轮询到 STOPPED**（v5 S-2 / S-3）。

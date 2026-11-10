@@ -13,7 +13,7 @@ const README_MD: &str = include_str!("../../../readme.md");
 #[tauri::command]
 pub fn app_get_info<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_json::Value, String> {
     guard::guard_readonly(&window)?;
-    let build = sysinfo::windows_build();
+    let build = sysinfo::windows_build().unwrap_or(0);
     let username = std::env::var("USERNAME").unwrap_or_default();
     let homedir = std::env::var("USERPROFILE").unwrap_or_default();
     Ok(serde_json::json!({
@@ -183,7 +183,7 @@ pub fn start_boot_watchdog<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
 /// app:first-paint — 渲染层 DOMContentLoaded + 双 rAF 黑闪握手（只认首个通知）
 ///
 /// 只认 `main` 的帧：`tauri-api.js` 在**每个**窗口里都会发这条，而闩锁是全局一次性的。
-/// 若不按 label 判定，一个先渲染完的子窗（preview/models/…）会把主窗口提前 show 出来，
+/// 若不按 label 判定，一个先渲染完的子窗（models/processManager/residue）会把主窗口提前 show 出来，
 /// 主窗自己那帧还没画完 —— 正是这套握手要消灭的黑闪。子窗的首帧由各自的
 /// `on_page_load(Finished)` 路径处理，不经过这里。
 #[tauri::command]
@@ -191,7 +191,7 @@ pub fn app_first_paint<R: tauri::Runtime>(app: AppHandle<R>, window: WebviewWind
     // 审查 v2-F15：全仓唯一不走统一 `guard*` 的命令注册——条数现算以
     // `node tools/check-channel-map.mjs --strict` 为准（勿在此写死数字）。
     // 这里刻意按 label 判定而非 `guard(window, MAIN)`，是因为非 main 是**正常路径**
-    // （四个子窗都会发这条通知，见上面注释），用 guard 会把每一次子窗首帧都记成
+    // （三个子窗都会发这条通知，见上面注释），用 guard 会把每一次子窗首帧都记成
     // error 级「来源校验失败」，把真正的注入尝试淹掉。
     // 但**留痕不能省**：`engine/guard.rs` 的 `guard()` 注释写明「静默拒绝会掩盖注入尝试」，
     // 所以非 main 时至少留一条 debug，未知 label 才升级为 warn。

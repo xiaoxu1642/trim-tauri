@@ -27,8 +27,14 @@ pub struct Sandbox(std::path::PathBuf);
 
 impl Sandbox {
     /// 建沙箱并返回守卫。同名旧目录先删（同 pid 复用 / 上次被强杀的残留）。
+    ///
+    /// A14（X1-L06）：目录名**强制**带 `std::process::id()`。
+    /// 此前 pid 由调用点自觉拼进 tag，于是有 3 处漏拼（取数命令：`rg -n 'Sandbox::new\("' src-tauri/src`；
+    /// `p2e-m12` / `r1b-l10-font-import` /
+    /// `r1b-l12-font-junction`）—— 同一个测试进程里两次用同名 tag 建沙箱会互相删对方的目录，
+    /// 且并行跑时症状是「夹具目录莫名消失」，极难定位。pid 拼在 helper 里就不给漏的机会。
     pub fn new(tag: &str) -> Sandbox {
-        let dir = std::env::temp_dir().join(format!("trim-{tag}"));
+        let dir = std::env::temp_dir().join(format!("trim-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("测试沙箱可创建");
         Sandbox(dir)

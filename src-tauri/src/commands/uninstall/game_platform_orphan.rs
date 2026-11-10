@@ -912,9 +912,10 @@ pub(super) struct LibraryListing {
 }
 
 /// 只读列出一个库根下的游戏目录：优先 `steamapps\common\*`（Steam 形态），
-/// 退回库根一级目录（Epic / WeGame 形态）。
+/// 退回库根一级目录（Epic / WeGame 形态）。列目录失败必须交回调用方，
+/// 不能伪装成「空库」。
 #[allow(dead_code)]
-pub(super) fn list_game_dirs(root: &str) -> Vec<String> {
+pub(super) fn list_game_dirs(root: &str) -> Result<Vec<String>, String> {
     let common = Path::new(root).join("steamapps").join("common");
     let base = if common.is_dir() { common.to_path_buf() } else { PathBuf::from(root) };
     let mut out: Vec<String> = match std::fs::read_dir(&base) {
@@ -924,11 +925,16 @@ pub(super) fn list_game_dirs(root: &str) -> Vec<String> {
             .filter(|p| p.is_dir())
             .map(|p| p.to_string_lossy().to_string())
             .collect(),
-        Err(_) => return Vec::new(),
+        // 根本身不存在 = 「这个游戏平台没装」，与「读失败」是两回事：
+        // 前者回空库（调用方按「没有该平台」处理），后者才回 Err（A1-L03）。
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(format!("读取失败 {}: {e}", base.display()));
+        }
     };
     out.sort();
     out.truncate(COMMON_DIR_CAP);
-    out
+    Ok(out)
 }
 
 /// 一个库里最多出多少条目录候选（防某台机器上 common 目录异常膨胀淹掉判断面）。
@@ -1086,8 +1092,21 @@ mod tests {
 
     #[test]
     fn list_game_dirs_on_missing_root_is_empty_not_a_guess() {
-        // 读不到就是空（调用方不得据此判「库里没有游戏」）
-        assert!(list_game_dirs(r"Z:\definitely\not\here\9f3a").is_empty());
+        let missing_root = r"Z:\definitely\not\here\9f3a";
+        let result = list_game_dirs(missing_root).expect("不存在的根是普通 NotADirectory，不该伪装成硬失败");
+        assert!(result.is_empty(), "调用方不得据此判「库里没有游戏」以外的状态");
+    }
+
+    #[test]
+    fn list_game_dirs_read_error() {
+        // 走 testutil 的沙箱守卫（自建自清、Drop 兜底），不在 `%TEMP%` 裸建文件。
+        let sb = crate::testutil::Sandbox::new("list-game-dirs-read-error");
+        let file = sb.path().join("not-a-directory");
+        std::fs::write(&file, b"not-a-directory").expect("写入判红样本失败");
+        let err = list_game_dirs(&file.to_string_lossy()).expect_err("文件路径当目录必须报错");
+        assert!(err.contains("读取失败"), "{err}");
+        let path_text = file.to_string_lossy().into_owned();
+        assert!(err.contains(&path_text), "{err}");
     }
 
     #[test]

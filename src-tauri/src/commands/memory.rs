@@ -141,15 +141,16 @@ pub async fn memory_info<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<
 
 // ==================== memory:clean ====================
 
-/// memory:clean — 按区域清理工作集/系统缓存/列表（需管理员；直调原生引擎，30s 超时）
+/// memory:clean — 按区域清理工作集/系统缓存/列表（需管理员；直调原生引擎，阻塞池执行，
+/// 无整条命令超时；原生实现内部的等待/超时以此为准）
 ///
 /// 返回形状与 Electron 原生分支逐字段一致：`{ success, data, engine: 'rust' }`。
 /// 差异：Electron 在原生不可用时回落 PowerShell，Tauri 侧**不回落**（失败即如实返回错误）。
 #[tauri::command]
 pub async fn memory_clean<R: tauri::Runtime>(window: WebviewWindow<R>, items: Option<Vec<Value>>) -> Result<Value, String> {
     // 审查 v2-L17：这条**会改系统状态**（清工作集/系统缓存），唯一调用方是主窗的
-    // `memoryclean.js`（见 `app.js` 的页面表），四个子窗都不加载它 ⇒ 收 MAIN 档。
-    // `guard_readonly` 放行全部五窗是历史命名造成的错位，不是它该有的档位。
+    // `memoryclean.js`（见 `app.js` 的页面表），三个子窗都不加载它 ⇒ 收 MAIN 档。
+    // `guard_readonly` 放行全部四个窗口 label 是历史命名造成的错位，不是它该有的档位。
     guard::guard(&window, guard::MAIN)?;
     // `Array.isArray(items) ? items.filter(i => typeof i === 'string') : []`
     // v7.2 `R1d-M05`：被丢掉的**条数**要能看见。旧写法 `filter_map` 静默丢非字符串项，
@@ -326,7 +327,8 @@ pub async fn memory_processes<R: tauri::Runtime>(window: WebviewWindow<R>) -> Re
 
 // ==================== memory:kill ====================
 
-/// memory:kill — 结束指定进程（15s 超时）；PID 必为正整数且必须命中本窗口最近一次扫描
+/// memory:kill — 结束指定进程（阻塞池执行，无整条命令超时；原生实现内部的等待/超时以此为准）；
+/// PID 必为正整数且必须命中本窗口最近一次扫描
 #[tauri::command]
 pub async fn memory_kill<R: tauri::Runtime>(window: WebviewWindow<R>, pid: Option<Value>) -> Result<Value, String> {
     let label = guard::guard_readonly(&window)?;
@@ -397,7 +399,8 @@ pub async fn memory_kill<R: tauri::Runtime>(window: WebviewWindow<R>, pid: Optio
 
 // ==================== memory:stubborn-kill ====================
 
-/// memory:stubborn-kill — 顽固软件专杀（需管理员，30s 超时）
+/// memory:stubborn-kill — 顽固软件专杀（需管理员；阻塞池执行，无整条命令超时；
+/// 原生实现内部的等待/超时以此为准）
 ///
 /// 审查 v2-H2：档位由 `guard_readonly`（放行全部五个应用窗口）升为 `MAIN`。
 /// 它会批量 `TerminateProcess` 系统里所有匹配进程，后端不校验任何前端确认值
@@ -439,7 +442,8 @@ pub async fn memory_stubborn_kill<R: tauri::Runtime>(window: WebviewWindow<R>) -
 
 // ==================== memory:stubborn-block ====================
 
-/// memory:stubborn-block — 顽固软件阻止开机自启（需管理员，60s 超时）
+/// memory:stubborn-block — 顽固软件阻止开机自启（需管理员；阻塞池执行，无整条命令超时；
+/// 原生实现内部的等待/超时以此为准）
 ///
 /// 持久化策略（改服务启动类型 / 删更新任务），不提供自动还原。
 ///

@@ -32,6 +32,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { countPsSteps } from './count-ps-steps.mjs';
 import { allItems, groupItems } from './lib/rule-shape.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
@@ -84,7 +85,10 @@ console.log(`真源读数：清理项=${cleanupTotal} 优化项=${optTotal} 高�
 
 // ---------- readme 声明逐处对拍 ----------
 const readme = read('readme.md');
+const ZH_DIGITS = { 一: 1, 两: 2, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+const readmeNormalized = readme.replace(/[一两二三四五六七八九十](?=[类道档组项个层步])/g, (m) => String(ZH_DIGITS[m]));
 const findAll = (re) => [...readme.matchAll(re)].map((m) => Number(m[1]));
+const findAllNormalized = (re) => [...readmeNormalized.matchAll(re)].map((m) => Number(m[1]));
 
 const assertAllEqual = (label, re, truth) => {
   const got = findAll(re);
@@ -234,15 +238,22 @@ assertAllEqual('9c. 清理项大类数 = groups.length', /(\d+)\s*大类共\s*\d
 //     「扫得出数据的类数」。补实现或隐藏 UWP 属业务裁定： whichever 方向落地，两侧
 //     数字一起动，本门禁的对拍会引导 readme 同步。
 const ctxRs = read('src-tauri/src/engine/native/contextmenu.rs');
-const scenesBlk = ctxRs.match(/let scenes: &\[\(&str, &\[&str\]\)\] = &\[([\s\S]*?)\];/);
-const sceneCount = scenesBlk ? (scenesBlk[1].match(/\("([^"]+)"/g) ?? []).length : NaN;
+const ctxCode = blankNonCode(ctxRs, 'rs', { keepStrings: true });
+// R5a-L06：扫描场景表已抽成共享 helper `cm_scenes_scan_table()`（`vec![...]` 形态），
+// 这里同时认旧字面量形态与新 helper 形态，避免门禁因重构而落空。
+const scenesBlk = ctxCode.match(/let scenes: &\[\(&str, &\[&str\]\)\] = &\[([\s\S]*?)\];/);
+const scenesHelperBlk = ctxCode.match(/fn cm_scenes_scan_table\(\)[\s\S]*?vec!\[([\s\S]*?)\n {4}\]/);
+const sceneCount = scenesHelperBlk
+  ? (scenesHelperBlk[1].match(/vec!\[/g) ?? []).length
+  : (scenesBlk ? (scenesBlk[1].match(/\("([^"]+)"/g) ?? []).length : NaN);
 const SPECIAL_CATS = ['发送到', 'Win+X', '新建菜单', '打开方式'];
-const specialHit = scenesBlk ? SPECIAL_CATS.filter((c) => ctxRs.includes(`category: "${c}"`)) : [];
+// 特殊类别不依赖 scenes 表形态（它们各自只有一段生成代码），直接全文件判。
+const specialHit = SPECIAL_CATS.filter((c) => ctxCode.includes(`category: "${c}"`));
 const ctxReachable = Number.isFinite(sceneCount) ? sceneCount + specialHit.length : NaN;
 check(Number.isFinite(ctxReachable), 'contextmenu.rs scenes 表 + 特殊类别可解析',
   `scenes 表 ${sceneCount} 类 + 特殊 ${specialHit.length} 类 = 后端可达 ${ctxReachable}`);
 assertAllEqual('10. 右键菜单扫描类数 = 后端可达类数实算', /按\s*(\d+)\s*类扫描/g, ctxReachable);
-const ctxJs = read('src/scripts/contextmenu.js');
+const ctxJs = blankNonCode(read('src/scripts/contextmenu.js'), 'js', { keepStrings: true });
 const catOrderBlk = ctxJs.match(/const CATEGORY_ORDER = \[([\s\S]*?)\];/);
 const catOrderCount = catOrderBlk ? catOrderBlk[1].split(',').filter((s) => s.trim()).length : NaN;
 check(Number.isFinite(catOrderCount) && catOrderCount >= ctxReachable,
@@ -257,7 +268,7 @@ if (Number.isFinite(catOrderCount) && catOrderCount > ctxReachable) {
 //     fileCache/registryCache（系统文件缓存/注册表缓存）按用户裁定直接隐藏入口（后端
 //     mem_clean 白名单本就不提供 82/84）。regionUnavailable 兜底保留：将来若再出现
 //     `sysUnavailable: true` 条目，仍不计入「可勾选区域」。
-const mcJs = read('src/scripts/memoryclean.js');
+const mcJs = blankNonCode(read('src/scripts/memoryclean.js'), 'js', { keepStrings: true });
 const regionsBlk = mcJs.match(/const REGIONS = \[([\s\S]*?)\n  \];/);
 const regionTotal = regionsBlk ? (regionsBlk[1].match(/^\s*\{ id: '/gm) ?? []).length : NaN;
 const regionUnavailable = regionsBlk ? (regionsBlk[1].match(/sysUnavailable: true/g) ?? []).length : 0;
@@ -268,7 +279,7 @@ assertAllEqual('11. 内存清理可勾选区域数 = REGIONS 实算', /按\s*(\d
 
 // 12. 网络检测诊断项数：readme「N 项只读诊断」⇄ netcheck.js ITEM_META 键数
 //     （该表注释自述「键名与后端回传 items 一致」——前端表即口径真源）。
-const ncJs = read('src/scripts/netcheck.js');
+const ncJs = blankNonCode(read('src/scripts/netcheck.js'), 'js', { keepStrings: true });
 const metaBlk = ncJs.match(/const ITEM_META = \{([\s\S]*?)\n  \};/);
 const netItems = metaBlk ? (metaBlk[1].match(/^\s{4}\w+: \{ name:/gm) ?? []).length : NaN;
 check(Number.isFinite(netItems), 'netcheck.js ITEM_META 可解析', `诊断项 ${netItems}`);
@@ -284,6 +295,21 @@ for (const it of allItems(cleanup)) {
   if (it.prov && it.prov.sourceClass === 'winapp2-clue') winapp2Count++;
 }
 assertAllEqual('13. WinApp2 溯源条数 = sourceClass=winapp2-clue 实算', /(\d+)\s*条精选自\s*WinApp2/g, winapp2Count);
+
+// A-06② / C-08④：中文数词与阿拉伯数字都进同一组对拍；把「四类」改成「五类」必须红。
+const zhCounts = (unit) => findAllNormalized(new RegExp(`(\\d+)\\s*${unit}`, 'g'));
+const residueClasses = ['服务残留', '驱动残留', '注册表残留', '文件·文件夹残留'].length;
+const guardSteps = 8;
+check(
+  zhCounts('类残留').length === 1 && zhCounts('类残留')[0] === residueClasses,
+  `14a. 卸载残留类数（中文数词归一）= 枚举面 ${residueClasses} 类`,
+  `归一后命中 ${JSON.stringify(zhCounts('类残留'))}`,
+);
+check(
+  zhCounts('道现读判据').length === 1 && zhCounts('道现读判据')[0] === guardSteps,
+  `14b. 注册表删除判据道数（中文数词归一）= 静态面 ${guardSteps} 道`,
+  `归一后命中 ${JSON.stringify(zhCounts('道现读判据'))}`,
+);
 
 console.log('');
 if (fail > 0) {

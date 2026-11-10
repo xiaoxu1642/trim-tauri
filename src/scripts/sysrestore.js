@@ -88,15 +88,15 @@
 
     const listEl = q('#restoreList');
     if (!listEl) return;
+    const protBadges = prot.map(p =>
+      `<span class="restore-vol on">${escapeHtml(p.drive)} 保护开</span>`
+    ).join('');
     if (!rps.length) {
       listEl.innerHTML = window.emptyState
         ? window.emptyState({ icon: 'shield', title: '暂无还原点', desc: '系统还原点用于系统异常时一键回退，建议优化前先创建', cta: { text: '创建还原点', target: 'btnRestoreCreate' } })
         : '<div class="empty-state"><p>暂无还原点，点击底部「创建还原点」立即创建一个</p></div>';
       return;
     }
-    const protBadges = prot.map(p =>
-      `<span class="restore-vol on">${escapeHtml(p.drive)} 保护开</span>`
-    ).join('');
 
     listEl.innerHTML = rps.map((rp, i) => `
       <div class="restore-item">
@@ -132,7 +132,7 @@
     const ok = await window.app?.confirmDanger?.(
       '创建系统还原点',
       '系统还原点用于系统异常时一键回退。\n\n即将为所有已启用保护的磁盘创建还原点。',
-      '创建',
+      '仍然执行',
       '取消',
       '此操作为系统级操作，创建过程可能需要数十秒，请确认当前无其他系统任务正在进行。'
     );
@@ -178,7 +178,7 @@
     const ok = await window.app?.confirmDanger?.(
       '恢复默认创建频率',
       '将把系统还原点的创建频率限制恢复为你修改前的值。\n\n若本机没有修改前的记录，则删除覆写值、恢复 Windows 默认的 24 小时限制。',
-      '恢复',
+      '仍然执行',
       '取消',
       '此操作写入系统注册表，需要管理员权限。'
     );

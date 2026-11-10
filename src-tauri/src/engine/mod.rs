@@ -30,6 +30,10 @@ pub mod snapshot;
 pub mod sysrestore;
 pub mod sysinfo;
 pub mod systembin;
+/// A14（X1-L01 一族）：测试用子进程执行器（带超时 + 杀整树）。
+/// 不加 `#[cfg(test)]`：集成测试（`tests/*.rs`）编译时 cfg(test) 对被依赖 crate 不生效，
+/// 收在 cfg(test) 里会让库内测试与集成测试各写一份 —— 那正是本模块要消灭的重复。
+pub mod testcmd;
 /// B2-1（2026-10-27 全仓重审 P0）：临时件名的形态真源 —— 生成侧与清扫白名单共用一份声明。
 pub mod tmpnames;
 pub mod winhttp;

@@ -126,22 +126,28 @@ pub(crate) struct Downloaded {
     sha256: String,
     /// 这次包体实际来自哪条线路（回退换线时与检查阶段的线路可能不同）
     via: String,
-    /// 落在用户「下载」目录里的那份安装包路径（插件自己只用内存字节安装，
-    /// 这份是给用户看得见/事后自查的；写失败为空，不影响更新本身）
+    /// 落在下载落点目录里的那份安装包路径（插件自己只用内存字节安装，
+    /// 这份是给用户看得见/事后自查的；同名已存在时回既有路径；写失败为空，
+    /// 不影响更新本身）
     saved_to: String,
 }
 
-/// 把下载好的安装包按发布时的文件名放进用户「下载」目录。
+/// 下载目录保存回执；波次 3 消费端按 `savedTo` / `skipped` / `saveError` 原字段名取。
+#[derive(Clone)]
+pub(crate) struct SavedDownload {
+    saved_to: String,
+    skipped: bool,
+    save_error: Option<String>,
+}
+
+/// 把下载好的安装包按发布时的文件名放进 [`download_dir`]。
 ///
 /// 为什么放这里而不是只留在内存：用户 2026-10-05 指定的流程要求「下载到下载文件夹」，
 /// 而且一份看得见的安装包是自动更新唯一的事后凭证 —— 装完想核对哈希、或想再装一次，
 /// 都不用重新下载。文件名沿用发布名，与下载 URL 末段一致，避免同名不同物。
 /// 返回 `None` = 没写成（没有下载目录 / 磁盘或权限问题），调用方只记日志不阻断。
-fn save_to_downloads(bytes: &[u8], file_name: &str) -> Option<String> {
-    let dir = std::env::var_os("USERPROFILE")
-        .map(std::path::PathBuf::from)
-        .map(|h| h.join("Downloads"))
-        .filter(|d| d.is_dir())?;
+fn save_to_downloads(bytes: &[u8], file_name: &str) -> Option<SavedDownload> {
+    let dir = download_dir()?;
     // 只接受一个纯文件名：URL 末段理论上可被清单写坏，路径分隔符一律拒绝
     if file_name.is_empty()
         || file_name.contains('/')
@@ -151,13 +157,43 @@ fn save_to_downloads(bytes: &[u8], file_name: &str) -> Option<String> {
         return None;
     }
     let path = dir.join(file_name);
-    match std::fs::write(&path, bytes) {
-        Ok(_) => Some(path.to_string_lossy().to_string()),
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            if let Err(e) = std::io::Write::write_all(&mut file, bytes) {
+                log::write_log("warn", &format!("[updater] 安装包写入下载目录失败（不影响更新）: {e}"));
+                return None;
+            }
+            Some(SavedDownload {
+                saved_to: path.to_string_lossy().to_string(),
+                skipped: false,
+                save_error: None,
+            })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            log::write_log("info", &format!("[updater] 安装包同名文件已存在，跳过覆盖: {}", path.display()));
+            Some(SavedDownload {
+                saved_to: path.to_string_lossy().to_string(),
+                skipped: true,
+                save_error: None,
+            })
+        }
         Err(e) => {
             log::write_log("warn", &format!("[updater] 安装包写入下载目录失败（不影响更新）: {e}"));
             None
         }
     }
+}
+
+/// 下载落点的单一判定；测试用沙箱替换目录时也必须走这里。
+fn download_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join("Downloads"))
+        .filter(|d| d.is_dir())
 }
 
 /// 清单里声明的包体 SHA-256（可选字段）。
@@ -612,7 +648,16 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
                     .and_then(|mut s| s.next_back())
                     .unwrap_or("")
                     .to_string();
-                let saved = save_to_downloads(&bytes, &file_name).unwrap_or_default();
+                let saved_result = save_to_downloads(&bytes, &file_name);
+                let saved = saved_result
+                    .as_ref()
+                    .map(|s| s.saved_to.clone())
+                    .unwrap_or_default();
+                let saved_skipped = saved_result.as_ref().map(|s| s.skipped).unwrap_or(false);
+                let save_error = saved_result
+                    .as_ref()
+                    .and_then(|s| s.save_error.clone())
+                    .unwrap_or_default();
                 *lock(&DOWNLOADED) = Some(Downloaded {
                     sha256: actual.clone(),
                     via: via.clone(),
@@ -623,7 +668,7 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
                 *lock(&PENDING) = None;
                 push(&app, json!({
                     "phase": "ready", "version": version, "sha256": actual, "via": via,
-                    "savedTo": saved,
+                    "savedTo": saved, "skipped": saved_skipped, "saveError": save_error,
                 }));
             }
             None => {
@@ -847,8 +892,10 @@ fn clean_installer(path: &str) -> Cleaned {
     }
 }
 
-/// 启动 8s 后静默检查一次（对照上游 initUpdater 的 setTimeout）。
+/// 首帧后 3s 静默检查一次（对照上游 initUpdater 的 setTimeout）。
 /// 为什么延后：避开窗口动画与概览预热的资源抢占期。
+/// 与主窗那 3s/8s 兜底**无关**：那是渲染层自己的两个定时器，这里是后端独立的一条，
+/// 两边各自计时、互不触发。
 pub fn schedule_silent_check<R: Runtime>(app: &AppHandle<R>) {
     if is_dev_build() {
         log::write_log("info", "[updater] 开发环境，跳过自动更新");
@@ -936,6 +983,35 @@ mod tests {
         assert!(save_to_downloads(b"x", "..\\setup.exe").is_none());
         assert!(save_to_downloads(b"x", "a/b.exe").is_none());
         assert!(save_to_downloads(b"x", r"a\b.exe").is_none());
+    }
+
+    /// R1a-L09：下载目录里的同名安装包不得被覆盖；回执指向既有文件。
+    #[test]
+    fn r1a_download_does_not_overwrite() -> Result<(), Box<dyn std::error::Error>> {
+        let sandbox = crate::testutil::Sandbox::new(&format!("r1a-download-{}", std::process::id()));
+        let sandbox_path = sandbox.path().to_path_buf();
+        let downloads = sandbox_path.join("Downloads");
+        std::fs::create_dir_all(&downloads)?;
+        let name = "r1a-download-setup.exe";
+        let existing = downloads.join(name);
+        std::fs::write(&existing, b"old")?;
+        let original_downloads = std::env::var_os("USERPROFILE").map(std::path::PathBuf::from);
+        unsafe { std::env::set_var("USERPROFILE", &sandbox_path) };
+        let saved = match save_to_downloads(b"new", name) {
+            Some(saved) => saved,
+            None => panic!("下载落点必须指向既有同名文件"),
+        };
+        match original_downloads {
+            Some(original) => unsafe { std::env::set_var("USERPROFILE", original) },
+            None => unsafe { std::env::remove_var("USERPROFILE") },
+        }
+        assert_eq!(saved.saved_to, downloads.join(name).to_string_lossy());
+        let skipped = saved.skipped;
+        let save_error = saved.save_error;
+        assert!(skipped, "同名文件必须标记 skipped");
+        assert!(save_error.is_none(), "跳过覆盖不是保存失败");
+        assert_eq!(std::fs::read(&existing)?, b"old");
+        Ok(())
     }
 
     /// 清单里的 sha256 只是**交叉核对值**（信任锚始终是内置公钥背书的 minisign 签名），

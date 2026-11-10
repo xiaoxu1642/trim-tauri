@@ -75,13 +75,13 @@ export function pathPrefixProblem(p) {
 /** 收集一条规则里的所有目标指纹（与 A3 的口径一致：类型 + 可移植模板 + pattern + recurse + reg value） */
 function targetFingerprints(it) {
   const fps = [];
-  for (const fk of it.fileKeys ?? []) {
+  for (const fk of Array.isArray(it.fileKeys) ? it.fileKeys : []) {
     if (!fk || typeof fk !== 'object') continue;
     fps.push(
       `file|${String(fk.path ?? '').toLowerCase()}|${fk.pattern ?? '*'}|${fk.recurse === false ? 'false' : 'true'}`,
     );
   }
-  for (const rk of it.regKeys ?? []) {
+  for (const rk of Array.isArray(it.regKeys) ? it.regKeys : []) {
     if (!rk || typeof rk !== 'object') continue;
     fps.push(`reg|${String(rk.path ?? '').toLowerCase()}|${rk.value ?? ''}`);
   }
@@ -102,6 +102,13 @@ function targetFingerprints(it) {
 export function validateCleanupPackage(pkg) {
   const errs = [];
   const say = (id, msg) => errs.push(`[${id}] ${msg}`);
+  const containers = (value, label) => {
+    if (!Array.isArray(value)) {
+      say('A5', `${label} 必须是数组（当前 ${JSON.stringify(value)}）`);
+      return [];
+    }
+    return value;
+  };
 
   if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) {
     return ['[A5] 规则包不是 JSON 对象'];
@@ -346,7 +353,7 @@ export function validateCleanupPackage(pkg) {
     }
     // A2 / A7 fileKeys 形态
     const fkList = Array.isArray(it.fileKeys) ? it.fileKeys : [];
-    if ('fileKeys' in it && !Array.isArray(it.fileKeys)) say('A2', `规则 ${id}: fileKeys 必须是数组`);
+    if ('fileKeys' in it && !Array.isArray(it.fileKeys)) say('A5', `规则 ${id}: fileKeys 必须是数组`);
     if (fkList.length > number('cleanup', 'maxFileKeysPerItem')) {
       say('A5', `规则 ${id}: fileKeys 条数 ${fkList.length} 超上限`);
     }
@@ -399,7 +406,7 @@ export function validateCleanupPackage(pkg) {
     }
     // A2 regKeys
     const rkList = Array.isArray(it.regKeys) ? it.regKeys : [];
-    if ('regKeys' in it && !Array.isArray(it.regKeys)) say('A2', `规则 ${id}: regKeys 必须是数组`);
+    if ('regKeys' in it && !Array.isArray(it.regKeys)) say('A5', `规则 ${id}: regKeys 必须是数组`);
     if (rkList.length > number('cleanup', 'maxRegKeysPerItem')) {
       say('A5', `规则 ${id}: regKeys 条数 ${rkList.length} 超上限`);
     }
@@ -419,7 +426,7 @@ export function validateCleanupPackage(pkg) {
     // A2 excludePaths（C-2 开门的字段；:: 具名值排除只能配具名值 regKeys —— F-2）
     if ('excludePaths' in it) {
       const eps = it.excludePaths;
-      if (!Array.isArray(eps)) say('A2', `规则 ${id}: excludePaths 必须是字符串数组`);
+      if (!Array.isArray(eps)) say('A5', `规则 ${id}: excludePaths 必须是字符串数组`);
       else {
         if (eps.length > number('cleanup', 'maxExcludePathsPerItem')) {
           say('A5', `规则 ${id}: excludePaths 条数 ${eps.length} 超上限`);
@@ -533,8 +540,8 @@ export function validateCleanupPackage(pkg) {
       const v = g[f];
       if (typeof v !== 'string' || !v.trim()) say('A6', `groups.${f} 缺失或为空（组 ${g.key ?? '?'}）`);
     }
-    for (const it of g.items ?? []) checkItem(it, `组 ${g.key ?? '?'}`);
-    const subs = g.subGroups ?? [];
+    for (const it of containers(g.items ?? [], `组 ${g.key ?? '?'} 的 items`)) checkItem(it, `组 ${g.key ?? '?'}`);
+    const subs = containers(g.subGroups ?? [], `组 ${g.key ?? '?'} 的 subGroups`);
     if (!Array.isArray(subs)) say('A5', `组 ${g.key ?? '?'} 的 subGroups 必须是数组`);
     else {
       if (subs.length > number('cleanup', 'maxSubGroupsPerGroup')) {
@@ -552,7 +559,9 @@ export function validateCleanupPackage(pkg) {
           const v = sg[f];
           if (typeof v !== 'string' || !v.trim()) say('A6', `subGroups.${f} 缺失或为空（子组 ${sg.id ?? sg.name ?? '?'}）`);
         }
-        for (const it of sg.items ?? []) checkItem(it, `子组 ${sg.id ?? sg.name ?? '?'}`);
+        for (const it of containers(sg.items ?? [], `子组 ${sg.id ?? sg.name ?? '?'} 的 items`)) {
+          checkItem(it, `子组 ${sg.id ?? sg.name ?? '?'}`);
+        }
       }
     }
   }
@@ -665,28 +674,31 @@ export function selfTest(validate) {
     });
     return p;
   };
-  const overGroups = groupsPkg(41);
-  if (!validate(overGroups).some((e) => e.startsWith('[A5]'))) problems.push('41 组（maxGroups=40）未被 A5 判红');
-  const edgeGroups = groupsPkg(40);
-  if (validate(edgeGroups).some((e) => e.startsWith('[A5]'))) problems.push('40 组（maxGroups 等值）被 A5 误判红');
+  const maxGroups = number('cleanup', 'maxGroups');
+  const overGroups = groupsPkg(maxGroups + 1);
+  if (!validate(overGroups).some((e) => e.startsWith('[A5]'))) problems.push(`${maxGroups + 1} 组（maxGroups=${maxGroups}）未被 A5 判红`);
+  const edgeGroups = groupsPkg(maxGroups);
+  if (validate(edgeGroups).some((e) => e.startsWith('[A5]'))) problems.push(`${maxGroups} 组（maxGroups 等值）被 A5 误判红`);
 
   const manyKeys = clone();
-  manyKeys.groups[0].items[0].fileKeys = Array.from({ length: 33 }, (_, i) => ({
+  const maxFileKeys = number('cleanup', 'maxFileKeysPerItem');
+  manyKeys.groups[0].items[0].fileKeys = Array.from({ length: maxFileKeys + 1 }, (_, i) => ({
     path: `%LOCALAPPDATA%\\SelfTest\\f${i}`, pattern: '*', recurse: true,
   }));
-  if (!validate(manyKeys).some((e) => e.startsWith('[A5]'))) problems.push('33 个 fileKeys（maxFileKeysPerItem=32）未被 A5 判红');
+  if (!validate(manyKeys).some((e) => e.startsWith('[A5]'))) problems.push(`${maxFileKeys + 1} 个 fileKeys（maxFileKeysPerItem=${maxFileKeys}）未被 A5 判红`);
   const edgeKeys = clone();
-  edgeKeys.groups[0].items[0].fileKeys = Array.from({ length: 32 }, (_, i) => ({
+  edgeKeys.groups[0].items[0].fileKeys = Array.from({ length: maxFileKeys }, (_, i) => ({
     path: `%LOCALAPPDATA%\\SelfTest\\f${i}`, pattern: '*', recurse: true,
   }));
-  if (validate(edgeKeys).some((e) => e.startsWith('[A5]'))) problems.push('32 个 fileKeys（等值）被 A5 误判红');
+  if (validate(edgeKeys).some((e) => e.startsWith('[A5]'))) problems.push(`${maxFileKeys} 个 fileKeys（等值）被 A5 误判红`);
 
   const prefix = '%LOCALAPPDATA%\\SelfTest\\';
+  const maxTargetLen = number('cleanup', 'maxTargetLen');
   const longPath = clone();
-  longPath.groups[0].items[0].fileKeys[0].path = prefix + 'a'.repeat(260 - prefix.length);
-  if (validate(longPath).some((e) => e.startsWith('[A2]'))) problems.push('260 字符 target（maxTargetLen 等值）被 A2 误判红');
+  longPath.groups[0].items[0].fileKeys[0].path = prefix + 'a'.repeat(maxTargetLen - prefix.length);
+  if (validate(longPath).some((e) => e.startsWith('[A2]'))) problems.push(`${maxTargetLen} 字符 target（maxTargetLen 等值）被 A2 误判红`);
   const overPath = clone();
-  overPath.groups[0].items[0].fileKeys[0].path = prefix + 'a'.repeat(261 - prefix.length);
-  if (!validate(overPath).some((e) => e.startsWith('[A2]'))) problems.push('261 字符 target（maxTargetLen=260）未被 A2 判红');
+  overPath.groups[0].items[0].fileKeys[0].path = prefix + 'a'.repeat(maxTargetLen + 1 - prefix.length);
+  if (!validate(overPath).some((e) => e.startsWith('[A2]'))) problems.push(`${maxTargetLen + 1} 字符 target（maxTargetLen=${maxTargetLen}）未被 A2 判红`);
   return problems;
 }

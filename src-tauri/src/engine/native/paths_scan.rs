@@ -64,7 +64,19 @@ fn strip_icon_suffix(s: &str) -> String {
 }
 
 fn normalize_path(value: &str) -> String {
-    let v = value.trim().trim_matches('"');
+    let trimmed = value.trim();
+    // R5b-L01：带引号的 DisplayIcon 形如 `"C:\...\notepad.exe",0`。必须先在
+    // `",` 处切掉图标序号，再剥外层引号；反过来会先吃掉路径尾引号，把 `,0`
+    // 留在路径里，canonicalize 失败后整串被当成安装路径展示。
+    let unquoted = if let Some(rest) = trimmed.strip_prefix('"') {
+        match rest.find("\",") {
+            Some(end) => &rest[..end],
+            None => trimmed.trim_matches('"'),
+        }
+    } else {
+        trimmed.trim_matches('"')
+    };
+    let v = unquoted.trim();
     if v.is_empty() { return String::new(); }
     let expanded = expand_env(v);
     // R5b-M02：先剥末尾 `,<数字>` 图标索引（`C:\Program Files\App\app.exe,0` 的首个空格
@@ -121,69 +133,108 @@ unsafe fn resolve_from_app_paths(exe_name: &str) -> String {
 }
 
 /// 软件清单条目
+#[derive(Debug)]
 struct InventoryEntry { name: String, install_path: String }
 
-/// 枚举卸载注册表构建软件清单
-unsafe fn build_inventory() -> Vec<InventoryEntry> {
+/// 枚举卸载注册表构建软件清单（可注入闭包，便于单测模拟权限拒绝）。
+///
+/// `open_root(hive, root)` 返回子键名列表；`None` = 根键打不开（权限/IO）。
+/// `read_sub(hive, root, sub)` 返回 `Ok((name, install_path))`；`Err(())` = 子键打不开。
+///
+/// 返回 `(entries, skipped)`，`skipped` 是根键/子键打开失败的次数。
+/// R5b-L04：旧实现根键/子键 `RegOpenKeyExW` 失败时直接 `continue`，回执既不报 skipped
+/// 也不判 partial，卸载清单被静默截断却长得像「完整枚举」。这里与 glob 分支同口径：
+/// 读不动必须在日志留痕，并把 skipped 数带回给命令层。
+fn inventory_scan(
+    roots: &[(HKEY, &str)],
+    open_root: &dyn Fn(HKEY, &str) -> Option<Vec<String>>,
+    read_sub: &dyn Fn(HKEY, &str, &str) -> Result<(String, String), ()>,
+) -> (Vec<InventoryEntry>, usize) {
     let mut entries: Vec<InventoryEntry> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (hive, root) in [
-        (HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
-        (HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
-        (HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
-    ] {
-        let sk = to_wide(root);
-        let mut hk = HKEY::default();
-        if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() { continue; }
-        for sub in reg_enum_subkeys(hk) {
-            let sub_path = format!("{root}\\{sub}");
-            let ssk = to_wide(&sub_path);
-            let mut shk = HKEY::default();
-            if RegOpenKeyExW(hive, PCWSTR(ssk.as_ptr()), Some(0), KEY_READ, &mut shk).is_err() { continue; }
-            let name = reg_read_string(shk, "DisplayName").unwrap_or_default();
-            let _ = RegCloseKey(shk);
-            if name.trim().is_empty() { continue; }
-            // 跳过系统组件和更新
-            let ssk2 = to_wide(&sub_path);
-            let mut shk2 = HKEY::default();
-            if RegOpenKeyExW(hive, PCWSTR(ssk2.as_ptr()), Some(0), KEY_READ, &mut shk2).is_ok() {
-                // SystemComponent 是 DWORD（值 1 = 系统组件）：原先按字符串读，类型闸恒不过 ⇒
-                // `"" == "1"` 恒假 ⇒ 「跳过系统组件」这道过滤器**从来没生效过**，
-                // 卸载清单被系统组件条目放大（QQ/微信/抖音的安装路径可能被当成系统组件目录）。
-                let sys_comp = reg_read_dword_val(shk2, "SystemComponent").unwrap_or(0);
-                let release_type = reg_read_string(shk2, "ReleaseType").unwrap_or_default();
-                let _ = RegCloseKey(shk2);
-                if uninstall_entry_is_hidden(sys_comp, &release_type) { continue; }
-            }
-            // 解析安装路径
-            let ssk3 = to_wide(&sub_path);
-            let mut shk3 = HKEY::default();
-            let mut install = String::new();
-            if RegOpenKeyExW(hive, PCWSTR(ssk3.as_ptr()), Some(0), KEY_READ, &mut shk3).is_ok() {
-                for field in ["InstallLocation", "DisplayIcon", "UninstallString"] {
-                    if let Some(v) = reg_read_string(shk3, field) {
-                        let norm = normalize_path(&v);
-                        if !norm.is_empty() {
-                            if std::path::Path::new(&norm).is_file() {
-                                install = std::path::Path::new(&norm).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                            } else if std::path::Path::new(&norm).is_dir() {
-                                install = norm;
-                            }
-                            if !install.is_empty() { break; }
-                        }
-                    }
+    let mut skipped = 0usize;
+    for (hive, root) in roots {
+        let Some(subs) = open_root(*hive, root) else {
+            skipped += 1;
+            crate::engine::log::write_log(
+                "warn",
+                &format!("路径扫描：卸载注册表根键打开失败（{root}），该根已跳过"),
+            );
+            continue;
+        };
+        for sub in subs {
+            let (name, install) = match read_sub(*hive, root, &sub) {
+                Ok(v) => v,
+                Err(()) => {
+                    skipped += 1;
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!("路径扫描：卸载子键读取失败（{root}\\{sub}），已跳过"),
+                    );
+                    continue;
                 }
-                let _ = RegCloseKey(shk3);
-            }
-            if install.is_empty() { continue; }
+            };
+            if name.trim().is_empty() || install.is_empty() { continue; }
             let key = format!("{}|{}", name.trim().to_lowercase(), install.to_lowercase());
             if seen.insert(key) {
                 entries.push(InventoryEntry { name: name.trim().to_string(), install_path: install });
             }
         }
-        let _ = RegCloseKey(hk);
     }
-    entries
+    (entries, skipped)
+}
+
+/// 生产路径：真实注册表枚举卸载项。
+unsafe fn build_inventory() -> (Vec<InventoryEntry>, usize) {
+    let roots = [
+        (HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+        (HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ];
+    inventory_scan(
+        &roots,
+        &|hive, root| {
+            let sk = to_wide(root);
+            let mut hk = HKEY::default();
+            if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
+                return None;
+            }
+            let subs = reg_enum_subkeys(hk);
+            let _ = RegCloseKey(hk);
+            Some(subs)
+        },
+        &|hive, root, sub| {
+            let sub_path = format!("{root}\\{sub}");
+            let ssk = to_wide(&sub_path);
+            let mut shk = HKEY::default();
+            if RegOpenKeyExW(hive, PCWSTR(ssk.as_ptr()), Some(0), KEY_READ, &mut shk).is_err() {
+                return Err(());
+            }
+            let name = reg_read_string(shk, "DisplayName").unwrap_or_default();
+            // 跳过系统组件和更新（SystemComponent 是 DWORD；ReleaseType 是字符串）
+              let sys_comp = reg_read_dword_u32(shk, "SystemComponent").unwrap_or(0);
+            let release_type = reg_read_string(shk, "ReleaseType").unwrap_or_default();
+            let mut install = String::new();
+            for field in ["InstallLocation", "DisplayIcon", "UninstallString"] {
+                if let Some(v) = reg_read_string(shk, field) {
+                    let norm = normalize_path(&v);
+                    if !norm.is_empty() {
+                        if std::path::Path::new(&norm).is_file() {
+                            install = std::path::Path::new(&norm).parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                        } else if std::path::Path::new(&norm).is_dir() {
+                            install = norm;
+                        }
+                        if !install.is_empty() { break; }
+                    }
+                }
+            }
+            let _ = RegCloseKey(shk);
+            if uninstall_entry_is_hidden(sys_comp, &release_type) {
+                return Ok((String::new(), String::new()));
+            }
+            Ok((name, install))
+        },
+    )
 }
 
 /// 从软件清单按名称模式匹配安装路径
@@ -268,7 +319,7 @@ fn glob_first_dir(pattern: &str) -> String {
 /// 用户数据目录、缓存目录、glob 匹配。开始菜单 .lnk 目标解析暂未实现（S2 用 IShellLink COM）。
 pub fn paths_scan(rules_json: &str) -> Result<Value, String> {
     unsafe {
-        let inventory = build_inventory();
+        let (inventory, skipped) = build_inventory();
 
         // 解析规则库中的候选目录
         let mut rule_cache: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
@@ -444,6 +495,10 @@ pub fn paths_scan(rules_json: &str) -> Result<Value, String> {
             "wechatCacheDir": wechat_cache,
             "douyinCacheDir": douyin_cache,
             "qqCacheDir": qq_cache,
+            // R5b-L04：根键/子键读不动时必须如实上报——卸载清单被静默截断却长得像
+            // 「完整枚举」会让路径匹配静默漏掉目标。skipped > 0 即 partial。
+            "skipped": skipped,
+            "partial": skipped > 0,
             "scanVersion": 2,
             // 时间戳**不在这里产生**：本函数只负责找路径。扫描时间由命令层
             // （`commands::paths`）统一以 ISO-8601 写入 —— 此前这里塞的是
@@ -469,7 +524,8 @@ pub(super) fn uninstall_entry_is_hidden(sys_comp: u32, release_type: &str) -> bo
 
 #[cfg(test)]
 mod tests {
-    use super::uninstall_entry_is_hidden;
+    use super::{inventory_scan, normalize_path, uninstall_entry_is_hidden};
+    use windows::Win32::System::Registry::HKEY;
 
     /// R5b-M15 回归钉：`SystemComponent` 是 DWORD，按字符串读时判据恒假 ⇒ 过滤器失效。
     #[test]
@@ -532,5 +588,84 @@ mod tests {
                 "关闭不得出现在内层 if / if let 里（会与分支外的关闭重复）：{line}"
             );
         }
+    }
+
+    /// R5b-L01：带引号的 DisplayIcon 必须先切图标序号再剥引号。
+    ///
+    /// 判红自证：把 `normalize_path` 首行恢复成 `value.trim().trim_matches('"')`，
+    /// `",0` 会留在路径尾部，`is_file` 断言红。
+    #[test]
+    fn r5b_quoted_display_icon_parses() {
+        let exe = std::env::current_exe().expect("取当前测试程序路径");
+        let raw = format!("\"{}\",0", exe.display());
+        let parsed = normalize_path(&raw);
+        assert!(
+            std::path::Path::new(&parsed).is_file(),
+            "带引号且带图标序号的 DisplayIcon 必须解析回真实 exe：{raw} -> {parsed}"
+        );
+        // 反向对照：不带图标序号的引号形态仍必须剥干净。
+        let plain = normalize_path(&format!("\"{}\"", exe.display()));
+        assert!(std::path::Path::new(&plain).is_file(), "{plain}");
+    }
+
+    /// R5b-L04：根键/子键打开失败时，回执必须带 `skipped` 并判 `partial`。
+    /// 判红自证：把 `inventory_scan` 的失败分支恢复成静默 `continue` ⇒ skipped 恒 0，
+    /// 本条断言红。
+    #[test]
+    fn r5b_inventory_reports_unreadable_root() {
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+
+        // 第一个根键权限拒绝（open_root 返回 None），其余根正常。
+        let roots = [
+            (HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+        ];
+        let open_root = |_hive: HKEY, root: &str| -> Option<Vec<String>> {
+            if root.contains("WOW6432Node") {
+                Some(vec!["AppA".to_string(), "AppB".to_string()])
+            } else {
+                None // 权限拒绝
+            }
+        };
+        let read_sub = |_: HKEY, _: &str, sub: &str| -> Result<(String, String), ()> {
+            match sub {
+                "AppA" => Ok(("AppA".to_string(), r"C:\Program Files\AppA".to_string())),
+                "AppB" => Ok(("AppB".to_string(), r"C:\Program Files\AppB".to_string())),
+                _ => Err(()),
+            }
+        };
+        let (entries, skipped) = inventory_scan(&roots, &open_root, &read_sub);
+        assert_eq!(skipped, 1, "权限拒绝的根键必须计数 skipped");
+        assert_eq!(entries.len(), 2, "可读根键的条目必须正常枚举：{entries:?}");
+        assert!(
+            entries.iter().all(|e| !e.name.is_empty() && !e.install_path.is_empty()),
+            "{entries:?}"
+        );
+
+        // 子键打不开也要计数。
+        let single_root = [(HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall")];
+        let open_root2 = |_: HKEY, _: &str| -> Option<Vec<String>> {
+            Some(vec!["AppA".to_string(), "Broken".to_string()])
+        };
+        let read_sub2 = |_: HKEY, _: &str, sub: &str| -> Result<(String, String), ()> {
+            if sub == "Broken" { Err(()) } else { Ok(("AppA".to_string(), r"C:\Program Files\AppA".to_string())) }
+        };
+        let (entries, skipped) = inventory_scan(&single_root, &open_root2, &read_sub2);
+        assert_eq!(skipped, 1, "打不开的子键必须计数 skipped");
+        assert_eq!(entries.len(), 1, "能读的子键必须保留：{entries:?}");
+    }
+
+    /// R5b-L04 正向对照：全部根键可读时 skipped 必须为 0（不误报 partial）。
+    #[test]
+    fn r5b_inventory_all_readable_has_zero_skipped() {
+        use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+        let roots = [(HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall")];
+        let open_root = |_: HKEY, _: &str| -> Option<Vec<String>> { Some(vec!["AppA".to_string()]) };
+        let read_sub = |_: HKEY, _: &str, sub: &str| -> Result<(String, String), ()> {
+            if sub == "AppA" { Ok(("AppA".to_string(), r"C:\Program Files\AppA".to_string())) } else { Err(()) }
+        };
+        let (entries, skipped) = inventory_scan(&roots, &open_root, &read_sub);
+        assert_eq!(skipped, 0, "全部可读时不得误报 skipped");
+        assert_eq!(entries.len(), 1);
     }
 }

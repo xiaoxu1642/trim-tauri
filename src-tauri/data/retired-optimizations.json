@@ -90,7 +90,7 @@
     {
       "id": "perf_service_shutdown_fast",
       "title": "缩短服务关闭等待时间",
-      "note": "N4（2026-09-30 用户点名下线）：与「系统响应微调合集」目标同类，已整并进 tf_perf_misc（WaitToKillServiceTimeout=2000 一步不丢）。注意合并后 tf_perf_misc 的生效粒度升为「需重启」（HKLMSYSTEMCurrentControlSetControl），optimizer-scope.json 已同步。本机若留有该项的注册表备份，启动概览会列成「待还原」。"
+      "note": "N4（2026-09-30 用户点名下线）：与「系统响应微调合集」目标同类，已整并进 tf_perf_misc（WaitToKillServiceTimeout=2000 一步不丢）。注意合并后 tf_perf_misc 的生效粒度升为「需重启」（HKLM\\SYSTEM\\CurrentControlSet\\Control），optimizer-scope.json 已同步。本机若留有该项的注册表备份，启动概览会列成「待还原」。"
     },
     {
       "id": "tf_fso",
@@ -110,7 +110,7 @@
     {
       "id": "audio_disable_voice_activation",
       "title": "关闭应用语音激活",
-      "note": "v5 / Q1 裁定（2026-10-02 用户裁决「摘除优化列表，直接删除该优化项」）：写的是 HKLMSOFTWAREMicrosoftSpeech_OneCoreSettingsAgentActivationEnabled，该键所有权属 TrustedInstaller，实测写入必回「拒绝访问：该键的所有权不在 Administrators，需先取得所有权」，而 Trim 的既有口径是**不代取所有权**——于是这一项结构上不可能成功，永远只会在日志里刷 WARN。还原缺口：本项是纯 pwsh 步骤、不进值级备份（本账门口径只有 reg 型步骤进 optimizer-backups），但因写入从未成功，本机不存在需要回退的已应用状态；若在别的机器上曾写入成功，手工回退方式是删掉该值或改回 1。"
+      "note": "v5 / Q1 裁定（2026-10-02 用户裁决「摘除优化列表，直接删除该优化项」）：写的是 HKLM\\SOFTWARE\\Microsoft\\Speech_OneCore\\Settings\\AgentActivationEnabled，该键所有权属 TrustedInstaller，实测写入必回「拒绝访问：该键的所有权不在 Administrators，需先取得所有权」，而 Trim 的既有口径是**不代取所有权**——于是这一项结构上不可能成功，永远只会在日志里刷 WARN。还原缺口：本项是纯 pwsh 步骤、不进值级备份（本账门口径只有 reg 型步骤进 optimizer-backups），但因写入从未成功，本机不存在需要回退的已应用状态；若在别的机器上曾写入成功，手工回退方式是删掉该值或改回 1。"
     },
     {
       "id": "audio_disable_voice_activation_last_used",
@@ -120,7 +120,7 @@
     {
       "id": "svc_fax_disable",
       "title": "Fax 服务使用排查",
-      "note": "v5 / Q3 裁定（2026-10-02 用户裁决「退役」）：该项对 Fax 服务写 Start=4 并 Stop-Service，而 Windows 11 24H2（本机 26200）已不再随系统分发 Fax 服务——实测 SCM 判 1060「指定的服务未安装」，只剩 HKLMSYSTEMCurrentControlSetServicesFax 注册表键残留（Start 已是 4），该项在受支持的系统上没有可作用的对象。还原缺口：本项步骤为纯 pwsh（无 reg 步），按本账门口径不进值级备份，已应用过的用户没有自动还原出口——需要时把 ServicesFax 的 Start 改回 3 并删掉该服务键即可（本机实测该值一直为 4，未被本项改动过）。"
+      "note": "v5 / Q3 裁定（2026-10-02 用户裁决「退役」）：该项对 Fax 服务写 Start=4 并 Stop-Service，而 Windows 11 24H2（本机 26200）已不再随系统分发 Fax 服务——实测 SCM 判 1060「指定的服务未安装」，只剩 HKLM\\SYSTEM\\CurrentControlSet\\Services\\Fax 注册表键残留（Start 已是 4），该项在受支持的系统上没有可作用的对象。还原缺口：本项步骤为纯 pwsh（无 reg 步），按本账门口径不进值级备份，已应用过的用户没有自动还原出口——需要时把 ServicesFax 的 Start 改回 3 并删掉该服务键即可（本机实测该值一直为 4，未被本项改动过）。"
     },
     {
       "id": "tf_ifeo_perf",

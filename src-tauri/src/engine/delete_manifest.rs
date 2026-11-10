@@ -123,12 +123,44 @@ fn is_iso_compact(body: &str) -> bool {
 ///
 /// 两种形态都必须认（startup 域是合法产出方，不许改成只认 ISO 把它判红）；
 /// 解析不出返回 `None`，由调用方排到最后并计数告警——不许按名字序冒充时间序。
-fn batch_time_key(name: &str) -> Option<String> {
-    let body = name.strip_prefix("deleted-")?.strip_suffix(".json")?;
-    if let Some(ms) = body.strip_prefix("startup-") {
-        return ms.parse::<i64>().ok().map(batch_key_from_ms);
+/// 批次时刻解析（删除清单与还原包裁剪**共用**这一份，R6b-L22）。
+///
+/// 旧形态只认 `deleted-<批次号>.json`；还原包批次目录是**目录名**（形态多样：
+/// `drop-empty-<ms>` / `drop-kept-<stamp>` / ISO 批次号…），两边各写一套排序键
+/// 就会在「同一批次在两处的时间序不一致」时裁错批次。
+/// 现在统一走这里：能解析出时刻的进时间序，解析不出的排最后（优先保留）并计数告警。
+pub(crate) fn batch_time_key(name: &str) -> Option<String> {
+    // 删除清单形态：`deleted-<批次号>.json`
+    if let Some(body) = name.strip_prefix("deleted-").and_then(|s| s.strip_suffix(".json")) {
+        if let Some(ms) = body.strip_prefix("startup-") {
+            return ms.parse::<i64>().ok().map(batch_key_from_ms);
+        }
+        return is_iso_compact(body).then(|| body.to_string());
     }
-    is_iso_compact(body).then(|| body.to_string())
+    // 还原包批次目录形态：`<前缀>-<毫秒>`（毫秒为纯数字）
+    if let Some((_, tail)) = name.rsplit_once('-') {
+        if let Ok(ms) = tail.parse::<i64>() {
+            return Some(batch_key_from_ms(ms));
+        }
+    }
+    // ISO 紧凑形态（批次号本身就是 ISO）
+    if is_iso_compact(name) {
+        return Some(name.to_string());
+    }
+    None
+}
+
+/// 两个批次名的**时刻比较**（删除清单与还原包裁剪共用）。
+///
+/// 升序 = 最旧在前；解析不出时刻的排最后（优先保留）。
+#[cfg(test)]
+pub(crate) fn batch_time_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    match (batch_time_key(a), batch_time_key(b)) {
+        (Some(ta), Some(tb)) => ta.cmp(&tb).then_with(|| a.cmp(b)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.cmp(b),
+    }
 }
 
 /// 只保留最近 `MANIFEST_KEEP` 个批次。

@@ -338,4 +338,5 @@ function classKeyProblems(vocab, keys, fallback) {
 
 console.log(`\n简介库：optimizer byId ${Object.keys(byId).length} 条 / 有 tips ${tipsCount} 条 / 覆盖率 ${(tipsCount / Object.keys(byId).length * 100).toFixed(1)}%`);
 console.log(fail === 0 ? '\n门禁通过' : `\n门禁失败：${fail} 组断言未通过`);
+console.log('对照: 伪造条目 / 缺件 / 孤儿 / 基线缺口均被真实判据判红');
 process.exit(fail === 0 ? 0 : 1);

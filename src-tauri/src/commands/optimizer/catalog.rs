@@ -37,7 +37,10 @@ pub(super) fn options() -> &'static Vec<Value> {
             let _ = LOAD_ERROR.set(Box::leak(reason.into_boxed_str()));
             return Vec::new();
         }
-        serde_json::from_str(OPTIONS_JSON).expect("optimizer-runtime.json 合法")
+        parse_embedded_json(OPTIONS_JSON, "optimizer-runtime.json")
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
     })
 }
 
@@ -47,7 +50,53 @@ pub(super) fn load_error() -> Option<&'static str> {
     LOAD_ERROR.get().map(|s| s.as_ref())
 }
 
+/// 目录验签被拒的统一回执；四条 find_option 消费命令与 `optimizer:list` 共用。
+/// `degraded` 不是一条可展示状态：调用方会先拿到 `success:false` 与稳定错误码，
+/// 渲染层按回执三态直接报「目录不可用」，不把它折成「目录为空」。
+pub(super) fn catalog_load_failure() -> Option<Value> {
+    let reason = load_error()?;
+    Some(json!({
+        "success": false,
+        "degraded": true,
+        "loadError": reason,
+        "code": "optimizer-catalog-unverified",
+        "message": format!("优化目录验签未通过，已拒绝装载：{reason}"),
+    }))
+}
+
 static LOAD_ERROR: OnceLock<&'static str> = OnceLock::new();
+
+/// 编译期内嵌侧表的统一解析出口：坏数据只让对应侧表失效，不许把整窗带崩。
+fn parse_embedded_json(text: &str, label: &str) -> Value {
+    serde_json::from_str(text).unwrap_or_else(|e| {
+        crate::engine::log::write_log(
+            "error",
+            &format!("{label} 编译期内嵌侧表解析失败，已按不可用处理: {e}"),
+        );
+        Value::Null
+    })
+}
+
+/// 侧表不可用的口径：`Null` 与「合法空表」不同，前者必须让调用方按降级处理。
+#[cfg(test)]
+pub(super) fn embedded_table_unavailable(value: &Value) -> bool {
+    let _ = value;
+    value.is_null()
+}
+
+#[cfg(test)]
+mod r3b_l07_tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_side_table_does_not_panic() {
+        let corrupt = "{ not json";
+        let parsed = std::panic::catch_unwind(|| parse_embedded_json(corrupt, "坏侧表样本"));
+        let value = parsed.expect("坏侧表不得 panic");
+        assert!(embedded_table_unavailable(&value), "坏侧表必须被判不可用");
+        assert!(!embedded_table_unavailable(&json!({ "items": [] })), "合法空表不得被判不可用");
+    }
+}
 
 pub(super) fn find_option(id: &str) -> Option<&'static Value> {
     options().iter().find(|o| o.get("id").and_then(|v| v.as_str()) == Some(id))
@@ -65,8 +114,7 @@ pub(super) fn retired_items() -> &'static [Value] {
     static CACHE: OnceLock<Vec<Value>> = OnceLock::new();
     CACHE
         .get_or_init(|| {
-            let parsed: Value =
-                serde_json::from_str(RETIRED_JSON).expect("retired-optimizations.json 合法");
+            let parsed = parse_embedded_json(RETIRED_JSON, "retired-optimizations.json");
             parsed
                 .get("items")
                 .and_then(Value::as_array)
@@ -120,8 +168,7 @@ pub(super) fn scope_label_of(rank: u8) -> &'static str {
 pub(super) fn scope_table() -> &'static std::collections::HashMap<String, u8> {
     static CACHE: OnceLock<std::collections::HashMap<String, u8>> = OnceLock::new();
     CACHE.get_or_init(|| {
-        let parsed: Value =
-            serde_json::from_str(SCOPE_JSON).expect("optimizer-scope.json 合法");
+        let parsed = parse_embedded_json(SCOPE_JSON, "optimizer-scope.json");
         parsed
             .get("scope")
             .and_then(Value::as_object)
@@ -243,8 +290,7 @@ pub(super) fn load_verified_panel(
 pub(super) fn provenance_of(option_id: &str) -> Option<Value> {
     static CACHE: OnceLock<std::collections::HashMap<String, Value>> = OnceLock::new();
     let map = CACHE.get_or_init(|| {
-        let parsed: Value =
-            serde_json::from_str(PROVENANCE_JSON).expect("optimizer-provenance.json 合法");
+        let parsed = parse_embedded_json(PROVENANCE_JSON, "optimizer-provenance.json");
         parsed
             .get("items")
             .and_then(Value::as_object)
@@ -262,7 +308,7 @@ pub(super) fn groups_sidecar() -> Value {
     static CACHE: OnceLock<Value> = OnceLock::new();
     CACHE
         .get_or_init(|| {
-            let parsed: Value = serde_json::from_str(GROUPS_JSON).expect("optimizer-groups.json 合法");
+            let parsed = parse_embedded_json(GROUPS_JSON, "optimizer-groups.json");
             parsed.get("groups").cloned().unwrap_or(Value::Null)
         })
         .clone()
@@ -273,8 +319,7 @@ pub(super) fn groups_sidecar() -> Value {
 pub(super) fn defaults_of(option_id: &str) -> Option<Value> {
     static CACHE: OnceLock<std::collections::HashMap<String, Value>> = OnceLock::new();
     let map = CACHE.get_or_init(|| {
-        let parsed: Value =
-            serde_json::from_str(DEFAULTS_JSON).expect("optimizer-defaults.json 合法");
+        let parsed = parse_embedded_json(DEFAULTS_JSON, "optimizer-defaults.json");
         parsed
             .get("items")
             .and_then(Value::as_object)
@@ -305,8 +350,7 @@ pub(super) fn verify_optimizer_signature() -> Result<(), String> {
 pub(super) fn security_degrade_of(option_id: &str) -> Option<Value> {
     static CACHE: OnceLock<std::collections::HashMap<String, Value>> = OnceLock::new();
     let map = CACHE.get_or_init(|| {
-        let parsed: Value =
-            serde_json::from_str(SECURITY_JSON).expect("optimizer-security.json 合法");
+        let parsed = parse_embedded_json(SECURITY_JSON, "optimizer-security.json");
         parsed
             .get("items")
             .and_then(Value::as_object)
@@ -357,7 +401,7 @@ pub(super) struct WriteSpec {
     /// A 类（注册表可回读）断言。M2-B。
     ///
     /// 三种判据形态，**混起来会判错**：
-    /// - `kind=dword` + `expect`：键存在且值等于期望（走 `read_reg_dword_opt`）
+    /// - `kind=dword` + `expect`：键存在且值等于期望（走 `read_reg_dword_u32_as_i64`）
     /// - `kind=binary` + `expect`：键存在且字节序列等于期望（走 `read_reg_binary_opt`）
     /// - `absent=true`：**键必须不存在**才算已生效。`perf_wu_enable` 是删除语义
     ///   （`Remove-ItemProperty` 删掉 4 个 `Pause*` 键），判「值等于某个数」永远不可能
@@ -389,7 +433,7 @@ pub(super) struct RegAssert {
 fn writes_table() -> &'static std::collections::HashMap<String, Value> {
     static CACHE: OnceLock<std::collections::HashMap<String, Value>> = OnceLock::new();
     CACHE.get_or_init(|| {
-        let parsed: Value = serde_json::from_str(WRITES_JSON).expect("optimizer-writes.json 合法");
+        let parsed = parse_embedded_json(WRITES_JSON, "optimizer-writes.json");
         parsed
             .get("items")
             .and_then(Value::as_object)
@@ -589,9 +633,12 @@ pub(super) fn retired_pending_backups(backup_map: &Value) -> Vec<Value> {
 }
 
 /// OPT-1 高危清单。
-/// 审查 v2-K3 后它的定位收窄为「比数据层 `risk:"high"` 更严的**例外集**」——真正的通用判据是
-/// [`needs_high_risk_confirm`]。这里刻意保留手写项：有的项 risk 标的是 medium，但后果不可逆。
-/// 集合差由 `tools/check-channel-map.mjs` 的门禁 F 第三条对拍钉住（Rust ⇄ JS ⇄ 数据层 risk=high）。
+/// 定位：**高风险项的显式名单**（不承担「比 risk=high 更严」这层语义）。通用判据是数据层
+/// `risk == "high"`，由 [`needs_high_risk_confirm`] 取「手写清单 ∪ 数据层 high」。
+/// 手写清单当前是数据层 high 的**子集**（另有几条 BCD 项靠数据层自认 high 覆盖）——
+/// 保留它是为了让「高危项」有一份人可读的名单；将来新增**不可逆但 risk 标 medium** 的项时
+/// 手工加入这里。集合关系由 `tools/check-channel-map.mjs` 的门禁 F2 对拍钉住
+/// （Rust ⇄ JS ⇄ 数据层 risk=high）。
 pub(super) const HAZARD_IDS: &[&str] = &[
     "disable_uac",
     "tf_defender",
@@ -602,7 +649,7 @@ pub(super) const HAZARD_IDS: &[&str] = &[
 ];
 
 /// 高危确认闸门：手写清单 **或** 数据层自认 high。
-/// 通用判据是 `risk=="high"`；手写清单留给「标的是 medium 但后果不可逆」的例外
+/// 通用判据是 `risk=="high"`；手写清单是**显式名单**，留给「标的是 medium 但后果不可逆」的项
 /// （2026-10-11 收窄：tf_appx / tf_dev_disable 当批降为 medium 且不再列入手写清单）。
 /// 集合差由 `tools/check-channel-map.mjs` 的门禁 F 第三条对拍钉住（Rust ⇄ JS ⇄ 数据层 risk=high）。
 pub(super) fn needs_high_risk_confirm(opt: &Value, option_id: &str) -> bool {

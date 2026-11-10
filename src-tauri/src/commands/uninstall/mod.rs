@@ -40,8 +40,8 @@
 mod appx;
 pub use appx::{uninstall_appx_logo, __cmd__uninstall_appx_logo, __tauri_command_name_uninstall_appx_logo};
 // v0.7.0 机-wide 扫描整条退役后，七个深扫器与它们的判据/签名助手**保留为内部代码**（不再有
-// 界面、也不再有可直接调用的命令）。`services_orphan` / `drivers_orphan` 仍被 residue 的四类扫描
-// 部分复用，其余模块当前没有生产调用方 —— 逐模块 `allow(dead_code)` 是为了不让「刻意保留」
+// 界面、也不再有可直接调用的命令）。`services_orphan` 仍被 residue 复用；
+// `drivers_orphan` / `vendor_registry` 当前无生产调用方 —— 逐模块 `allow(dead_code)` 是为了不让「刻意保留」
 // 撞上 AGENTS §4 的零警告线（先例：engine/pnp.rs 的同类标注；蓝屏码库相关模块
 // 已于 2026-10-12 随体检结论退役整体拆除）。
 #[allow(dead_code)]
@@ -79,7 +79,9 @@ pub(crate) use helpers::valid_uninstall_key_path;
 #[cfg(test)]
 mod residue_trace_tests;
 mod residue_update;
-pub use residue_update::{residue_rules_dir, residue_watermark, uninstall_modify, __cmd__uninstall_modify, __tauri_command_name_uninstall_modify};
+// B-05 ②：`residue_rules_dir` 全仓 0 消费，不再从这里导出（定义留在 residue_update.rs
+// 作为「读根口径」的唯一实现）。
+pub use residue_update::{residue_watermark, uninstall_modify, __cmd__uninstall_modify, __tauri_command_name_uninstall_modify};
 // R-1（2026-10-07）：Run/RunOnce 只读可见面（`reg_value_gate` 仍被 residue 执行链复用）
 #[allow(dead_code)]
 mod run_keys;

@@ -45,8 +45,9 @@ pub fn clear(label: &str) {
 /// 为什么生产没有单 label 之外的清理需求而这里需要：槽是进程级 static，而测试的
 /// label 必须是现役窗口 ⇒ 并行用例天然共用同一槽（`main|contextmenu` 与
 /// `main|startup` 同窗不同域尚且互不覆盖，同域就互相顶）。底座给出口，
-/// **并行语义由调用方声明**（tests/common/mod.rs 的 reset_snapshots 文档：
-/// 快照类断言不得对同一 label 并发跑）。
+/// **并行语义由调用方声明**（快照类断言不得对同一 label 并发跑；
+/// A14 已删掉 tests/common/mod.rs 里 0 调用的 `reset_snapshots` 包装层，
+/// 需要清槽的用例直接调本函数）。
 /// 生产零调用方 ⇒ 显式 allow，不进「死代码即删」的清理射程（与 §5.18 的
 /// 整表 allow 同族：集成测试链接的是非 cfg(test) 产物，看不到 cfg(test) 件）。
 #[allow(dead_code)]

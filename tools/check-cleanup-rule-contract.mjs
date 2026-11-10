@@ -181,7 +181,7 @@ function main() {
   const frozen = schema.cleanup[FROZEN_KEY];
   if (!frozen) {
     fail(`[A5] 契约表缺 cleanup.${FROZEN_KEY}.winapp2Version（冻结值没了等于放开抬值）`);
-  } else if ('winapp2Version' in rules && String(rules.winapp2Version) !== String(frozen)) {
+  } else if ('winapp2Version' in rules && rules.winapp2Version !== frozen) {
     fail(
       `[A5] winapp2Version=${rules.winapp2Version} 与冻结值 ${frozen} 不符——P1-4 已裁决它只是历史素材基线，` +
         `禁止随「计划同步」抬值；确需变动请同时改 tools/rule-schema.json 与本门禁的注释并写明依据`,

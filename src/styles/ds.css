@@ -65,6 +65,7 @@ input[type="range"].ds-slider::-webkit-slider-thumb {
   border-radius: 50%;
   background: var(--fg-primary);
   border: 5px solid var(--accent);
+  /* 控件投影（滑块手柄自身的立体感），不是浮层投影，不走 --shadow-flyout */
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
   transition: transform var(--duration-fast) var(--ease-standard);
 }
@@ -94,7 +95,7 @@ input[type="range"].ds-slider:focus-visible {
 }
 .ds-ring-text {
   position: absolute;
-  font-size: calc(12px * var(--font-size-scale, 1));
+  font-size: var(--fs-meta);
   font-weight: calc(600 * var(--font-weight-scale, 1));
   color: var(--fg-primary);
   font-variant-numeric: tabular-nums;
@@ -128,7 +129,7 @@ input[type="range"].ds-slider:focus-visible {
   z-index: 13000;
   max-width: 280px;
   padding: 6px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-small);
   /* 口径 v2·B 类（宿主承载面）：浮层底必须由浮层自己成立，不挂在宿主状态上。原先只有半透明
      的 --bg-elevated，floor 由 main.css 的 body.electron-mica / body[data-material="none"]
      两条宿主前件补——无材质子窗与 mica 不受支持的主窗两条都不命中，正文就压在身后内容上
@@ -137,7 +138,7 @@ input[type="range"].ds-slider:focus-visible {
   background: linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)), var(--bg-elevated);
   border: 1px solid var(--border-strong);
   color: var(--fg-primary);
-  font-size: calc(12px * var(--font-size-scale, 1));
+  font-size: var(--fs-meta);
   line-height: 1.55;
   /* 提示里的 \n 是内容（多条件判定依据、多路径目标清单），不是排版噪音 */
   white-space: pre-line;
@@ -145,7 +146,7 @@ input[type="range"].ds-slider:focus-visible {
   opacity: 0;
   transform: translateY(2px);
   transition: opacity 120ms var(--ease-standard), transform 120ms var(--ease-standard);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+  box-shadow: var(--shadow-flyout);
 }
 .ds-tooltip.on { opacity: 1; transform: none; }
 
@@ -163,7 +164,7 @@ input[type="range"].ds-slider:focus-visible {
   background: linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)), var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-btn);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+  box-shadow: var(--shadow-flyout);
   /* v3.5.1 动效审查 M5：菜单由 ds.js 按触发点定位（position:fixed + left/top），原先无入场
      凭空出现。用 @starting-style 补「从触发器方向长出」的轻微缩放点明空间来源，不依赖 JS
      加类，浏览器不支持时自动退化为瞬时出现。v2-L6：--ds-menu-origin 是当年为「按触发点
@@ -181,11 +182,11 @@ input[type="range"].ds-slider:focus-visible {
   width: 100%;
   padding: 7px 10px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-small);
   background: none;
   color: var(--fg-primary);
   font-family: inherit;
-  font-size: calc(13px * var(--font-size-scale, 1));
+  font-size: var(--fs-secondary);
   text-align: left;
   cursor: pointer;
 }
@@ -207,12 +208,12 @@ input[type="range"].ds-slider:focus-visible {
 .ds-skeleton-block {
   display: inline-block;
   height: 12px;
-  border-radius: 6px;
+  border-radius: var(--radius-small);
   background: linear-gradient(90deg, var(--bg-input) 25%, var(--bg-hover) 45%, var(--bg-input) 65%);
   background-size: 200% 100%;
   animation: ds-shimmer 1.2s ease-in-out infinite;
 }
-.ds-skeleton-block.icon { width: 36px; height: 36px; border-radius: 8px; flex-shrink: 0; }
+.ds-skeleton-block.icon { width: 36px; height: 36px; border-radius: var(--radius-btn); flex-shrink: 0; }
 .ds-skeleton-block.short { flex-shrink: 0; }
 @keyframes ds-shimmer { to { background-position: -200% 0; } }
 

@@ -22,20 +22,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import { REPO_ROOT, ORIGIN } from './ps-origin.mjs';
 import { writeFileAtomic } from './lib/atomic-write.mjs';
 
 const OUT = path.join(REPO_ROOT, 'src-tauri', 'data', 'optimizer-runtime.json');
 const SRC = path.join(ORIGIN, 'src', 'scripts-powershell', 'optimizer-scripts.js');
-const WRITE = process.argv.slice(2).includes('--write');
-
 const require = createRequire(import.meta.url);
-const { OPTIONS } = require(SRC);
-
-if (!Array.isArray(OPTIONS) || OPTIONS.length === 0) {
-  console.error(`✗ ${path.relative(REPO_ROOT, SRC)} 的 OPTIONS 不是非空数组（源形状变了？）`);
-  process.exit(1);
-}
 
 // Python json.dumps 默认分隔符（', ' / ': '）的同形序列化器。
 // 显式拒绝 undefined/function/symbol/bigint 与非有限数：JSON.stringify 会**静默丢弃/写坏**
@@ -56,33 +49,45 @@ function serialize(v) {
   throw new Error(`OPTIONS 里出现不可序列化类型 ${t}（JSON.stringify 会静默丢弃，这里显式拒）`);
 }
 
-const want = serialize(OPTIONS);
-if (JSON.stringify(JSON.parse(want)) !== JSON.stringify(OPTIONS)) {
-  console.error('✗ 序列化 round-trip 结果与源深等失败（序列化器坏了，拒绝写盘）');
-  process.exit(1);
+export function serializeOptimizerRuntime() {
+  const { OPTIONS } = require(SRC);
+  if (!Array.isArray(OPTIONS) || OPTIONS.length === 0) {
+    throw new Error(`${path.relative(REPO_ROOT, SRC)} 的 OPTIONS 不是非空数组（源形状变了？）`);
+  }
+  const want = serialize(OPTIONS);
+  if (JSON.stringify(JSON.parse(want)) !== JSON.stringify(OPTIONS)) {
+    throw new Error('序列化 round-trip 结果与源深等失败（序列化器坏了，拒绝写盘）');
+  }
+  return want;
 }
 
-const rel = path.relative(REPO_ROOT, OUT).replace(/\\/g, '/');
-
-if (WRITE) {
-  fs.mkdirSync(path.dirname(OUT), { recursive: true });
-  writeFileAtomic(OUT, want);
-  console.log(`✓ 已生成 ${rel}（${OPTIONS.length} 项）`);
-  console.log('  下一步（§5.21）：node tools/sign-cleanup-rules.mjs sign --file src-tauri/data/optimizer-runtime.json');
-  process.exit(0);
+function main(argv = process.argv.slice(2)) {
+  const write = argv.includes('--write');
+  const want = serializeOptimizerRuntime();
+  const rel = path.relative(REPO_ROOT, OUT).replace(/\\/g, '/');
+  if (write) {
+    fs.mkdirSync(path.dirname(OUT), { recursive: true });
+    writeFileAtomic(OUT, want);
+    console.log(`✓ 已生成 ${rel}（${JSON.parse(want).length} 项）`);
+    console.log('  下一步（§5.21）：node tools/sign-cleanup-rules.mjs sign --file src-tauri/data/optimizer-runtime.json');
+    return;
+  }
+  if (!fs.existsSync(OUT)) {
+    console.error(`✗ ${rel} 不存在。跑：node tools/gen-optimizer-runtime.mjs --write`);
+    process.exitCode = 1;
+    return;
+  }
+  const got = fs.readFileSync(OUT, 'utf8');
+  if (got !== want) {
+    console.error(`✗ ${rel} 与 vendor OPTIONS 不一致（改了源忘重出，或手改了 data/*.json）`);
+    console.error('  修法：node tools/gen-optimizer-runtime.mjs --write 然后重签（§5.21）');
+    let i = 0;
+    while (i < Math.min(got.length, want.length) && got[i] === want[i]) i++;
+    console.error(`  首个差异在第 ${i} 字节：产物 "${got.slice(i, i + 40)}" vs 源 "${want.slice(i, i + 40)}"`);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`✓ ${rel} 与 vendor OPTIONS 逐字节一致（${JSON.parse(want).length} 项）`);
 }
 
-if (!fs.existsSync(OUT)) {
-  console.error(`✗ ${rel} 不存在。跑：node tools/gen-optimizer-runtime.mjs --write`);
-  process.exit(1);
-}
-const got = fs.readFileSync(OUT, 'utf8');
-if (got !== want) {
-  console.error(`✗ ${rel} 与 vendor OPTIONS 不一致（改了源忘重出，或手改了 data/*.json）`);
-  console.error('  修法：node tools/gen-optimizer-runtime.mjs --write 然后重签（§5.21）');
-  let i = 0;
-  while (i < Math.min(got.length, want.length) && got[i] === want[i]) i++;
-  console.error(`  首个差异在第 ${i} 字节：产物 "${got.slice(i, i + 40)}" vs 源 "${want.slice(i, i + 40)}"`);
-  process.exit(1);
-}
-console.log(`✓ ${rel} 与 vendor OPTIONS 逐字节一致（${OPTIONS.length} 项）`);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();

@@ -266,7 +266,7 @@ fn extra_steps(option_id: &str, extra_id: &str) -> Vec<Value> {
                 "$setup = Join-Path $env:SystemRoot \"SYSWOW64\\ONEDRIVESETUP.EXE\"",
                 "if (Test-Path $setup) { Start-Process -FilePath $setup -ArgumentList \"/UNINSTALL\" -Wait -NoNewWindow }",
                 "$odDirs = @(\"$env:SystemDrive\\OneDriveTemp\", \"$env:USERPROFILE\\OneDrive\", \"$env:LOCALAPPDATA\\Microsoft\\OneDrive\", \"$env:PROGRAMDATA\\Microsoft OneDrive\")",
-                "foreach ($d in $odDirs) { if (Test-Path -LiteralPath $d) { Write-Output ('@@RECYCLE@@' + (@{ id = 'tf_appx'; path = $d; isDir = $true } | ConvertTo-Json -Compress)) } }",
+                "foreach ($d in $odDirs) { if (Test-Path -LiteralPath $d) { $u16 = [System.Text.Encoding]::Unicode.GetBytes($d); Write-Output ('@@RECYCLE2@@' + [Convert]::ToBase64String($u16) + '|' + (@{ id = 'tf_appx'; isDir = $true } | ConvertTo-Json -Compress)) } }",
             ].join("\n");
             vec![
                 json!({
@@ -532,7 +532,7 @@ mod tests {
             .join("\n");
         assert!(joined.contains("ONEDRIVESETUP.EXE"), "{joined}");
         assert!(joined.contains("/UNINSTALL"), "{joined}");
-        assert!(joined.contains("@@RECYCLE@@"), "{joined}");
+        assert!(joined.contains("@@RECYCLE2@@"), "{joined}");
         // 回收站协议必须挂在 tf_appx 名下（退役前挂在已不存在的 tf_onedrive 上）
         assert!(joined.contains("id = 'tf_appx'"), "{joined}");
         let reg = with

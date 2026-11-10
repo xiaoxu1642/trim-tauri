@@ -1,7 +1,8 @@
 //! quickcmds 域（C 批）：quickcmds:run
 //!
 //! 对照 main.js 6830-6889（QUICKCMDS 白名单 + tokenize/expand/runQuickCmd +
-//! quickcmds:run）与 `src/scripts/quickcmds-data.js`（69 条 / 8 分类）。
+//! quickcmds:run）与 `src/scripts/quickcmds-data.js`（条数以 CMDS.length 与本文件的
+//! Rust 白名单对拍为准 —— 两侧对不上即判红，故不在注释里写死条数）。
 //!
 //! # 安全模型（QC-1，2026-09-15）
 //!
@@ -407,7 +408,7 @@ fn run_quick_cmd(id: &str, cmd: &str) -> (bool, String) {
 /// quickcmds:run — 按 id 执行白名单快捷指令（渲染层只传 id）
 ///
 /// v4-K04（2026-10-09）：档位从 `guard_readonly` 升 `guard::MAIN` —— 白名单里含
-/// `sys-cmd-admin`（`Start-Process cmd -Verb RunAs`）：挂在 readonly 档等于让四个子窗
+/// `sys-cmd-admin`（`Start-Process cmd -Verb RunAs`）：挂在 readonly 档等于让三个子窗
 /// 任一渲染层失陷就能弹 UAC，用户点「是」后拿到管理员令牌的交互式 cmd，绕过 elevate 链
 /// 的全部配套（MAIN 档 / 防重入 / nonce 握手 / 日志）。子窗消费面实测为 0（四份子窗
 /// HTML 均未挂 quickcmds.js），改档零功能代价。

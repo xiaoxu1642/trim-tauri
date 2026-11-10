@@ -57,6 +57,19 @@ use windows::Win32::Networking::WinHttp::{
 /// 流式读取缓冲（64KB，与迁移前 runtimes 实现一致）
 const READ_CHUNK: usize = 64 * 1024;
 
+/// 阶段超时写入 WinHTTP；返回值不许丢弃，失败必须让请求 fail-closed。
+fn apply_timeouts(session: *mut c_void, phase_ms: i32) -> bool {
+    unsafe { WinHttpSetTimeouts(session, 15_000, 15_000, phase_ms, phase_ms).is_ok() }
+}
+
+/// 可判红的失败处置：恢复成 `let _ =` 静默忽略时，本判据必须转假。
+#[cfg(test)]
+fn timeout_failure_is_reported(source: &str) -> bool {
+    source.contains("if !apply_timeouts(session.raw(), phase_ms) {")
+        && source.contains("return Err(\"WinHTTP 阶段超时设置失败，已拒绝本次请求\".into());")
+        && !source.contains(concat!("let _ = unsafe { WinHttpSetTimeouts", "(session.raw(), 15_000, 15_000, phase_ms, phase_ms) };"))
+}
+
 // ==================== 句柄与工具 ====================
 
 /// WinHTTP 句柄 RAII 包装：Drop 时 WinHttpCloseHandle；NULL 不关（NULL 本身就是失败标记）
@@ -75,6 +88,7 @@ impl WinHandle {
     fn raw(&self) -> *mut c_void {
         self.0
     }
+
 }
 
 impl Drop for WinHandle {
@@ -280,7 +294,13 @@ fn open_response(
     // 阶段超时（毫秒）：解析/连接沿用 15s 头寸；发送/接收用调用方给的 timeout
     // （runtimes 传 30s → 与迁移前 15/15/30/30 逐字一致）
     let phase_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
-    let _ = unsafe { WinHttpSetTimeouts(session.raw(), 15_000, 15_000, phase_ms, phase_ms) };
+    if !apply_timeouts(session.raw(), phase_ms) {
+        crate::engine::log::write_log(
+            "warn",
+            &format!("WinHTTP 阶段超时设置失败（解析/连接 15000ms，发送/接收 {phase_ms}ms），拒绝静默退回系统默认超时"),
+        );
+        return Err("WinHTTP 阶段超时设置失败，已拒绝本次请求".into());
+    }
     // 跟随重定向：v2-L4P-22（A-4/RPT-06）——两个维度收口：
     // ① 自定义请求头非空 ⇒ 一律 NEVER。WinHTTP 跨主机 30x 会原样重发全部请求头
     //    （含用户自配的鉴权头），而此时 allow_host 是「用户自选源」分支（None），
@@ -606,7 +626,11 @@ mod tests {
     #[test]
     #[ignore = "真实联网（只读微软域名响应头），发布前门禁跑"]
     fn 真机_终点_host_与建连同源() {
-        let url = "https://download.microsoft.com/";
+        // 真实重定向链：aka.ms 301 → dotnet.microsoft.com（微软域名，终点 200）。
+        // 原用 `download.microsoft.com/` 根路径，本机实测恒返 400（Invoke-WebRequest 复核同源），
+        // 那不是 `open_response` 的缺陷、而是 CDN 根路径不提供可 200 的页面；
+        // 换成本仓 runtimes 下载链已在用的 aka.ms 跳转形态，保住「真实跳转」这一被测行为。
+        let url = "https://aka.ms/dotnet-download";
         let resp = open_response(url, &[], Duration::from_secs(15)).expect("真实请求应拿到响应头");
         let gate_host = url_host(&resp.final_url).expect("终点 URL 必须能拆出 host");
         let connect_side = crack_url(&resp.final_url).expect("终点 URL 必须能同源拆解").host;
@@ -619,6 +643,20 @@ mod tests {
             "host 串里不该再有 userinfo 或反斜杠（那正是两套实现分叉的位置）: {gate_host}"
         );
         println!("终点 URL={} / host={gate_host}", resp.final_url);
+    }
+
+    #[test]
+    fn winhttp_timeout_failure_is_reported() {
+        let src = include_str!("winhttp.rs");
+        assert!(
+            timeout_failure_is_reported(src),
+            "WinHttpSetTimeouts 失败必须写 warn 并回 Err"
+        );
+        let reverted = src.replace("if !apply_timeouts(session.raw(), phase_ms) {", "if false {");
+        assert!(
+            !timeout_failure_is_reported(&reverted),
+            "恢复静默忽略后判据必须转红"
+        );
     }
 }
 

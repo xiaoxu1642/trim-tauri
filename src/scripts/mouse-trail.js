@@ -18,7 +18,9 @@
   // 审查v4-M1：reduced-motion 必须使用时实时求值，禁止模块加载时固化快照
   // （固化会导致运行中切换系统「减少动态效果」偏好永不生效，9.6-B8 / v4-M1）
   function isReducedMotion() {
-    return !!(window.ds && window.ds.reducedMotion && window.ds.reducedMotion());
+    if (window.ds && typeof window.ds.reducedMotion === 'function') return !!window.ds.reducedMotion();
+    if (window.ds && typeof window.ds.reducedMotionFallback === 'function') return !!window.ds.reducedMotionFallback();
+    return true;
   }
   // 逗号分隔的 transition-duration 逐项解析取最长一段（多属性过渡要等最慢的那个）；
   // 单位可能是 s 也可能是 ms，必须按结尾单位换算，否则 0.52s 会算成 520000ms。
@@ -139,7 +141,10 @@
       if (typeof rmMQ.addEventListener === 'function') rmMQ.addEventListener('change', onChange);
       else if (typeof rmMQ.addListener === 'function') rmMQ.addListener(onChange);
     }
-    document.addEventListener('pointermove', (e) => spawn(e.clientX, e.clientY), { passive: true });
+    document.addEventListener('pointermove', (e) => {
+      if (e.pointerType && e.pointerType !== 'mouse') return;
+      spawn(e.clientX, e.clientY);
+    }, { passive: true });
     const toggle = document.getElementById('mouseTrailToggle');
     toggle && toggle.addEventListener('change', () => {
       writeEnabled(toggle.checked);

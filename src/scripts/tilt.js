@@ -92,7 +92,9 @@
   // reduce 时监听器根本不挂载（关闭偏好后永不生效），运行中开启偏好同样不生效。
   // A3-L06：MediaQueryList 对象的缓存与实时求值统一由 ds.reducedMotion() 承担。
   function isReducedMotion() {
-    return !!(window.ds && window.ds.reducedMotion && window.ds.reducedMotion());
+    if (window.ds && typeof window.ds.reducedMotion === 'function') return !!window.ds.reducedMotion();
+    if (window.ds && typeof window.ds.reducedMotionFallback === 'function') return !!window.ds.reducedMotionFallback();
+    return true;
   }
 
   // 排除判定（面板内含「启动项列表 / 扫描结果表格」则整块不倾斜，需求指定）：
@@ -133,6 +135,7 @@
   }
 
   document.addEventListener('mousemove', function (e) {
+    if (e.pointerType && e.pointerType !== 'mouse') return;
     if (isReducedMotion()) { clearTilt(); return; }
     var el = e.target && e.target.closest ? e.target.closest(SELECTOR) : null;
     // 命中「启动项列表」/扫描结果表格所在面板时取消倾斜

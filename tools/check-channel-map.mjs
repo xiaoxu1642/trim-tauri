@@ -17,18 +17,20 @@
 //      引用到的应用权限允许集 —— 否则 generate_handler! 会在构建期静默裁掉命令（R8-L07）。
 //      该目录不存在时打 ⊘ SKIP 并声明本节未校验（不打 ✓ 冒充通过）。
 //
-// 未迁移通道（Rust 尚未注册）只做**统计报告**不判失败，以支持 Phase 1 增量迁移。
+// 迁移已满额：默认严格检查；只有显式 `--allow-pending` 才保留旧统计档，
+// 避免「删掉一条 Rust 命令但 CHANNEL_MAP 还在」被当成普通统计放行。
 //
-// 用法：node tools/check-channel-map.mjs [--strict]
-//   --strict：要求全部通道均已迁移（Phase 5 收尾门禁用）
+// 用法：node tools/check-channel-map.mjs [--allow-pending]
+//   --allow-pending：临时保留未迁移通道统计档（默认严格，不得用于必跑门禁）
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 import { ORIGIN, REPO_ROOT } from './ps-origin.mjs';
 import { walkRs, walkFiles } from './lib/fs-walk.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 
-const STRICT = process.argv.includes('--strict');
+const STRICT = !process.argv.includes('--allow-pending');
 const TAURI_ROOT = REPO_ROOT;
 
 // 通道契约基线：读**仓库内**的上游快照（审查 K2）。原先这里是硬编码的本机源仓库绝对路径，
@@ -136,9 +138,9 @@ const TAURI_ADDED = {
   'app:open-doc': '2026-10-22（目检会话）：模型子窗「API 文档」入口——渲染层只传白名单 key，URL 由 Rust 常量表给出（readonly 档：调用方就是子窗，主窗无入口）',
   // CDP 远程调试开关（2026-10-22 用户点名）：上游 Electron 轨的调试口是主进程自己的
   // `--inspect`/webPreferences，渲染层从来没有「查询/设置远程调试」这类通道，故在此登记。
-  'cleanup:scan-cancel': '2026-11-02（用户裁定）：清理页「扫描大小」在扫描中变为「停止扫描」——协作式取消位，引擎在条目边界返回；回执带 cancelled:true 并保留已扫结果（主窗档）',
   'settings:cdp-state': '2026-10-22（目检会话）：读 CDP 远程调试三态——本进程是否真暴露端口 / 下次启动的意图 / 是否需要重启。WebView2 的 --remote-debugging-port 只能在浏览器进程创建前定下，运行中改不了，所以不能只回一个布尔（主窗档）',
   'settings:cdp-set': '2026-10-22（目检会话）：写 CDP 手动档偏好（dev 默认开、正式默认关，用户可覆盖）。只改「下次启动的意图」，回执如实带 requiresRestart；偏好落独立明文小文件而非 settings.json，因为读取点在 Builder 之前、不能等解密链（主窗档）',
+  'cleanup:scan-cancel': '2026-11-02（用户裁定）：清理页「扫描大小」在扫描中变为「停止扫描」——协作式取消位，引擎在条目边界返回；回执带 cancelled:true 并保留已扫结果（主窗档）',
   // F4a2-M01（P1-W3 Phase2d）：外观域真源从 localStorage 迁到后端 appearance.json 的读回/写入通道。
   // 刻意**不**复用 settings:set-pref：那条的值闸是「必须是布尔」，外观键是颜色串 / 数值 / 开关的
   // 混合形状，靠一条布尔闸要么放宽它（等于拆掉「不能借体积闸灌任意形状」）、要么塞不进。
@@ -203,6 +205,23 @@ const TAURI_ADDED = {
   'settings:set-pref': 'P2-13（2026-10-09）：UI 偏好键写（PREF_KEYS 白名单写 settings.json 偏好段；上游无此面）',
   'cleanup:query-locked': 'P1-D C1-1（2026-10-16）：占用查询——任意文件/目录问「谁占着它」（复用 check-locked 同一条 RM 管线；主窗内嵌卡片；上游无此能力）',
 };
+const CDP_COMMENT_CONTRACT = (() => {
+  const cdpStateAt = adapter.indexOf("cdpState: function () { return invokeChannel('settings:cdp-state')");
+  const scanCancelAt = adapter.indexOf("scanCancel: function () { return invokeChannel('cleanup:scan-cancel')");
+  const beforeLines = (at) => at < 0 ? '' : adapter.slice(0, at).split('\n').slice(-3).join('\n');
+  const cdpStateWindow = beforeLines(cdpStateAt);
+  const scanCancelWindow = beforeLines(scanCancelAt);
+  return {
+    ok: cdpStateAt >= 0 && scanCancelAt >= 0 && /CDP/.test(cdpStateWindow) && !/CDP/.test(scanCancelWindow),
+    detail: cdpStateAt < 0 || scanCancelAt < 0
+      ? 'TAURI_ADDED 锚点失效，无法判定注释归属'
+      : /CDP/.test(scanCancelWindow)
+        ? 'CDP 注释仍挂在 cleanup:scan-cancel 上方（交换注释块会破坏通道归属）'
+        : !/CDP/.test(cdpStateWindow)
+          ? 'settings:cdp-state 上方找不到 CDP 注释块'
+          : '',
+  };
+})();
 
 function collect(set, re, text) {
   for (const m of text.matchAll(re)) set.add(m[1]);
@@ -229,6 +248,13 @@ const sendMap = parseMap('SEND_MAP', adapter);
 const handlerBlock = libRs.slice(libRs.indexOf('generate_handler!['), libRs.indexOf('])', libRs.indexOf('generate_handler![')));
 const registered = new Set();
 for (const m of handlerBlock.matchAll(/commands::\w+::(\w+)/g)) registered.add(m[1]);
+const PROBES_CONTRACT = (() => {
+  const invalidProbes = PROBES.filter((p) => !registered.has(p));
+  return {
+    ok: invalidProbes.length === 0,
+    detail: invalidProbes.length ? `这些登记项已经失效（命令不在注册表）：${JSON.stringify(invalidProbes)}` : '',
+  };
+})();
 
 // 解析 commands/**.rs 中声明的 #[tauri::command] 函数
 // v3 D2：递归扫——命令下沉到子目录（commands/uninstall/*.rs）时，只扫一层会让 D3
@@ -259,6 +285,16 @@ const check = (ok, label, detail = '') => {
 };
 
 console.log('=== IPC 通道映射一致性门禁 ===\n');
+check(
+  PROBES_CONTRACT.ok,
+  'D0. PROBES 登记的排障探针都在 generate_handler! 里',
+  PROBES_CONTRACT.detail,
+);
+check(
+  CDP_COMMENT_CONTRACT.ok,
+  'A0. CDP 注释块归位：settings:cdp-state 前 3 行有 CDP，cleanup:scan-cancel 前 3 行没有 CDP',
+  CDP_COMMENT_CONTRACT.detail,
+);
 
 // ---- A. invoke 集合 ----
 const retiredKeys = Object.keys(RETIRED);
@@ -404,7 +440,9 @@ function parseApiPaths(text) {
     for (const [, text] of pool) {
       let idx = text.indexOf(needle);
       while (idx >= 0) {
-        if (!/[\w$]/.test(text[idx + needle.length] || '')) return true;
+        const lineStart = text.lastIndexOf('\n', idx) + 1;
+        const codeBefore = blankNonCode(text.slice(lineStart, idx), 'js', { keepStrings: true }).trim();
+        if (!/[\w$]/.test(text[idx + needle.length] || '') && codeBefore !== '') return true;
         idx = text.indexOf(needle, idx + 1);
       }
       if (dynamic.has(domain) && new RegExp(`window\\.api\\.${domain}\\s*\\.?\\s*\\[`).test(text)) return true;
@@ -438,7 +476,7 @@ function parseApiPaths(text) {
 /**
  * D5 基线（2026-10-03 R1-1.2b 登记）：只读档却**只有主窗在用**的命令。
  *
- * 语义：这些命令挂 `guard_readonly`（放行全部五个窗口 label），但四个子窗没有任何一个
+ * 语义：这些命令挂 `guard_readonly`（放行全部四个窗口 label），但三个子窗没有任何一个
  * 在调它们 —— 那份放宽当前没有任何消费方在用，却把命令暴露给了全部窗口。
  *
  * **为什么是「登记基线」而不是「一条条改档」**：
@@ -548,7 +586,7 @@ const d5MissingWhy = [...D5_READONLY_WITHOUT_SUB_CONSUMER].filter((c) => d5Why(c
   // 独立真源 = **子窗 HTML 实际加载的脚本里的调用点**。清单改不动 HTML：
   // 想把一条只有主窗消费的 readonly 命令留在 readonly 档，就必须让某个子窗真的调它，
   // 否则这里红。按 AGENTS §3「档位以谁真的需要调它为准」—— readonly 档的价值就是
-  // 「四个子窗也放行」，**没有一个子窗消费方，那份放宽就是白给的攻击面**。
+  // 「三个子窗也放行」，**没有一个子窗消费方，那份放宽就是白给的攻击面**。
   //
   // 口径与 D4 同源（复用 apiPaths / aliases / dynamic 推导，不另造一套匹配）：
   //   - readonly 档命令 ⇒ 至少一个**子窗专属**脚本里有调用点；
@@ -741,6 +779,7 @@ const d6RustOnly = [];  // Rust 有但前端没传且未登记白名单
 // T1a-L12：两个静默 continue（无泛型签名 / 无载荷方法）此前没有任何计数 —— 新增一条
 // 无泛型的命令或箭头/async 包装方法时，D6 只是少比一条，地板 D6a 只数 jsParams 挡不住。
 let d6Compared = 0;
+const rustNamesByCommand = new Map();
 for (const { rel, abs } of cmdFiles) {
   const text = readFileSync(abs, 'utf8');
   const lines = text.split('\n');
@@ -807,6 +846,7 @@ for (const { rel, abs } of cmdFiles) {
       rustNames.push(nm[1]);
     }
     d6Compared++;
+    rustNamesByCommand.set(cmdName, rustNames);
     // 前端有 / Rust 无
     for (const k of jsKeys) {
       const sn = camelToSnake(k);
@@ -848,6 +888,21 @@ check(
     : d6RustOnly.length
       ? d6RustOnly.join('；')
       : '',
+);
+const paramWlBad = [];
+for (const [cmdName, names] of Object.entries(PARAM_WHITELIST)) {
+  const rustNamesForCmd = rustNamesByCommand.get(cmdName);
+  const ch = [...channelMap.entries()].find(([, cmd]) => cmd === cmdName)?.[0];
+  const snakeJsKeysForCmd = (jsParams.get(ch) || []).map(camelToSnake);
+  for (const rn of names) {
+    if (!rustNamesForCmd?.includes(rn)) paramWlBad.push(`PARAM_WHITELIST ${cmdName}.${rn} 不在 Rust 签名里（登记已失效）`);
+    if (snakeJsKeysForCmd.includes(rn)) paramWlBad.push(`PARAM_WHITELIST ${cmdName}.${rn} 已在前端载荷里传递（豁免应删掉）`);
+  }
+}
+check(
+  paramWlBad.length === 0,
+  'D6c. PARAM_WHITELIST 反向棘轮：登记形参真在 Rust 签名且真不在前端载荷',
+  paramWlBad.join('；'),
 );
 
 
@@ -1094,7 +1149,9 @@ console.log(`未迁移 invoke 通道（前 20）：${[...channelMap.entries()].f
 
 if (STRICT) {
   const pending = [...channelMap.values(), ...sendMap.values()].filter(v => !registered.has(v));
-  check(pending.length === 0 && notRegistered.length === 0, `E. --strict：全部 ${total} 条通道均已迁移`, pending.length ? `仍缺 ${pending.length} 条` : '');
+  check(pending.length === 0 && notRegistered.length === 0, `E. 默认 strict：全部 ${total} 条通道均已迁移`, pending.length ? `仍缺 ${pending.length} 条` : '');
+} else {
+  console.log('⊘ --allow-pending：未迁移通道只统计不判失败（本节未校验，不是通过）');
 }
 
 console.log(`\n${fail === 0 ? '门禁通过' : `${fail} 项未通过`}`);

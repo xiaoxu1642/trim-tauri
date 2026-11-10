@@ -20,6 +20,8 @@
   // 子窗原先无上限，一批并行失败会把窗口压成一整列提示。超出的对最旧一条走退场动画。
   var MAX_VISIBLE_TOASTS = 4;
   var EXIT_MS = 300;
+  var hintToken = 0;
+  var stackToken = 0;
 
   function retire(el) {
     if (!el || el.classList.contains('removing')) return;
@@ -36,15 +38,20 @@
     for (var i = 0; i < alive.length - MAX_VISIBLE_TOASTS; i++) retire(alive[i]);
   }
 
-  // 提示行形态：宿主元素 id 由调用方给定（各窗 HTML 各有一行专属提示位）
+  // 提示行形态：宿主元素 id 由调用方给定（各窗 HTML 各有一行专属提示位）。
+  // F3-L17：清空只认「文案 + 当轮 token」，同一文案重入会更新 token，旧定时器不误清新提示。
   function hintLine(hostId, type, message) {
     var host = document.getElementById(hostId);
     if (!host) return;
+    var token = ++hintToken;
     host.textContent = message || '';
+    if (host.dataset) host.dataset.trimSubToastToken = String(token);
     host.style.color = TYPE_COLORS[type] || 'var(--fg-tertiary)';
     if (message) {
       setTimeout(function () {
-        if (host.textContent === message) host.textContent = '';
+        if (host.dataset && host.dataset.trimSubToastToken === String(token) && host.textContent === message) {
+          host.textContent = '';
+        }
       }, 5000);
     }
   }
@@ -63,15 +70,34 @@
       host.setAttribute('aria-atomic', 'false');
       document.body.appendChild(host);
     }
+    var existing = null;
+    Array.prototype.forEach.call(host.children, function (child) {
+      if (!existing && child.dataset && child.dataset.trimSubToastMessage === String(message)) existing = child;
+    });
+    var token = ++stackToken;
+    if (existing) {
+      existing.dataset.trimSubToastToken = String(token);
+      trim(host);
+      setTimeout(function () {
+        if (existing.dataset.trimSubToastToken === String(token)) retire(existing);
+      }, 4000);
+      return;
+    }
     var el = document.createElement('div');
     el.className = 'toast ' + (['success', 'error', 'warning', 'info'].indexOf(type) !== -1 ? type : 'info');
+    if (el.dataset) {
+      el.dataset.trimSubToastMessage = String(message);
+      el.dataset.trimSubToastToken = String(token);
+    }
     var text = document.createElement('div');
     text.className = 'toast-message';
     text.textContent = String(message);
     el.appendChild(text);
     host.appendChild(el);
     trim(host);
-    setTimeout(function () { retire(el); }, 4000);
+    setTimeout(function () {
+      if (el.dataset.trimSubToastToken === String(token)) retire(el);
+    }, 4000);
   }
 
   window.subToast = { hintLine: hintLine, stack: stack };

@@ -116,15 +116,9 @@
   // Promise（用户侧「点了没反应」）；且 runScan/onDelete 的按钮文案写在
   // querySelector('span') 上，DOM 形状漂移时 finally 里抛错会把按钮永久焊死在
   // disabled。与 optimizer.js 的 guardAsync 同口径：捕获后落 toast + 日志，绝不静默。
-  function guardAsync(label, handler) {
-    return (...args) => {
-      Promise.resolve(handler(...args)).catch((e) => {
-        const msg = (e && e.message) || e;
-        window.app?.toast?.('error', label + '失败: ' + msg);
-        window.app?.log?.('error', label + '异常: ' + msg);
-      });
-    };
-  }
+  // C-08（F4b-L06）：唯一实现收到 `ds.js`（此前本文件与 optimizer.js 各有一份逐字相同的
+  // 实现）；此处只取用，调用点不变。
+  const guardAsync = ds.guardAsync;
 
   // Unix 秒 → YYYY-MM-DD（创建日期列，2026-09-28 用户要求；0/缺失显示 —）
   function fmtDate(ts) {
@@ -608,7 +602,7 @@
     const ok = await window.app?.confirmDanger?.(
       '确认删除',
       `将把「${nameOf(path)}」整树移入回收站，共约 ${formatSize(total)}。`,
-      '确认删除',
+        '仍然执行',
       '取消',
       '移入回收站（可在回收站还原）；删除会记入「已删除清单」。受保护的系统路径会被拒绝。'
     );
@@ -645,7 +639,7 @@
     const ok = await window.app?.confirmDanger?.(
       '确认删除',
       `将把「${nameOf(path)}」移入回收站，约 ${formatSize(total)}。`,
-      '确认删除',
+        '仍然执行',
       '取消',
       '移入回收站（可在回收站还原）；删除会记入「已删除清单」。受保护的系统路径会被拒绝。'
     );
@@ -699,7 +693,7 @@
     box.style.display = 'flex';
     box.innerHTML = `<div style="flex:1;min-width:0">
       <div style="font-size:12px;opacity:.65;margin-bottom:6px">本层类型构成（按类型家族聚合）</div>
-      <div style="display:flex;height:12px;border-radius:6px;overflow:hidden">${famSegs}</div>
+      <div style="display:flex;height:12px;border-radius:var(--radius-small);overflow:hidden">${famSegs}</div>
       <div style="display:flex;gap:14px;margin-top:6px;font-size:12px;flex-wrap:wrap;opacity:.85">${famLegend}</div>
       <div style="font-size:11px;opacity:.55;margin-top:4px">Top 扩展名：${topExt}</div>
     </div>`;
@@ -737,7 +731,7 @@
     box.style.display = 'flex';
     box.innerHTML = `<div style="flex:1;min-width:0">
       <div style="font-size:12px;opacity:.65;margin-bottom:6px">本层时间构成（按文件最后修改时间；回答"这些空间是什么时候留下的"）</div>
-      <div style="display:flex;height:12px;border-radius:6px;overflow:hidden">${segs}</div>
+      <div style="display:flex;height:12px;border-radius:var(--radius-small);overflow:hidden">${segs}</div>
       <div style="display:flex;gap:14px;margin-top:6px;font-size:12px;flex-wrap:wrap;opacity:.85">${legend}</div>
     </div>`;
   }
@@ -1217,7 +1211,7 @@
       items.length > 1
         ? `将删除选中的 ${items.length} 项，共约 ${formatSize(total)}。`
         : `将删除选中的 1 项，共约 ${formatSize(total)}。`,
-      '确认删除',
+      '仍然执行',
       '取消',
       '默认移入回收站（可在回收站还原）；回收站不可用的位置会保留不删除并提示失败。删除项会记录在「已删除清单」中。'
     );
@@ -1400,7 +1394,7 @@ document.getElementById(cfg.drivesEl)?.addEventListener('keydown', onDriveClick)
     document.getElementById('emptyBtnIgnoreList')?.addEventListener('click', openIgnoreList);
     if (window.api?.finder?.onProgress && !subscribed) {
       subscribed = true;
-      window.api.finder.onProgress(onProgress);
+      window.app?.trackSubscription?.(window.api.finder.onProgress(onProgress));
     }
   }
 

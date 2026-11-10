@@ -137,6 +137,23 @@ catch { Write-Output ('ERR:' + $_.Exception.Message); exit 1 }";
         .collect())
 }
 
+/// Appx 执行准入的**执行侧**复验（R2b-L04）：列表侧 `removable` 不是执行凭据。
+///
+/// 渲染层可以回传任意包全名；执行前必须重新枚举当前用户已注册包，并确认：
+/// ① 这个包全名在**当前用户**的 `Get-AppxPackage` 清单里（staged/全用户预配不算）；
+/// ② 该行的 `removable` 为 true（`enum_appx_packages` 已过滤 NonRemovable）。
+/// 任一不成立直接拒，不进入 `Remove-AppxPackage`。
+pub(super) fn appx_exec_admissible(fullname: &str, listed: &[Value]) -> Result<(), String> {
+    let id = format!("APPX|{fullname}");
+    match listed.iter().find(|r| r["id"].as_str() == Some(id.as_str())) {
+        None => Err("该包未注册到当前用户（staged / 全用户预配或已被移除），当前用户不能执行卸载".to_string()),
+        Some(row) if row["removable"] != Value::Bool(true) => {
+            Err("该包当前用户不可卸载（staged / 全用户预配），已拒绝执行".to_string())
+        }
+        Some(_) => Ok(()),
+    }
+}
+
 /// Appx「未注册到当前用户」补充枚举（HiBit §H6 借鉴项，2026-09-29）。
 ///
 /// 为什么要这一路：`Get-AppxPackage` 是**当前用户**语义，看不到两类实际占盘的东西——
@@ -154,6 +171,22 @@ catch { Write-Output ('ERR:' + $_.Exception.Message); exit 1 }";
 ///    拼进命令时，这道闸必须已经生效过。
 /// 3. 体积不给数：`WindowsApps` 的 ACL 标准用户读不了，读不出就返回 0 并在界面显示"——"，
 ///    不猜一个数冒充实测。
+/// 展示用的安装目录（注册表 `Path` 值去掉最后一段文件名）。
+///
+/// B-05 ③：旧写法是 `match install.rsplit_once('\\')` 的**两个同体分支**
+/// （带 `Packages` 判定的那支与不带判定的支体返回同一个串）—— 判定没有任何效果，
+/// 只是让人误以为「Packages 层会被剥掉」。
+///
+/// 当前口径：**不剥** `Packages` 层，两种形状给出同一个目录串。
+/// 若将来要剥（把展示目录改成包目录的上一级），先补展示层形状用例再改这里，
+/// 不许只改这一处。
+pub(super) fn appx_install_display_dir(install: &str) -> String {
+    match install.rsplit_once('\\') {
+        Some((dir, _)) => dir.to_string(),
+        None => String::new(),
+    }
+}
+
 pub(super) fn enum_appx_store_extras(seen: &std::collections::HashSet<String>) -> Vec<Value> {
     use crate::engine::native;
     use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
@@ -202,11 +235,7 @@ pub(super) fn enum_appx_store_extras(seen: &std::collections::HashSet<String>) -
                 } else {
                     String::new()
                 };
-                let install_dir = match install.rsplit_once('\\') {
-                    Some((dir, _)) if dir.ends_with("Packages") => dir.to_string(),
-                    Some((dir, _)) => dir.to_string(),
-                    None => String::new(),
-                };
+                let install_dir = appx_install_display_dir(&install);
                 // R2b-L07：同一个包全名可能在 Staged 与 Applications 两个子树都出现 ——
                 // 按 id 先到先得去重，与 install_dir 是否解析出来无关（Applications 支路
                 // 没有 Path 值，install_dir 恒空，旧写法把那支的整段去重跳过了）。
@@ -378,6 +407,47 @@ pub(super) mod uninstall_appx_tests {
         assert!(!valid_appx_fullname("名字非法"));
     }
 
+    /// B-05 ③：展示用的安装目录 —— 两种 `Path` 形状（带 `Packages` 层 / 不带）
+    /// 当前**都给出同一个目录串**（旧写法那两支同体分支的判定没有效果）。
+    /// 将来若要剥 `Packages` 层，本用例必须先改（它就是那个「先补形状用例」的钉子）。
+    #[test]
+    fn appx展示目录两种形状同值() {
+        // 两种形状：目录层以 `Packages` 结尾 / 不以它结尾
+        let with_packages = r"C:\Program Files\WindowsApps\Packages";
+        let without_packages =
+            r"C:\Program Files\WindowsApps\Microsoft.Xxx_1.0.0.0_x64__8wekyb3d8bbwe";
+        assert_eq!(
+            appx_install_display_dir(with_packages),
+            r"C:\Program Files\WindowsApps"
+        );
+        assert_eq!(
+            appx_install_display_dir(without_packages),
+            r"C:\Program Files\WindowsApps"
+        );
+        // 没有反斜杠（读不到路径）⇒ 空串，不得给出半截目录
+        assert_eq!(appx_install_display_dir(""), "");
+    }
+
+    /// B-05 ③：展示目录函数里**不得**再留那个空转的 `Packages` 判定分支。
+    ///
+    /// 旧写法是 `match` 的两支同体分支（带判定的那支与不带的支体返回同一个串），
+    /// 判定没有任何效果，只会让人误以为「Packages 层会被剥掉」。
+    /// 判红自证：把那个同体分支加回去 ⇒ 本用例红。
+    #[test]
+    #[allow(non_snake_case)]
+    fn appx展示目录没有空转的Packages分支() {
+        let src = include_str!("appx.rs");
+        let body = src
+            .split("fn appx_install_display_dir")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n").next())
+            .unwrap_or_default();
+        assert!(
+            !body.contains("Packages"),
+            "展示目录函数里不得再有空转的 Packages 判定分支: {body}"
+        );
+    }
+
     /// U-4：包全名 → PFN。Name 含下划线（多段拼回）、Version/Arch 去尾两段；
     /// 结构不符返回 None。
     #[test]
@@ -432,5 +502,26 @@ pub(super) mod uninstall_appx_tests {
         }
         // 空列表在这台机器上是合法结果（没有可卸载的商店应用），不据此判失败；
         // 这条用例真正钉的是「调用成功 + 每一项都过形状」，脚本跑歪会直接 Err。
+    }
+
+    /// R2b-L04：执行侧复验 `removable` 与当前用户注册，列表字段不是执行准入。
+    #[test]
+    fn r2b_appx_execution_rechecks_removable() {
+        let listed = vec![
+            json!({ "id": "APPX|Live.App_1.0.0.0_x64__pub", "removable": true }),
+            json!({ "id": "APPX|Staged.App_1.0.0.0_x64__pub", "removable": false }),
+        ];
+        assert!(
+            appx_exec_admissible("Live.App_1.0.0.0_x64__pub", &listed).is_ok(),
+            "当前用户已注册且 removable=true 才放行"
+        );
+        assert!(
+            appx_exec_admissible("Staged.App_1.0.0.0_x64__pub", &listed).is_err(),
+            "removable=false 的 staged/provisioned 包必须直接拒"
+        );
+        assert!(
+            appx_exec_admissible("NotRegistered.App_1.0.0.0_x64__pub", &listed).is_err(),
+            "不在当前用户清单里的包必须拒（旧实现只验 fullname 就执行）"
+        );
     }
 }

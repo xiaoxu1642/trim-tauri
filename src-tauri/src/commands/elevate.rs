@@ -655,9 +655,14 @@ mod tests {
         // ping -n 3 ≈ 2s：明显短于 3s 上界（不会撞超时分支），又长到能被「有没有等」区分出来
         let mut child = std::process::Command::new("cmd")
             .args(["/C", "ping -n 3 127.0.0.1 >nul"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .expect("探针子进程必须起得来");
         let pid = child.id();
+        // X1-L01：子进程立刻入 Job —— 探针若中途失败/超时，子孙不会留在盘上。
+        // 建不了 job 时降级（不因此判红）：大不了探针退化成「只等本体」。
+        let _job = crate::engine::job::ProcessJob::create_for(pid).ok();
         assert!(!takeover_writer_gone(pid), "刚拉起的子进程被判成已消失：判据方向反了");
         let started = std::time::Instant::now();
         wait_predecessor_exit(pid);
@@ -671,6 +676,21 @@ mod tests {
             "等了 {waited_ms}ms：超过上界 + 宽限，说明走的是超时分支而不是等到位"
         );
         assert!(takeover_writer_gone(pid), "函数返回时子进程还在，等于没等");
-        let _ = child.wait();
+        // 末尾的 wait 也要有上界：子进程若没按预期退出，这里不得把整轮验收挂死。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("探针子进程在 5s 内未退出，收尾超时");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
     }
 }

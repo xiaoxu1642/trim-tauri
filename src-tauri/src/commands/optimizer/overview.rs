@@ -318,7 +318,7 @@ pub(super) fn collect_checks(opt: &Value) -> Vec<Check> {
     // 这 6 项原先同样是 `pwsh` 文本 ⇒ `collect_checks` 返回空 vec ⇒ 体检恒「未生效」
     // ⇒ 用户点「立即执行」重复施加。形态与 B 类完全同构，只是原语不同。
     let opt_id2 = opt.get("id").and_then(Value::as_str).unwrap_or("");
-    if !opt_id2.is_empty() && checks.is_empty() {
+    if !opt_id2.is_empty() {
         if let Some(spec) = write_spec_of(opt_id2) {
             for r in spec.reg_writes {
                 // ⚠️ 侧表里写的是**短名**（HKLM/HKCU/…）而 [`reg_hive`] 认的是
@@ -508,7 +508,7 @@ pub(super) fn reg_targets(o: &Value) -> Value {
 /// 后端可检测项（其中 4 个在本机已优化），VBS 漏标就是这类分叉。
 /// `ids = Some(&[])` 显式空 = 不检任何项（返回空 map）。
 ///
-/// 与原 PS 的**一处刻意差异**：DWORD 比较按无符号 32 位读出（`read_reg_dword_opt`），
+/// 与原 PS 的**一处刻意差异**：DWORD 比较按无符号 32 位读出（`read_reg_dword_u32_as_i64`），
 /// 原 PS 的 `[int]$v -eq [int]$d` 是 32 位**有符号**，`dword:ffffffff` 这类值会判不上。
 /// 优化项里没有 > 2^31-1 的期望值，此差异不改变现有行为，但让实现不再有这个坑。
 /// 判定单条断言（M2-C 抽出）。
@@ -545,7 +545,7 @@ pub(super) fn judge_check(c: &Check) -> bool {
                 //
                 // 语义方向与灰态一致（宁可多灰不可漏灰）：宁可把「用户配了 8GB
                 // 但组策略又改了」判成未生效，也不要判成已生效让用户以为生效了。
-                match native::read_reg_dword_opt(c.hive, &c.subkey, &c.key) {
+                match native::read_reg_dword_u32_as_i64(c.hive, &c.subkey, &c.key) {
                     None => false, // 读不到 ⇒ 未生效（fail-closed）
                     Some(v) => c
                         .data
@@ -592,7 +592,7 @@ pub(super) fn judge_check(c: &Check) -> bool {
                 // 重复删不存在的键 —— 「谎报未生效 + 重复施加」的组合比检不出更糟。
                 //
                 // 读侧用 `read_reg_value_text`（任意类型都读得到）而不是
-                // `read_reg_dword_opt`：判据是「这个键还在不在」，与值类型无关。
+                // `read_reg_dword_u32_as_i64`：判据是「这个键还在不在」，与值类型无关。
                 //
                 // ⚠️ **已知简化**：`None` 同时覆盖「值不存在」与「键打不开
                 // （无权限 / 父键缺失）」。本判据不区分 —— 对 `WindowsUpdate`
@@ -610,7 +610,7 @@ pub(super) fn judge_check(c: &Check) -> bool {
                 }
             } else if c.is_dword {
                 match c.data.parse::<i64>() {
-                    Ok(want) => native::read_reg_dword_opt(c.hive, &c.subkey, &c.key) == Some(want),
+                    Ok(want) => native::read_reg_dword_u32_as_i64(c.hive, &c.subkey, &c.key) == Some(want),
                     Err(_) => false,
                 }
             } else {
@@ -852,12 +852,16 @@ pub async fn optimizer_list<R: Runtime>(window: WebviewWindow<R>) -> Value {
 /// 实际是劫持面被静默吞掉。两条必须结构上可分辨。
 fn catalog_response(load_err: Option<&str>, rows: &[Value]) -> Value {
     match load_err {
-        Some(reason) => json!({
-            "success": false,
-            "code": "optimizer-catalog-unverified",
-            "message": format!("优化目录验签未通过，已拒绝装载：{reason}"),
-            "data": [],
-        }),
+        Some(_) => {
+            let mut response = catalog_load_failure().unwrap_or_else(|| json!({
+                "success": false,
+                "degraded": true,
+                "code": "optimizer-catalog-unverified",
+                "message": "优化目录验签未通过，已拒绝装载",
+            }));
+            response["data"] = json!([]);
+            response
+        }
         None => json!({ "success": true, "data": rows }),
     }
 }
@@ -888,9 +892,9 @@ pub async fn optimizer_touch_recent<R: Runtime>(
 ///
 /// **档位 `MAIN` 而不是 `guard_readonly`**（由 check-guard-tiers 的 D5 组判出来的）：
 /// 本命令**只读侧表**，但只有**主窗的优化页**消费它（`optimizer.js::init` 调
-/// `applyGroupSidecar`）。四个子窗（预览 / 模型 / 进程管理 / 外设）都不加载
+/// `applyGroupSidecar`）。三个子窗（models / processManager / residue）都不加载
 /// `optimizer.js`、也不渲染分类导航 —— 给它 readonly 档就是 D5 说的「白给放宽」：
-/// 放行了全部五个窗口 label，却没有任何子窗消费方。
+/// 放行了全部四个窗口 label，却没有任何子窗消费方。
 /// 判档依据是 AGENTS §3「以谁真的需要调它为准」，不是「它只读」。
 #[tauri::command]
 pub async fn optimizer_list_groups<R: Runtime>(window: WebviewWindow<R>) -> Value {
@@ -969,6 +973,10 @@ pub async fn optimizer_check_optimized<R: Runtime>(
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
+    let _ = options();
+    if let Some(response) = catalog_load_failure() {
+        return response;
+    }
     // ids 缺键（None）= 启动时静默全量体检；显式 [] = 空结果。
     let results = check_optimized(ids.as_deref());
     json!({ "success": true, "results": results })
@@ -1000,6 +1008,10 @@ pub async fn optimizer_batch_preflight<R: Runtime>(
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
     }
+    let _ = options();
+    if let Some(response) = catalog_load_failure() {
+        return response;
+    }
     let ids = ids.unwrap_or_default();
     let restore = restore.unwrap_or(false);
     let mut runnable: Vec<String> = Vec::new();
@@ -1026,10 +1038,20 @@ pub async fn optimizer_batch_preflight<R: Runtime>(
 }
 
 /// optimizer:state-overview —— 记账清单 + stale 判定 + detected
+///
+/// ⚠️ 本命令走 `guard_readonly`，但**会写盘**：动态项（`dynamic`）遗留的 `pending`
+/// 记录在这里被整批删除（下方 `drop_pending_ids` → `remove_many`），以免动态项改名后
+/// 留下一堆永远对不上的 pending。这是**已登记的例外**：只删动态项的遗留 pending，
+/// 不碰用户选择的忽略名单、也不碰已应用记录；
+/// `check-guard-tiers` 的 `guard_readonly` 写原语扫描把本命令登记为例外。
 #[tauri::command]
 pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {
         return json!({ "success": false, "message": msg });
+    }
+    let _ = options();
+    if let Some(response) = catalog_load_failure() {
+        return response;
     }
     // 性能修复（P1 批次）：items / 忽略名单 / detected 三段**一次读盘**派生
     // （旧写法 opt_state::all() + dismissed_map() + detected_all() 各调一次 load() ⇒
@@ -1173,7 +1195,8 @@ mod p1_6a_catalog_response_tests {
         let 被拒 = catalog_response(Some("签名不匹配"), &[]);
         assert_eq!(被拒["success"], json!(false), "验签失败不得报成功: {被拒}");
         assert_eq!(被拒["code"], json!("optimizer-catalog-unverified"), "错误码必须稳定，前端与门禁都按它判读");
-        assert!(被拒["message"].as_str().unwrap_or("").contains("签名不匹配"), "拒因必须带上来: {被拒}");
+        assert!(被拒["message"].as_str().unwrap_or("").contains("验签未通过"), "拒因必须带上来: {被拒}");
+        assert_eq!(被拒["degraded"], json!(true), "目录被拒必须显式 degraded: {被拒}");
 
         let 合法空 = catalog_response(None, &[]);
         assert_eq!(合法空["success"], json!(true), "合法装载后确实 0 项仍是成功（不得被顺手改成失败）");
@@ -1188,5 +1211,47 @@ mod p1_6a_catalog_response_tests {
         let rows = vec![json!({ "id": "a" }), json!({ "id": "b" })];
         let out = catalog_response(None, &rows);
         assert_eq!(out["data"].as_array().map(|v| v.len()), Some(2));
+    }
+
+    #[test]
+    fn overview_emits_service_and_reg_checks() {
+        let src = include_str!("overview.rs");
+        let reg_branch = src
+            .split("// 第五条分支：注册表写入坐标")
+            .nth(1)
+            .and_then(|s| s.split("\n    checks").next())
+            .unwrap_or_default();
+        assert!(
+            !reg_branch.contains("checks.is_empty()"),
+            "注册表段不得再被 checks.is_empty() 挡掉"
+        );
+        assert!(
+            reg_branch.contains("if !opt_id2.is_empty()"),
+            "注册表段必须只按 write spec 判断，不再前置 checks 空表门"
+        );
+    }
+
+    #[test]
+    fn catalog_load_failure_is_distinct_from_empty_catalog() {
+        let rejected = catalog_load_failure_shape(Some("签名不匹配"));
+        assert_eq!(rejected["degraded"], json!(true));
+        assert_eq!(rejected["code"], json!("optimizer-catalog-unverified"));
+        assert_eq!(rejected["loadError"], json!("签名不匹配"));
+        let empty = catalog_load_failure_shape(None);
+        assert_eq!(empty["success"], json!(true));
+    }
+}
+
+#[cfg(test)]
+fn catalog_load_failure_shape(reason: Option<&str>) -> Value {
+    match reason {
+        Some(reason) => json!({
+            "success": false,
+            "degraded": true,
+            "loadError": reason,
+            "code": "optimizer-catalog-unverified",
+            "message": format!("优化目录验签未通过，已拒绝装载：{reason}"),
+        }),
+        None => json!({ "success": true, "data": [] }),
     }
 }

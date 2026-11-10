@@ -327,7 +327,10 @@ fn scan_task_files() -> (Vec<Value>, Vec<String>) {
                 "enabled": enabled,
                 "location": format!("计划任务{}", task_path.trim_end_matches('\\')),
                 "scope": "HKLM",
-                "disabledBy": if !enabled { "system" } else { "" },
+                // R5d-L08：任务 XML 只有「已禁用」这一个事实，没有操作者。
+                // 这里不猜 `system`；`startup_scan` 会按 Trim 台账把本工具禁用
+                // 的行改成 `trim`，其余无法归因的禁用行保持 `unknown`。
+                "disabledBy": if !enabled { "unknown" } else { "" },
                 "publisher": "",
                 "resolvedPath": resolved_target,
                 "missingTarget": task_missing,
@@ -798,8 +801,7 @@ pub fn startup_scan() -> Result<(Vec<Value>, Vec<String>), String> {
     // 会为**每个**任务做一次深查（本机数百任务 ⇒ 实测 60s+），而我们要的三件事
     // （触发类型 / 命令行 / 启用态）全部写在任务 XML 文件里 —— 纯文件读，毫秒级。
     // XML 按固定写出形态做子串判读，不引解析依赖（§2 零新增依赖）。
-    let (task_rows, task_warnings) = scan_task_files();
-    results.extend(task_rows);
+    let (mut task_rows, task_warnings) = scan_task_files();
     warnings.extend(task_warnings);
 
     // ---------- 合并 disabled.json ----------
@@ -819,8 +821,14 @@ pub fn startup_scan() -> Result<(Vec<Value>, Vec<String>), String> {
     // - 腿②（本段打的来源标记）挡住「不是本次扫描现读得到的」那一类 —— 执行侧
     //   只收 `origin:"scan"` 的 task 行。
     match read_disabled_records() {
-        Ok(records) => merge_disabled_ledger(&mut results, &records),
+        Ok(records) => {
+            // R5d-L08：任务行的禁用归因先按 Trim 台账落定，再并台账行。
+            apply_task_disabled_by(&mut task_rows, &records);
+            results.extend(task_rows);
+            merge_disabled_ledger(&mut results, &records);
+        }
         Err(e) => {
+            results.extend(task_rows);
             crate::engine::log::write_log("warn", &format!("启动项禁用台账不可读，本次按无附加项处理: {e}"));
             warnings.push(format!("启动项禁用台账不可读：{e}（禁启用状态可能不准确）"));
         }
@@ -837,6 +845,14 @@ pub fn startup_scan() -> Result<(Vec<Value>, Vec<String>), String> {
 /// 又会与并行跑的同域用例互相踩（本机实测偶发红，2026-10-27 B2 批次复现）。
 fn merge_disabled_ledger(results: &mut Vec<Value>, records: &[Value]) {
     for r in records {
+        // R5d-L08：任务归因记录只用于 disabledBy 回填，不参与扫描补行——
+        // 任务不存在时没有可恢复对象，合并只会留一条点不动的幽灵行。
+        // 任意注入的 task 行（没有本标记）仍走原合并链，来源闸照旧覆盖。
+        if r.get("source").and_then(|v| v.as_str()) == Some("task")
+            && r.get("attributionOnly").and_then(|v| v.as_bool()) == Some(true)
+        {
+            continue;
+        }
         let Some(id) = r.get("id").and_then(|v| v.as_str()) else { continue; };
         if results.iter().any(|x| x.get("id").and_then(|v| v.as_str()) == Some(id)) { continue; }
         let mut item = r.clone();
@@ -852,6 +868,28 @@ fn merge_disabled_ledger(results: &mut Vec<Value>, records: &[Value]) {
         // 这条不变量必须在合并段也成立，否则护栏名单一扩容，历史台账行就显示成可操作。
         apply_startup_guard(&mut item);
         results.push(item);
+    }
+}
+
+/// R5d-L08：给计划任务行补禁用归因。
+///
+/// 任务 XML 只写 `<Enabled>false</Enabled>`，不记录谁禁的；Trim 台账里
+/// `source:"task"` 且同 id 的记录才是「Trim 自己禁用」的证据。没有证据时
+/// 保持 `unknown`，绝不猜 `system`。
+fn apply_task_disabled_by(rows: &mut [Value], records: &[Value]) {
+    for row in rows {
+        if row.get("source").and_then(|v| v.as_str()) != Some("task") {
+            continue;
+        }
+        if row.get("enabled").and_then(|v| v.as_bool()) != Some(false) {
+            continue;
+        }
+        let id = row.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let by_trim = records.iter().any(|r| {
+            r.get("id").and_then(|v| v.as_str()) == Some(id)
+                && r.get("source").and_then(|v| v.as_str()) == Some("task")
+        });
+        row["disabledBy"] = json!(if by_trim { "trim" } else { "unknown" });
     }
 }
 
@@ -1436,7 +1474,7 @@ pub fn startup_toggle(items: &[Value], enable: bool) -> Result<Value, String> {
             let result = match source.as_str() {
                 "registry" => toggle_registry_item(item, enable, &mut records),
                 "folder" => toggle_folder_item(item, enable, &mut records),
-                "task" => toggle_task_item(item, enable),
+                "task" => toggle_task_item(item, enable, &mut records),
                 _ => Err("未知来源类型".into()),
             };
 
@@ -1716,7 +1754,48 @@ unsafe fn toggle_folder_item(item: &Value, enable: bool, records: &mut Vec<Value
     }
 }
 
-unsafe fn toggle_task_item(item: &Value, enable: bool) -> Result<ToggleOutcome, String> {
+/// R5d-L08：Trim 禁用计划任务后的归因凭据。
+///
+/// 任务 XML 没有操作者字段，台账是「这次禁用是 Trim 做的」的唯一证据。
+/// 启用成功即摘掉记录，避免下次扫描继续冒领系统/他人禁用的任务。
+/// 记录本身不驱动任务启停（执行臂仍只收 `origin:"scan"`）。
+fn update_task_ledger(records: &mut Vec<Value>, item: &Value, disable: bool) {
+    let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
+        return;
+    };
+    records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id));
+    if !disable {
+        return;
+    }
+    records.push(json!({
+        "id": id,
+        "name": item.get("name"),
+        "command": item.get("command"),
+        "source": "task",
+        "hive": "",
+        "regPath": "",
+        "valueName": "",
+        "valueType": "",
+        "valueData": "",
+        "valueDataB64": "",
+        "valueDataArray": [],
+        "filePath": "",
+        "taskPath": item.get("taskPath"),
+        "taskName": item.get("taskName"),
+        "location": item.get("location"),
+        "scope": item.get("scope"),
+        "publisher": item.get("publisher"),
+        "resolvedPath": item.get("resolvedPath"),
+        "disabledBy": "trim",
+        "attributionOnly": true,
+    }));
+}
+
+unsafe fn toggle_task_item(
+    item: &Value,
+    enable: bool,
+    records: &mut Vec<Value>,
+) -> Result<ToggleOutcome, String> {
     let task_path = item.get("taskPath").and_then(|v| v.as_str()).unwrap_or("");
     let task_name = item.get("taskName").and_then(|v| v.as_str()).unwrap_or("");
     // R5a-M01 ①：容器准入（形状 + 系统子树排除），在拼 /TN 与调 schtasks **之前**。
@@ -1728,7 +1807,18 @@ unsafe fn toggle_task_item(item: &Value, enable: bool) -> Result<ToggleOutcome, 
     // R5a-M01 ①+追加：现读核对「这条任务确实在本域扫描树里且是启动项任务」。
     // 与形状闸分工：形状闸管字段合法性，本条管「此刻磁盘上真的有这么个任务」。
     task_scan_tree_check(task_path, task_name)?;
-    if task_name.is_empty() { return Err("缺少任务名".into()); }
+        // B03（方案 R5d-L09）：删掉原 here 的 `task_name.is_empty()` 检查 —— 它在
+        // `task_container_verdict` 之后，而 verdict 内部已拒空名（同一句拒因），
+        // 那行永远走不到。两处同形拒因并存时，改一处文案就会漏掉另一处。
+    // R5d-L08：已处于目标态就不改动、不记账 —— 否则「对系统已禁用的任务再点禁用」
+    // 会把台账写成 Trim，回扫冒领成 trim。
+    if item.get("enabled").and_then(|v| v.as_bool()) == Some(enable) {
+        return Ok(ToggleOutcome::Unchanged(if enable {
+            "计划任务本来就是启用状态（未改动）".into()
+        } else {
+            "计划任务本来就是禁用状态（未改动）".into()
+        }));
+    }
     let full_name = format!("{task_path}{task_name}");
     let arg = if enable { "/ENABLE" } else { "/DISABLE" };
     // v6-K01（P0-2）：解析失败与 spawn 失败同报错口径
@@ -1738,6 +1828,7 @@ unsafe fn toggle_task_item(item: &Value, enable: bool) -> Result<ToggleOutcome, 
         crate::engine::systembin::SCHTASKS_TIMEOUT,
     ).map_err(|e| format!("schtasks 执行失败: {e}"))?;
     if output.status.success() {
+        update_task_ledger(records, item, !enable);
         Ok(ToggleOutcome::Changed(if enable { "已启用".into() } else { "已禁用".into() }))
     } else {
         let stderr = crate::engine::systembin::decode_native_output(&output.stderr);
@@ -1847,6 +1938,57 @@ fn plan_folder_delete(item: &Value, records: &[Value]) -> Result<FolderDeletePla
 }
 
 
+
+/// R5d-L10：`RegDeleteValueW` 的 LSTATUS 分类。
+///
+/// 0=成功；2/3=值/键路径不存在（已经不在）；5=拒绝访问。其他码如实报错，
+/// 不把未知失败伪装成「已删除」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegDeleteValueOutcome {
+    Deleted,
+    AlreadyAbsent,
+    AccessDenied,
+}
+
+impl RegDeleteValueOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Deleted => "deleted",
+            Self::AlreadyAbsent => "already_absent",
+            Self::AccessDenied => "access_denied",
+        }
+    }
+}
+
+fn classify_reg_delete_status(code: u32) -> Result<RegDeleteValueOutcome, String> {
+    match code {
+        0 => Ok(RegDeleteValueOutcome::Deleted),
+        2 | 3 => Ok(RegDeleteValueOutcome::AlreadyAbsent),
+        5 => Ok(RegDeleteValueOutcome::AccessDenied),
+        other => Err(format!("删除注册表值失败（win32={other}）")),
+    }
+}
+
+unsafe fn reg_delete_value_status(
+    hive: HKEY,
+    subkey: &str,
+    value_name: &str,
+) -> Result<RegDeleteValueOutcome, String> {
+    // N11（R5a-K02）：删值写点必须自带容器准入，不能只依赖调用方。
+    // 生产链在备份前已判过一次；这里是第二道，防止未来新调用点绕过。
+    registry_container_verdict(hive_tag_of(hive, subkey), subkey)?;
+    let sk = to_wide_checked(subkey)
+        .map_err(|_| "注册表键路径非法（含 NUL 或控制字符），未执行删除".to_string())?;
+    let nm = to_wide_checked(value_name)
+        .map_err(|_| "启动项值名非法（含 NUL 或控制字符），未执行删除".to_string())?;
+    let mut hk = HKEY::default();
+    if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk).is_err() {
+        return Err("无法打开注册表键".into());
+    }
+    let status = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
+    let _ = RegCloseKey(hk);
+    classify_reg_delete_status(status.0)
+}
 
 /// 启动项删除（原 PS 时代脚本 startup_remove.ps1，已退役；S3）
 ///
@@ -1975,54 +2117,79 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                     results.push(json!({"id": id, "name": name, "status": "error", "message": "注册表备份失败，未执行删除"}));
                     continue;
                 }
-                // 删值
-                unsafe {
-                    let mut hk = HKEY::default();
-                    if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_SET_VALUE, &mut hk).is_err() {
+                // 删值：`RegDeleteValueW` 的返回码是主判据，回读存在性只作辅证。
+                let outcome = match unsafe { reg_delete_value_status(hive, &subkey, value_name) } {
+                    Ok(v) => v,
+                    Err(msg) => {
                         failed += 1;
-                        results.push(json!({"id": id, "name": name, "status": "error", "message": "无法打开注册表键"}));
+                        results.push(json!({"id": id, "name": name, "status": "error", "message": msg}));
                         continue;
                     }
-                    let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
-                    let _ = RegCloseKey(hk);
-                    // 回读
+                };
+                let still_exists = unsafe {
                     let mut hk2 = HKEY::default();
-                    let still_exists = if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk2).is_ok() {
+                    if RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk2).is_ok() {
                         let mut ty = REG_VALUE_TYPE::default();
                         let mut size = 0u32;
                         let exists = RegQueryValueExW(hk2, PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_ok();
                         let _ = RegCloseKey(hk2);
                         exists
-                    } else { false };
-                    if still_exists {
-                        failed += 1;
-                        results.push(json!({"id": id, "name": name, "status": "error", "message": "删除未生效（可能需要管理员权限）"}));
                     } else {
-                        // R5d-L03：批准位是**按键名常驻**的 —— 值删了位还在，之后同名值（应用
-                        // 重装、或本工具 startup_add 新加）一写回来就被系统当成「已禁用」。
-                        // 只清**已存在**的批准记录（不新建键、不给无关值留死数据），
-                        // RunOnce 不碰（理由与 toggle_registry_item 的 is_run_once 同源）。
-                        let run_once = subkey
-                            .rsplit('\\')
-                            .next()
-                            .map(|s| s.to_ascii_lowercase().starts_with("runonce"))
-                            .unwrap_or(false);
-                        if !run_once && read_approved_blob(hive, approved_subkey, value_name).is_some() {
-                            if let Err(why) = set_approved_bit(hive, approved_subkey, value_name, false) {
-                                // 收尾失败**不改变删除结果**（值确实已删），但必须留痕：
-                                // 残留的批准位会让同名新值开局即禁用。
-                                crate::engine::log::write_log(
-                                    "warn",
-                                    &format!("启动项删除后清理批准位失败（{value_name}）: {why}"),
-                                );
-                            }
-                        }
-                        // 从 disabled.json 移除记录
-                        records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
-                        success += 1;
-                        results.push(json!({"id": id, "name": name, "status": "ok", "message": "已删除（已备份注册表键）"}));
+                        false
+                    }
+                };
+                // 交叉核对：0 必须已消失；2/3 若回读仍在，说明期间被重建/状态
+                // 不一致，不能报成功；5 直接按拒绝访问。
+                let delete_ok = match outcome {
+                    RegDeleteValueOutcome::Deleted | RegDeleteValueOutcome::AlreadyAbsent => !still_exists,
+                    RegDeleteValueOutcome::AccessDenied => false,
+                };
+                if !delete_ok {
+                    failed += 1;
+                    let message = match outcome {
+                        RegDeleteValueOutcome::Deleted => "删除未生效（回读仍存在，可能需要管理员权限）",
+                        RegDeleteValueOutcome::AlreadyAbsent => "删除返回不存在，但回读仍存在（状态不一致）",
+                        RegDeleteValueOutcome::AccessDenied => "删除注册表值被拒绝（需要管理员权限）",
+                    };
+                    results.push(json!({
+                        "id": id, "name": name, "status": "error",
+                        "message": message, "deleteResult": outcome.as_str()
+                    }));
+                    continue;
+                }
+                // R5d-L03：批准位是**按键名常驻**的 —— 值删了位还在，之后同名值（应用
+                // 重装、或本工具 startup_add 新加）一写回来就被系统当成「已禁用」。
+                // 只清**已存在**的批准记录（不新建键、不给无关值留死数据），
+                // RunOnce 不碰（理由与 toggle_registry_item 的 is_run_once 同源）。
+                let run_once = subkey
+                    .rsplit('\\')
+                    .next()
+                    .map(|s| s.to_ascii_lowercase().starts_with("runonce"))
+                    .unwrap_or(false);
+                if !run_once
+                    && unsafe { read_approved_blob(hive, approved_subkey, value_name) }.is_some()
+                {
+                    if let Err(why) = unsafe { set_approved_bit(hive, approved_subkey, value_name, false) } {
+                        // 收尾失败**不改变删除结果**（值确实已删），但必须留痕：
+                        // 残留的批准位会让同名新值开局即禁用。
+                        crate::engine::log::write_log(
+                            "warn",
+                            &format!("启动项删除后清理批准位失败（{value_name}）: {why}"),
+                        );
                     }
                 }
+                // 从 disabled.json 移除记录
+                records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
+                success += 1;
+                let message = if outcome == RegDeleteValueOutcome::AlreadyAbsent {
+                    "值已不存在（无需删除；已清理批准位）"
+                } else {
+                    "已删除（已备份注册表键）"
+                };
+                results.push(json!({
+                    "id": id, "name": name, "status": "ok",
+                    "message": message, "deleteResult": outcome.as_str()
+                }));
             }
             "folder" => {
                 // K04：逐项计划（纯函数，可测）——containment 在计划里判，失败逐条计数。
@@ -2140,6 +2307,8 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                     results.push(json!({"id": id, "name": name, "status": "error", "message": "删除未生效（可能需要管理员权限）"}));
                 } else {
                     success += 1;
+                    // R5d-L08：任务已删，台账里的 Trim 归因记录不能留成幽灵项。
+                    records.retain(|r| r.get("id").and_then(|v| v.as_str()) != Some(id.as_str()));
                     results.push(json!({"id": id, "name": name, "status": "ok", "message": "已删除（已导出任务备份）"}));
                 }
             }
@@ -2696,7 +2865,7 @@ mod r5a_m01_task_guard_tests {
         );
 
         // ④ 执行臂必须拒（不调 schtasks）
-        let err = unsafe { toggle_task_item(row, false) }.unwrap_err();
+        let err = unsafe { toggle_task_item(row, false, &mut Vec::new()) }.unwrap_err();
         assert!(
             err.contains("台账") || err.contains("拒绝"),
             "台账注入的 task 行必须被拒，实得: {err}"
@@ -2921,6 +3090,7 @@ mod r5d_ledger_and_task_tests {
     /// 判红自证：把 `task_enabled_from_xml` 的取值改回 `xml_first(text, "Enabled")`
     /// ⇒ ①②③ 红（被触发器值带偏）。
     #[test]
+    #[allow(non_snake_case)]
     fn 任务启用态读Settings内的Enabled() {
         // ① 触发器关、任务级开 ⇒ 任务会跑，必须读 true（验收样本）
         assert!(task_enabled_from_xml(
@@ -2946,6 +3116,7 @@ mod r5d_ledger_and_task_tests {
     ///
     /// 判红自证：把 `scan_task_files` 改回 `xml_first(&text, "Enabled")` ⇒ 两条都红。
     #[test]
+    #[allow(non_snake_case)]
     fn 任务扫描必须调用Settings判据() {
         let prod = include_str!("startup.rs")
             .split("#[cfg(test)]\nmod r5d_ledger_and_task_tests")
@@ -3046,6 +3217,194 @@ mod r5d_ledger_and_task_tests {
         assert!(
             del.contains("note_ledger_write_failure(&mut results, &mut failed, &e)"),
             "删除臂没有降级回执: {del}"
+        );
+    }
+
+    /// R5d-L08：计划任务 XML 只说明「已禁用」，不说明是谁禁的。
+    /// 没有 Trim 台账证据时不得猜成 `system`，必须写 `unknown`。
+    ///
+    /// 修前红：生产段仍含恒 `system` 的写法 ⇒ 本用例红。
+    #[test]
+    fn r5d_disabled_by_is_not_guessed() {
+        let prod = include_str!("startup.rs")
+            .split("#[cfg(test)]\nmod r5d_ledger_and_task_tests")
+            .next()
+            .unwrap_or_default();
+        assert!(
+            !prod.contains(r#""disabledBy": if !enabled { "system" } else { "" }"#),
+            "计划任务禁用态不得再猜成 system"
+        );
+        assert!(
+            prod.contains(r#""disabledBy": if !enabled { "unknown" } else { "" }"#),
+            "无法归因的禁用任务必须写 unknown"
+        );
+        assert!(
+            prod.contains("toggle_task_item(item, enable, &mut records)"),
+            "启停臂没有把任务台账传进 toggle_task_item"
+        );
+        assert!(
+            prod.contains("update_task_ledger(records, item, !enable)"),
+            "任务启停成功后没有更新归因台账"
+        );
+        assert!(
+            prod.contains("apply_task_disabled_by(&mut task_rows, &records)"),
+            "扫描链没有按 Trim 台账回填任务归因"
+        );
+
+        // 行为：Trim 自己禁用 → 台账有记录 → 回扫 trim；没有记录 → unknown。
+        let item = json!({
+            "id": "task|\\TrimR5d\\|Probe",
+            "name": "Probe",
+            "source": "task",
+            "taskPath": "\\TrimR5d\\",
+            "taskName": "Probe",
+            "enabled": true,
+            "disabledBy": "",
+        });
+        let mut records = Vec::new();
+        update_task_ledger(&mut records, &item, true);
+        assert_eq!(
+            records[0]["attributionOnly"],
+            json!(true),
+            "任务归因记录必须带 attributionOnly 标记"
+        );
+        let mut merged = Vec::new();
+        merge_disabled_ledger(&mut merged, &records);
+        assert!(
+            merged.is_empty(),
+            "任务归因记录不得并成点不动的幽灵行: {merged:?}"
+        );
+        let mut rows = vec![json!({
+            "id": "task|\\TrimR5d\\|Probe",
+            "source": "task",
+            "enabled": false,
+            "disabledBy": "unknown",
+        })];
+        apply_task_disabled_by(&mut rows, &records);
+        assert_eq!(
+            rows[0]["disabledBy"],
+            json!("trim"),
+            "Trim 自己禁用后回扫必须显示 trim: {rows:?}"
+        );
+
+        let mut unknown = vec![json!({
+            "id": "task|\\|Other",
+            "source": "task",
+            "enabled": false,
+            "disabledBy": "unknown",
+        })];
+        apply_task_disabled_by(&mut unknown, &records);
+        assert_eq!(
+            unknown[0]["disabledBy"],
+            json!("unknown"),
+            "没有 Trim 台账证据时不得猜 system: {unknown:?}"
+        );
+
+        // 启用成功后摘记录：原 Trim 行不能继续冒领归因。
+        update_task_ledger(&mut records, &item, false);
+        assert!(records.is_empty(), "启用成功后必须摘掉归因记录: {records:?}");
+    }
+
+    /// R5d-L10：`RegDeleteValueW` 的返回值必须参与判定。
+    ///
+    /// 修前红：生产段仍是 `let _ = RegDeleteValueW(...)` ⇒ 本用例红。
+    #[test]
+    fn r5d_delete_value_reports_already_absent() {
+        let prod = include_str!("startup.rs")
+            .split("#[cfg(test)]\nmod r5d_ledger_and_task_tests")
+            .next()
+            .unwrap_or_default();
+        assert!(
+            !prod.contains("let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));"),
+            "RegDeleteValueW 返回值不得再被丢弃"
+        );
+        assert!(
+            prod.contains("already_absent") && prod.contains("deleteResult"),
+            "删值回执必须记录 already_absent"
+        );
+
+        // 行为：在允许的 HKCU Run 容器里建唯一值 → 第一次删 deleted → 第二次删
+        // already_absent。值名自带 pid+时间戳，Drop 只清自己这一条。
+        const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+        struct RunValueGuard(Vec<u16>);
+        impl Drop for RunValueGuard {
+            fn drop(&mut self) {
+                // 本守卫只操作 Run 容器内的自有值；过同一道容器准入后清理。
+                let _ = registry_container_verdict("HKCU", RUN);
+                unsafe {
+                    let sk = to_wide(RUN);
+                    let mut hk = HKEY::default();
+                    if RegOpenKeyExW(
+                        HKEY_CURRENT_USER,
+                        PCWSTR(sk.as_ptr()),
+                        Some(0),
+                        KEY_SET_VALUE,
+                        &mut hk,
+                    )
+                    .is_ok()
+                    {
+                        let _ = RegDeleteValueW(hk, PCWSTR(self.0.as_ptr()));
+                        let _ = RegCloseKey(hk);
+                    }
+                }
+            }
+        }
+
+        assert!(
+            registry_container_verdict("HKCU", RUN).is_ok(),
+            "测试值必须落在允许的 Run 容器"
+        );
+        let value_name = format!(
+            "TrimR5dL10Probe-{}-{}",
+            std::process::id(),
+            crate::engine::now_ms()
+        );
+        let sk = to_wide_checked(RUN).expect("Run 键名合法");
+        let nm = to_wide_checked(&value_name).expect("测试值名合法");
+        let _guard = RunValueGuard(nm.clone());
+        let mut hk = HKEY::default();
+        let mut disp = Default::default();
+        unsafe {
+            let create = RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                PCWSTR(sk.as_ptr()),
+                None,
+                PCWSTR::default(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_READ | KEY_WRITE,
+                None,
+                &mut hk,
+                Some(&mut disp),
+            );
+            assert_eq!(create.0, 0, "打开 HKCU Run 键");
+            let data: Vec<u8> = "C:\\TrimR5dL10\\missing.exe\0"
+                .encode_utf16()
+                .flat_map(|w| w.to_le_bytes())
+                .collect();
+            let write = RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_SZ, Some(&data));
+            assert_eq!(write.0, 0, "写临时 Run 值");
+            let _ = RegCloseKey(hk);
+        }
+
+        let first = unsafe { reg_delete_value_status(HKEY_CURRENT_USER, RUN, &value_name) }
+            .expect("第一次删值必须成功");
+        assert_eq!(
+            first,
+            RegDeleteValueOutcome::Deleted,
+            "首次删值应记 deleted"
+        );
+        let second = unsafe { reg_delete_value_status(HKEY_CURRENT_USER, RUN, &value_name) }
+            .expect("第二次删值必须按 already_absent 返回");
+        assert_eq!(
+            second,
+            RegDeleteValueOutcome::AlreadyAbsent,
+            "值已不存在时必须记 already_absent"
+        );
+        assert_eq!(second.as_str(), "already_absent");
+        assert_eq!(
+            classify_reg_delete_status(5).expect("5 是已识别码"),
+            RegDeleteValueOutcome::AccessDenied,
+            "5 必须记 access_denied"
         );
     }
 }

@@ -69,10 +69,12 @@ function stripCommentsForRefs(file, text) {
 const texts = corpus.map((f) => [f, stripCommentsForRefs(f, readFileSync(f, 'utf8'))]);
 const assets = walkFiles(DIST);
 
-/** 引用命中 = basename 出现在「剥注释后」的语料代码里；文件自身不算。 */
+/** 引用命中 = basename 以完整路径段出现在「剥注释后」的语料代码里；文件自身不算。 */
 function referenceHits(name, self, corpusTexts) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const boundary = new RegExp(`(^|[^\\w.-])${escaped}(?=$|[^\\w.-])`);
   return corpusTexts
-    .filter(([cf, code]) => cf !== self && code.includes(name))
+    .filter(([cf, code]) => cf !== self && boundary.test(code))
     .map(([cf]) => relative(REPO_ROOT, cf).replace(/\\/g, '/'));
 }
 
@@ -150,7 +152,9 @@ if (existsSync(ICONS_DIR)) {
   for (const f of icons) {
     const name = basename(f);
     if (bundled.has(name)) continue;
-    const referenced = texts.some(([cf, text]) => cf !== f && text.includes(name));
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const boundary = new RegExp(`(^|[^\\w.-])${escaped}(?=$|[^\\w.-])`);
+    const referenced = texts.some(([cf, text]) => cf !== f && boundary.test(text));
     if (!referenced) orphan.push(name);
   }
   console.log(`\nsrc-tauri/icons 台账：共 ${icons.length} 个，bundle.icon 点名 ${bundled.size} 个，` +

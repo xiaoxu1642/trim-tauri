@@ -21,6 +21,8 @@
     el.setAttribute('tabindex', '0');
     if (!el.getAttribute('role')) el.setAttribute('role', 'button');
     el.addEventListener('keydown', (e) => {
+        // C-06（F4a1-L14）：长按会连发 keydown ⇒ 元素被反复点击。
+        if (e.repeat) return;
       if ((e.key === 'Enter' || e.key === ' ') && e.target === el) {
         e.preventDefault();
         el.click();
@@ -195,16 +197,17 @@
             const ok = await window.app.confirmDanger(
               '删除背景图片',
               `将删除「${name}」（移入回收站，可在回收站还原）。`,
-              '删除',
+              '仍然执行',
               '取消',
               '导入的图片被删除后，若它正被用作应用内渐变之外的自定义背景，背景会随即失效。'
             );
             if (!ok) return;
             const resp = await window.api?.appearance?.deleteBg?.(file);
-            if (resp && resp.success === false) {
-              window.app?.toast?.('error', '删除失败：' + (resp.message || '未知原因'));
+            if (!resp || resp.success !== true) {
+              window.app?.toast?.('error', '删除失败：' + ((resp && resp.message) || '未知原因'));
               return;
             }
+            files.splice(0, files.length, ...files.filter((item) => item.path !== file));
             const ap2 = window.pathbindingAppearance.load();
             if (ap2.bgPath === file) {
               delete ap2.bgPath;

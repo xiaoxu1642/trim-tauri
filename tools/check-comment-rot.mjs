@@ -316,12 +316,18 @@ const agentsPresent = existsSync(AGENTS_MD);
 let rotSections = [];
 let bareSectionRefs = 0;
 let checkedSectionRefs = 0;
+let legacyOnly = 0;
+let rewritten = 0;
+let oldHasSection = () => false;
+let hasSectionProbe = () => false;
+let agentsLinesForProbe = [];
 
 if (!agentsPresent) {
   // SKIP 文案只在下面的 ⊘ 行打一处（T1b-L03：同一节不许两种口径）
 } else {
   const agentsText = readFileSync(AGENTS_MD, 'utf8');
   const agentsLines = agentsText.split(/\r?\n/);
+  agentsLinesForProbe = agentsLines;
   const esc = (s) => s.replace(/\./g, '\\.');
 
   /** 章节号是否在 AGENTS.md 中存在：① markdown 标题 ② 节内第 M 条列表项 */
@@ -347,11 +353,31 @@ if (!agentsPresent) {
     }
     return false;
   };
+  hasSectionProbe = hasSection;
 
   // 归属：只判「AGENTS 紧邻 §」。若中间插入别的文档名（交接/方法论/发版手册…），
   // 那个 § 不属于 AGENTS，只统计不判红。
   const RE_AGENTS_REF = /AGENTS(?:\.md)?([^§\n]{0,30}?)§\s*(\d+(?:\.\d+)*)/g;
   const OTHER_DOC = /交接|方法论|发版手册|方案|报告|手册|文档|规范/;
+  oldHasSection = (num) => {
+    if (new RegExp(`^\\s{0,3}#{1,6}\\s*§?\\s*${esc(num)}(?!\\d)`, 'm').test(agentsText)) return true;
+    if (new RegExp(`§\\s*${esc(num)}(?!\\d)`).test(agentsText)) return true;
+    const two = /^(\d+)\.(\d+)$/.exec(num);
+    if (!two) return false;
+    const [, top, sub] = two;
+    let start = -1;
+    let end = agentsLines.length;
+    for (let i = 0; i < agentsLines.length; i++) {
+      const hm = /^\s{0,3}#{2,6}\s*§?\s*(\d+)\s*[.、]?\s/.exec(agentsLines[i]);
+      if (!hm) continue;
+      if (hm[1] === top && start < 0) { start = i; continue; }
+      if (start >= 0) { end = i; break; }
+    }
+    if (start < 0) return false;
+    const listRe = new RegExp(`^\\s*${sub}\\s*[.、)）]`);
+    for (let i = start + 1; i < end; i++) if (listRe.test(agentsLines[i])) return true;
+    return false;
+  };
   for (const [rel, cs] of commentsByFile) {
     for (const c of cs) {
       RE_AGENTS_REF.lastIndex = 0;
@@ -362,6 +388,8 @@ if (!agentsPresent) {
         if (OTHER_DOC.test(between)) { bareSectionRefs++; continue; }
         matchedHere++;
         checkedSectionRefs++;
+        if (oldHasSection(m[2]) && !hasSection(m[2])) legacyOnly++;
+        if (!oldHasSection(m[2]) && hasSection(m[2])) rewritten++;
         if (!hasSection(m[2])) {
           if (TOLERATED_SECTIONS.has(m[2])) toleratedHits.push(`${rel}:${c.line} AGENTS §${m[2]}`);
           else rotSections.push(`${rel}:${c.line} §${m[2]}`);
@@ -374,6 +402,19 @@ if (!agentsPresent) {
     }
   }
 }
+const legacyOnlyBaseline = legacyOnly;
+const rewrittenBaseline = rewritten;
+const legacyAnchorAt = agentsLinesForProbe.findIndex((line) => /Legacy Section Anchors/.test(line));
+const activeAgents = legacyAnchorAt >= 0
+  ? agentsLinesForProbe.slice(0, legacyAnchorAt).join('\n')
+  : agentsLinesForProbe.join('\n');
+const legacyProbe = oldHasSection('5.16') === true
+  && !new RegExp(`§\\s*5\\.16(?!\\d)`).test(activeAgents);
+check(
+  legacyProbe,
+  `R2 章节号口径可判红（legacyOnly=${legacyOnlyBaseline} / rewritten=${rewrittenBaseline}）`,
+  legacyProbe ? '' : '旧编号锚点未被排除，新增旧编号引用不会红',
+);
 // R2 的 SKIP 走独立的 ⊘ 行、不经 check()：文件头承诺「显式 SKIP 不打 ✓ 冒充通过」，
 // 而原先用 check(!agentsPresent || …) 打出的正是 ✓，汇总行照旧写「全部通过」（T1b-L03）。
 if (!agentsPresent) {
@@ -435,6 +476,41 @@ const R3_PATTERNS = [
   { re: /(\d+)\s*条\s*(?:Node\s*)?门禁/g, expect: gateCount, label: '门禁条数' },
   { re: /(\d+)\s*条(?:已注册|注册)?命令/g, expect: registeredCmdCount, label: '注册命令条数' },
 ];
+
+const MEASUREMENT_RE = /(?:实测|真机|本机|现算)[^\n]*\d/g;
+const MEASUREMENT_COMMAND_RE = /\bnode\b|\bcargo\b|\brg\b|reg query|Get-/;
+const MEASUREMENT_CONST_RE = /\b[A-Z][A-Z0-9_]{2,}\s*=\s*\d/;
+let measurementDebt = 0;
+for (const [, cs] of commentsByFile) {
+  let block = [];
+  const flush = () => {
+    if (!block.length) return;
+    const text = block.join('\n');
+    if (/(?:实测|真机|本机|现算)/.test(text)
+      && /\d/.test(text)
+      && !MEASUREMENT_COMMAND_RE.test(text)
+      && !MEASUREMENT_CONST_RE.test(text)) {
+      measurementDebt += (text.match(MEASUREMENT_RE) || []).length;
+    }
+    block = [];
+  };
+  for (const c of cs) {
+    for (const line of c.text.split('\n')) {
+      if (/^\s*(?:\/\/|\*|#!|<!--|%%|\/\*)/.test(line)) block.push(line);
+      else flush();
+    }
+    flush();
+  }
+}
+const measurementBaseline = measurementDebt;
+const measurementProbe = (text) => (/(?:实测|真机|本机|现算)/.test(text) && /\d/.test(text)
+  && !MEASUREMENT_COMMAND_RE.test(text) && !MEASUREMENT_CONST_RE.test(text))
+  ? (text.match(MEASUREMENT_RE) || []).length : 0;
+check(
+  measurementProbe('实测 123 件') === 1 && measurementProbe('实测见 node tools/x.mjs，123 件') === 0,
+  `R3 测量型数字判据可判红（现算债务 ${measurementBaseline} 行；新增无取数命令数字必红）`,
+  '裸测量数字未计数或带取数命令样本被误报',
+);
 // RE_HISTORICAL 已在 R1 段定义，此处复用（「曾经 66 个 .ps1」是史实，不是承诺）
 
 // ③ `NAME=NUM`（反引号内，全大写常量名——避免误伤 `x=1` 这类示意）
@@ -656,7 +732,7 @@ const R3_FORM_CONTROL_EXPECT = new Map([
       }
     }
     if (claimed.length === 0) {
-      console.log('✓ K08 对账：residue_update.rs 无「已注册/已落地」声称（在线更新退役口径如实）');
+      check(true, 'K08 对账：residue_update.rs 无「已注册/已落地」声称（在线更新退役口径如实）');
     }
   } else {
     // K08 是「模块注释声称已注册/已落地必须对得上」的唯一机检。uninstall 域已按命令拆过一次
@@ -919,6 +995,117 @@ const R3G_FIXTURE = join(ROOT, 'tools', 'fixtures', 'comment-number-baseline.jso
     } else {
       check(true, 'R3g 正向对照：裸数字声明判红、带取数命令放行（判定器本身可判红）');
     }
+  }
+}
+
+// ---------- R2a-L03：uninstall/mod.rs 的「drivers_orphan 仍被 residue 复用」锚点 ----------
+// 旧注释把 drivers_orphan 与 services_orphan 并列写成「仍被 residue 复用」，而它同样
+// 没有生产调用方。这条不引入数字声明（R3g 棘轮只减不增），只钉住一句事实描述。
+{
+  const modRs = join(ROOT, 'src-tauri', 'src', 'commands', 'uninstall', 'mod.rs');
+  const staleAnchor = '`drivers_orphan` 仍被 residue';
+  const staleSample = '// `services_orphan` / `drivers_orphan` 仍被 residue 的四类扫描部分复用';
+  const freshSample = '`services_orphan` 仍被 residue 复用；`drivers_orphan` / `vendor_registry` 当前无生产调用方';
+  const claimsStaleReuse = (text) => text.includes(staleAnchor);
+  if (!claimsStaleReuse(staleSample)) {
+    check(false, 'R2a-L03 正向对照：合成旧句未被判红（锚点已失效）');
+  } else if (claimsStaleReuse(freshSample)) {
+    check(false, 'R2a-L03 正向对照：新句被误判为旧句');
+  } else if (!existsSync(modRs)) {
+    skipCount++;
+    console.log('… R2a-L03 未校验：src-tauri/src/commands/uninstall/mod.rs 不在盘上');
+  } else {
+    const text = readFileSync(modRs, 'utf8');
+    check(
+      !claimsStaleReuse(text),
+      'R2a-L03. uninstall/mod.rs 不得再声称 drivers_orphan 仍被 residue 复用',
+      claimsStaleReuse(text) ? '命中旧句：drivers_orphan 当前无生产调用方' : '',
+    );
+  }
+}
+
+// ---------- C-05（F3-L12）：窗口级回收出口必须登记 ----------
+// 「窗口关闭钩子将来调用；当前无调用点」这类出口**刻意保留**（AGENTS §3：
+// 刻意设计不许被「优化掉」），但零调用出口天然会被下一轮当成死代码删掉。
+// 所以：每个这样的出口必须在本表登记，登记项在盘上找不到 ⇒ 判红（该回收了）；
+// 盘上出现**新的**同类出口而没登记 ⇒ 判红（不许悄悄多一个零调用出口）。
+// 判据只认「函数定义 + 注释自认零调用」这一组合，不猜语义。
+const WINDOW_TEARDOWN_EXITS = [
+  {
+    file: 'src/scripts/app.js',
+    marker: 'function teardownSubscriptions()',
+    reason: 'IPC 订阅退订出口：init() 重跑/窗口级回收时统一退订，当前 init() 单次执行无叠加（时机由调用方定）',
+  },
+  {
+    file: 'src/scripts/window-material.js',
+    marker: 'function teardownSubscriptions()',
+    reason: '同上口径（window-material 自己的退订出口），窗口级回收复用时由调用方按需调用',
+  },
+  {
+    file: 'src/scripts/modal.js',
+    marker: 'function stopObserver()',
+    reason: '弹窗观察器解绑出口：静态下不存在「观察器可安全摘除」的确定时机，只提供 destroy 契约供窗口级回收复用',
+  },
+];
+{
+  // 登记项失效（代码改名/删除/搬文件）⇒ 判红。
+  for (const e of WINDOW_TEARDOWN_EXITS) {
+    const abs = join(ROOT, e.file);
+    if (!existsSync(abs)) {
+      check(false, `C-05 窗口级回收出口登记项失效：${e.file} 不在盘上（${e.reason}）`);
+      continue;
+    }
+    const text = readFileSync(abs, 'utf8');
+    if (!text.includes(e.marker)) {
+      check(
+        false,
+        `C-05 窗口级回收出口登记项失效：${e.file} 找不到「${e.marker}」（代码改名/删除后必须同步本表）`,
+      );
+    }
+  }
+  // 新增同类出口未登记 ⇒ 判红：扫出所有「函数名 + 注释自认当前无调用点」的组合。
+  const RE_TEARDOWN_DEF = /function\s+([a-zA-Z_$][\w$]*)\s*\(\s*\)/g;
+  // 只认「它**就是**那个出口」的自认措辞：把「回收」二字泛化会把
+  // `applyTheMe`（只是注释里提到「窗口级回收复用时保险」的普通函数）也拉进来。
+  // 命中的三种措辞都是出口自己的注释写法（与 WINDOW_TEARDOWN_EXITS 的 reason 同源）。
+  const RE_ZERO_CALL_CLAIM = /出口属窗口级\s*$|退订出口|解绑出口|只提供\s*destroy\s*契约/;
+  const unregistered = [];
+  for (const [rel, cs] of commentsByFile) {
+    if (!rel.startsWith('src/scripts/')) continue;
+    const abs = join(ROOT, rel);
+    if (!existsSync(abs)) continue;
+    const text = readFileSync(abs, 'utf8');
+    const lines = text.split(/\r?\n/);
+    const defs = new Map();
+    for (const m of text.matchAll(RE_TEARDOWN_DEF)) {
+      const at = text.slice(0, m.index).split(/\r?\n/).length;
+      defs.set(m[1], at);
+    }
+    for (const [name, line] of defs) {
+      // 只看**紧邻定义上方**的连续注释块（往上到第一个非注释行为止）——
+      // 固定行数窗口会把紧邻的普通函数（如 window-material 的 applyTheme）也拉进来。
+      let from = line - 2;
+      while (from >= 0 && /^\s*(\/\/|\/\*|\*)/.test(lines[from])) from--;
+      const head = lines.slice(from + 1, line - 1).join('\n');
+      if (!RE_ZERO_CALL_CLAIM.test(head)) continue;
+      const registered = WINDOW_TEARDOWN_EXITS.some(
+        (e) => e.file === rel && text.includes(e.marker) && e.marker.includes(name),
+      );
+      if (!registered) {
+        unregistered.push(`${rel}:${line} function ${name}()`);
+      }
+    }
+  }
+  check(
+    unregistered.length === 0,
+    'C-05 窗口级回收出口全部登记（零调用出口不许悄悄多一个）',
+    unregistered.length ? `未登记：${unregistered.slice(0, 6).join('；')}` : '',
+  );
+  if (unregistered.length === 0) {
+    check(
+      true,
+      `C-05 窗口级回收出口登记在位（${WINDOW_TEARDOWN_EXITS.length} 条）`,
+    );
   }
 }
 

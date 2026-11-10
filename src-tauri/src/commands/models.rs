@@ -578,6 +578,10 @@ pub fn models_close_window<R: tauri::Runtime>(window: WebviewWindow<R>) -> Resul
     guard::guard_readonly(&window)?;
     if let Err(e) = window.close() {
         log::write_log("warn", &format!("关闭「大模型管理」窗口失败: {e}"));
+        return Ok(json!({
+            "success": false,
+            "message": format!("关闭「大模型管理」窗口失败: {e}")
+        }));
     }
     Ok(json!({ "success": true }))
 }

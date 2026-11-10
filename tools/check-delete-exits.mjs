@@ -57,11 +57,8 @@ const EXEMPTS = new Map([
   ['startup_delete', { apis: { send_to_trash_os: 1, startup_delete: 2 }, why: '注册表项/启动文件夹快捷方式删除，闸门=native::startup_delete 白名单目标，非文件 protect' }],
   // 自有报告目录：report_path() 已做 basename 化 + .json 后缀白名单防路径穿越；
   // protect 清单整含 app_data_dir，对自有数据目录恒拒、无判定意义
-  ['realtime_report_delete', { apis: { remove_file: 1 }, why: '删 Trim 自有网速报告（app_data_dir/report），basename+.json 白名单防穿越，非用户内容' }],
-  ['realtime_report_clear', { apis: { remove_file: 1 }, why: '同上——清空自有报告目录内 *.json，目录固定+后缀白名单' }],
-  // 自有字体副本：只动 Trim 导入时生成的副本，绝不触用户原始字体文件
-  ['fonts_import', { apis: { remove_owned_font_copy: 1 }, why: 'remove_file 只删自有字体副本目录内「上一份导入副本」（替换语义）' }],
-  ['fonts_remove_imported', { apis: { remove_owned_font_copy: 1 }, why: '移除记录 + 删 settings.fontImported 登记的自有副本，不触用户原始文件' }],
+  ['realtime_report_delete', { apis: { remove_file: 1 }, why: '保留永久删：删 Trim 自有网速报告（app_data_dir/report），basename+.json 白名单防穿越，非用户内容' }],
+  ['realtime_report_clear', { apis: { remove_file: 1 }, why: '保留永久删：清空自有报告目录内 *.json，目录固定+后缀白名单，非用户内容' }],
   // v2-L4P-12（B-1）：backgrounds 住在 app_data_dir() 里，而 configure_from_app 把
   // app_data_dir() 整棵登记为 subtree ⇒ is_path_protected 恒拒，功能完全不可用。
   // 闸门收口为四件套（见命令体注释），故从 MUST_PROTECT 挪入豁免并写明依据：
@@ -114,7 +111,29 @@ const MUST_PROTECT = [
 // 命令体里出现组合闸调用 = 受保护面在位（组合闸内部必调 is_path_protected，
 // 由下方 C01 断言组钉死组合闸本身不许掉闸）。
 const PROTECT_MARKERS = ['is_path_protected', 'validate_mutation_target'];
-const bodyHasProtect = (body) => PROTECT_MARKERS.some((m) => body.includes(m));
+function markerPropagates(body, marker) {
+  const re = new RegExp(`\\b${marker}\\s*\\(`, 'g');
+  let match;
+  while ((match = re.exec(body)) !== null) {
+    const idx = match.index;
+    const before = body.slice(Math.max(0, idx - 200), idx);
+    if (/\blet\s+_\s*=\s*(?:\w+::)*\s*$/.test(before)) continue;
+    const tail = body.slice(idx, Math.min(body.length, idx + 500));
+    if (/\)\s*\?/.test(tail.slice(0, 120))) return true;
+    const brace = tail.indexOf('{');
+    if (brace >= 0) {
+      const block = tail.slice(brace, brace + 300);
+      if (/^\{\s*\}/.test(block)) continue;
+      if (/\breturn\b|\bcontinue\b/.test(block)) return true;
+      if (/\bif\b|\bmatch\b/.test(before.slice(-120))) return true;
+    }
+    if (/\bif\s+!/.test(before + tail.slice(0, 120))) return true;
+    if (/\belse\s*\{/.test(before + tail)) return true;
+  }
+  return false;
+}
+const bodyHasProtect = (body, markers = PROTECT_MARKERS) =>
+  (Array.isArray(markers) ? markers : [markers]).some((m) => markerPropagates(body, m));
 
 // 二跳出口的正向棘轮（审查 L-4）：protect 不在命令体内、而在本仓 helper 里。
 // 登记 {命令, helper}，钉住 helper 体内的 protect 调用——helper 改名/protect 被删/
@@ -123,23 +142,9 @@ const bodyHasProtect = (body) => PROTECT_MARKERS.some((m) => body.includes(m));
 //
 // ⚠️ 第三段 `file` 是 2026-10-04 磁盘清理审计 §2.1 补的，且**不是可选的锦上添花**：
 //
-//   cleanup_execute 此前登记在 MUST_PROTECT（命令体口径）。但命令体
-//   （commands/cleanup/scan_execute.rs）里唯一的 is_path_protected 在扫描执行函数内（现算：rg -n "is_path_protected" src-tauri/src/commands/cleanup/scan_execute.rs），位于
-//   `if to_recycle && …` 分支内 —— v3.3.0 用户裁定「常规清理 toRecycle 恒 false」
-//   之后**产品语义上不可达**。真正执行永久删除的闸门在
-//   `engine/native/cleanup.rs::cleanup_execute:680`，那个文件不在本门禁扫描网内。
-//   判红实验：把该判定改成 `else if false`，本门禁四组断言**全部照绿**（已实测）。
-//   也就是说「删掉全仓唯一永久删除链的保护判定」是零告警的。
-//
-//   修法两条，缺一不可：
-//   ① 把 cleanup_execute 从 MUST_PROTECT 挪进本表，并**指名文件**——
-//      `extractBody` 只按函数名搜索，而命令体与引擎函数**同名**
-//      （scan_execute.rs / engine/native/cleanup.rs 都是 `cleanup_execute`），
-//      不指名就会解析到命令体那个，等于什么都没修。
-//   ② 指名文件后本组判的是引擎函数；命令体那处不再能满足任何一条棘轮，
-//      也就回到报告里要求的「384 单独不足以满足正向棘轮」。
-//
-//   第三段 file 是**相对 src-tauri** 的（ROOT 就是 src-tauri，见 :28）。
+//   已修：见 `MUST_PROTECT_VIA_HELPER` 第三段 `file=src/engine/native/cleanup.rs`。
+//   命令体与引擎函数同名，登记表指名文件后由 2b 钉住 helper 体内的保护判定；
+//   第三段相对 src-tauri，ROOT 就是 src-tauri。
 const MUST_PROTECT_VIA_HELPER = [
   // 2026-10-09（v4-K09 修复）：cleanup_execute 拆出薄包装——删前备份根需要可注入
   // （三个端到端用例的备份副本原先写进用户真实数据目录），实现体搬进
@@ -151,6 +156,12 @@ const MUST_PROTECT_VIA_HELPER = [
   // （裁根是固定的 backup_write_dir 单根，protect 对自有数据目录恒拒无判定意义），
   // 而是 reparse 拒 + 封条同生同死 ⇒ 第四段指名本行的必须标记（2b 支持自定义）。
   ['peripheral_apply', 'prune_backups', 'src/commands/peripheral.rs', 'is_reparse'],
+  // P2/R1b-L10（字体导入三段式）与 R1b-L11（命名空间闸先于触盘）之后，
+  // 字体导入的删旧副本动作搬进了 `stage_font_import`（命令体只调它），
+  // 且真正的删除原语在 `remove_owned_font_copy`（归属 + reparse + 回收站）。
+  // 命令体扫描看不到二跳委托 ⇒ 登记进本表，闸门由 2b 钉在 helper 体内。
+  ['fonts_import', 'stage_font_import', 'src/commands/fonts.rs', 'remove_owned_font_copy'],
+  ['fonts_remove_imported', 'remove_owned_font_copy', 'src/commands/fonts.rs', 'is_reparse'],
 ];
 
 // ==================== C01 断言组（v7.2 R1d-K01/R2a-M01/R3-M03/R4-M01/R1b-M02） ====================
@@ -314,7 +325,7 @@ check(lostProtect.length === 0, '2. 正向出口的 is_path_protected 前置不�
     const r = resolveHelperBody(helper, file);
     if (r.err) { helperIssues.push(r.err); continue; }
     if (!r.body) { helperIssues.push(`${cmd} 的 helper ${helper} 未能在源码中定位（改名/搬走了？）`); continue; }
-    if (!r.body.body.includes(marker)) helperIssues.push(`${helper}(${r.body.file}) 体内已无 ${marker}——${cmd} 的删除闸被拆`);
+    if (!bodyHasProtect(r.body.body, marker)) helperIssues.push(`${helper}(${r.body.file}) 体内 ${marker} 未传播 Err/早退——${cmd} 的删除闸被拆`);
   }
   check(helperIssues.length === 0, '2b. 二跳出口的 helper 体内 is_path_protected 在位（L-4 棘轮）',
     helperIssues.length ? helperIssues.join('；') : `${MUST_PROTECT_VIA_HELPER.length} 条 helper 链全部在位`);
@@ -335,7 +346,7 @@ for (const [name, { file, body }] of bodies) {
       .filter(([cmd]) => cmd === name)
       .map(([, helper, f, marker = 'is_path_protected']) => {
         const r = resolveHelperBody(helper, f);
-        return !r.err && r.body && r.body.body.includes(marker);
+        return !r.err && r.body && bodyHasProtect(r.body.body, marker);
       })
       .some(Boolean);
     if (!helperResolved) {
@@ -480,7 +491,11 @@ const POSITIVE_CONTROLS = (() => {
   checks.push(['真实调用仍命中', sample2.includes('remove_file')]);
   // ②b T1a-L07：核心判据 bodyHasProtect 的两向样本（此前只有 tokenizer 对照）
   checks.push(['删除体无 protect 判红', !bodyHasProtect('fn z() { remove_file(p); }')]);
-  checks.push(['删除体有 protect 放行', bodyHasProtect('fn z() { is_path_protected(p); remove_file(p); }')]);
+  checks.push(['删除体有 protect 放行', bodyHasProtect('fn z() { if !is_path_protected(p) { return Err("x".into()); } remove_file(p); }')]);
+  checks.push(['let _ 吞掉 protect 判红', !bodyHasProtect('fn z() { let _ = validate_mutation_target(p); remove_file(p); }')]);
+  checks.push(['空分支 protect 判红', !bodyHasProtect('fn z() { if !is_path_protected(p) {} remove_file(p); }')]);
+  checks.push(['问号传播 protect 放行', bodyHasProtect('fn z() -> Result<()> { validate_mutation_target(p)?; remove_file(p); Ok(()) }')]);
+  checks.push(['if let Err 返回放行', bodyHasProtect('fn z() { if let Err(e) = validate_mutation_target(p) { return Err(e); } remove_file(p); }')]);
   // ③ C01-a：四闸俱全的组合闸放行
   const goodValidator =
     'fn validate_mutation_target(p: &str) -> Result<(), String> { if is_path_protected(p) { return Err("x".into()); } if final_path_protected(p) { return Err("x".into()); } if is_system_namespace(p) { return Err("x".into()); } if is_reparse(&md) { return Err("x".into()); } Ok(()) }';

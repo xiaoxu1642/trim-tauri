@@ -451,9 +451,36 @@ pub fn read_reg_content(file: &Path) -> Result<RegBackupContent, String> {
         ));
     }
     let bytes = std::fs::read(file).map_err(|e| format!("读取 .reg 失败: {e}"))?;
+    read_reg_bytes(&bytes)
+}
+
+/// 写侧摘要锚：内存字节直接解析，读盘侧再重算摘要，不一致即拒。
+fn read_reg_bytes(bytes: &[u8]) -> Result<RegBackupContent, String> {
     let text = decode_reg_bytes(&bytes)?;
     let digest = crate::engine::hash::sha256_bytes(&bytes);
     Ok(RegBackupContent { text, digest })
+}
+
+/// 供优化器 `.reg` 临时件使用的同源装载：写盘字节 + 摘要一次解析，读盘后按摘要复核。
+pub fn reg_import_from_bytes(
+    bytes: &[u8],
+    digest: &str,
+) -> Result<RegImportStat, RegImportFailure> {
+    let content = match read_reg_bytes(bytes) {
+        Ok(c) => c,
+        Err(reason) => return Err(RegImportFailure { stat: RegImportStat::default(), reason }),
+    };
+    if content.digest != digest {
+        return Err(RegImportFailure {
+            stat: RegImportStat::default(),
+            reason: "摘要不一致".into(),
+        });
+    }
+    let sections = match parse_reg_text(&content.text) {
+        Ok(s) => s,
+        Err(reason) => return Err(RegImportFailure { stat: RegImportStat::default(), reason }),
+    };
+    reg_import_apply_sections(&AdmittedSections::for_non_restore_path(sections))
 }
 
 /// 读文件并按编码解码（闸侧与原生 import 共用同一份，避免两套口径）。
@@ -2081,7 +2108,7 @@ pub fn reg_import_apply_sections(sections: &AdmittedSections) -> Result<RegImpor
 /// 那会退回「闸侧一套键枚举、执行侧另一套」的旧形态，应改用 `reg_backup_restore_guards`
 /// 回执的 `sections` + [`reg_import_apply_sections`]。
 pub fn reg_import_apply(path: &std::path::Path) -> Result<RegImportStat, RegImportFailure> {
-    let text = match read_reg_text_file(path) {
+    let content = match crate::engine::reg_backup::read_reg_content(path) {
         Ok(t) => t,
         Err(reason) => {
             return Err(RegImportFailure {
@@ -2090,7 +2117,7 @@ pub fn reg_import_apply(path: &std::path::Path) -> Result<RegImportStat, RegImpo
             })
         }
     };
-    let sections = match parse_reg_text(&text) {
+    let sections = match parse_reg_text(&content.text) {
         Ok(s) => s,
         Err(reason) => {
             return Err(RegImportFailure {

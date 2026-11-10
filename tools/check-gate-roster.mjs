@@ -18,6 +18,7 @@ import { blankNonCode } from './lib/src-scan.mjs';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const TOOLS = join(ROOT, 'tools');
 const AGENTS = join(ROOT, 'AGENTS.md');
+const RUN = process.argv.includes('--run');
 
 // 必跑门禁唯一真源。顺序即 `--run` 的执行顺序；新增门禁必须登记在这里（不再写进 AGENTS.md）。
 const MUST_RUN = [
@@ -55,6 +56,8 @@ const MUST_RUN = [
   'check-appearance-prefs',
   'check-subwindow-init',
   'check-confirm-danger',
+  'check-silent-catch',
+  'check-material-parity',
   'check-treemap-layout',
   'check-item-intro',
   'check-desktop-entry',
@@ -126,6 +129,10 @@ const GATE_ARGS = {
     : {}),
 };
 
+if (process.argv.includes('--run')) {
+  console.log('本节未校验：check-review-units 的 U6/U7 依赖当前轮 coverage / 报告显式参数，本门禁不默认指向 docs 资料区');
+}
+
 // T1b-L09：副作用档。`--run --tier=readonly` 跳过会 spawn 外部进程/写盘的门禁；
 // 不带 --tier 时维持原行为（全跑，供发版/收尾验收）。
 // P2-A/A-2：登记必须对得上源码，否则「副作用档跳过哪些」这件事本身就是假绿。
@@ -154,7 +161,6 @@ const COMMENT_STRIP_GATES = [
   'check-subwindow-css.mjs',
   'check-tests-helper-parity.mjs',
 ];
-const RUN = process.argv.includes('--run');
 const TIER_ARG = (process.argv.find((a) => a.startsWith('--tier=')) || '').split('=')[1] || '';
 if (TIER_ARG && TIER_ARG !== 'readonly') {
   console.error(`✗ 未知 --tier=${TIER_ARG}（只支持 readonly）`);

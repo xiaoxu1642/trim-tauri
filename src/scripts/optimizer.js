@@ -11,16 +11,11 @@
 
   // P3-1（审查 2026-10-07）：async 事件处理器一旦 reject 就是浮动 Promise —— 用户侧表现为
   // 「点了没反应」，只有一条渲染层未处理拒绝进日志。统一收口：捕获后落 toast + 日志，绝不静默。
-  // 与 init 里的 guardBatch（v2-M22）同一口径，只是把「包装整段 async 处理器」这件事提出来复用。
-  function guardAsync(label, handler) {
-    return (...args) => {
-      Promise.resolve(handler(...args)).catch((e) => {
-        const msg = (e && e.message) || e;
-        window.app?.toast?.('error', label + '失败: ' + msg);
-        window.app?.log?.('error', label + '异常: ' + msg);
-      });
-    };
-  }
+  // 与 init 里的 guardBatch（v2-M22）同一口径。
+  // C-08（F4b-L06）：`guardAsync` 的唯一实现收到 `ds.js`（本文件与 finder.js 曾各写一份
+  // 逐字相同的实现，改一处漂一处，且没人看得见第三份）；此处只取用，调用点不变
+  // （取数命令：rg -n 'guardAsync\(' src/scripts/optimizer.js）。
+  const guardAsync = ds.guardAsync;
 
   // ==================== E7：分类两层结构（default / custom）====================
   //
@@ -397,6 +392,8 @@
       label: title,
       finished: false,
       removeTimer: null,
+      // F3-L15：进度 Toast 常驻到执行结束，普通提示的 FIFO 不得把它挤掉。
+      pinned: true,
       // 让「点击空白关最顶层 Toast」也够得到进度 Toast（此前它游离在 activeToasts 之外）
       remove: () => disposeProgressToast(true)
     };
@@ -418,6 +415,8 @@
     const t = progressToast;
     // 不再提前摘引用：保留 finished 标记，由下一条 createProgressToast 或计时器回收
     t.finished = true;
+    // F3-L15：完成即 unpin，退出常驻；随后按停留时长自行回收。
+    t.pinned = false;
     const icon = t.el.querySelector('.toast-icon');
     const tune = t.el.querySelector('.toast-tune');
     if (icon) icon.innerHTML = ok ? iconFor('success') : iconFor('error');
@@ -435,6 +434,7 @@
     if (!progressToast) return;
     const t = progressToast;
     progressToast = null;
+    t.pinned = false;
     clearTimeout(t.removeTimer);
     window.app?.unregisterToast?.(t);
     if (t.el && t.el.parentNode) {
@@ -840,7 +840,22 @@
   ].filter(Boolean).join(' · ');
 
   function renderNaraCol() {
-    if (!NARA_PANEL) return '';
+    if (!NARA_PANEL) {
+      if (!NARA_PANEL_DEGRADED) return '';
+      // A1-L04：侧表读取/验签失败不再静默消失。入口卡留在原位并写明后果：
+      // 隐藏集合为空 ⇒ 原本被侧表挪走的成员已回到主列表，仍可单独执行。
+      return `
+        <section class="opt-col opt-col--nara is-degraded" data-nara-entry-degraded aria-label="永劫无间专项暂不可用">
+          <div class="opt-col-head">
+            <span class="opt-nara-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+            </span>
+            <span class="opt-col-title">永劫无间专项</span>
+            <span class="opt-col-count">不可用</span>
+          </div>
+          <div class="opt-nara-desc">专项数据暂不可用。原因：${escapeHtml(NARA_PANEL_DEGRADED)}。原专项隐藏成员已回到主列表，可照常单独执行。</div>
+        </section>`;
+    }
     const sections = NARA_PANEL.sections || [];
     const optCount = (NARA_PANEL.hiddenFromOptimizer || []).length;
     const taskCount = sections.reduce((n, s) => n + (s.tasks?.length || 0), 0);
@@ -875,6 +890,8 @@
       card.dataset.boundNara = '1';
       card.addEventListener('click', () => openNaraPanel());
       card.addEventListener('keydown', (e) => {
+          // C-06（F4a1-L14）：长按会连发 keydown ⇒ 面板被反复打开。
+          if (e.repeat) return;
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openNaraPanel(); }
       });
     });
@@ -887,7 +904,12 @@
   async function openNaraPanel() {
     const create = window.modal?.create;
     if (!create) { window.app?.toast?.('error', '弹窗组件未就绪，请刷新页面重试'); return; }
-    if (!NARA_PANEL) return;
+    if (!NARA_PANEL) {
+      if (NARA_PANEL_DEGRADED) {
+        window.app?.toast?.('warning', '永劫专项数据暂不可用：' + NARA_PANEL_DEGRADED + '。隐藏成员已回到主列表。', 6000);
+      }
+      return;
+    }
     // 完整目录（含主列表隐藏项）；缺 id 就跳过，不让一个坏 id 杀掉整块面板
     const byId = new Map(ALL_OPTIONS.map(o => [o.id, o]));
     const sections = (NARA_PANEL.sections || []).map(s => ({
@@ -992,7 +1014,7 @@
       : isBcd && disabled ? '当前无需执行（体检未发现需要对齐的配置）'
         : '勾选/取消该优化项';
     return `<div class="nara-checkrow${disabled ? ' is-optimized' : ''}"
-            data-nara-opt="${escapeHtml(o.id)}" data-tip="${tip}">
+            data-nara-opt="${escapeHtml(o.id)}" data-tip="${escapeHtml(tip)}">
       <span class="checkbox${on ? ' checked' : ''}${disabled ? ' disabled' : ''}" role="checkbox" tabindex="0"
             aria-label="选择 ${window.ds.escAttr(o.title)}"
             aria-checked="${on ? 'true' : 'false'}"${disabled ? ' aria-disabled="true"' : ''}>${on ? checkSvg() : ''}</span>
@@ -1245,7 +1267,20 @@
   const PRIVACY_SHIELD_SVG = '<path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z"/>';
 
   function renderPrivacyCol() {
-    if (!PRIVACY_PANEL) return '';
+    if (!PRIVACY_PANEL) {
+      if (!PRIVACY_PANEL_DEGRADED) return '';
+      return `
+        <section class="opt-col opt-col--nara opt-col--privacy is-degraded" data-privacy-entry-degraded aria-label="隐私自护面板暂不可用">
+          <div class="opt-col-head">
+            <span class="opt-nara-icon opt-privacy-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">${PRIVACY_SHIELD_SVG}</svg>
+            </span>
+            <span class="opt-col-title">隐私自护</span>
+            <span class="opt-col-count">不可用</span>
+          </div>
+          <div class="opt-nara-desc">专项数据暂不可用。原因：${escapeHtml(PRIVACY_PANEL_DEGRADED)}。原专项隐藏成员已回到主列表，可照常单独执行。</div>
+        </section>`;
+    }
     const sections = PRIVACY_PANEL.sections || [];
     const count = (PRIVACY_PANEL.hiddenFromOptimizer || []).length;
     return `
@@ -1275,6 +1310,8 @@
       card.dataset.boundPrivacy = '1';
       card.addEventListener('click', () => openPrivacyPanel());
       card.addEventListener('keydown', (e) => {
+          // C-06（F4a1-L14）：长按会连发 keydown ⇒ 面板被反复打开。
+          if (e.repeat) return;
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openPrivacyPanel(); }
       });
     });
@@ -1286,7 +1323,12 @@
   function openPrivacyPanel() {
     const create = window.modal?.create;
     if (!create) { window.app?.toast?.('error', '弹窗组件未就绪，请刷新页面重试'); return; }
-    if (!PRIVACY_PANEL) return;
+    if (!PRIVACY_PANEL) {
+      if (PRIVACY_PANEL_DEGRADED) {
+        window.app?.toast?.('warning', '隐私自护数据暂不可用：' + PRIVACY_PANEL_DEGRADED + '。隐藏成员已回到主列表。', 6000);
+      }
+      return;
+    }
     const byId = new Map(ALL_OPTIONS.map(o => [o.id, o]));
     const sections = (PRIVACY_PANEL.sections || []).map(s => ({
       ...s,
@@ -1641,7 +1683,10 @@
   }
 
   // 已优化项标记：执行成功后立即置灰并**落本地数据**（用于用户刚操作完的即时反馈，
-  // 且重启后仍在）。判断规则不变（dynamic / 含 reg·service.disable / 含 pwsh·cmd 步骤 → 标记）。
+  // 且重启后仍在）。C-08（F4b-L03）口径订正：判据是「dynamic **或**有任意执行步骤即标记」——
+  // 旧注释写的是「含 reg·service.disable / 含 pwsh·cmd 步骤 → 标记」，那是实现里**曾经**的
+  // 窄判据；现实现更保守（任何 steps 都标记），注释按现实现写，别再让读注释的人以为
+  // 只有 reg/service/pwsh 那几类步骤会被标记。
   function markOptimizedIfApplicable(opt) {
     if (!opt || !opt.id) return false;
     if (opt.dynamic) { markAppliedLocal(opt.id); return true; }
@@ -1963,7 +2008,7 @@
       const ok = await window.app?.confirmDanger?.(
         '按原值还原退役优化项',
         `将把 ${items.length} 项已退役优化在执行前记录的注册表原值写回系统（共 ${items.reduce((n, i) => n + (i.values || 0), 0)} 个值）。`,
-        '确认还原',
+        '仍然执行',
         '取消',
         '这些项已从优化目录移除，除了这里没有别的还原入口；需要管理员权限。'
       );
@@ -2378,12 +2423,13 @@
       if (!(await ensureRestorePoint())) return;
       if (opt.dynamic && dynCtl) {
         const dynP = dynamicParams(opt.id, preCloseRaw);
-        // 本会话立即记录已应用档位：重开弹窗时该档位按钮置灰（只有 mem 档有这个概念）
-        if (opt.id === 'svc_mem_gb') svcAppliedGb = normalizeSvcTier(dynP.gb);
         // B11：与 runBatch 对齐 —— await + try/catch，避免浮动 Promise 变成
         // unhandled rejection（用户侧表现为「点击后毫无反应」）
         try {
-          await runOptionActive(dynP, opt);
+          const ok = await runOptionActive(dynP, opt);
+          // F4b-M02：只有执行成功才记录已应用档位。旧实现先写后跑，
+          // 失败/被拒时重开弹窗仍把该档显示成「已应用」，用户无法重试。
+          if (ok && opt.id === 'svc_mem_gb') svcAppliedGb = normalizeSvcTier(dynP.gb);
         } catch (e) {
           window.app?.toast('error', '优化执行失败: ' + (e.message || e));
         }
@@ -2418,7 +2464,7 @@
         '修复服务启动类型',
         '将把「' + svcName + '」的启动类型改回「自动」并重新启动它。' +
         '若你确实想让它保持手动，请点「取消」并直接关闭本窗口。',
-        '修复', '取消',
+        '仍然执行', '取消',
         '只影响这一个服务的启动类型，不改其他系统设置。'
       );
       if (!go) return;
@@ -2446,8 +2492,12 @@
   let ALL_OPTIONS = [];
   // C3：永劫无间专项面板侧表。null=未加载/加载失败，对象=完整侧表。
   let NARA_PANEL = null;
+  // A1-L04：侧表失败原因（空串=未失败）。与 NARA_PANEL 分开保存：失败时成员回主列表，
+  // 但入口卡必须继续显示「专项数据暂不可用」，不能把失败折成「本机没有这个功能」。
+  let NARA_PANEL_DEGRADED = '';
   // 2026-10-11 WinUtil 借鉴 V3：隐私自护面板侧表（同形机制；null=不渲染入口卡/不过滤）。
   let PRIVACY_PANEL = null;
+  let PRIVACY_PANEL_DEGRADED = '';
 
   // ==================== 生效粒度（applyScope，BoosterX §B2）====================
   // 档位序与 Rust 侧 SCOPE_RANK 同表（commands/optimizer.rs），两侧一致性由
@@ -2646,7 +2696,7 @@
     const go = await window.app.confirmDanger(
       '未创建还原点继续执行？',
       '未创建还原点的情况下执行优化，出现问题将无法通过系统还原回退。',
-      '仍要执行优化',
+      '仍然执行',
       '取消',
       '建议先创建还原点再执行优化。'
     );
@@ -2744,6 +2794,23 @@
   // 执行已勾选的优化项（支持跨分类；跳过当前页面分类之外的项需重新渲染时保持一致）
   async function runSelected(entriesOverride) {
     if (batchRunning) return;
+    // A2-L01：判据后立即置位并禁用按钮，再进 collectBatchChoices / filterByPreflight
+    // 两个无模态 await。旧实现把它们放在置位之前，二连点会发两批。
+    batchRunning = true;
+    const btn = document.getElementById('btnOptimizerSelected');
+    if (btn) { btn.disabled = true; btn.dataset.orig = btn.innerHTML; btn.innerHTML = '执行中…'; }
+    try {
+      await runSelectedLocked(entriesOverride);
+    } finally {
+      batchRemainingIds = null;
+      progressToastSuffix = '';
+      batchRunning = false;
+      if (btn) { btn.disabled = false; btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig; }
+    }
+  }
+
+  // 锁外的实际批处理体：锁的获取/释放在 runSelected，避免把 100+ 行再缩进一层。
+  async function runSelectedLocked(entriesOverride) {
     // entriesOverride：永劫专项面板用自己的勾选集调用（面板成员在主列表被隐藏，
     // 不能从 selectedIds/OPTIONS 取）；主页面按钮不传参，走原口径。
     const entries = entriesOverride
@@ -2764,10 +2831,7 @@
     // 用户从「执行所选」走仍然是第 5 项失败时前 4 项已落盘。
     const allowed = await filterByPreflight(batch);
     if (!allowed) return;
-    if (!allowed.length) {
-      window.app?.toast('warning', '勾选的优化项全部被预检拦下，没有可执行的项');
-      return;
-    }
+    if (!allowed.length) return; // filterByPreflight 已给出逐项原因（F4b-L02）
     // 高危项统计
     const hazardList = allowed.filter(o => needsHazardConfirm(o));
     const highCount = allowed.filter(o => o.risk === 'high').length;
@@ -2808,7 +2872,7 @@
       const go = await window.app.confirmDanger(
         '⚠️ 高危安全操作确认',
         `本批 ${hazardList.length} 项高危优化会显著降低系统安全防护：\n\n${detail}`,
-        '仍然全部执行',
+        '仍然执行',
         '取消',
         '此操作可能使系统更容易受到恶意软件或攻击的侵害，请确认已了解风险。'
       );
@@ -2817,9 +2881,6 @@
 
     if (!(await ensureRestorePoint())) return;
 
-    batchRunning = true;
-    const btn = document.getElementById('btnOptimizerSelected');
-    if (btn) { btn.disabled = true; btn.dataset.orig = btn.innerHTML; btn.innerHTML = '执行中…'; }
     let okCount = 0, failCount = 0;
     const failedNames = [];
     // BoosterX §B2：整批只给**一次**生效建议，取成功项里最粗的档位。
@@ -2828,7 +2889,6 @@
     let batchScope = 0, batchScopeCount = 0;
     // F4b-M12：上锁之后必须整段有 finally —— 循环之后还有 clearSelection / renderGroups /
     // toast 三段可抛代码，任一处抛错都会把 batchRunning 永久钉在 true，四个批量入口全部失灵。
-    try {
       for (let i = 0; i < allowed.length; i++) {
         const opt = allowed[i];
         // 审查 2026-09-27 M8：记录「当前 + 剩余」，提权确认瞬间据此持久化
@@ -2862,12 +2922,6 @@
         window.app?.toast(batchScope >= SCOPE_RANK.reboot ? 'info' : 'success', scopeAdviceText(batchScope, batchScopeCount), 9000);
         window.app?.log('info', `优化批次生效粒度：${batchScope >= SCOPE_RANK.reboot ? '需重启电脑' : '建议重启资源管理器'}（${batchScopeCount} 项）`);
       }
-    } finally {
-      batchRemainingIds = null;
-      progressToastSuffix = '';
-      batchRunning = false;
-      if (btn) { btn.disabled = false; btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig; }
-    }
   }
 
   // ==================== M1 批次整批预检 ====================
@@ -2909,6 +2963,15 @@
       .slice(0, 10)
       .map(r => '· ' + titleOf(r.id) + '：' + r.reason)
       .join('\n') + (rejected.length > 10 ? `\n…等共 ${rejected.length} 项被拦` : '');
+    if (!kept.length) {
+      // F4b-L02：全部被拦时直接收口。旧实现仍弹「是否只执行剩下的零项」，
+      // 用户点确认后什么也不会发生——把「没有可执行项」说成一次选择是误导。
+      window.app?.toast('warning', `整批预检拦下 ${rejected.length} 项：\n\n${detail}`, 9000, {
+        title: '全部优化项被预检拦截'
+      });
+      window.app?.log('warn', `批量预检全部拦下 ${rejected.length} 项：${rejected.map(r => `${r.id}(${r.reason})`).join(', ')}`);
+      return [];
+    }
     const go = await window.app.confirm(
       '部分优化项无法执行',
       `整批预检拦下 ${rejected.length} 项：\n\n${detail}\n\n是否只执行剩下的 ${kept.length} 项？`,
@@ -2916,9 +2979,7 @@
       '取消整批'
     );
     if (!go) return null;
-    if (kept.length) {
-      window.app?.log('info', `批量预检拦下 ${rejected.length} 项：${rejected.map(r => `${r.id}(${r.reason})`).join(', ')}`);
-    }
+    window.app?.log('info', `批量预检拦下 ${rejected.length} 项：${rejected.map(r => `${r.id}(${r.reason})`).join(', ')}`);
     return kept;
   }
 
@@ -2941,6 +3002,22 @@
   let batchRunning = false;
   async function runBatch() {
     if (batchRunning) return;
+    // A2-L01：同 runSelected —— 判据后立刻上锁并禁用按钮，二连点不会进第二遍。
+    batchRunning = true;
+    const btn = document.getElementById('btnOptimizerBatch');
+    if (btn) { btn.disabled = true; btn.dataset.orig = btn.innerHTML; btn.innerHTML = '批量执行中…'; }
+    try {
+      await runBatchLocked();
+    } finally {
+      batchRemainingIds = null;
+      progressToastSuffix = '';
+      batchRunning = false;
+      if (btn) { btn.disabled = false; btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig; }
+    }
+  }
+
+  // 锁外的实际批处理体：锁的获取/释放在 runBatch。
+  async function runBatchLocked() {
     const entries = getCurrentPageOptions();
     if (!entries.length) {
       window.app?.toast('warning', '当前页面没有可执行的优化项');
@@ -2957,11 +3034,7 @@
     // 选择「仍然执行可执行的那部分」——被拦的项会被剔出批次，不会白等）。
     const allowed = await filterByPreflight(batch);
     if (!allowed) { setCardsSelected(false); return; }
-    if (!allowed.length) {
-      window.app?.toast('warning', '本批全部优化项都被预检拦下，没有可执行的项');
-      setCardsSelected(false);
-      return;
-    }
+    if (!allowed.length) { setCardsSelected(false); return; } // 原因已由 filterByPreflight 给出
     // 全选高亮，提示即将执行的项
     setCardsSelected(true);
     const highCount = allowed.filter(o => o.risk === 'high').length;
@@ -2994,7 +3067,7 @@
       const go = await window.app.confirmDanger(
         '⚠️ 高危安全操作确认',
         `本页 ${hazardList.length} 项高危优化会显著降低系统安全防护：\n\n${detail}`,
-        '仍然全部执行',
+        '仍然执行',
         '取消',
         '此操作可能使系统更容易受到恶意软件或攻击的侵害，请确认已了解风险。'
       );
@@ -3010,15 +3083,11 @@
     // 执行前统一检查系统还原点（未创建/超 5 天弹警示；用户最终拒绝则中止）
     if (!(await ensureRestorePoint())) { setCardsSelected(false); return; }
 
-    batchRunning = true;
-    const btn = document.getElementById('btnOptimizerBatch');
-    if (btn) { btn.disabled = true; btn.dataset.orig = btn.innerHTML; btn.innerHTML = '批量执行中…'; }
     let okCount = 0, failCount = 0;
     const failedNames = [];
     let batchScope = 0, batchScopeCount = 0;
     // F4b-M12：同 runSelected —— 循环之后的 setCardsSelected / clearSelection / renderGroups /
     // toast 都可能抛，锁必须在 finally 里放。
-    try {
       for (let i = 0; i < allowed.length; i++) {
         const opt = allowed[i];
         // 审查 2026-09-27 M8：同 runSelected——提权中断时据此恢复剩余批次
@@ -3057,12 +3126,6 @@
         window.app?.toast(batchScope >= SCOPE_RANK.reboot ? 'info' : 'success', scopeAdviceText(batchScope, batchScopeCount), 9000);
         window.app?.log('info', `优化批次生效粒度：${batchScope >= SCOPE_RANK.reboot ? '需重启电脑' : '建议重启资源管理器'}（${batchScopeCount} 项）`);
       }
-    } finally {
-      batchRemainingIds = null;
-      progressToastSuffix = '';
-      batchRunning = false;
-      if (btn) { btn.disabled = false; btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig; }
-    }
   }
 
   // ==================== 初始化 ====================
@@ -3092,16 +3155,33 @@
       // 三条并行取（互不依赖），侧表失败不阻塞目录渲染（走 GROUP_FALLBACK 兜底）。
       // 外加 C3：永劫专项面板侧表（独立并行拉，失败不阻塞目录）。
       Promise.all([pDisk, window.api.optimizer.list(), window.api.optimizer.listGroups(),
-                   window.api.optimizer.naraPanel?.().catch(() => null),
-                   window.api.optimizer.privacyPanel?.().catch(() => null)])
+                   Promise.resolve(window.api.optimizer.naraPanel?.()).catch((e) => {
+                     NARA_PANEL_DEGRADED = (e && e.message) || '读取失败';
+                     window.app?.log?.('warn', '永劫专项侧表读取失败：' + NARA_PANEL_DEGRADED);
+                     return null;
+                   }),
+                   Promise.resolve(window.api.optimizer.privacyPanel?.()).catch((e) => {
+                     PRIVACY_PANEL_DEGRADED = (e && e.message) || '读取失败';
+                     window.app?.log?.('warn', '隐私自护侧表读取失败：' + PRIVACY_PANEL_DEGRADED);
+                     return null;
+                   })])
         .then(([dt, res, gs, np, pp]) => {
         diskType = dt;
         // E7：分类两层结构。失败/形状不对时保留 GROUP_FALLBACK（applyGroupSidecar 内部已判）
         if (gs && gs.success) applyGroupSidecar(gs.data);
-        // C3：永劫专项面板侧表。失败/null 时 NARA_PANEL 保持 null → 不触发任何过滤与入口卡
+        // C3：永劫专项面板侧表。失败/null 时 NARA_PANEL 保持 null，但失败原因要留在
+        // 入口卡上（A1-L04）：隐藏集合为空 ⇒ 成员回主列表，这个后果必须说给用户。
         if (np && np.success && np.data) NARA_PANEL = np.data;
+        else if (np && np.success === false) {
+          NARA_PANEL_DEGRADED = np.message || '侧表验签未通过';
+          window.app?.log?.('warn', '永劫专项侧表不可用：' + NARA_PANEL_DEGRADED);
+        }
         // 2026-10-11：隐私自护面板侧表（同上）
         if (pp && pp.success && pp.data) PRIVACY_PANEL = pp.data;
+        else if (pp && pp.success === false) {
+          PRIVACY_PANEL_DEGRADED = pp.message || '侧表验签未通过';
+          window.app?.log?.('warn', '隐私自护侧表不可用：' + PRIVACY_PANEL_DEGRADED);
+        }
         // F4b-M02：入口按钮与看板点击的监听绑定**不依赖**目录数据分支——原实现把
         // bindEvents 埋进 success 分支且无 else，目录读取失败（验签失败按空目录返回、
         // IPC reject 等）时页面空白、所有按钮零监听，点了毫无反应且零报错。
@@ -3144,9 +3224,9 @@
         window.app?.log?.('error', '优化中心初始化异常: ' + ((e && e.message) || e));
         renderFallback('页面初始化异常');
       });
-      window.api.optimizer.onProgress(({ percent }) => {
+      window.app?.trackSubscription?.(window.api.optimizer.onProgress(({ percent }) => {
         if (typeof percent === 'number') setProgressToastProgress(percent);
-      });
+      }));
     } else {
       renderFallback();
     }
@@ -3191,7 +3271,7 @@
       return;
     }
     root.innerHTML = window.emptyState
-      ? window.emptyState({ icon: 'search', title: '优化选项需在应用内运行', desc: '当前为浏览器预览模式，请在 Electron 应用内打开「电脑优化中心」使用全部功能' })
+      ? window.emptyState({ icon: 'search', title: '优化选项需在应用内运行', desc: '当前为浏览器预览模式，请在 Trim 桌面应用内打开「电脑优化中心」使用全部功能' })
       : `<div class="empty-state"><p>当前为浏览器预览模式，优化选项需在 Electron 应用内运行。</p></div>`;
   }
 
@@ -3272,20 +3352,19 @@
     // 审查 v2-M22（v1 L13 点名的 optimizer 开窗/执行入口）：runBatch/runSelected 是 async，
     // 循环体内部虽有 try/catch，但**循环之前**的 confirmDanger / ensureRestorePoint 一旦 reject
     // 就是浮动 Promise —— 表现为「点批量执行毫无反应」，日志里也查不到。统一在此收口。
-    const guardBatch = (fn) => () => {
+    // F4b-M03：两个「执行所选」入口统一套 guardAsync（与本文件其余 async 处理器同口径）。
+    // 保留预览模式前置；确认链 reject 时 guardAsync 负责 toast + 日志，批量锁由各自 finally 放。
+    const guardBatch = (label, fn) => guardAsync(label, () => {
       if (!window.api?.optimizer) { window.app?.toast('warning', '当前为预览模式，无法执行优化'); return; }
-      Promise.resolve(fn()).catch((e) => {
-        window.app?.toast('error', '批量执行异常：' + ((e && e.message) || e));
-        window.app?.log?.('error', '优化批量执行异常: ' + ((e && e.message) || e));
-      });
-    };
+      return fn();
+    });
 
     const batchBtn = document.getElementById('btnOptimizerBatch');
-    if (batchBtn) batchBtn.addEventListener('click', guardBatch(runBatch));
+    if (batchBtn) batchBtn.addEventListener('click', guardBatch('批量执行', runBatch));
     const selectedBtn = document.getElementById('btnOptimizerSelected');
     if (selectedBtn) {
       selectedBtn.disabled = true;
-      selectedBtn.addEventListener('click', guardBatch(runSelected));
+      selectedBtn.addEventListener('click', guardBatch('执行所选', runSelected));
     }
     const externalBtn = document.getElementById('btnOptExternal');
     if (externalBtn) externalBtn.addEventListener('click', openExternalAudit);

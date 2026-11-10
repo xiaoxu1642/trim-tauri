@@ -323,6 +323,36 @@ const balanced = (from, at) => {
   }
 }
 
+// ---- 8. HTML 属性 ⇄ 渲染层选择器双向契约（T1d-L03） ----
+// data-finder-manifest 的宿主与消费点分处 HTML / finder.js；任一侧改名都会让
+// 「打开清单」静默失效。这里把两侧当成一份登记表，逐边核对名字和数量。
+const HTML_DATA_CONTRACTS = [
+  {
+    attr: 'data-finder-manifest',
+    html: 'index.html',
+    htmlMin: 3,
+    js: 'scripts/finder.js',
+    jsAnchor: 'document.querySelectorAll',
+  },
+];
+for (const c of HTML_DATA_CONTRACTS) {
+  const htmlClean = stripHtmlComments(readFileSync(join(SRC, c.html), 'utf8'));
+  const htmlCount = [...htmlClean.matchAll(new RegExp(`\\b${c.attr}\\b`, 'g'))].length;
+  const jsClean = blankNonCode(readFileSync(join(SRC, c.js), 'utf8'), 'js', { keepStrings: true });
+  const jsCount = [...jsClean.matchAll(new RegExp(`\\b${c.attr}\\b`, 'g'))].length;
+  check(
+    htmlCount >= c.htmlMin && jsCount > 0 && jsClean.includes(c.jsAnchor),
+    `8. ${c.attr}：${c.html} ${htmlCount} 处 ⇄ ${c.js} ${jsCount} 处消费契约成立`,
+    htmlCount < c.htmlMin
+      ? `${c.html} 少一处宿主或属性被改名（低于 ${c.htmlMin} 处）`
+      : jsCount === 0
+        ? `${c.js} 里的选择器被改名/删除`
+        : !jsClean.includes(c.jsAnchor)
+          ? `${c.js} 里找不到 ${c.jsAnchor} 消费形态`
+          : '',
+  );
+}
+
 if (fail > 0) {
   console.error('check-html-contract: 存在违规');
   process.exit(1);

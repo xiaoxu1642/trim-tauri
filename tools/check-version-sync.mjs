@@ -16,6 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
@@ -201,7 +202,8 @@ check(
     confIdErr = e.message;
   }
   const pathsSrc = read('src-tauri/src/engine/paths.rs');
-  const rsId = (pathsSrc.match(/pub\s+const\s+IDENTIFIER\s*:\s*&str\s*=\s*"([^"]*)"/) || [])[1] ?? '';
+  const pathsCode = blankNonCode(pathsSrc, 'rs', { keepStrings: true });
+  const rsId = (pathsCode.match(/pub\s+const\s+IDENTIFIER\s*:\s*&str\s*=\s*"([^"]*)"/) || [])[1] ?? '';
   check(
     !!confId && !!rsId && confId === rsId,
     '9. conf identifier ⇄ engine/paths.rs IDENTIFIER 字面一致（D1-M07 双真源对拍）',

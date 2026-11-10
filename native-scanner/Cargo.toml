@@ -13,6 +13,9 @@ windows-sys = { version = "0.59", features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",
   "Win32_System_IO",
+  # A14（X1-L01 一族）：测试用子进程执行器需要 Job Object（杀整树，超时不留孤儿）。
+  # 与 src-tauri 侧 engine::job 同源能力，本 crate 是独立 crate，无法反向依赖那个实现。
+  "Win32_System_JobObjects",
   "Win32_System_Threading",
   "Win32_System_SystemInformation",
   "Win32_System_Diagnostics_ToolHelp",

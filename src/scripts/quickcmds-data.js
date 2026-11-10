@@ -1,4 +1,4 @@
-// quickcmds-data.js - 快捷指令数据（69 条 / 8 分类）
+// quickcmds-data.js - 快捷指令数据（条数以 CMDS.length 与 Rust 白名单对拍为准）
 // 来源：old\快捷指令\QuickLauncher-解包分析报告.md（快捷指令大全 v6.0 解包逆向）
 // 每条：{ id, name, desc, cmd, cat }
 //   id   —— 稳定标识（主进程白名单校验用，渲染层仅传 id）

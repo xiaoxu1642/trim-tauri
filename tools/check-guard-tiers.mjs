@@ -20,7 +20,7 @@
 //
 // ==================== 已知档位疑点（2026-10-03 R1-1.2b 登记） ====================
 // MUST_READONLY 是**现状如实登记**，不是背书。以下条目实测确有写/删/起进程副作用，
-// 却挂在 readonly 档（放行全部五个窗口 label），逐条带「疑点」注释：
+// 却挂在 readonly 档（放行全部四个窗口 label），逐条带「疑点」注释：
 //
 //   memory_kill · app_open_external · paths_browse ·
 //   startup_openlocation · models_save / models_test / models_set_scope ·
@@ -34,7 +34,7 @@
 //   1. 改档会锁死或放开功能，是 AGENTS §3「M1~M3 教训」点名的方向性风险，必须先查
 //      「谁真的需要调它」—— 多数条目可能只有主窗消费，但也有可能子窗在用（`modal_*`
 //      那一类就是子窗专用）。查错方向就是 100% 功能不可用。
-//   2. readonly 档并不等于「无害」：这四个子窗加载的脚本面比主窗窄，实际可利用性要
+//   2. readonly 档并不等于「无害」：这三个子窗加载的脚本面比主窗窄，实际可利用性要
 //      逐条看渲染层有没有消费方，属于另一轮审计的范围。
 //   3. 本批的交付物是**棘轮**（让未来的放宽变红），把审档和补棘轮混在一批里会让审档
 //      的结论被当成已定论—— 那正是 v0.5.0 `startType`「以为执行链是好的」那类事故的成因。
@@ -46,7 +46,7 @@ const UPDATE = process.argv.includes('--update')
   ? (process.argv[process.argv.indexOf('--update') + 1] === 'readonly' ? 'readonly' : true)
   : false;
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
@@ -173,7 +173,7 @@ const MUST_MAIN = [
   // 卸载域 MVP（竞品借鉴落地方案 P0 §11）：卸载/残留执行是高危写操作，
   // 且只有主窗加载 uninstall.js —— 六条命令全档 MAIN。
   // 其中 check/update-residue 两条按「谁真的需要调它」定档（AGENTS §3 的 M1~M3 教训）：
-  // 更新入口在卸载页（主窗），**不得**因为"检查版本看着像只读"就下放成放行四个子窗的档位。
+  // 更新入口在卸载页（主窗），**不得**因为"检查版本看着像只读"就下放成放行三个子窗的档位。
   'uninstall_list',
   'uninstall_run',
   'uninstall_modify',
@@ -483,10 +483,18 @@ const handlerNames = (() => {
   if (!m) return new Set();
   return new Set(m[1].split(',').map((s) => s.trim().split('::').pop()).filter(Boolean));
 })();
+const handlerMissing = [...handlerNames].filter((n) => !tiers.has(n)).sort();
+const tiersExtra = [...tiers.keys()].filter((n) => !handlerNames.has(n)).sort();
 check(
-  handlerNames.size > 0 && tiers.size === handlerNames.size,
-  `A1b. 档位台账条数 ⇄ generate_handler! 注册条数（${tiers.size} / ${handlerNames.size}）`,
-  tiers.size === handlerNames.size ? '' : `差 ${tiers.size - handlerNames.size} 条——名字抽取窗口失明或命令漏注册`,
+  handlerNames.size > 0 && handlerMissing.length === 0 && tiersExtra.length === 0,
+  `A1b. 档位台账名字集合 ⇄ generate_handler! 双向一致（${tiers.size} / ${handlerNames.size}）`,
+  handlerNames.size === 0
+    ? 'generate_handler! 解析为空 —— 登记网失效，不能判绿'
+    : handlerMissing.length
+      ? `注册有但台账没有：${JSON.stringify(handlerMissing)}`
+      : tiersExtra.length
+        ? `台账有但注册没有：${JSON.stringify(tiersExtra)}`
+        : '',
 );
 
 // ---- A2. 手写判定豁免双向棘轮 ----
@@ -540,10 +548,10 @@ check(
 // ---- D. 只读档双向棘轮（R1-1.2b，2026-10-03） ----
 // 为什么必须补这一组：A1 只查「有没有 guard」，A2 只管 HANDWRITTEN，B/C 只管 MAIN ——
 // **`guard_readonly` 这一档此前没有任何一组断言在管**。后果是一条真实的静默放宽路径：
-// 把某MAIN 命令改成 `guard_readonly`（来源校验从「只认主窗」放宽到「五个窗口 label 全放行」）
+// 把某MAIN 命令改成 `guard_readonly`（来源校验从「只认主窗」放宽到「四个窗口 label 全放行」）
 // **并且**顺手删掉它在 MUST_MAIN 的登记 ⇒ A1 仍绿（有 guard）、A2 不适用、B 因已删登记而不红、
 // C 因已不是 MAIN 而不适用 —— 四组全部放行。
-// 而 readonly 档的语义是「放行全部五个窗」，放宽它等于把主窗专属的写操作暴露给四个子窗。
+// 而 readonly 档的语义是「放行全部四个窗」，放宽它等于把主窗专属的写操作暴露给三个子窗。
 //
 // 口径与 B 组对称：代码里判 readonly 的命令集合 == 清单登记的集合，双向差集非空即红。
 // 注意与 B 组的区别：B 组管「MAIN 档是谁」，本组管「**谁被放宽到了 readonly**」——
@@ -551,7 +559,7 @@ check(
 const MUST_READONLY = [
   // ⚠️ 本清单是**现状如实登记**，不是背书。R1-1.2b 的目的是让「偷偷放宽到 readonly」
   // 变成门禁红，不是重新审一遍全部档位。带「疑点」注释的条目确有写/删/起进程副作用，
-  // 却挂在 readonly 档（放行全部五个窗口 label）—— 逐条列在文件头「已知档位疑点」一节。
+  // 却挂在 readonly 档（放行全部四个窗口 label）—— 逐条列在文件头「已知档位疑点」一节。
   // 本批**不改**这些档位：改档会锁死或放开功能，须按 AGENTS §3「档位以谁真的需要调它
   // 为准」的 M1~M3 教训单独评审。
   'aidesc_get',
@@ -691,6 +699,9 @@ for (const [konst, spec] of Object.entries(MUST_WINDOWSET)) {
 // 「新增子窗只同步了两处（guard.rs / capabilities）」这类漏项没有一道门禁能抓到。
 {
   const capDir = join(REPO_ROOT, 'src-tauri', 'capabilities');
+  if (!existsSync(capDir)) {
+    check(false, 'H. capabilities 目录存在（APP_WINDOWS 双向对拍的输入面）', `${capDir} 不存在：不能拿空并集冒充通过`);
+  } else {
   const capLabels = new Set();
   for (const f of readdirSync(capDir).filter((n) => n.endsWith('.json'))) {
     const j = JSON.parse(readFileSync(join(capDir, f), 'utf8'));
@@ -707,6 +718,7 @@ for (const [konst, spec] of Object.entries(MUST_WINDOWSET)) {
         ? `只在 capabilities 里 ${JSON.stringify(onlyCap)}（权限清单给了不在册/已退役的窗口）`
         : '',
   );
+  }
 }
 const roMissing = wantReadonly.filter((n) => !actualReadonly.includes(n));
 const roExtra = actualReadonly.filter((n) => !wantReadonly.includes(n));
@@ -865,9 +877,9 @@ pub fn synth_const_run<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
 // ---- G. 全集档与其它 guard 形态的双向棘轮（v6-K19） ----
 // 为什么必须补：A1 只看「有没有 guard」，A2 只管 HANDWRITTEN，B/C 只管 MAIN，D 管
 // READONLY，E 管 `guard::<窗口集常量>` —— 剩下两档**此前没有任何一组在管**：
-//   · `guard(&window, guard::APP_WINDOWS)`（五窗全集）：把一条 MAIN 命令改成它、
+//   · `guard(&window, guard::APP_WINDOWS)`（四窗全集）：把一条 MAIN 命令改成它、
 //     并顺手删掉 MUST_MAIN 登记 ⇒ A1 仍绿、A2 不适用、B 因已删登记而不红、
-//     C/E 不适用 —— 来源校验从「只认主窗」静默放宽到「五窗全放行」；
+//     C/E 不适用 —— 来源校验从「只认主窗」静默放宽到「四窗全放行」；
 //   · `guard(&window, <任意内联数组>)`（GUARD_OTHER）：新出口可以完全绕开三张清单。
 // 口径（K19 原文「要么有登记表，要么出现即红」）：两张表都必须与实况**完全一致**，
 // 空表即「出现即红」。当前两档实况均为 0 条，所以两张表是空的——这是有意的，
@@ -896,13 +908,16 @@ const GUARD_OTHER = [];
   const wantOther = GUARD_OTHER.map((e) => e.name).sort();
   const otherMissing = wantOther.filter((n) => !actualOther.includes(n));
   const otherExtra = actualOther.filter((n) => !wantOther.includes(n));
+  const otherBadReason = GUARD_OTHER.filter((e) => typeof e.reason !== 'string' || e.reason.trim().length < 8);
   check(
-    otherMissing.length === 0 && otherExtra.length === 0,
+    otherMissing.length === 0 && otherExtra.length === 0 && otherBadReason.length === 0,
     `G2. GUARD_OTHER 形态逐条登记（登记 ${wantOther.length} / 实际 ${actualOther.length}；空表=出现即红）`,
     otherMissing.length
       ? `登记了但代码已不是该形态 ${JSON.stringify(otherMissing)}`
       : otherExtra.length
         ? `未登记的其它 guard 形态 ${JSON.stringify(otherExtra.map((n) => `${tiers.get(n)?.file}:${tiers.get(n)?.line} ${n}`))}`
+        : otherBadReason.length
+          ? `登记理由为空或不足 8 字符：${JSON.stringify(otherBadReason.map((e) => e.name))}`
         : '',
   );
 }

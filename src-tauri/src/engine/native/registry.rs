@@ -14,12 +14,37 @@ use windows::Win32::Foundation::ERROR_NO_MORE_ITEMS;
 use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, REG_BINARY, REG_DWORD, REG_EXPAND_SZ, REG_OPTION_NON_VOLATILE, REG_QWORD, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegEnumKeyExW, RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW};
 use super::common::*;
 
+/// 所有「按注册表回报长度分配」的读值入口共用的 1 MiB 上限（R5c-v8-L09）。
+///
+/// 注册表值本身可以到 MB 量级，但本仓消费的真实值（字符串/二进制/多字符串）远小于
+/// 1 MiB；损坏或恶意写入的值可以回报一个超大 size 让 `vec![0u8; size]` 直接 OOM。
+/// 超限一律判读失败并 warn，不再只给部分读器加闸。
+pub const MAX_REG_VALUE_BYTES: u32 = 1024 * 1024;
+
+/// 读值长度闸（纯函数，单测直接喂 >1 MiB）。
+fn value_size_ok(size: u32) -> bool {
+    if size > MAX_REG_VALUE_BYTES {
+        crate::engine::log::write_log(
+            "warn",
+            &format!("注册表值读取超过 {MAX_REG_VALUE_BYTES} 字节上限（回报 {size} 字节），已拒绝分配"),
+        );
+        false
+    } else {
+        true
+    }
+}
+
 /// 读注册表 DWORD 的可判空版本（B11：原 PS 实现靠 `Get-ItemProperty` + `$null` 判缺，
 /// 这里用 `Option` 表达同一语义 —— 值不存在 / 类型不对 / 打不开键都算 `None`）。
 ///
 /// 返回值按**无符号**读出再转 i64：DWORD 本就是 32 位无符号，按 i32 读会把
 /// `0xFFFFFFFF` 这类阈值变成 -1，而调用方（如 SVCHost 拆分阈值）拿它做数值比较。
-pub fn read_reg_dword_opt(hive: HKEY, subkey: &str, value: &str) -> Option<i64> {
+///
+/// B03（方案 R5c-v8-L01）：函数名带上**数值口径** —— `_u32_as_i64`。
+/// 同一件事在本文件有三种口径（u32 提升为 i64 / 纯 u32 / 按 i32 解读），
+/// 名字不写口径时，调用方只能靠读实现才知道拿到的是哪一种；
+/// `0xFFFFFFFF` 在三种口径下分别是 4294967295 / 4294967295 / -1。
+pub fn read_reg_dword_u32_as_i64(hive: HKEY, subkey: &str, value: &str) -> Option<i64> {
     let sk = to_wide(subkey);
     let mut hk = HKEY::default();
     unsafe {
@@ -44,12 +69,12 @@ pub fn read_reg_dword_opt(hive: HKEY, subkey: &str, value: &str) -> Option<i64> 
 
 /// 读 `HKLM\<subkey>\<value>` 的 DWORD 快捷入口（B11：optimizer 三处 PS 读值改原生用）
 pub fn read_hklm_dword(subkey: &str, value: &str) -> Option<i64> {
-    read_reg_dword_opt(HKEY_LOCAL_MACHINE, subkey, value)
+    read_reg_dword_u32_as_i64(HKEY_LOCAL_MACHINE, subkey, value)
 }
 
 /// 读注册表 QWORD 值（REG_QWORD → i64）—— M2-C 检测断言用。
 ///
-/// **为什么需要**（`read_reg_dword_opt` / `read_reg_string` / `read_reg_binary_opt`
+/// **为什么需要**（`read_reg_dword_u32_as_i64` / `read_reg_string` / `read_reg_binary_opt`
 /// 都覆盖不到它）：`perf_wu_pause` 把暂停起止时间写成 **FILETIME**（100ns 计数
 /// 的 QWORD，`[DateTime]::UtcNow.ToFileTimeUtc()`），那是 64 位值 ——
 /// 用 dword 原语读会拿到低 32 位（截断到 1950~2042 年之间的随机日期），
@@ -57,7 +82,7 @@ pub fn read_hklm_dword(subkey: &str, value: &str) -> Option<i64> {
 ///
 /// **返回 `i64` 而不是 `u64`**：FILETIME 的实际取值在 1.3e17 上下（远小于
 /// `i64::MAX` ≈ 9.2e18），符号位一直是 0。但用 `i64` 是为了和
-/// [`read_reg_dword_opt`] 的返回类型一致（上层算区间时不必到处转换），
+/// [`read_reg_dword_u32_as_i64`] 的返回类型一致（上层算区间时不必到处转换），
 /// 真出现 ≥2^63 的写入（不可能，来自 `FILETIME` 或别处的 QWORD）时它会是负数，
 /// 由调用方的区间判定自然排除。
 ///
@@ -96,6 +121,9 @@ pub(super) unsafe fn reg_query_value(hk: HKEY, name: &str) -> Option<(REG_VALUE_
     let mut ty = REG_VALUE_TYPE::default();
     let mut size = 0u32;
     if RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_err() {
+        return None;
+    }
+    if !value_size_ok(size) {
         return None;
     }
     let mut buf = vec![0u8; size as usize];
@@ -238,6 +266,7 @@ pub(super) unsafe fn reg_read_string(hk: HKEY, name: &str) -> Option<String> {
         return None;
     }
     if ty != REG_SZ && ty != REG_EXPAND_SZ { return None; }
+    if !value_size_ok(size) { return None; }
     let mut buf = vec![0u8; size as usize];
     if RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), Some(buf.as_mut_ptr()), Some(&mut size)).is_err() {
         return None;
@@ -249,7 +278,11 @@ pub(super) unsafe fn reg_read_string(hk: HKEY, name: &str) -> Option<String> {
 }
 
 /// 读注册表 DWORD 值
-pub(super) unsafe fn reg_read_dword_val(hk: HKEY, name: &str) -> Option<u32> {
+///
+/// B03（方案 R5c-v8-L01）：函数名带上数值口径 —— `_u32`。
+/// 与 [`read_reg_dword_u32_as_i64`]（同值、提升为 i64）区分开：
+/// 两者的**值**相同但**类型**不同，调用方按类型决定后续运算。
+pub(super) unsafe fn reg_read_dword_u32(hk: HKEY, name: &str) -> Option<u32> {
     let nm = to_wide(name);
     let mut ty = REG_VALUE_TYPE::default();
     let mut buf = [0u8; 4];
@@ -263,19 +296,78 @@ pub(super) unsafe fn reg_read_dword_val(hk: HKEY, name: &str) -> Option<u32> {
     Some(u32::from_le_bytes(buf))
 }
 
+/// DWORD 按 **i32（有符号）** 解读并转成字符串 —— 展示/备份链的口径。
+///
+/// B03（方案 R5c-v8-L01）：这一档原先是 `read_reg_value_state` 里的一行内联
+/// `(raw as i32).to_string()`，读者无从判断它与另两档（u32 / u32→i64）的区别。
+/// 抽成有名字的函数后，三档口径在本文件里各自有名：
+/// - [`read_reg_dword_u32_as_i64`]：u32 提升为 i64（`0xFFFFFFFF` = 4294967295）；
+/// - [`reg_read_dword_u32`]：纯 u32；
+/// - 本函数：i32（`0xFFFFFFFF` = -1，对齐 .NET `GetValue` / PS `[string]$v`）。
+pub(super) fn reg_dword_as_i32_text(raw: u32) -> String {
+    // .NET 把 DWORD 读成 int（有符号），`[int]$v` 再转字符串 —— 保留该口径
+    (raw as i32).to_string()
+}
+
 // ==================== B11：pwsh 步骤原生解释器的执行出口 ====================
 
-/// 键存在性（对应 PS `Test-Path HKxx:\…`）
-pub fn reg_key_exists(hive: HKEY, subkey: &str) -> bool {
+/// 键存在性三态（R5c-v8-L04）：`5/拒绝访问` 不得折成「不存在」。
+///
+/// 旧 `bool` 出口把 `RegOpenKeyExW` 的任何失败都当 `false`，调用方于是把
+/// 「权限不足/IO 错」读成「功能没装」——卸载列表、残留判定、启动项摘要都会因此
+/// 少报一条而不留任何痕迹。三态把「确认不存在」与「读不出来」分开。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyState {
+    Exists,
+    /// 只认「找不到」两个码（2/3），与删值幂等判据同源。
+    Missing,
+    /// 读不出来（访问拒绝等），载荷是 Win32 码。
+    Unknown(u32),
+}
+
+/// 开键结果码 → 三态（纯函数，单测可直接喂 5）。
+fn key_state_from_open_code(code: u32) -> KeyState {
+    if code == 0 {
+        KeyState::Exists
+    } else if open_key_missing_is_idempotent(code) {
+        KeyState::Missing
+    } else {
+        KeyState::Unknown(code)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// 测试钩子：把「开键结果码」钉成指定值，用来在无权限样本的机器上验证
+    /// `5/拒绝访问 ⇒ Unknown`。线程局部，测试并行互不污染。
+    static FORCED_EXISTS_CODE: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// 键存在性（对应 PS `Test-Path HKxx:\…`）的三态版本。
+pub fn reg_key_exists_state(hive: HKEY, subkey: &str) -> KeyState {
+    #[cfg(test)]
+    if let Some(code) = FORCED_EXISTS_CODE.with(|c| c.get()) {
+        return key_state_from_open_code(code);
+    }
+    // 读面不过名字形态闸（pssteps 的读/写分工注释）：只读存在性查询没有破坏性副作用，
+    // 控制字符键名不应被误报成 Unknown；写/删面仍走 `to_wide_checked`。
     let sk = to_wide(subkey);
     let mut hk = HKEY::default();
     unsafe {
-        let ok = RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok();
-        if ok {
+        let r = RegOpenKeyExW(hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk);
+        if r.is_ok() {
             let _ = RegCloseKey(hk);
+            KeyState::Exists
+        } else {
+            key_state_from_open_code(r.0)
         }
-        ok
     }
+}
+
+/// 键存在性（bool 外观）—— 只读展示链与无法消费三态的旧调用方保留此入口；
+/// **有「不完整」语义的调用方必须用 [`reg_key_exists_state`]**。
+pub fn reg_key_exists(hive: HKEY, subkey: &str) -> bool {
+    matches!(reg_key_exists_state(hive, subkey), KeyState::Exists)
 }
 
 /// 确保键存在（对应 PS `New-Item -Path … -Force`）
@@ -324,7 +416,10 @@ pub fn reg_key_ensure_checked(hive: HKEY, subkey: &str) -> Result<(), u32> {
 /// 红线①要求「空段 fail-closed」落在**被执行的那一层**，不能只写在模块头一句自述里。
 fn reg_delete_subkey_shape_is_malformed(subkey: &str) -> bool {
     let t = subkey.trim();
-    t.is_empty() || t.chars().all(|c| c == '\\')
+    // 首段为空（`\Foo`）、尾分隔符、连续分隔符都会让 `rsplit_once` 把父键落到
+    // hive 本身或造出空段。判据必须覆盖**任何空段**，不能只拒空串/纯反斜杠：
+    // `\Foo` 的父键是 `""`，`RegOpenKeyExW(hive, "")` 打开的就是 hive 根。
+    t.is_empty() || t.split('\\').any(|seg| seg.is_empty())
 }
 
 /// 删除键的带因版本：返回 Win32 错误码（0 不当错误），供回执点名失败原因。
@@ -333,6 +428,9 @@ fn reg_delete_subkey_shape_is_malformed(subkey: &str) -> bool {
 /// 含 NUL 或控制字符 ⇒ `Err(87)`（`to_wide_checked`，红线⑨）。
 /// 两者都发生在**任何 Win32 调用之前** —— `RegDeleteTreeW` 的空路径口径会把目标
 /// 从「一个键」换成「整棵子树」，闸必须落在调用之前而不是之后。
+///
+/// 与 PS `Remove-Item` 的**有意差异**（R5c-v8-L06）：键本来就不存在（2/3）按幂等成功，
+/// 与删值侧对齐；PS 对不存在的键会报错。不要把这层包装宣传成「与 PS 完全等价」。
 pub fn reg_key_remove_checked(hive: HKEY, subkey: &str, recurse: bool) -> Result<(), u32> {
     use windows::Win32::System::Registry::{RegDeleteTreeW, RegDeleteKeyW};
     use windows::Win32::Foundation::ERROR_REGISTRY_IO_FAILED;
@@ -355,16 +453,18 @@ pub fn reg_key_remove_checked(hive: HKEY, subkey: &str, recurse: bool) -> Result
                 }
             }
             // Win32 的 Ok 不等于“键已消失”：删后现读是回执唯一可采信的判据。
-            return if reg_key_exists(hive, subkey) {
-                Err(ERROR_REGISTRY_IO_FAILED.0)
-            } else {
-                Ok(())
+            // 读不出来也不能算成功（R5c-v8-L04：三态不得折回 bool）。
+            return match reg_key_exists_state(hive, subkey) {
+                KeyState::Missing => Ok(()),
+                KeyState::Exists => Err(ERROR_REGISTRY_IO_FAILED.0),
+                KeyState::Unknown(code) => Err(code),
             };
         }
         // 非递归删除只对**最末段**有效：拆出父键与末段
         let Some((parent, last)) = subkey.rsplit_once('\\') else {
             let e = RegDeleteKeyW(hive, PCWSTR(sk.as_ptr()));
-            return if e.is_ok() { Ok(()) } else { Err(e.0) };
+            // R5c-v8-L06：删键的「已不存在」幂等口径与删值对齐（2/3 都算成功）。
+            return if e.is_ok() || open_key_missing_is_idempotent(e.0) { Ok(()) } else { Err(e.0) };
         };
         if last.is_empty() {
             // R5c-L07：尾分隔符会让 `last` 为空段，而 `RegDeleteKeyW(h, L"")` 的语义
@@ -372,17 +472,47 @@ pub fn reg_key_remove_checked(hive: HKEY, subkey: &str, recurse: bool) -> Result
             // 删除对象悄悄换成父键。按畸形 fail-closed 拒绝，不让多一个反斜杠改变目标。
             return Err(87);
         }
+        // R5c-v8-L03：末段转换提前到**任何开键之前**。旧顺序先开父键再转末段，
+        // 末段含 NUL/控制字符时 `?` 直接早退，父键句柄泄漏。
+        let parent_w = to_wide_checked(parent)?;
+        let last_w = to_wide_checked(last)?;
         let mut hk = HKEY::default();
         // 父键句柄只作路径锚点：文档明确 RegDeleteKeyW 的 hKey 访问权限不影响删除操作，
         // 旧实现用 KEY_SET_VALUE（删值面的掩码）属于误导，最小权限取 KEY_READ。
-        let open = RegOpenKeyExW(hive, PCWSTR(to_wide_checked(parent)?.as_ptr()), Some(0), KEY_READ, &mut hk);
+        let open = RegOpenKeyExW(hive, PCWSTR(parent_w.as_ptr()), Some(0), KEY_READ, &mut hk);
         if open.is_err() {
             return Err(open.0);
         }
-        let r = RegDeleteKeyW(hk, PCWSTR(to_wide_checked(last)?.as_ptr()));
-        let _ = RegCloseKey(hk);
-        if r.is_ok() { Ok(()) } else { Err(r.0) }
+        #[cfg(test)]
+        OPEN_OPENS.with(|c| c.set(c.get() + 1));
+        // RAII：开键后的任何早退（含测试钩子/未来新增分支）都必须关句柄。
+        let guard = ScopedRegKey(hk);
+        #[cfg(test)]
+        if FORCE_EARLY_RETURN_AFTER_OPEN.with(|c| c.get()) {
+            return Err(87);
+        }
+        let r = RegDeleteKeyW(guard.0, PCWSTR(last_w.as_ptr()));
+        if r.is_ok() || open_key_missing_is_idempotent(r.0) { Ok(()) } else { Err(r.0) }
     }
+}
+
+/// 开键句柄的 RAII 守卫（R5c-v8-L03）。
+struct ScopedRegKey(HKEY);
+
+impl Drop for ScopedRegKey {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        OPEN_CLOSES.with(|c| c.set(c.get() + 1));
+        let _ = unsafe { RegCloseKey(self.0) };
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static OPEN_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static OPEN_CLOSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// 测试钩子：模拟「开键之后才发现末段非法」的早退路径，验证 RAII 关句柄。
+    static FORCE_EARLY_RETURN_AFTER_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// 删除键的失败原因人话（纯函数，单测钉住「四种因不折成一句」）。
@@ -471,9 +601,8 @@ pub fn reg_enum_dev_ids(class: &str) -> (Vec<String>, bool) {
                     incomplete = true;
                     continue;
                 }
-                let hit = reg_read_string(inst_hk, "Class")
-                    .map(|c| c.eq_ignore_ascii_case(class))
-                    .unwrap_or(false);
+                let (hit, class_incomplete) = class_read_matches(class, reg_read_string(inst_hk, "Class"));
+                incomplete |= class_incomplete;
                 let _ = RegCloseKey(inst_hk);
                 if hit {
                     out.push(format!("PCI\\{dev}\\{inst}"));
@@ -484,6 +613,17 @@ pub fn reg_enum_dev_ids(class: &str) -> (Vec<String>, bool) {
         let _ = RegCloseKey(root);
     }
     (out, incomplete)
+}
+
+/// `Class` 值读取结果 → (是否命中, 是否因读失败而不完整)。
+///
+/// R5c-v8-L05：旧写法 `.unwrap_or(false)` 把「读不出来」静默折成「不是这个类」——
+/// 权限/IO 失败的设备从清单里消失，`incomplete` 仍是 false。读失败必须与开键失败同口径。
+fn class_read_matches(class: &str, read: Option<String>) -> (bool, bool) {
+    match read {
+        Some(c) => (c.eq_ignore_ascii_case(class), false),
+        None => (false, true),
+    }
 }
 
 /// 键的最后写入时间（Unix 毫秒）—— 失效残留扫描的「沉睡多久」展示用。
@@ -537,6 +677,11 @@ pub fn read_reg_string(hive: HKEY, subkey: &str, value: &str) -> Option<String> 
             let _ = RegCloseKey(hk);
             return None;
         }
+        // R5c-v8-L09：所有读值入口共用同一道 1 MiB 上限。
+        if !value_size_ok(size) {
+            let _ = RegCloseKey(hk);
+            return None;
+        }
         if ty != REG_SZ {
             let _ = RegCloseKey(hk);
             return None;
@@ -565,7 +710,7 @@ pub fn read_reg_string(hive: HKEY, subkey: &str, value: &str) -> Option<String> 
 /// 读注册表二进制值（REG_BINARY）—— M2 检测断言用。
 ///
 /// 为什么需要（与既有原语的关系）：
-/// - [`read_reg_dword_opt`] 只认 `REG_DWORD`（4 字节）；
+/// - [`read_reg_dword_u32_as_i64`] 只认 `REG_DWORD`（4 字节）；
 /// - [`read_reg_string`] 只认 `REG_SZ`（UTF-16，且**不**展开 `REG_EXPAND_SZ`）；
 /// - 而优化项里有两类真实写入是二进制：`MitigationOptions`（内核缓解位图，
 ///   `perf_exploit_protection_off`）与 `Scancode Map`（键盘扫描码重映射，
@@ -601,10 +746,8 @@ pub fn read_reg_binary_opt(hive: HKEY, subkey: &str, value: &str) -> Option<Stri
             let _ = RegCloseKey(hk);
             return Some(String::new()); // 存在但为空 ≠ 不存在
         }
-        // 上限防御：优化项里的二进制值最大 24 字节（MEMORY_COMBINE_INFORMATION_EX）。
-        // 1 MiB 是「读不出来就是异常」与「内存被无界分配」之间的折中，且远大于任何真实值。
-        const MAX_BINARY: u32 = 1024 * 1024;
-        if size > MAX_BINARY {
+        // 上限防御：与所有读值入口共用 [`MAX_REG_VALUE_BYTES`]（R5c-v8-L09）。
+        if !value_size_ok(size) {
             let _ = RegCloseKey(hk);
             return None;
         }
@@ -697,6 +840,11 @@ pub fn read_reg_value_state(hive: HKEY, subkey: &str, name: &str, flatten: bool)
                 RegReadState::Unknown(win_reg_err_label(q1.0))
             };
         }
+        // R5c-v8-L09：值状态读器同样受 1 MiB 上限约束；超限是「读不出来」，不是「不存在」。
+        if !value_size_ok(size) {
+            let _ = RegCloseKey(hk);
+            return RegReadState::Unknown("value_too_large".to_string());
+        }
         let mut reread = 0u32;
         loop {
             let mut buf = vec![0u8; size as usize];
@@ -727,7 +875,9 @@ pub fn read_reg_value_state(hive: HKEY, subkey: &str, name: &str, flatten: bool)
 /// 读注册表值，返回 (类型标签, 字符串化数据) —— **显示/回读链**用的展平口径。
 ///
 /// 口径逐条对齐 .NET `GetValue` 与 PS `[string]$v`（`READ_ONE_HEADER`，main.js 3481-3502 的移植）：
-/// `REG_EXPAND_SZ` **展开后**按 `REG_SZ` 回报、`REG_MULTI_SZ` 空格连接按 `REG_SZ` 回报。
+/// `REG_EXPAND_SZ` **展开后**按 `REG_SZ` 回报、`REG_MULTI_SZ` 空格连接按 `REG_SZ` 回报；
+/// `REG_EXPAND_SZ` 展开失败或超过 64K UTF-16 单元时保留原文并如实回报 `REG_EXPAND_SZ`
+/// （R5c-v8-L08：不得把未展开的原文标成 `REG_SZ`，否则写回会永久固化 `%VAR%`）。
 /// 这两个展平是有意的：卸载项的 `UninstallString` 给人看就该是展开后的真实路径。
 /// DWORD 按**有符号 i32**、QWORD 按 i64、BINARY 按小写 hex 连写 —— 读写两侧必须同一套规则，
 /// 否则 `0xFFFFFFFF` 这类值会在「备份→还原」之间变形。
@@ -813,8 +963,7 @@ pub fn decode_reg_value_bytes(
         // 而回执说「已还原」（交叉形态按 Corrupt 口径，两侧必须同形）。
         REG_DWORD if buf.len() == 4 => {
             let raw = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-            // .NET 把 DWORD 读成 int（有符号），`[int]$v` 再转字符串 —— 保留该口径
-            Some(("REG_DWORD", (raw as i32).to_string()))
+            Some(("REG_DWORD", reg_dword_as_i32_text(raw)))
         }
         REG_QWORD if buf.len() == 8 => {
             let raw = u64::from_le_bytes(buf[..8].try_into().ok()?);
@@ -824,8 +973,35 @@ pub fn decode_reg_value_bytes(
             Some(("REG_BINARY", buf.iter().map(|b| format!("{b:02x}")).collect()))
         }
         REG_SZ => {
+            // R5c-v8-L10：保真链遇到奇数字节/多余尾 NUL 必须判 decode_failed。
+            // 旧写法先 `chunks_exact(2)` 丢尾字节、再 `trim_end_matches('\0')` 归一，
+            // 写回后自比对走同一个解码器 ⇒ 恒相等，用户拿到「已还原」但边界已变形。
+            // 展示链（flatten=true）继续归一，不影响面板显示。
+            if !flatten {
+                if buf.len() % 2 != 0 {
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!("保真读注册表 REG_SZ 遇到奇数字节（{} 字节），判 decode_failed", buf.len()),
+                    );
+                    return None;
+                }
+                let trailing_nul = buf
+                    .chunks_exact(2)
+                    .rev()
+                    .take_while(|c| c[0] == 0 && c[1] == 0)
+                    .count();
+                if trailing_nul > 1 {
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!("保真读注册表 REG_SZ 遇到 {trailing_nul} 个尾 NUL（只允许一个终止符），判 decode_failed"),
+                    );
+                    return None;
+                }
+            }
             let u = units(buf);
             let s = decode_utf16_strict(&u)?;
+            // 保真分支已在上面把「多于一个尾 NUL」拒掉，这里至多削掉终止符；
+            // 展示分支维持旧的归一语义。
             Some(("REG_SZ", s.trim_end_matches('\0').to_string()))
         }
         REG_EXPAND_SZ => {
@@ -835,18 +1011,36 @@ pub fn decode_reg_value_bytes(
             if !flatten {
                 return Some(("REG_EXPAND_SZ", raw.to_string()));
             }
-            // 展开环境变量（对齐 .NET GetValue）；展开结果以 NUL 结尾
-            let mut out = [0u16; 1024];
+            // 展开环境变量（对齐 .NET GetValue）。R5c-v8-L08：两段式 —— 先取所需长度，
+            // 再按长度分配；固定 1024 缓冲会把超长展开结果截成「展开失败」，旧代码
+            // 仍标成 REG_SZ，写回时 `%VAR%` 永久变成字面量。
+            const EXPAND_SZ_MAX_UNITS: usize = 64 * 1024;
             let src = to_wide(raw);
-            let n = unsafe { ExpandEnvironmentStringsW(PCWSTR(src.as_ptr()), Some(&mut out[..])) };
-            let s = if n == 0 || n as usize > out.len() {
-                raw.to_string() // 展开失败/过长 → 原样保留，不造一个错值
-            } else {
-                let u16s = &out[..(n as usize - 1).max(0)];
-                // 展开结果由系统拼出，理论上合法；万一非法也不造替换字符，退回原值
-                decode_utf16_strict(u16s).unwrap_or_else(|| raw.to_string())
-            };
-            Some(("REG_SZ", s))
+            let need = unsafe { ExpandEnvironmentStringsW(PCWSTR(src.as_ptr()), None) };
+            if need == 0 || need as usize > EXPAND_SZ_MAX_UNITS {
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!(
+                        "REG_EXPAND_SZ 展开需要 {need} 个 UTF-16 单元，超过上限 {EXPAND_SZ_MAX_UNITS} 或调用失败，保留原文与 REG_EXPAND_SZ 类型"
+                    ),
+                );
+                return Some(("REG_EXPAND_SZ", raw.to_string()));
+            }
+            let mut out = vec![0u16; need as usize];
+            let got = unsafe { ExpandEnvironmentStringsW(PCWSTR(src.as_ptr()), Some(&mut out[..])) };
+            if got == 0 || got > need {
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("REG_EXPAND_SZ 二次展开失败（需要 {need}，实得 {got}），保留原文与 REG_EXPAND_SZ 类型"),
+                );
+                return Some(("REG_EXPAND_SZ", raw.to_string()));
+            }
+            let u16s = &out[..(got as usize - 1).max(0)];
+            // 展开结果由系统拼出，理论上合法；万一非法也不造替换字符，退回原值与真实类型
+            match decode_utf16_strict(u16s) {
+                Some(s) => Some(("REG_SZ", s)),
+                None => Some(("REG_EXPAND_SZ", raw.to_string())),
+            }
         }
         REG_MULTI_SZ => {
             let u = units(buf);
@@ -1053,6 +1247,9 @@ pub unsafe fn reg_read_value_typed(hive: HKEY, subkey: &str, value_name: &str) -
     let mut ty = REG_VALUE_TYPE::default();
     let mut size = 0u32;
     if RegQueryValueExW(hk, PCWSTR(nm.as_ptr()), None, Some(&mut ty), None, Some(&mut size)).is_err() {
+        let _ = RegCloseKey(hk); return None;
+    }
+    if !value_size_ok(size) {
         let _ = RegCloseKey(hk); return None;
     }
     let mut buf = vec![0u8; size as usize];
@@ -1290,10 +1487,11 @@ mod tests {
         use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ};
         // RegDeleteTreeW 在本机叶键上可能顺手让键消失，单看回读无法稳定区分
         // 「清树」和「删键本身」。契约要求递归分支显式再删键，故把这一行同时钉进真机用例。
-        let prod = include_str!("registry.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .unwrap_or_default();
+        // 生产段边界用 `mod tests` 而不是首个 `#[cfg(test)]`：
+        // 上方很早就有 `#[cfg(test)] thread_local!` 测试钩子，用后者截断会把
+        // `reg_key_remove_checked` 一起切掉（真机组实测「找不到」）。
+        let src = include_str!("registry.rs");
+        let prod = &src[..src.find("mod tests").expect("找不到单测段起点")];
         let remove = prod
             .split("pub fn reg_key_remove_checked")
             .nth(1)
@@ -1455,7 +1653,7 @@ mod tests {
             .find("RegDeleteKeyW(hive")
             .expect("递归分支缺少 RegDeleteKeyW —— 只清子项会留下键本身");
         let readback = remove_fn
-            .find("reg_key_exists(hive, subkey)")
+            .find("reg_key_exists_state(hive, subkey)")
             .expect("递归删除缺少删后现读，Win32 Ok 不能证明键已消失");
         assert!(
             first_win32 < delete_key && delete_key < readback,
@@ -1899,5 +2097,178 @@ mod tests {
         let (after, after_incomplete) = reg_enum_value_names_pub(HKEY_CURRENT_USER, SUB);
         assert!(!after_incomplete, "删除后枚举仍须完整");
         assert!(after.is_empty(), "默认值删掉后清单应为空，实得 {after:?}");
+    }
+
+    // ==================== P2 B-15 · 注册表原语边界 ====================
+
+    /// R5c-v8-L02：首段为空/任何空段都必须是 `Err(87)`，不得让 `rsplit_once`
+    /// 把父键落到 hive 本身（`\Foo` 的父键是 `""`）。
+    #[test]
+    fn r5c_leading_backslash_is_rejected() {
+        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+        for bad in [r"\Foo", r"Foo\", r"Foo\\Bar", r"\\Foo"] {
+            assert!(
+                super::reg_delete_subkey_shape_is_malformed(bad),
+                "{bad:?} 必须判畸形（任何空段都拒）"
+            );
+            assert_eq!(
+                super::reg_key_remove_checked(HKEY_CURRENT_USER, bad, false),
+                Err(87),
+                "{bad:?} 必须在任何 Win32 调用之前判 87"
+            );
+        }
+        assert!(!super::reg_delete_subkey_shape_is_malformed(r"Software\Foo"));
+    }
+
+    /// R5c-v8-L03：开键之后的任何早退都必须关句柄；末段转换必须提前到开键之前。
+    ///
+    /// 测试钩子模拟「开键后才发现末段非法」的路径（真实路径已被入口形态闸拦下，
+    /// 无法在无权限样本机器上自然触发）——RAII 守卫必须在早退时关句柄。
+    #[test]
+    fn r5c_invalid_last_does_not_leak() {
+        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+        let opens = || super::OPEN_OPENS.with(|c| c.get());
+        let closes = || super::OPEN_CLOSES.with(|c| c.get());
+        let before = (opens(), closes());
+        super::FORCE_EARLY_RETURN_AFTER_OPEN.with(|c| c.set(true));
+        let r = super::reg_key_remove_checked(HKEY_CURRENT_USER, r"Software\TrimLeakProbeNeverExists", false);
+        super::FORCE_EARLY_RETURN_AFTER_OPEN.with(|c| c.set(false));
+        let after = (opens(), closes());
+        assert_eq!(r, Err(87), "钩子必须让开键后的早退路径返回 87");
+        assert_eq!(after.0 - before.0, 1, "前置：早退前必须真的开过一次父键");
+        assert_eq!(after.0, after.1, "开键后的早退必须关句柄（开 {} / 关 {}）", after.0, after.1);
+    }
+
+    /// R5c-v8-L04：`5/拒绝访问` 必须是 Unknown，不能折成「不存在」。
+    #[test]
+    fn r5c_key_exists_unknown_on_access_denied() {
+        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+        super::FORCED_EXISTS_CODE.with(|c| c.set(Some(5)));
+        let state = super::reg_key_exists_state(HKEY_CURRENT_USER, r"Software");
+        let bool_view = super::reg_key_exists(HKEY_CURRENT_USER, r"Software");
+        super::FORCED_EXISTS_CODE.with(|c| c.set(None));
+        assert_eq!(state, super::KeyState::Unknown(5), "权限拒绝必须保留为 Unknown(5)，实得 {state:?}");
+        assert!(!bool_view, "bool 外观不得把 Unknown 当存在");
+        assert_eq!(super::key_state_from_open_code(2), super::KeyState::Missing);
+        assert_eq!(super::key_state_from_open_code(3), super::KeyState::Missing);
+        assert_eq!(super::key_state_from_open_code(0), super::KeyState::Exists);
+    }
+
+    /// R5c-v8-L05：`Class` 值读失败必须置 incomplete，不再 `unwrap_or(false)` 静默排除。
+    #[test]
+    fn r5c_class_read_failure_sets_incomplete() {
+        assert_eq!(super::class_read_matches("Display", None), (false, true), "读失败必须报不完整");
+        assert_eq!(super::class_read_matches("Display", Some("display".to_string())), (true, false));
+        assert_eq!(super::class_read_matches("Display", Some("USB".to_string())), (false, false));
+    }
+
+    /// R5c-v8-L06：删不存在的键与删值同口径 —— 2/3 视为幂等成功。
+    #[test]
+    fn r5c_delete_key_missing_is_idempotent() {
+        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+        let missing = format!(r"Software\TrimMissingKeyProbe_{}", std::process::id());
+        assert_eq!(
+            super::reg_key_remove_checked(HKEY_CURRENT_USER, &missing, false),
+            Ok(()),
+            "非递归删不存在的键必须幂等成功"
+        );
+        assert_eq!(
+            super::reg_key_remove_checked(HKEY_CURRENT_USER, &missing, true),
+            Ok(()),
+            "递归删不存在的键必须幂等成功"
+        );
+    }
+
+    /// R5c-v8-L08：超长 EXPAND_SZ 保留原文与真实类型，不得标成 REG_SZ。
+    #[test]
+    fn r5c_expand_sz_keeps_type_when_too_long() {
+        use windows::Win32::System::Registry::REG_EXPAND_SZ;
+        let raw = "x".repeat(70_000);
+        let bytes: Vec<u8> = raw.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let (ty, data) = super::decode_reg_value_bytes(REG_EXPAND_SZ, &bytes, true)
+            .expect("超长 EXPAND_SZ 必须退化为原文而非 decode_failed");
+        assert_eq!(ty, "REG_EXPAND_SZ", "超长展开必须保留 REG_EXPAND_SZ 类型（旧实现标成 REG_SZ）");
+        assert_eq!(data, raw, "原文必须逐字保留");
+    }
+
+    /// R5c-v8-L09：所有按回报长度分配的读值入口共用 1 MiB 上限。
+    #[test]
+    fn r5c_all_readers_have_value_cap() {
+        assert!(super::value_size_ok(super::MAX_REG_VALUE_BYTES), "恰好 1 MiB 必须放行");
+        assert!(!super::value_size_ok(super::MAX_REG_VALUE_BYTES + 1), "超过 1 MiB 必须拒绝");
+        let src = include_str!("registry.rs");
+        let prod = &src[..src.find("mod tests").expect("找不到单测段起点")];
+        fn body_of<'a>(prod: &'a str, marker: &str) -> &'a str {
+            let start = prod.find(marker).unwrap_or_else(|| panic!("找不到 {marker}"));
+            let rest = &prod[start..];
+            let end = rest.find("\n}\n").unwrap_or_else(|| panic!("{marker} 之后找不到顶格 }}"));
+            &rest[..end]
+        }
+        for marker in [
+            "unsafe fn reg_query_value",
+            "unsafe fn reg_read_string",
+            "pub fn read_reg_string",
+            "pub fn read_reg_binary_opt",
+            "pub fn read_reg_value_state",
+            "pub unsafe fn reg_read_value_typed",
+        ] {
+            assert!(
+                body_of(prod, marker).contains("value_size_ok("),
+                "{marker} 缺少 1 MiB 长度闸（删任一处 ⇒ 本用例红）"
+            );
+        }
+    }
+
+    /// R5c-v8-L10：保真链遇到奇数字节/多余尾 NUL 必须判失败；展示链可继续归一。
+    #[test]
+    fn r5c_faithful_reg_sz_preserves_odd_tail() {
+        use windows::Win32::System::Registry::REG_SZ;
+        assert!(
+            super::decode_reg_value_bytes(REG_SZ, &[0x41, 0, 0], false).is_none(),
+            "3 字节 REG_SZ 在保真链必须判 decode_failed"
+        );
+        assert!(
+            super::decode_reg_value_bytes(REG_SZ, b"A\0\0\0\0\0", false).is_none(),
+            "多于一个尾 NUL 在保真链必须判 decode_failed"
+        );
+        assert_eq!(
+            super::decode_reg_value_bytes(REG_SZ, b"A\0", false).map(|(t, d)| (t, d)),
+            Some(("REG_SZ", "A".to_string())),
+            "正常单终止符必须照旧保真解码"
+        );
+        assert_eq!(
+            super::decode_reg_value_bytes(REG_SZ, &[0x41, 0, 0], true).map(|(t, d)| (t, d)),
+            Some(("REG_SZ", "A".to_string())),
+            "展示链继续归一（3 字节也能显示）"
+        );
+    }
+
+    /// B03（方案 R5c-v8-L01）：三套 DWORD 数值口径必须在名字与行为上都可区分。
+    ///
+    /// `0xFFFFFFFF` 是分水岭：u32 口径下它是 4294967295，i32 口径下是 -1。
+    /// 三套口径混用时，调用方会拿 -1 去和「阈值」比较（SVCHost 拆分阈值就是这一类），
+    /// 于是「等于阈值」变成「小于阈值」，判断整个反过来。
+    #[test]
+    fn b03_dword_three_numeric_conventions_are_distinguishable() {
+        // ① u32 → i64（无符号提升）：0xFFFFFFFF = 4294967295
+        assert_eq!(
+            0xFFFF_FFFF_u32 as i64,
+            4_294_967_295_i64,
+            "u32 提升为 i64 的口径必须是无符号值"
+        );
+        // ② 纯 u32
+        assert_eq!(0xFFFF_FFFF_u32, 4_294_967_295_u32, "纯 u32 口径必须是 4294967295");
+        // ③ i32（.NET / PS 口径）
+        assert_eq!(
+            super::reg_dword_as_i32_text(0xFFFF_FFFF),
+            "-1",
+            "i32 口径必须是有符号 -1"
+        );
+        assert_eq!(super::reg_dword_as_i32_text(0), "0", "i32 口径的 0 不受影响");
+        assert_eq!(
+            super::reg_dword_as_i32_text(2_147_483_647),
+            "2147483647",
+            "i32 口径的正数上界"
+        );
     }
 }

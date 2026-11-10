@@ -168,6 +168,33 @@ for (const f of IMPL) {
   else g.fail(`② ${f} 守卫被掏空（Drop ${hasDrop ? '在' : '缺'} / remove_dir_all ${hasRemove ? '在' : '缺'}）⇒ 已改造的建点会静默退回「失败即留残」，而①仍然全绿`);
 }
 
+// ②b A14（X1-L06）：守卫建出来的沙箱目录名必须**带进程 id**。
+// 此前 pid 由调用点自觉拼进 tag，于是有 3 处漏拼（取数命令：
+// `rg -n 'Sandbox::new\("' src-tauri/src`）—— 同一测试进程里两次用同名 tag
+// 建沙箱会互相删掉对方的目录，并行跑时的症状是「夹具目录莫名消失」，极难定位。
+// pid 拼在 helper 里就不给漏的机会：门禁钉住「守卫实现里必须出现 process::id()」。
+{
+  const PID_IN_NAME = /std::process::id\(\)/;
+  for (const f of IMPL) {
+    const abs = join(ROOT, f);
+    if (!existsSync(abs)) continue;
+    const t = readFileSync(abs, 'utf8');
+    // 只看建点那一段：`temp_dir()` 之后、拼目录名的表达式。
+    const sites = t.split(/\r?\n/).filter((l) => /temp_dir\(\)/.test(l));
+    const withPid = sites.filter((l) => PID_IN_NAME.test(l)).length;
+    const window = 6; // 建点常跨行（链式 + format!），给一个短窗口
+    const near = [];
+    const lines = t.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      if (!/temp_dir\(\)/.test(lines[i])) continue;
+      near.push(lines.slice(i, Math.min(i + window, lines.length)).join('\n'));
+    }
+    const anyPid = near.some((s) => PID_IN_NAME.test(s));
+    if (anyPid) g.ok(`②b ${f} 沙箱目录名带 process::id()（${withPid}/${sites.length} 处建点在同一行内可见 pid）`);
+    else g.fail(`②b ${f} 沙箱目录名没带 process::id() ⇒ 同名 tag 会互相删目录（并行症状：夹具目录莫名消失）`);
+  }
+}
+
 // ③ %TEMP% 残留：观测项
 const TEMP = process.env.TEMP || process.env.TMP;
 if (!TEMP || !existsSync(TEMP)) {

@@ -102,17 +102,32 @@ check(allProportional, '面积占比 = 体积占比（相对误差 1%）');
 // T1d-L07：AN_TM_LOGIC_H（逻辑单位）⇄ .an-tm-box 高度（物理 px）的联动。
 // 格子坐标以逻辑单位算，CSS 高度把它们线性放大；文字阈值（AN_TM_NAME_MIN_*）也按逻辑
 // 单位比较，所以两者的比例 = 阈值在屏上的物理尺寸。2026-11-01 现算 230 / 46 = 5 px/单位；
-// 改任一侧都必须重新核算「名字放不放得下」，这里钉住比例本身。
+// 改任一侧都必须重新核算「名字放不下 / 挤字」，两侧分别钉在设计常量，禁止同步改数字绕过。
 {
   const logicH = Number((src.match(/const AN_TM_LOGIC_H\s*=\s*(\d+)/) || [])[1]);
   const minNameH = Number((src.match(/const AN_TM_NAME_MIN_H\s*=\s*(\d+)/) || [])[1]);
   const subMinH = Number((src.match(/const AN_TM_SUB_MIN_H\s*=\s*(\d+)/) || [])[1]);
   const cssH = Number((readFileSync(PAGES_CSS, 'utf8').match(/\.an-tm-box\s*\{[^}]*\bheight:\s*(\d+)px/) || [])[1]);
-  const PX_PER_LOGIC_UNIT = 5; // 230px / 46 逻辑单位（阈值物理尺寸的换算基准）
+  const AN_TM_LOGIC_H_EXPECTED = 46;
+  const AN_TM_BOX_HEIGHT_PX_EXPECTED = 230;
+  const PX_PER_LOGIC_UNIT = AN_TM_BOX_HEIGHT_PX_EXPECTED / AN_TM_LOGIC_H_EXPECTED;
   check(
-    logicH > 0 && cssH === logicH * PX_PER_LOGIC_UNIT,
-    `CSS 高度 ⇄ JS 逻辑高联动（.an-tm-box ${cssH}px / AN_TM_LOGIC_H ${logicH} = ${PX_PER_LOGIC_UNIT}px/单位）`,
-    logicH > 0 && cssH === logicH * PX_PER_LOGIC_UNIT ? '' : '两侧比例漂移：文字阈值的物理尺寸随之变化，格子会漏字或挤字',
+    logicH === AN_TM_LOGIC_H_EXPECTED && cssH === AN_TM_BOX_HEIGHT_PX_EXPECTED,
+    `设计钉：AN_TM_LOGIC_H=${AN_TM_LOGIC_H_EXPECTED}、.an-tm-box=${AN_TM_BOX_HEIGHT_PX_EXPECTED}px（实算 ${logicH} / ${cssH}px = ${PX_PER_LOGIC_UNIT}px/单位）`,
+    logicH !== AN_TM_LOGIC_H_EXPECTED
+      ? `JS 逻辑高漂移：设计钉 ${AN_TM_LOGIC_H_EXPECTED}，实算 ${logicH}；文字阈值的物理尺寸随之变化`
+      : cssH !== AN_TM_BOX_HEIGHT_PX_EXPECTED
+        ? `CSS 物理高漂移：设计钉 ${AN_TM_BOX_HEIGHT_PX_EXPECTED}px，实算 ${cssH}px；文字阈值的物理尺寸随之变化`
+        : '',
+  );
+  const minNamePx = minNameH * PX_PER_LOGIC_UNIT;
+  const subMinPx = subMinH * PX_PER_LOGIC_UNIT;
+  check(
+    Number.isFinite(minNamePx) && Number.isFinite(subMinPx) && minNamePx > 0 && subMinPx > minNamePx,
+    `文字阈值物理尺寸（名字 ${minNamePx}px / 副行 ${subMinPx}px）由设计比例现算`,
+    !Number.isFinite(minNamePx) || !Number.isFinite(subMinPx)
+      ? '文字阈值解析失败 —— 阈值在屏上的物理尺寸不可知，不能判绿'
+      : '阈值物理尺寸未保持递增，格子会漏字或挤字',
   );
   check(
     minNameH > 0 && subMinH > minNameH && subMinH < logicH,

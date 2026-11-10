@@ -258,14 +258,30 @@ fn js_num_str(n: f64) -> String {
     /// 判据分两半：还原链**一个删除调用都不许有**；删除链的保留上限裁撤必须还在位。
     #[test]
     fn 还原链不得删除自己的还原依据() {
-        let restore = strip_rust_comments(include_str!("backup.rs"));
-        for needle in ["remove_file", "remove_dir_all", "remove_dir("] {
+        let restore_all = strip_rust_comments(include_str!("backup.rs"));
+        // R4 原判据是「全文零删除调用」。P2/A-05 之后还原链用 `create_new`
+        // 占位：拷回失败时要删掉**自己刚创建的那个空占位文件**（不是既有还原依据），
+        // 这是受控例外；但测试区里的夹具清理不该混进生产面判定。
+        let restore = restore_all.split("#[cfg(test)]").next().unwrap_or("");
+        for needle in ["remove_dir_all", "remove_dir("] {
             assert!(
                 !restore.contains(needle),
                 "backup.rs 出现 {needle}：还原链不得删除 .reg 备份 / 清单 / 副本\
                  （保留裁剪只走 paths::prune_backups 与 native::prune_file_backups）"
             );
         }
+        // 生产段的 remove_file 只允许「删自己刚创建的 create_new 占位文件」这一处；
+        // 多一处（或改成删 original）都判红。
+        assert_eq!(
+            restore.matches("std::fs::remove_file(&dst)").count(),
+            1,
+            "生产段只允许 create_new 占位失败时的自清理，不得有任何别的 remove_file"
+        );
+        assert_eq!(
+            restore.matches("std::fs::remove_file(").count(),
+            1,
+            "生产段出现未登记的 remove_file：还原链不得删既有还原依据"
+        );
         // 另一半：不是"不裁"，而是"只按统一上限裁"——裁撤接线必须还在
         let engine = strip_rust_comments(include_str!("../../engine/native/cleanup.rs"));
         assert!(engine.contains("paths::prune_backups("), "注册表备份的保留上限裁撤不见了");
@@ -987,6 +1003,53 @@ fn js_num_str(n: f64) -> String {
             builtin.contains("validate_cleanup_package(&v)"),
             "内置副本没过同一道语义校验 = 给内置开了豁免通道"
         );
+    }
+
+    #[test]
+    fn rule_pack_rejects_non_object_entry() {
+        let mut group = ok_pkg(ok_item())["groups"][0].clone();
+        group["items"] = json!([ok_item(), "不是对象"]);
+        let err = validate_cleanup_package(&json!({
+            "version": 2,
+            "rulesVersion": 20260928,
+            "groups": [group],
+        })).unwrap_err();
+        assert!(
+            err.contains("groups[0].items[1] 不是对象"),
+            "拒绝原因必须带组/条目下标: {err}"
+        );
+
+        let mut group = ok_pkg(ok_item())["groups"][0].clone();
+        group["subGroups"] = json!([{"id": "sg", "name": "测试子组", "items": [1]}]);
+        let err = validate_cleanup_package(&json!({
+            "version": 2,
+            "rulesVersion": 20260928,
+            "groups": [group],
+        })).unwrap_err();
+        assert!(
+            err.contains("groups[0].subGroups[0].items[0] 不是对象"),
+            "拒绝原因必须带子组/条目下标: {err}"
+        );
+    }
+
+    #[test]
+    fn custom_toggle_bad_json_is_reported() {
+        let sb = crate::testutil::Sandbox::new(&format!(
+            "cleanup-custom-bad-json-{}",
+            std::process::id()
+        ));
+        let path = sb.join("bad.json");
+        std::fs::write(&path, b"{bad json").expect("写坏 JSON 样本");
+        let result = safe_read_json(&path);
+        let reason = result.expect_err("坏 JSON 必须显式失败");
+        assert!(reason.contains("JSON 解析失败"), "原因必须可辨: {reason}");
+
+        let custom = vec![path];
+        let rules = load_merged_rules_uncached(custom);
+        let skipped = rules["skippedCustomRules"].as_array().cloned().unwrap_or_default();
+        assert_eq!(skipped.len(), 1, "坏 custom 文件必须进回执: {rules}");
+        assert_eq!(skipped[0]["file"], json!("bad.json"), "回执必须带文件名: {skipped:?}");
+        assert!(skipped[0]["reason"].as_str().unwrap_or_default().contains("JSON 解析失败"));
     }
 
 // ==================== §4.7 防回滚水位线：进程内高水位（2026-10-04） ====================

@@ -464,20 +464,22 @@ function sliceBetween(text, startNeedle, endNeedle) {
   return text.slice(start, end > start ? end : Math.min(text.length, start + 6000));
 }
 function focusTrapMissing(code) {
+  const clean = blankNonCode(code, 'js', { keepStrings: true });
   const out = [];
-  if (!code.includes("e.key !== 'Tab'")) out.push('没有 Tab 键判定');
-  if (!code.includes('preventDefault')) out.push('没有 Tab 默认行为拦截');
-  if (!code.includes("addEventListener('focusin'")) out.push('没有 focusin 监听');
-  if (!code.includes('container.contains(document.activeElement)')) out.push('没有容器归属判定');
-  if (!code.includes('target.focus()')) out.push('没有初始焦点');
-  if (!code.includes('prevFocus.focus()')) out.push('没有关闭归还');
+  if (!clean.includes("e.key !== 'Tab'")) out.push('没有 Tab 键判定');
+  if (!clean.includes('preventDefault')) out.push('没有 Tab 默认行为拦截');
+  if (!clean.includes("addEventListener('focusin'")) out.push('没有 focusin 监听');
+  if (!clean.includes('container.contains(document.activeElement)')) out.push('没有容器归属判定');
+  if (!clean.includes('target.focus()')) out.push('没有初始焦点');
+  if (!clean.includes('prevFocus.focus()')) out.push('没有关闭归还');
   return out;
 }
 function modalFocusMissing(code) {
+  const clean = blankNonCode(code, 'js', { keepStrings: true });
   const out = [];
-  if (!code.includes('ds.focusTrap(')) out.push('未接 ds.focusTrap');
-  if (!code.includes('initialFocus: \'[data-confirm="ok"]\'')) out.push('确认框默认焦点未落主按钮');
-  if (!code.includes('trap.release()') && !code.includes('trap?.release()')) out.push('关闭未调用 trap.release');
+  if (!clean.includes('ds.focusTrap(')) out.push('未接 ds.focusTrap');
+  if (!clean.includes('initialFocus: \'[data-confirm="ok"]\'')) out.push('确认框默认焦点未落主按钮');
+  if (!clean.includes('trap.release()') && !clean.includes('trap?.release()')) out.push('关闭未调用 trap.release');
   return out;
 }
 
@@ -504,6 +506,10 @@ const COLLAPSE_SITES = [
   { file: 'src/scripts/optimizer.js', needle: 'opt-row', why: '优化看板行（点击查看详情/还原是唯一入口）' },
   { file: 'src/scripts/models-window.js', needle: 'mw-group-head', why: '大模型管理分组头折叠' },
   { file: 'src/scripts/finder.js', needle: 'an-tm-cell', why: 'Treemap 格子下钻（role=button）' },
+  { file: 'src/scripts/startup.js', needle: 'tabindex="0" role="button"', why: '启动项行卡键盘打开详情' },
+  { file: 'src/scripts/maintenance.js', needle: 'maint-card', why: '系统维护行卡键盘打开详情' },
+  { file: 'src/scripts/contextmenu.js', needle: 'ctx-kanban-row', why: '右键菜单行键盘打开详情' },
+  { file: 'src/scripts/contextmenu.js', needle: 'ctx-reg-jump', why: '注册表路径键盘打开 regedit' },
 ];
 function collapseKeyWiring(text) {
   return /addEventListener\(\s*['"]keydown['"]/.test(text) && /['"]Enter['"]/.test(text);
@@ -906,6 +912,29 @@ function frozenRmConstants(code) {
   }
 }
 
+// ---- ⑫ 灯箱可访问名与缩略图选中态（P2/C-W1 F4a1-L19） ----
+{
+  const lbText = read(join(SRC, 'vendor', 'litebox.js'));
+  const cleanText = read(join(SRC, 'scripts', 'cleanup.js'));
+  const judge = (lb, clean) => lb.includes("this.dialog.setAttribute('aria-label', '图片预览')")
+    && lb.includes("this.dialog.setAttribute('aria-label', caption ? '图片预览：' + caption : '图片预览')")
+    && clean.includes('aria-selected="true"')
+    && clean.includes("btn.setAttribute('aria-selected', 'true')")
+    && clean.includes("btn.setAttribute('aria-selected', 'false')");
+  const POS_LB = "this.dialog.setAttribute('aria-label', '图片预览');\nthis.dialog.setAttribute('aria-label', caption ? '图片预览：' + caption : '图片预览');";
+  const POS_CLEAN = "const cur = selected ? ' aria-current=\"true\" aria-selected=\"true\"' : ' aria-selected=\"false\"';\nbtn.setAttribute('aria-selected', 'true');\nbtn.setAttribute('aria-selected', 'false');";
+  const NEG_LB = "this.dialog.classList.add('litebox');";
+  const NEG_CLEAN = "btn.setAttribute('aria-current', 'true');";
+  if (!judge(POS_LB, POS_CLEAN) || judge(NEG_LB, NEG_CLEAN)) {
+    g.fail('⑫ 正向对照失败：灯箱可访问名/缩略图选中态判定器失真');
+  }
+  if (!judge(lbText, cleanText)) {
+    g.fail('⑫ litebox dialog 缺 aria-label，或缩略图 option 缺 aria-selected 同步 ⇒ 读屏读不到名称与选中态');
+  } else {
+    g.ok('⑫ litebox dialog 有可读名称，缩略图 option 的 aria-selected 与当前图同步');
+  }
+}
+
 // ---- 扫描面地板（低于粗下界 ⇒ 疑似正则/目录失明，判红） ----
 if (checkboxSites < 4) g.fail(`勾选框模板命中 ${checkboxSites} 处（< 4）⇒ 扫描面疑似失明`);
 if (liveHosts < 4) g.fail(`异步提示宿主命中 ${liveHosts} 处（< 4）⇒ 扫描面疑似失明`);
@@ -989,6 +1018,88 @@ if (tipSites < 10) g.fail(`data-tip 命中 ${tipSites} 处（< 10）⇒ 扫描�
 // T1d-K01：采集面地板——jsFiles 塌缩（scripts/ 或 vendor/ 改名）时其余断言全是空集假绿
 if (jsFiles.length < JS_CORPUS_FLOOR) {
   g.fail(`前端 js 语料只有 ${jsFiles.length} 个（< ${JS_CORPUS_FLOOR}）⇒ 采集面塌陷（scripts/** + vendor/** 递归现算），拒绝判绿`);
+}
+
+// ---------- C-06（F4a1-L14）：自写 keydown 必须挡按键连发 ----------
+// 长按一个键会连发 keydown（`e.repeat === true`）。绑在「Enter/Space 触发动作」上的
+// 处理器若不挡，一次物理按键会被放大成连续多次动作（折叠行开→关→开、抽屉反复收起）。
+// 本组只认**触发动作**的那类 keydown（键位判定含 Enter / Space），方向键导航类
+// （ArrowUp/ArrowDown 移动焦点）连发是期望行为，不在本组判据面。
+{
+  const RE_KEYDOWN_HANDLER = /addEventListener\(\s*['"]keydown['"]\s*,\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/g;
+  const RE_ACTION_KEY = /\be\.key\s*===?\s*['"](?:Enter| |Spacebar)['"]|\be\.code\s*===?\s*['"](?:Enter|Space)['"]/;
+  // 「触发动作」的判据：Enter/Space 分支里调用了某个**非 e.* 的**函数。
+  // 只做 preventDefault / stopPropagation 的（xtable 的列宽手柄：Enter/Space 就地吞掉，
+  // 防冒泡到表头排序）不触发动作，长按连发无害 —— 那种不该被这条判据拉进来。
+  const RE_ACTION_CALL = /(?<![.\w$])(?:[A-Za-z_$][\w$]*)\s*\(/;
+  const RE_REPEAT_GUARD = /if\s*\(\s*e\.repeat\s*\)\s*return\s*;/;
+  const missing = [];
+  let actionHandlers = 0;
+  for (const [p, text] of sources) {
+    const stripped = blankNonCode(text, 'js', { keepStrings: true });
+    for (const m of stripped.matchAll(RE_KEYDOWN_HANDLER)) {
+      // 取 handler 体：从 `{` 起做括号配对（本仓写法都是单行箭头函数 + 块）。
+      const open = stripped.indexOf('{', m.index + m[0].length - 1);
+      if (open < 0) continue;
+      let depth = 0;
+      let end = open;
+      for (let i = open; i < stripped.length; i++) {
+        const c = stripped[i];
+        if (c === '{') depth++;
+        else if (c === '}') {
+          depth--;
+          if (depth === 0) { end = i; break; }
+        }
+      }
+      const body = stripped.slice(open, end + 1);
+      if (!RE_ACTION_KEY.test(body)) continue; // 不是「按键触发动作」的那类
+      // 「触发动作」的判据：**Enter/Space 那一支**里存在非 e.* 的函数调用。
+      // 逐个 e.key 判断取其体（花括号分支取块内；无花括号早退则取该 if 之后到下一个 if 之前）：
+      // ① `if (e.key === 'Enter' || ...) { e.preventDefault(); doThing(); }`（花括号分支）；
+      // ② `if (e.key !== 'Enter' && ...) return; doThing();`（无花括号早退）。
+      // 只看 Enter/Space 那一支：xtable 的列宽手柄 Enter/Space 只 preventDefault（不触发动作），
+      // 而 Arrow 分支有 applyColWidth —— 方向键连发步进是期望行为，不该被拉进来。
+      // 把 e.preventDefault( / e.stopPropagation( 换成不可能匹配的占位（__EP__）——
+      // 换成 `e_(` 仍会被「非 e.* 的调用」判据当成一次调用。
+      const withoutEP = body.replace(/\be\s*\.\s*(?:preventDefault|stopPropagation)\s*\(\s*\)/g, '__EP__');
+      let actionBranch = '';
+      const keyIfs = [...withoutEP.matchAll(/if\s*\(([^)]*e\.key[^)]*)\)/g)];
+      for (const kif of keyIfs) {
+        const cond = kif[1];
+        if (!/['"](?:Enter| |Spacebar)['"]/.test(cond)) continue; // 不是 Enter/Space 那一支
+        const after = withoutEP.slice(kif.index + kif[0].length);
+        const braceAt = after.indexOf('{');
+        const nextIfAt = after.search(/\bif\s*\(/);
+        if (braceAt >= 0 && (nextIfAt < 0 || braceAt < nextIfAt)) {
+          // 花括号分支：取块内
+          let d = 0;
+          for (let i = braceAt; i < after.length; i++) {
+            if (after[i] === '{') d++;
+            else if (after[i] === '}') { d--; if (d === 0) { actionBranch = after.slice(braceAt + 1, i); break; } }
+          }
+        } else {
+          // 无花括号早退：取该 if 之后到下一个 if 之前
+          actionBranch = nextIfAt < 0 ? after : after.slice(0, nextIfAt);
+        }
+        if (actionBranch) break;
+      }
+      if (!actionBranch) continue; // 取不到 Enter/Space 分支 ⇒ 不在本组判据面
+      const branchCall = RE_ACTION_CALL.exec(actionBranch);
+      if (!branchCall) continue; // 分支里没有非 e.* 的调用 ⇒ 不是触发动作
+      actionHandlers++;
+      if (!RE_REPEAT_GUARD.test(body)) {
+        missing.push(`${rel(p)}：自写 keydown 触发动作（Enter/Space）但没有 \`if (e.repeat) return;\` 守卫 ⇒ 长按会连发`);
+      }
+    }
+  }
+  if (actionHandlers < 3) {
+    g.fail(`C-06 动作型 keydown 只认出 ${actionHandlers} 个（< 3）⇒ 扫描面疑似失明`);
+  }
+  if (missing.length) {
+    for (const m of missing) g.fail(m);
+  } else {
+    g.ok(`C-06 动作型 keydown 全部挡了按键连发（${actionHandlers} 处）`);
+  }
 }
 
 console.log(

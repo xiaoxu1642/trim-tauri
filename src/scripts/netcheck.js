@@ -139,14 +139,16 @@
   async function startCollect() {
     if (collecting) return;
     if (!window.api?.netcheck?.collect) { toast('warning', '当前环境不支持网络检测'); return; }
-    collecting = true;
     const btn = document.getElementById('btnNetcheckStart');
-    if (btn) { btn.disabled = true; btn.textContent = '检测中…'; }
-    setAll('scanning');
-    nicProps = null;
-    renderAll();
-    renderNicProps();
     try {
+      setAll('scanning');
+      nicProps = null;
+      renderAll();
+      renderNicProps();
+      // F4b-L10：运行标志在 DOM/进度准备完成后才置位；前置步骤抛错时
+      // finally 照样复位，但不会先把闸门焊死。
+      collecting = true;
+      if (btn) { btn.disabled = true; btn.textContent = '检测中…'; }
       const resp = await window.api.netcheck.collect();
       const items = resp?.success && Array.isArray(resp.data?.items) ? resp.data.items : null;
       if (!items) {
@@ -207,7 +209,7 @@
     const ok = await window.app.confirmDanger(
       conf.title,
       conf.msg,
-      '执行修复', '取消',
+      '仍然执行', '取消',
       conf.hint || ''
     );
     if (!ok) return;
@@ -251,7 +253,7 @@
       (taskId === 'netstack'
         ? '将重置 Winsock 目录与 TCP/IP 栈并刷新 DNS，修复联网异常。\n\n会清空自定义网络筛选器，需重连网络。'
         : '将执行 ipconfig /flushdns 清空本地 DNS 解析缓存。'),
-      '执行', '取消',
+      '仍然执行', '取消',
       ''
     );
     if (!ok) return;

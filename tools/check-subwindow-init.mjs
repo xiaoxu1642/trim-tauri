@@ -32,6 +32,8 @@
 // 合成对照（AGENTS §4.1）：每次运行都跑 C0–C8，`?.` 漏绑 / 注释顶账 / 重入重跑 init /
 // 首屏少发调用 / 页面少加载脚本 / 未登记的 `?.` 调用 / 未登记的新绑定 / 失效的过渡条目，
 // 任一放行 ⇒ 本门禁自己判红。
+// 桩面限制（刻意简化，不是真浏览器）：只支持 `window.X` 形态的全局组件；`setTimeout`
+// 同步执行，便于把首屏调用在 init 结束前收进计数。子窗脚本不得依赖桩没有覆盖的异步/裸全局形态。
 //
 // 用法：node tools/check-subwindow-init.mjs [--verbose]
 import { readFileSync, readdirSync } from 'node:fs';
@@ -55,6 +57,7 @@ const PAGES = [
     // 断言 3b：本页初始化期间**全部**可观测调用（顺序无关、多重集精确相等）。
     // 这不是「文本里有什么」，而是桩上真的被调到的集合——少一条、多一条都判红。
     initCalls: ['ds.bindCheckboxKeys', 'residueWindow.onTarget', 'settings.getPrefs', 'settings.setPref', 'uninstall.residueScan'],
+    idempotencyHost: 'rsChainBody',
     // 断言 7：`?.` 元素绑定台账（脚本扫描 ⇄ 本页 HTML id ⇄ 本表 三向相等）。
     // 空 = 本页绑定全走 on() 降级 warn，缺件由断言 2/6 看得见。
     optionalBindings: [],
@@ -86,7 +89,7 @@ const PAGES = [
       'log.write': () => undefined,
     }),
     // `window.ds?.bindCheckboxKeys?.` 同样走可选链：桩不给就静默跳过，键盘勾选没有任何证据。
-    ds: { bindCheckboxKeys: () => undefined },
+    ds: {},
     expectHosts: ['rsChainBody:click'],
   },
   {
@@ -163,6 +166,13 @@ const GLOBAL_PROVIDER = {
   intro: 'scripts/intro.js',
   ProcessTools: 'scripts/processes.js',
 };
+const NATIVE_GLOBALS = new Set([
+  'close', 'document', 'location', 'localStorage', 'navigator', 'console',
+  'URLSearchParams', 'Promise', 'JSON', 'Math', 'Date', 'Object', 'Array',
+  'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'requestAnimationFrame',
+  'addEventListener', 'removeEventListener',
+]);
+const BARE_GLOBAL_OBJECTS = ['ds', 'modal', 'intro', 'subToast', 'ProcessTools'];
 
 // 过渡表：两窗仍是 `?.` 直挂（产品侧未迁 on() 降级 warn，缺件静默）。逐条登记、双向咬合：
 // 登记项在脚本里消失 ⇒ 判红（条目该删）；脚本里出现未登记的 `?.` 绑定 ⇒ 判红（只减不增）。
@@ -207,6 +217,7 @@ const TRANSITION = [
 
 let fail = 0;
 let skipped = 0;
+let checkboxKeydownRegistrations = 0;
 const skip = (label, detail = '') => {
   console.log(`– SKIP ${label}${detail ? ' — ' + detail : ''}`);
   skipped++;
@@ -322,12 +333,12 @@ function multisetDiff(a, b) {
  * 结构判定（断言 8）与运行判定共用这一份清单，不另抄一套。
  */
 function stubInventory(page) {
-  const s = new Set(['subToast.hintLine', 'ds.esc', 'ds.escAttr', 'ds.fmtBytes']);
+  const s = new Set(['subToast.hintLine', 'ds.esc', 'ds.escAttr', 'ds.fmtBytes', 'ds.bindCheckboxKeys']);
   for (const flat of Object.keys(page.api())) {
     const [ns, m] = flat.split('.');
     s.add(`api.${ns}.${m}`);
   }
-  for (const m of Object.keys(page.ds || {})) s.add(`ds.${m}`);
+  for (const m of Object.keys(page.ds || {})) if (m !== 'bindCheckboxKeys') s.add(`ds.${m}`);
   for (const [name, obj] of Object.entries(page.extraGlobals ? page.extraGlobals() : {})) {
     for (const [m, fn] of Object.entries(obj)) if (typeof fn === 'function') s.add(`${name}.${m}`);
   }
@@ -432,8 +443,16 @@ function judgeWiring(page, htmlText, code) {
   if (!scripts.includes(page.script)) v.push(`本页 HTML 没加载本页脚本 <script src="${page.script}">`);
   const used = new Set([...code.matchAll(/window\.([A-Za-z_$][\w$]*)/g)].map((m) => m[1]));
   for (const g of used) {
-    if (g === 'api' || !GLOBAL_PROVIDER[g]) continue;
+    if (g === 'api' || NATIVE_GLOBALS.has(g)) continue;
+    if (!GLOBAL_PROVIDER[g]) {
+      v.push(`脚本用到未登记的 window.${g} 全局组件（GLOBAL_PROVIDER 是豁免表，不是自动放行表）`);
+      continue;
+    }
     if (!scripts.includes(GLOBAL_PROVIDER[g])) v.push(`脚本用到 window.${g}，但本页 HTML 没加载 ${GLOBAL_PROVIDER[g]}`);
+  }
+  for (const m of code.matchAll(new RegExp(`(?:^|[^\\w$.])(?:${BARE_GLOBAL_OBJECTS.join('|')})\\.`, 'gm'))) {
+    const line = lineAt(code, m.index);
+    v.push(`第 ${line} 行出现裸全局引用 ${m[0].trim()}；改回 window.X 或同步扩展桩`);
   }
   return v;
 }
@@ -496,6 +515,7 @@ function buildCtx(page, opts = {}) {
       disabled: false,
       value: '',
       type: 'text',
+      __dsCheckboxKeys: false,
       textContent: '',
       innerHTML: '',
       style: {},
@@ -562,8 +582,19 @@ function buildCtx(page, opts = {}) {
     };
   }
 
-  const ds = { esc, escAttr: esc, fmtBytes: (n) => String(n) };
-  for (const [m, fn] of Object.entries(page.ds || {})) {
+  const ds = {
+    esc, escAttr: esc, fmtBytes: (n) => String(n),
+    // C-11/F1b-L01 运行面：只记录“真实注册”次数，幂等标记在 host 上。
+    bindCheckboxKeys: (host, selector) => {
+      calls.push({ name: 'ds.bindCheckboxKeys', stack: new Error().stack || '' });
+      if (!host) return;
+      if (host.__dsCheckboxKeys) return;
+      host.__dsCheckboxKeys = true;
+      checkboxKeydownRegistrations++;
+      host.addEventListener('keydown', () => {});
+    },
+  };
+  for (const [m, fn] of Object.entries(page.ds || {}).filter(([m]) => m !== 'bindCheckboxKeys')) {
     ds[m] = (...args) => {
       calls.push({ name: `ds.${m}`, stack: new Error().stack || '' });
       return fn(...args);
@@ -579,6 +610,8 @@ function buildCtx(page, opts = {}) {
     modal: null,
     intro: { mountIntroPanel: () => ({}) },
     confirmDanger: async () => true,
+    addEventListener: () => {},
+    removeEventListener: () => {},
   };
   // 非 api 表的全局对象（如 ProcessTools）同样进桩并计数——它们的首屏调用与
   // api 方法在「首屏真的会动」的判据里同权。
@@ -641,6 +674,7 @@ function buildCtx(page, opts = {}) {
   return {
     ctx,
     doc,
+    ds,
     calls,
     bound,
     warns,
@@ -799,8 +833,7 @@ check(
   wireBad.length ? wireBad.join(' | ') : labels.map((l) => `${l}→${LABEL_HTML[l]}`).join(', '),
 );
 
-const scans = new Map();
-
+  const scans = new Map();
 for (const page of PAGES) {
   const tag = page.html;
   const htmlText = readFileSync(join(SRC, page.html), 'utf8');
@@ -832,9 +865,13 @@ for (const page of PAGES) {
     if (!inventory.has(cap.path)) capV.violations.push(`能力台账 ${cap.path} 在桩里不存在`);
   }
   check(
-    capV.violations.length === 0,
+    capV.violations.length === 0 && (capV.calls.length > 0 || page.noOptionalCalls === true),
     `8. ${tag} 的 ?. 调用都在桩面上（${capV.calls.length} 处可选调用 / ${page.optionalCaps.length} 条能力台账）`,
-    capV.violations.length ? capV.violations.join(' | ') : capV.calls.map((c) => `${c.segs.join('?.')}?.${c.method}`).join(', ') || '(none)',
+    capV.violations.length
+      ? capV.violations.join(' | ')
+      : capV.calls.length === 0 && page.noOptionalCalls !== true
+        ? '本页 0 处可选调用，断言 8 归零失效；如确无可选调用，请在 PAGES 登记 noOptionalCalls: true'
+        : capV.calls.map((c) => `${c.segs.join('?.')}?.${c.method}`).join(', ') || '(none)',
   );
 
   // ---- 运行面：断言 1 / 2 / 3b / 3c ----
@@ -872,6 +909,20 @@ for (const page of PAGES) {
     if (!cap.invokeAtInit) continue;
     const hit = r.calls.filter((c) => c.name === cap.path).length;
     check(hit === 1, `8b. ${tag} 的能力台账 ${cap.path} 在初始化时被调到 1 次`, `实际 ${hit} 次`);
+  }
+  // C-11/F1b-L01：init 后重复调用 bindCheckboxKeys，同一 host 不得叠加 keydown。
+  const cbHost = page.idempotencyHost ? r.doc.getElementById(page.idempotencyHost) : null;
+  if (cbHost) {
+    // 本页 init 期间已经调过一次 bindCheckboxKeys（幂等标记已在 host 上），
+    // 所以这里的基准是「init 期间注册过 1 次」；重复调用**不得**再增加。
+    const before = checkboxKeydownRegistrations;
+    r.ds.bindCheckboxKeys(cbHost, '[data-rcheck]');
+    r.ds.bindCheckboxKeys(cbHost, '[data-rcheck]');
+    check(
+      before === 1 && checkboxKeydownRegistrations === before,
+      `8c. ${tag} bindCheckboxKeys 同 host 幂等（重复初始化不叠加 keydown）`,
+      `init 期注册 ${before} 次；重复调用后 ${checkboxKeydownRegistrations} 次`,
+    );
   }
   if (VERBOSE) console.log(`     · calls=${JSON.stringify(r.calls.map((c) => c.name))}\n     · bound=${JSON.stringify(r.bound)}`);
 

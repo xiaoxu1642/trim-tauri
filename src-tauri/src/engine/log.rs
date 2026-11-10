@@ -218,6 +218,13 @@ pub fn write_log(level: &str, message: &str) -> String {
 
 static FLUSH_SCHEDULED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// R6b-L20：flush 的写盘锁。
+///
+/// 「出队」在 `STATE` 锁里、「写盘」不在任何锁里 ⇒ 两个 flush 并发时，
+/// 后取到队的那批反而可能先写进文件，行序与写入顺序不一致（审计日志乱序）。
+/// 这把锁把两段并回一个临界区；`write_log` 入队不取它（入队很快，不必串行化）。
+static LOG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn schedule_async_flush() {
     use std::sync::atomic::Ordering;
     if FLUSH_SCHEDULED.swap(true, Ordering::SeqCst) {
@@ -258,6 +265,12 @@ fn requeue(rows: Vec<(PathBuf, String)>) {
 }
 
 fn flush_inner() {
+    // R6b-L20：把「出队 + 逐行写盘」放进**同一把锁**。
+    // 旧实现分两段：先 `mem::take` 出队（持 STATE 锁），再各自写盘（不持锁）。
+    // 两个 flush 并发时，后一个先把队列取空、先把新行写进文件，
+    // 先取到队的那批反而后写 ⇒ 文件里的行序与写入顺序不一致。
+    // 写盘本身慢（每行 open+append），所以锁范围只覆盖 flush，不覆盖 write_log 入队。
+    let _write_guard = LOG_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let drained = with_state(|st| std::mem::take(&mut st.queue));
     if drained.is_empty() {
         return;
@@ -667,5 +680,86 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_file(&self.0);
         }
+    }
+
+    /// R6b-L20：两个线程各写一批行并同时 flush，文件里的行序必须与写入序一致。
+    ///
+    /// 旧实现把「出队」放在 `STATE` 锁里、「写盘」放在锁外 ⇒ 两个 flush 并发时
+    /// 后取到队的那批反而可能先写进文件，行序被打乱（审计日志乱序）。
+    ///
+    /// 判红自证：把 `flush_inner` 里的 `LOG_WRITE_LOCK` 取锁去掉（只包出队不包写盘）⇒ 本用例红。
+    #[test]
+    fn concurrent_flush_preserves_order() {
+        use std::sync::Arc;
+
+        // ① 形态判据（稳定可判红）：取锁必须**在出队之前**，
+        //    且整段写盘都在锁内 —— 锁只包出队不包写盘时，两个 flush 并发会乱序。
+        let src = include_str!("log.rs");
+        let flush_body = src
+            .split("fn flush_inner()")
+            .nth(1)
+            .and_then(|s| s.split("fn flush_sync").next())
+            .unwrap_or_default();
+        let lock_at = flush_body.find("LOG_WRITE_LOCK.lock()");
+        let drain_at = flush_body.find("std::mem::take(&mut st.queue)");
+        let write_at = flush_body.find("write_all(line.as_bytes())");
+        assert!(
+            lock_at.is_some() && drain_at.is_some() && write_at.is_some(),
+            "flush_inner 必须同时含写锁、取队、写盘三处"
+        );
+        assert!(
+            lock_at < drain_at,
+            "取锁必须在出队之前（否则并发 flush 会让后取到队的先写盘）"
+        );
+        assert!(
+            lock_at < write_at,
+            "取锁必须在写盘之前（锁只包出队不包写盘 ⇒ 行序会乱）"
+        );
+
+        let _sb = crate::testutil::Sandbox::new(&format!("log-order-{}", std::process::id()));
+        let dir = _sb.path().to_path_buf();
+        let file = dir.join("order.log");
+        let _guard = RemoveOnDrop(file.clone());
+
+        // 直接往队列塞行（绕开 write_log 的 sink 开关），两个线程各塞一批后同时 flush。
+        let rows_a: Vec<(PathBuf, String)> = (0..100)
+            .map(|i| (file.clone(), format!("A{i:04}\n")))
+            .collect();
+        let rows_b: Vec<(PathBuf, String)> = (0..100)
+            .map(|i| (file.clone(), format!("B{i:04}\n")))
+            .collect();
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = [rows_a, rows_b]
+            .into_iter()
+            .map(|rows| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    with_state(|st| st.queue.extend(rows));
+                    flush_inner();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("flush 线程不得 panic");
+        }
+
+        let text = fs::read_to_string(&file).expect("读取日志文件失败");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 200, "两批共 200 行必须都落盘");
+
+        // 每一批内部必须保持写入序（乱序说明两批的行在文件里交错）。
+        let a: Vec<&str> = lines.iter().copied().filter(|l| l.starts_with('A')).collect();
+        let b: Vec<&str> = lines.iter().copied().filter(|l| l.starts_with('B')).collect();
+        assert_eq!(a.len(), 100, "A 批行数不对");
+        assert_eq!(b.len(), 100, "B 批行数不对");
+        for (i, line) in a.iter().enumerate() {
+            assert_eq!(*line, format!("A{i:04}"), "A 批行序被打乱");
+        }
+        for (i, line) in b.iter().enumerate() {
+            assert_eq!(*line, format!("B{i:04}"), "B 批行序被打乱");
+        }
+
     }
 }

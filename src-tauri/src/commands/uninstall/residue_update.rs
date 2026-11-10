@@ -33,6 +33,11 @@ pub(super) const BUILTIN_RESIDUE_RULES_JSON: &str = include_str!("../../../data/
 /// 残留规则根目录（**读**）：新根 `app_data_dir()\uninstall`（便携模式跟着 exe 走），
 /// 老根 `%APPDATA%\Trim\uninstall` 只作只读兜底 —— 2026-09-28 决策清单 D1=A，
 /// 与清理库同一口径（两库必须一起收口，否则便携模式只对一半成立）。
+///
+/// B-05 ②：全仓 **0 消费**（原导出只是把这条路径公开出去，没人用）。因此不再从
+/// `commands::uninstall` 导出（导出即等于对外承诺一条没人走的路），函数体留作
+/// 「读根口径」的唯一实现，将来真的要用读根时从这里取，不要另写一份拼接。
+#[allow(dead_code)]
 pub fn residue_rules_dir() -> PathBuf {
     crate::engine::paths::data_subdir_for_read("uninstall")
 }

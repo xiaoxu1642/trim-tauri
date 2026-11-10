@@ -1,6 +1,6 @@
 {
   "_generatedBy": "tools/gen-residue-fixture.mjs",
-  "_note": "卸载残留规则库契约夹具：Rust 运行期校验器与 Node 门禁各自独立实现断言，用同一组正反例钉口径（方案 §4.3 / §6.1）。改判定必须两侧同改并在此补用例。",
+  "_note": "本文件由 gen-residue-fixture 生成；补用例改生成器，不要手改",
   "regVectors": [
     {
       "target": "HKLM",
@@ -1993,6 +1993,56 @@
         }
       },
       "mustTrigger": "第二个变量替换"
+    },
+    {
+      "label": "target 33 段超上限（maxSegments=32）",
+      "ok": false,
+      "pkg": {
+        "rulesVersion": 20260928,
+        "prov": [
+          {
+            "sourceClass": "builtin-knowledge",
+            "reviewedAt": "2026-09-28"
+          }
+        ],
+        "rules": [
+          {
+            "id": "fixture-acme",
+            "ver": 20260928,
+            "displayName": [
+              "Acme Editor"
+            ],
+            "publisher": [
+              "Acme Corp"
+            ],
+            "uninstallKey": [
+              "AcmeEditor"
+            ],
+            "residue": [
+              {
+                "kind": "folder",
+                "target": "%APPDATA%\\s0\\s1\\s2\\s3\\s4\\s5\\s6\\s7\\s8\\s9\\s10\\s11\\s12\\s13\\s14\\s15\\s16\\s17\\s18\\s19\\s20\\s21\\s22\\s23\\s24\\s25\\s26\\s27\\s28\\s29\\s30\\s31\\s32",
+                "note": "用户配置目录"
+              },
+              {
+                "kind": "file",
+                "target": "%LOCALAPPDATA%\\Acme\\editor.log",
+                "note": "运行日志"
+              },
+              {
+                "kind": "reg_key",
+                "target": "HKCU\\Software\\Acme\\Editor",
+                "note": "当前用户配置键"
+              }
+            ]
+          }
+        ],
+        "_sig": {
+          "alg": "ed25519",
+          "sig": ""
+        }
+      },
+      "mustTrigger": "路径段数"
     },
     {
       "label": "note 缺失",

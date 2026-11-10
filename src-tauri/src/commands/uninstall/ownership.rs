@@ -55,9 +55,7 @@ pub(super) fn running_process_dirs() -> Option<HashSet<String>> {
                     .map(|_| String::from_utf16_lossy(&buf[..len as usize]));
                     let _ = windows::Win32::Foundation::CloseHandle(h);
                     if let Ok(p) = name {
-                        if let Some(parent) = Path::new(&p).parent() {
-                            out.insert(parent.to_string_lossy().to_ascii_lowercase());
-                        }
+                        insert_process_image_keys(&mut out, &p);
                     }
                 }
                 if Process32NextW(snap, &mut pe).is_err() {
@@ -71,6 +69,47 @@ pub(super) fn running_process_dirs() -> Option<HashSet<String>> {
         // 一旦接线即每次调用泄漏一个内核句柄 ⇒ 先按同域形状收口。
         let _ = windows::Win32::Foundation::CloseHandle(snap);
         Some(out)
+    }
+}
+
+/// 进程镜像路径 → 运行集合键（R2b-L01）。
+///
+/// 同时收**完整文件路径**与父目录：`process_running` 拿的是服务 `ImagePath` 解析出的
+/// landing **文件路径**，旧集合只收父目录 ⇒ `set.contains(landing)` 恒 false，
+/// 「镜像正在 landing 目录运行」被误报成「没在运行」。父目录保留给按目录比对的旧消费方。
+pub(super) fn insert_process_image_keys(set: &mut HashSet<String>, image: &str) {
+    set.insert(image.to_ascii_lowercase());
+    if let Some(parent) = Path::new(image).parent() {
+        set.insert(parent.to_string_lossy().to_ascii_lowercase());
+    }
+}
+
+/// 服务 landing 文件是否正在运行（完整文件路径比对，R2b-L01）。
+pub(super) fn process_running(process_keys: &Option<HashSet<String>>, landing: &str) -> bool {
+    process_keys
+        .as_ref()
+        .map(|set| set.contains(&landing.to_ascii_lowercase()))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R2b-L01：进程镜像的**完整文件路径**必须在集合里，`process_running` 用完整
+    /// landing 文件路径比对；旧实现只收父目录 ⇒ 本条红。
+    #[test]
+    fn r2b_service_running_detects_image_file() {
+        let mut set = HashSet::new();
+        insert_process_image_keys(&mut set, r"C:\Apps\Acme\svc.exe");
+        assert!(
+            set.contains(r"c:\apps\acme\svc.exe"),
+            "完整镜像文件路径必须进集合（旧实现只有父目录）: {set:?}"
+        );
+        assert!(set.contains(r"c:\apps\acme"), "父目录继续保留给旧消费方");
+        assert!(process_running(&Some(set.clone()), r"C:\Apps\Acme\svc.exe"), "landing 文件正在运行必须判 true");
+        assert!(!process_running(&Some(set), r"C:\Apps\Acme\other.exe"), "同目录另一个文件不得误判为运行");
+        assert!(!process_running(&None, r"C:\Apps\Acme\svc.exe"), "集合不可得时按未运行返回 false（既有语义）");
     }
 }
 

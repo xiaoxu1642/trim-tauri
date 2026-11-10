@@ -37,10 +37,15 @@ export function judgeReleaseArtifacts({ exeSha, sigText, version, manifests }) {
       continue;
     }
     if (m.version !== version) problems.push(`${name}: version=${JSON.stringify(m.version)} ≠ conf ${version}`);
-    if (typeof m.signature !== 'string' || !m.signature.trim()) {
+    if (typeof m.signature !== 'string' || !m.signature) {
       problems.push(`${name}: 缺 signature`);
-    } else if (sigText && m.signature.trim() !== sigText.trim()) {
-      problems.push(`${name}: signature 与 .sig 内容不一致`);
+    } else if (sigText && m.signature !== sigText) {
+      const trimmed = m.signature.trim();
+      if (trimmed === sigText.trim()) {
+        problems.push(`${name}: 签名含空白漂移（清单 signature 与 .sig 的原文不一致）`);
+      } else {
+        problems.push(`${name}: signature 与 .sig 内容不一致`);
+      }
     }
     if (typeof m.sha256 !== 'string' || !m.sha256) {
       problems.push(`${name}: 缺 sha256`);
@@ -71,6 +76,16 @@ export function judgeReleaseArtifacts({ exeSha, sigText, version, manifests }) {
   };
   const cases = [
     ['正确样本放行', good, 0],
+    ['签名字节空白漂移', {
+      ...good,
+      manifests: {
+        'latest.json': {
+          ...good.manifests['latest.json'],
+          signature: `${sig} `,
+          platforms: { 'windows-x86_64': { signature: `${sig} `, sha256: exeSha } },
+        },
+      },
+    }, 1],
     ['签名字节不符', { ...good, manifests: { 'latest.json': { ...good.manifests['latest.json'], signature: 'OTHER', platforms: { 'windows-x86_64': { signature: 'OTHER', sha256: exeSha } } } } }, 1],
     ['sha256 不符', { ...good, exeSha: 'b'.repeat(64) }, 2],
     ['版本漂移', { ...good, version: '9.9.9' }, 2],

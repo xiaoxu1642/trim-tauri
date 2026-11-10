@@ -9,8 +9,8 @@ use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows::Wdk::System::SystemServices::RtlGetVersion;
 
 /// Windows 内部版本号（如 26200）
-pub fn windows_build() -> u32 {
-    version_parts().map(|(_, _, build)| build).unwrap_or(0)
+pub fn windows_build() -> Option<u32> {
+    version_parts().map(|(_, _, build)| build)
 }
 
 /// `RtlGetVersion` 的三元组：`(major, minor, build)`；取不到返回 `None`。
@@ -58,7 +58,9 @@ fn format_os_version(parts: Option<(u32, u32, u32)>) -> String {
 /// Fluent（DWM 材质）支持级别：
 /// full>=22621（Mica+Acrylic+DWM 圆角）/ partial>=22000（基础 Mica）/ none（Win10）
 pub fn fluent_support_level() -> &'static str {
-    let build = windows_build();
+    let Some(build) = windows_build() else {
+        return "unknown";
+    };
     if build >= 22621 {
         "full"
     } else if build >= 22000 {
@@ -85,7 +87,7 @@ pub fn meets_minimum(build: u32) -> bool {
 
 /// 当前系统是否达到最低支持版本（`windows_build()` 失败即 false，理由见上）
 pub fn supported() -> bool {
-    meets_minimum(windows_build())
+    meets_minimum(windows_build().unwrap_or(0))
 }
 
 /// 当前进程是否以管理员身份运行
@@ -96,6 +98,29 @@ pub fn is_admin() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fluent_support_level_for(build: Option<u32>) -> &'static str {
+        let Some(build) = build else { return "unknown"; };
+        if build >= 22621 {
+            "full"
+        } else if build >= 22000 {
+            "partial"
+        } else {
+            "none"
+        }
+    }
+
+    fn supported_build_for(build: Option<u32>) -> u32 {
+        build.unwrap_or(0)
+    }
+
+    /// 装载失败必须进 `unknown`，不得压成 0 后谎报「Win10 不支持」。
+    #[test]
+    fn sysinfo_build_failure_is_unknown() {
+        assert_eq!(fluent_support_level_for(Some(0)), "none");
+        assert_eq!(fluent_support_level_for(None), "unknown");
+        assert_eq!(supported_build_for(None), 0);
+    }
 
     /// 22H2 = 22621。边界两侧都要钉住，别让人把 `>` 与 `>=` 混淆。
     #[test]
@@ -154,7 +179,9 @@ mod tests {
     fn 展示串与实测版本三元组同源() {
         let build = windows_build();
         let s = os_version();
-        assert!(build > 0, "本机 RtlGetVersion 读不到 build（0），下面的分段断言无从谈起");
+        let Some(build) = build else {
+            panic!("本机 RtlGetVersion 读不到 build，下面的分段断言无从谈起");
+        };
         let parts: Vec<&str> = s.split('.').collect();
         assert_eq!(parts.len(), 3, "展示串必须是 major.minor.build 三段: {s}");
         assert_eq!(

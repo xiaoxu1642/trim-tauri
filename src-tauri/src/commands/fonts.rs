@@ -35,6 +35,14 @@ use crate::engine::{guard, log, paths};
 
 use super::settings::{self, js_number, truthy_string};
 
+/// R1b-L11 验收钩子：统计 `same_path` 发起 canonicalize 的次数。
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// 测试钩子：`same_path` 每次调用 `std::fs::canonicalize` 前递增（R1b-L11 验收用）。
+#[cfg(test)]
+static FONT_CANONICALIZE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
 /// 导入字体副本目录（`<数据目录>/fonts`）
 fn fonts_dir() -> PathBuf {
     paths::join_data("fonts")
@@ -192,7 +200,11 @@ pub fn fonts_list<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, 
         Some(record) => {
             let family = truthy_string(record.get("family")).unwrap_or_default();
             let copy_path = truthy_string(record.get("copyPath")).unwrap_or_default();
-            let available = !copy_path.is_empty() && Path::new(&copy_path).exists();
+            // R1b-L11：命名空间闸先于 exists()——被篡改成 UNC/设备路径的 copyPath
+            // 不得发起 SMB 解析，直接判不可用。
+            let available = !copy_path.is_empty()
+                && is_local_namespace_path(Path::new(&copy_path))
+                && Path::new(&copy_path).exists();
             list.push(json!({
                 "family": family,
                 "cssStack": font_css_stack_for(&family),
@@ -286,6 +298,11 @@ pub async fn fonts_import<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
     }
 
     let dir = fonts_dir();
+    // R1b-L12：落点先验 reparse/归属（与删除侧三闸对称），再 create_dir_all/copy。
+    if let Err(e) = ensure_fonts_dir_safe(&dir) {
+        log::write_log("error", &format!("导入字体失败: {e}"));
+        return Ok(json!({ "success": false, "message": format!("导入失败：{e}") }));
+    }
     // 性能优化 P1：建目录同样是磁盘 I/O，单独一次派发（保留「创建字体目录失败」这条日志文案）
     let mkdir = {
         let mkdir_dir = dir.clone();
@@ -324,49 +341,47 @@ pub async fn fonts_import<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
     };
     let copy_path = dir.join(format!("{IMPORTED_BASE}{ext}"));
     let copy_str = copy_path.to_string_lossy().to_string();
-    // 性能优化 P1：整文件复制（可达数十 MB）进阻塞池，async 体只拿回执
-    let copied = {
-        let copy_src = src.clone();
-        let copy_dst = copy_path.clone();
-        tauri::async_runtime::spawn_blocking(move || std::fs::copy(&copy_src, &copy_dst)).await
+    // R1b-L10/L12：落盘 + 记录 + 替换收口到 stage_font_import —— 先复制到临时名、
+    // 写记录成功后再落位并删旧副本；任一步失败都保留旧记录/旧文件。
+    let prev_copy = prev.as_ref().and_then(|p| truthy_string(p.get("copyPath")));
+    let write_record = |record: &Value| {
+        // v4 组 1（R1-M02）：读-改-写收口 —— 损坏/读失败时拒绝写入，绝不拿空对象整表
+        // 覆写含 dpapi 密文密钥的 settings.json（旧链读空即覆盖，回执还是成功）。
+        settings::update_settings(|next| {
+            let Some(map) = next.as_object_mut() else {
+                return Err("设置结构异常".into());
+            };
+            map.insert("fontImported".into(), record.clone());
+            Ok(())
+        })
+        .map(|_| ())
     };
-    match copied {
-        Ok(Ok(_)) => {}
+    let staged = {
+        let src = src.clone();
+        let dir = dir.clone();
+        let family = family.clone();
+        let ext = ext.clone();
+        let prev_copy = prev_copy.clone();
+        // 性能优化 P1：整文件复制/落位（可达数十 MB）进阻塞池，async 体只拿回执
+        tauri::async_runtime::spawn_blocking(move || {
+            stage_font_import(&src, &dir, &family, &ext, prev_copy.as_deref(), &write_record)
+        })
+        .await
+    };
+    match staged {
+        Ok(Ok(_record)) => {}
         Ok(Err(e)) => {
             log::write_log("error", &format!("导入字体失败: {e}"));
+            // R1b-L10：替换落位失败时，刚写入的新记录已指向最终副本，尽力回滚旧记录。
+            if e.contains("替换字体副本失败") {
+                rollback_font_record(&prev);
+            }
             return Ok(json!({ "success": false, "message": format!("导入失败：{e}") }));
         }
         Err(e) => {
-            log::write_log("error", &format!("导入字体失败: 复制任务异常: {e}"));
+            log::write_log("error", &format!("导入字体失败: 导入任务异常: {e}"));
             return Ok(json!({ "success": false, "message": format!("导入失败：{e}") }));
         }
-    }
-    // 替换旧导入：删除旧副本（路径不同才删，相同则已被覆盖）
-    if let Some(prev) = &prev {
-        if let Some(prev_copy) = truthy_string(prev.get("copyPath")) {
-            if !prev_copy.is_empty() && !same_path(&prev_copy, &copy_str) {
-                // v2-L4P-27（B-5）：出口收紧为 remove_owned_font_copy（归属 + reparse + 回收站）
-                remove_owned_font_copy(&prev_copy);
-            }
-        }
-    }
-    let record = json!({
-        "family": family,
-        "sourcePath": src_str,
-        "copyPath": copy_str,
-        "importedAt": settings::iso_utc_now(),
-    });
-    // v4 组 1（R1-M02）：读-改-写收口 —— 损坏/读失败时拒绝写入，绝不拿空对象整表
-    // 覆写含 dpapi 密文密钥的 settings.json（旧链读空即覆盖，回执还是成功）。
-    if let Err(msg) = settings::update_settings(|next| {
-        let Some(map) = next.as_object_mut() else {
-            return Err("设置结构异常".into());
-        };
-        map.insert("fontImported".into(), record);
-        Ok(())
-    }) {
-        log::write_log("error", &format!("字体导入：设置保存失败（已拒绝写入）: {msg}"));
-        return Ok(json!({ "success": false, "message": "字体已复制，但设置写入失败，重启后会丢失该记录" }));
     }
     log::write_log("info", &format!("导入字体: {family}（副本已复制到 {copy_str}）"));
     Ok(json!({
@@ -379,6 +394,82 @@ pub async fn fonts_import<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
     }))
 }
 
+/// R1b-L10：替换落位失败后尽力回滚刚写入的新记录（恢复旧记录；无旧记录则移除键）。
+fn rollback_font_record(prev: &Option<Value>) {
+    let _ = settings::update_settings(|next| {
+        let Some(map) = next.as_object_mut() else {
+            return Ok(());
+        };
+        if let Some(prev) = prev {
+            map.insert("fontImported".into(), prev.clone());
+        } else {
+            map.remove("fontImported");
+        }
+        Ok(())
+    });
+}
+
+/// R1b-L12：字体导入落点先验 reparse/归属（与删除侧三闸对称）。
+/// 在 `create_dir_all` / `copy` 之前调用：落点自身或任一祖先是 reparse
+/// （junction/符号链接/云占位符）时拒绝导入，避免副本被写到另一块存储。
+fn ensure_fonts_dir_safe(dir: &Path) -> Result<(), String> {
+    if let Ok(meta) = std::fs::symlink_metadata(dir) {
+        if crate::engine::protect::is_reparse(&meta) {
+            return Err("字体目录是链接形态，已拒绝导入".to_string());
+        }
+    }
+    if let Some(anc) = trim_finder::scan::reparse_ancestor(dir) {
+        return Err(format!("字体目录位于链接路径下，已拒绝导入: {anc}"));
+    }
+    Ok(())
+}
+
+/// R1b-L10/L12：字体导入的「落盘 + 记录 + 替换」核心。
+///
+/// 顺序保证（R1b-L10）：先复制到**临时名** → 写新记录 → 记录成功后才把临时副本
+/// 落到最终名并删除旧副本。任一步失败都保留旧记录/旧文件，并清理本次临时副本。
+/// 落点安全（R1b-L12）由调用方先经 `ensure_fonts_dir_safe` 把关。
+fn stage_font_import(
+    src: &Path,
+    dir: &Path,
+    family: &str,
+    ext: &str,
+    prev_copy: Option<&str>,
+    write_record: &impl Fn(&Value) -> Result<(), String>,
+) -> Result<Value, String> {
+    let tmp_path = dir.join(format!("{IMPORTED_BASE}.tmp{ext}"));
+    let copy_path = dir.join(format!("{IMPORTED_BASE}{ext}"));
+    let copy_str = copy_path.to_string_lossy().to_string();
+
+    // 先落临时副本：最终落点（可能还是旧字体文件）在记录成功前不被触碰。
+    if let Err(e) = std::fs::copy(src, &tmp_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!("复制字体文件失败: {e}"));
+    }
+    let record = json!({
+        "family": family,
+        "sourcePath": src.to_string_lossy().to_string(),
+        "copyPath": copy_str,
+        "importedAt": settings::iso_utc_now(),
+    });
+    if let Err(e) = write_record(&record) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    // 记录成功：临时副本落位（覆盖旧文件），随后才删除旧副本。
+    if let Err(e) = std::fs::rename(&tmp_path, &copy_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!("替换字体副本失败: {e}"));
+    }
+    if let Some(prev) = prev_copy {
+        if !prev.is_empty() && !same_path(prev, &copy_str) {
+            // v2-L4P-27（B-5）：出口收紧为 remove_owned_font_copy（归属 + reparse + 回收站）
+            remove_owned_font_copy(prev);
+        }
+    }
+    Ok(record)
+}
+
 /// v2-L4P-27（B-5）：自有字体副本删除的**唯一出口**。check-delete-exits 豁免理由是
 /// 「只删 Trim 导入时生成的副本」——豁免必须由代码兑现：目标必须位于 fonts_dir()
 /// 直下、且自身不是 reparse（云占位符/junction 形态删到的是另一块存储）。settings 里
@@ -386,6 +477,12 @@ pub async fn fonts_import<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result
 ///（与背景图删除同口径，可恢复），不因「自己是副本」就永久删。
 fn remove_owned_font_copy(raw: &str) -> bool {
     let p = PathBuf::from(raw);
+    // R1b-L11：命名空间闸先于一切触盘（symlink_metadata/reparse_ancestor 对 UNC
+    // 会发起 SMB 解析）。非本地路径一律拒绝并留痕。
+    if !is_local_namespace_path(&p) {
+        log::write_log("warn", &format!("拒绝删除非本地命名空间的字体副本: {raw}"));
+        return false;
+    }
     if p.parent().map(|d| same_path(&d.to_string_lossy(), &fonts_dir().to_string_lossy())) != Some(true) {
         log::write_log("warn", &format!("拒绝删除 fonts 目录外的字体副本: {raw}"));
         return false;
@@ -424,14 +521,31 @@ fn remove_owned_font_copy(raw: &str) -> bool {
 }
 
 /// `path.resolve(a) !== path.resolve(b)` 等价（大小写不敏感比较 + 规范化）
-fn same_path(a: &str, b: &str) -> bool {    let norm = |p: &str| -> String {
+fn same_path(a: &str, b: &str) -> bool {
+    let norm = |p: &str| -> String {
         let pb = PathBuf::from(p);
+        // R1b-L11：非本地命名空间（UNC/设备路径）不发起 canonicalize，退化为字符串
+        // 规范化比较——SMB 解析可能挂住 IO，且这类路径本就不该进删除链。
+        if !is_local_namespace_path(&pb) {
+            return pb.to_string_lossy()
+                .trim_end_matches(['\\', '/'])
+                .to_ascii_lowercase();
+        }
+        #[cfg(test)]
+        FONT_CANONICALIZE_CALLS.fetch_add(1, Ordering::Relaxed);
         let full = std::fs::canonicalize(&pb).unwrap_or(pb);
         full.to_string_lossy()
             .trim_end_matches(['\\', '/'])
             .to_ascii_lowercase()
     };
     norm(a) == norm(b)
+}
+
+/// R1b-L11：字体路径命名空间闸。`\\` 前缀（UNC/设备路径）会在 exists()/
+/// canonicalize() 时发起 SMB 或设备解析，可能挂住 IO；一律先拒，不触盘。
+fn is_local_namespace_path(p: &Path) -> bool {
+    let s = p.to_string_lossy();
+    !(s.starts_with(r"\\") || s.starts_with(r"\??\"))
 }
 
 /// `basename.replace(/\.(ttf|otf|woff2?)$/i, '')`
@@ -585,5 +699,71 @@ mod tests {
         let _ = std::fs::remove_file(&bad);
         let _ = std::fs::remove_file(&good);
         let _ = std::fs::remove_file(&woff);
+    }
+
+    /// R1b-L10：写记录失败时，旧字体文件必须保留、临时副本必须清理。
+    /// 破坏自证：把 stage_font_import 改回「先复制到最终名再写记录」，本测试必红。
+    #[test]
+    fn r1b_font_import_keeps_old_on_record_failure() {
+        let _sb = crate::testutil::Sandbox::new("r1b-l10-font-import");
+        let base = _sb.path();
+        let dir = base.join("fonts");
+        std::fs::create_dir_all(&dir).unwrap();
+        let old_path = dir.join("imported.ttf");
+        std::fs::write(&old_path, b"OLD FONT DATA").unwrap();
+        let src = base.join("new.ttf");
+        std::fs::write(&src, b"NEW FONT DATA").unwrap();
+
+        let write_record = |_record: &Value| Err("注入的设置写入失败".to_string());
+        let err = stage_font_import(
+            &src,
+            &dir,
+            "NewFont",
+            ".ttf",
+            // 非 UTF-8 路径不许 unwrap（非 UTF-8 会 panic）；本用例的路径必可解码，
+            // 但仍按「取不到就跳过」的 fail-closed 口径写。
+            Some(old_path.to_str().unwrap_or_default()),
+            &write_record,
+        )
+        .unwrap_err();
+        assert!(err.contains("设置写入失败"), "应返回写记录失败: {err}");
+        // 旧字体仍可读、内容未变
+        assert_eq!(std::fs::read(&old_path).unwrap(), b"OLD FONT DATA");
+        // 临时副本已清理，最终落点未被触碰
+        assert!(!dir.join("imported.tmp.ttf").exists(), "临时副本必须清理");
+        assert!(dir.join("imported.ttf").exists(), "旧字体文件必须保留");
+    }
+
+    /// R1b-L11：UNC copyPath 必须在触盘（canonicalize/SMB 解析）之前被拒绝。
+    /// 破坏自证：把 same_path 的命名空间闸去掉（恢复先 canonicalize），本测试必红。
+    #[test]
+    fn r1b_font_unc_rejected_before_touch() {
+        FONT_CANONICALIZE_CALLS.store(0, Ordering::SeqCst);
+        let unc = r"\\server\share\fonts\imported.ttf";
+        // 删除链入口必须先拒，且不发起 canonicalize（SMB 解析）
+        assert!(!remove_owned_font_copy(unc), "UNC 副本必须拒绝删除");
+        assert_eq!(
+            FONT_CANONICALIZE_CALLS.load(Ordering::SeqCst),
+            0,
+            "UNC 路径不得触发 canonicalize"
+        );
+        // 命名空间闸本身：非本地路径拒绝、本地路径放行
+        assert!(!is_local_namespace_path(Path::new(unc)));
+        assert!(is_local_namespace_path(Path::new(r"C:\Windows\Fonts\a.ttf")));
+    }
+
+    /// R1b-L12：junction 落点必须在 create_dir_all/copy 之前被拒绝。
+    /// 破坏自证：去掉 ensure_fonts_dir_safe 的 reparse 检查，本测试必红。
+    #[test]
+    fn r1b_font_import_rejects_junction_destination() {
+        let _sb = crate::testutil::Sandbox::new("r1b-l12-font-junction");
+        let base = _sb.path();
+        let real = base.join("real");
+        let junction = base.join("fonts");
+        std::fs::create_dir_all(&real).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&real, &junction).unwrap();
+        let err = ensure_fonts_dir_safe(&junction).unwrap_err();
+        assert!(err.contains("链接"), "应拒绝 junction 落点: {err}");
     }
 }

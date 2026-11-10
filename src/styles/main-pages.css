@@ -149,7 +149,9 @@
      列宽由 Grid 自适应均分，任意分辨率下稳定，禁止再引入固定宽度/贴右覆盖。 */
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
-}@media (max-width: 880px) {
+}
+
+@media (max-width: 880px) {
 
   .settings-grid {
     grid-template-columns: 1fr;
@@ -275,12 +277,13 @@
   padding: 6px;
 }
 /* 重审-2026-11-01 F1c-M02：忙态不再整块压 opacity —— 0.7 会把 11px 元信息压到亮色 2.83:1（破 AA）。
-   只弱化容器描边这一处非文本装饰并给出进行中的指针形态，正文与元信息保持原色不变。 */
+   只弱化容器描边这一处非文本装饰，正文与元信息保持原色不变。
+   忙态由 pointer-events:none 让本元素及其子树整体退出命中测试，指针形态由下层元素决定，
+   故此处不再声明 cursor（写在这里也不会显示出来）。 */
 .syspanel-pwr-tree.is-busy,
 .syspanel-pwr-detail.is-busy {
   pointer-events: none;
   border-color: var(--border-subtle);
-  cursor: progress;
 }
 .syspanel-pwr-group + .syspanel-pwr-group {
   margin-top: 4px;
@@ -890,7 +893,9 @@
 }
 .overview-metrics.overview-maximized {
   grid-template-columns: repeat(4, minmax(0, 1fr));
-}@media (max-width: 1180px) {
+}
+
+@media (max-width: 1180px) {
 
   .overview-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .overview-metrics .health-card { grid-column: 1 / -1; }
@@ -951,7 +956,9 @@
   line-height: 1.4;
   word-break: break-word;
   overflow-wrap: anywhere;
-}@media (max-width: 760px) {
+}
+
+@media (max-width: 760px) {
 
   .device-info-table { grid-template-columns: minmax(0, 1fr); }
 }
@@ -1110,7 +1117,9 @@
   line-height: 1.8;
   word-break: break-all;
   overflow-wrap: anywhere;
-}@media (max-width: 560px) {
+}
+
+@media (max-width: 560px) {
 
   .fm-field-label { padding-top: 0; }
 }
@@ -1196,7 +1205,9 @@
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   border-color: var(--danger);
   color: var(--danger);
-}@media (max-width: 640px) {
+}
+
+@media (max-width: 640px) {
 
   .rt-stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -1209,7 +1220,9 @@
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 14px;
-}@media (max-width: 560px) {
+}
+
+@media (max-width: 560px) {
 
   .rt-sr-cards { grid-template-columns: 1fr; }
 }
@@ -1243,7 +1256,10 @@
   line-height: 1.6;
   color: var(--fg-tertiary);
   word-break: break-word;
-}@media (max-width: 900px) {
+}
+
+@media (max-width: 900px) {
+
   .mem-panel-actions { gap: 6px; }
 }
 
@@ -1402,7 +1418,9 @@
   border-radius: var(--radius-small);
 }
 
-.peri-note { margin: 2px 0 12px; color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1.55; }@media (max-width: 720px) {
+.peri-note { margin: 2px 0 12px; color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1.55; }
+
+@media (max-width: 720px) {
 
   .peri-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
@@ -1495,7 +1513,9 @@
 .rt-node-name { font-size: var(--fs-secondary); font-weight: calc(600*var(--font-weight-scale,1)); fill: var(--fg-primary); }
 .rt-node-state { font-size: calc(11.5px*var(--font-size-scale,1)); fill: var(--fg-tertiary); }
 /* 扫描线匀速旋转；prefers-reduced-motion 下静止（AGENTS §5） */
-.rt-sweep { animation: rt-spin 4s linear infinite; transform-box: view-box; }@media (prefers-reduced-motion: reduce) {
+.rt-sweep { animation: rt-spin 4s linear infinite; transform-box: view-box; }
+
+@media (prefers-reduced-motion: reduce) {
 
   .rt-sweep { animation: none; opacity: 0.25; }
 }
@@ -1538,7 +1558,9 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px 28px;
   align-items: start;
-}@media (max-width: 1000px) {
+}
+
+@media (max-width: 1000px) {
 
   .appearance-merge-grid { grid-template-columns: 1fr; }
 }
@@ -1770,13 +1792,15 @@
   color: var(--fg-secondary);
   white-space: nowrap;
 }
-/* 重审-2026-11-01 F1c-M03：本文件里三处「宽度/位移会动的过渡」就近补进 RM 块。main.css 的全窗归零段
-   （把 transition-duration 归零并标 !important）已能让它们不产生可见位移，这里再显式关一次，
-   RM 口径在本文件就近可对照，新增过渡照此登记。 */
+/* 重审-2026-11-01 F1c-M03：本文件六处过渡（尺寸/位移四处：441 基准条、1595 折叠箭头、1765 批量进度条、
+   2290 分档滑块填充；颜色与消散两处：1800 搜索框描边、1945 鼠标拖尾消散）里，尺寸/位移类四处
+   就近补进 RM 块。main.css 的全窗归零段（把 transition-duration 归零并标 !important）已能让它们
+   不产生可见位移，这里再显式关一次，RM 口径在本文件就近可对照，新增过渡照此登记。 */
 @media (prefers-reduced-motion: reduce) {
   .settings-collapse-chevron,
   .bench-progress-fill,
-  .maint-batch-progress-fill { transition: none; }
+  .maint-batch-progress-fill,
+  .bbr-fill { transition: none; }
 }
 
 /* 快捷指令页（69 条系统快捷入口）：卡片样式对齐图3——独立白色容器 + 图标色块 + 名称 + 分类标签 + 描述 */
@@ -1821,7 +1845,9 @@
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 12px;
-}@media (min-width: 1480px) {
+}
+
+@media (min-width: 1480px) {
 
   .qc-grid { grid-template-columns: repeat(4, 1fr); }
 }
@@ -1888,7 +1914,9 @@
   flex: 0 0 auto;
   display: flex;
   gap: 6px;
-}@media (max-width: 760px) {
+}
+
+@media (max-width: 760px) {
 
   .qc-grid { grid-template-columns: 1fr; }
   .qc-actions { flex-direction: column; }
@@ -1958,7 +1986,9 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   justify-content: space-between;
   gap: 12px;
   min-height: 32px;
-}@media (prefers-reduced-motion: reduce) {
+}
+
+@media (prefers-reduced-motion: reduce) {
 
   .mouse-trail-layer { display: none !important; }
 }
@@ -2091,7 +2121,9 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   border-radius: 50%;
   /* 匀速旋转刻意 linear（无 ease token 对应）；.8s 无 --duration-* token，保留字面 */
   animation: netcheckSpin .8s linear infinite;
-}@media (prefers-reduced-motion: reduce) {
+}
+
+@media (prefers-reduced-motion: reduce) {
 
   .netcheck-spinner { animation: none; }
 }
@@ -2222,7 +2254,9 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   font-size: var(--fs-meta);
   color: var(--fg-tertiary);
   overflow-wrap: anywhere;
-}@media (prefers-reduced-motion: reduce) {
+}
+
+@media (prefers-reduced-motion: reduce) {
 
   .upd-spinner { animation: none; border-top-color: var(--border-default); }
 }

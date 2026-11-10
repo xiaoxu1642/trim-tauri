@@ -6,7 +6,7 @@
 
 
 use windows::core::PCWSTR;
-use windows::Win32::System::Services::{CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS, SERVICE_STATUS};
+use windows::Win32::System::Services::{CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus, QUERY_SERVICE_CONFIGW, SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS, SERVICE_STATUS};
 use super::common::*;
 // ==================== B8 netcheck_status：网络连通性检测 ====================
 
@@ -46,9 +46,15 @@ pub(super) unsafe fn service_status_query(name: &str) -> ServiceQuery {
 }
 
 /// 兼容旧调用方：Unknown 与 NotFound 都折成 None（新调用方应使用三态版本）。
-pub(super) unsafe fn service_status(name: &str) -> Option<(u32, u32)> {
+///
+/// B03（方案 R5e-L04）：原签名返回 `Option<(u32, u32)>`，但第二元**恒为 0**
+/// （注释自认「startType 需要 QueryServiceConfig，简化为 0」）—— 那是假数据面：
+/// 调用方拿到 `(state, 0)` 会以为「启动类型是 0」，而 0 根本不是合法启动类型。
+/// 三个调用点（`process.rs` / `maintenance.rs` / `runtimes_net.rs`）都只用第一元，
+/// 故这里改成只返回状态码 `u32`，启动类型另走 [`service_absent_or_start_is`]。
+pub(super) unsafe fn service_status(name: &str) -> Option<u32> {
     match service_status_query(name) {
-        ServiceQuery::State(state) => Some((state, 0)),
+        ServiceQuery::State(state) => Some(state),
         _ => None,
     }
 }
@@ -105,7 +111,11 @@ pub(crate) fn win32_of(e: &windows::core::Error) -> u32 {
 }
 
 /// `SERVICE_STOPPED` / `ERROR_SERVICES_NOT_ACTIVE` / `ERROR_SERVICE_DOES_NOT_EXIST`
-const SVC_STOPPED: u32 = 1;
+///
+/// B03（方案 R5e-L04）：`SVC_STOPPED` 此前是文件私有，跨文件的调用点写的是**裸 1**
+/// （`match state { 4 => "Running", 1 => "Stopped", _ => "Unknown" }`）——
+/// 读者无从判断那个 1 是什么。与 `SVC_RUNNING` 一并导出，两个状态码用同一套名字。
+pub const SVC_STOPPED: u32 = 1;
 const SVC_NOT_RUNNING: u32 = 1062;
 const SVC_NOT_INSTALLED: u32 = 1060;
 
@@ -158,7 +168,7 @@ pub(super) unsafe fn service_set_start_type(name: &str, start_type: u32) -> Resu
 pub fn service_start_type(name: &str) -> Option<u32> {
     use windows::Win32::System::Services::{
         CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceConfigW,
-        QUERY_SERVICE_CONFIGW, SC_MANAGER_CONNECT, SERVICE_QUERY_CONFIG,
+        SC_MANAGER_CONNECT, SERVICE_QUERY_CONFIG,
     };
     unsafe {
         let scm = OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT).ok()?;
@@ -176,8 +186,7 @@ pub fn service_start_type(name: &str) -> Option<u32> {
         let start = if needed == 0 {
             None
         } else {
-            let mut buf = vec![0u8; needed as usize];
-            let cfg = buf.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
+            let (_buf, cfg) = aligned_service_config_buffer(needed);
             QueryServiceConfigW(svc, Some(cfg), needed, &mut needed)
                 .ok()
                 .map(|_| (*cfg).dwStartType.0)
@@ -186,6 +195,25 @@ pub fn service_start_type(name: &str) -> Option<u32> {
         let _ = CloseServiceHandle(scm);
         start
     }
+}
+
+/// 分配 `QueryServiceConfigW` 缓冲区：用 `Vec<u64>` 保证对齐
+/// ≥ `align_of::<QUERY_SERVICE_CONFIGW>()`，返回缓冲区与结构体指针。
+///
+/// R5e-L05：旧实现按字节分配，只保证最小对齐，`as *mut QUERY_SERVICE_CONFIGW`
+/// 是未定义行为（x64 上碰巧对齐，x86 上可能不对齐直接崩溃）。`Vec<u64>` 的分配
+/// 对齐按指针宽度分配，满足 `QUERY_SERVICE_CONFIGW`（含 `LPWSTR`）在两种架构上的对齐。
+fn aligned_service_config_buffer(needed: u32) -> (Vec<u64>, *mut QUERY_SERVICE_CONFIGW) {
+    let bytes = needed as usize;
+    let words = bytes.div_ceil(std::mem::size_of::<u64>());
+    let mut buf = vec![0u64; words];
+    let cfg = buf.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
+    debug_assert_eq!(
+        buf.as_ptr() as usize % std::mem::align_of::<QUERY_SERVICE_CONFIGW>(),
+        0,
+        "QueryServiceConfigW 缓冲区必须满足结构体对齐（R5e-L05）"
+    );
+    (buf, cfg)
 }
 
 /// 服务启动类型是否等于期望值（B11：原 PS `Get-Service ... StartType -eq 'Disabled'` 的原生等价）
@@ -235,7 +263,7 @@ pub fn service_exists(name: &str) -> bool {
 pub fn service_absent_or_start_is(name: &str, expected: u32) -> bool {
     use windows::Win32::System::Services::{
         CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceConfigW,
-        QUERY_SERVICE_CONFIGW, SC_MANAGER_CONNECT, SERVICE_QUERY_CONFIG,
+        SC_MANAGER_CONNECT, SERVICE_QUERY_CONFIG,
     };
     unsafe {
         let Ok(scm) = OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT) else {
@@ -255,8 +283,7 @@ pub fn service_absent_or_start_is(name: &str, expected: u32) -> bool {
         let verdict = if needed == 0 {
             false
         } else {
-            let mut buf = vec![0u8; needed as usize];
-            let cfg = buf.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
+            let (_buf, cfg) = aligned_service_config_buffer(needed);
             match QueryServiceConfigW(svc, Some(cfg), needed, &mut needed) {
                 Ok(()) => (*cfg).dwStartType.0 == expected,
                 Err(_) => false,
@@ -276,6 +303,13 @@ pub const SVC_START_MANUAL: u32 = windows::Win32::System::Services::SERVICE_DEMA
 
 /// `SERVICE_AUTO_START`（自动启动）。同上。
 pub const SVC_START_AUTO: u32 = windows::Win32::System::Services::SERVICE_AUTO_START.0;
+
+/// `SERVICE_RUNNING`（服务正在运行）。与 [`SVC_START_AUTO`] 同理由导出。
+///
+/// B03（方案 R5e-L04）：此前调用点写的是**裸数字 4**（`service_status(...) == 4`），
+/// 那个 4 是 Windows 的状态码，读者无从判断它是「运行中」还是别的什么；
+/// 同一文件里 `SVC_STOPPED` 也是裸 1。两边都换成有名字的常量。
+pub const SVC_RUNNING: u32 = windows::Win32::System::Services::SERVICE_RUNNING.0;
 
 /// 数据层 `startType` 字符串 → `dwStartType` 期望值。
 ///
@@ -343,6 +377,27 @@ pub fn service_set_start_pub(name: &str, start: u32) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// R5e-L05：`QueryServiceConfigW` 缓冲区必须满足结构体对齐。
+    /// 判红自证：把 `aligned_service_config_buffer` 恢复成 `Vec<u8>` ⇒ 指针模对齐
+    /// 非 0（x86 上必现），本条红。
+    #[test]
+    fn r5e_service_config_buffer_is_aligned() {
+        let (buf, cfg) = aligned_service_config_buffer(256);
+        let align = std::mem::align_of::<QUERY_SERVICE_CONFIGW>();
+        assert_eq!(
+            buf.as_ptr() as usize % align,
+            0,
+            "缓冲区基址必须满足 QUERY_SERVICE_CONFIGW 对齐（{align}）"
+        );
+        assert_eq!(
+            std::mem::size_of_val(&buf[0]),
+            std::mem::size_of::<u64>(),
+            "缓冲区必须用 u64 分配（保证对齐），不得退回 Vec<u8>"
+        );
+        assert_eq!(cfg as usize, buf.as_ptr() as usize, "指针必须指向缓冲区基址");
+        assert!(!buf.is_empty(), "256 字节至少需要一个 u64 槽位");
+    }
+
     /// service_absent_or_start_is 的 1060「已卸载」分支真机探针（AGENTS §1.6 第二问：
     /// 走真实 SCM 的新判据必须配 #[ignore] 探针，不能只靠推断）。
     ///
@@ -373,6 +428,34 @@ mod tests {
         assert!(
             !service_absent_or_start_is("RpcSs", SVC_START_DISABLED),
             "RpcSs 存在且非禁用，必须判 false（防 1060 分支把所有服务都判 true）"
+        );
+    }
+
+    /// B03（方案 R5e-L04）：`service_status` 的**形状**单测。
+    ///
+    /// 原签名是 `Option<(u32, u32)>`，第二元恒为 0（假数据面：调用方会以为
+    /// 「启动类型是 0」，而 0 不是合法启动类型）。改成只返回状态码 `u32` 后，
+    /// 形状本身必须被钉住 —— 改回二元组、或改成别的类型，本条即红。
+    ///
+    /// 只测形状不测真机（真机要读 SCM）：本条钉的是**类型契约**，不是服务状态值。
+    #[test]
+    fn b03_service_status_shape_is_single_u32() {
+        // 形状断言用类型体操表达，不调用真机查询：
+        // `Option<u32>` 而不是 `Option<(u32, u32)>`。
+        let shape_probe: unsafe fn(&str) -> Option<u32> = service_status;
+        // 编译期即可判红：若签名改回二元组，这一行不再匹配 `fn(&str) -> Option<u32>`。
+        let _ = shape_probe;
+    }
+
+    /// B03（方案 R5e-L04）：`SVC_RUNNING` / `SVC_STOPPED` 必须是**具名常量**，
+    /// 且与 Windows 的服务状态码一致（`SERVICE_RUNNING` = 4 / `SERVICE_STOPPED` = 1）。
+    #[test]
+    fn b03_service_state_constants_match_windows() {
+        assert_eq!(SVC_RUNNING, 4, "SVC_RUNNING 必须等于 SERVICE_RUNNING(4)");
+        assert_eq!(SVC_STOPPED, 1, "SVC_STOPPED 必须等于 SERVICE_STOPPED(1)");
+        assert_ne!(
+            SVC_RUNNING, SVC_STOPPED,
+            "运行中与已停止必须是两个不同的值"
         );
     }
 }

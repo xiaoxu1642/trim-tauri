@@ -38,6 +38,7 @@ const REPORT_READ_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 pub(crate) struct Sampler {
     stop: Option<Arc<AtomicBool>>,
+    worker: Option<std::thread::JoinHandle<()>>,
     last_request_at: i64,
     reaper_started: bool,
 }
@@ -48,6 +49,7 @@ fn with_sampler<T>(f: impl FnOnce(&mut Sampler) -> T) -> T {
     let mut guard = SAMPLER.lock().unwrap_or_else(|e| e.into_inner());
     let s = guard.get_or_insert(Sampler {
         stop: None,
+        worker: None,
         last_request_at: 0,
         reaper_started: false,
     });
@@ -64,7 +66,7 @@ fn ensure_sampler() {
         }
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        std::thread::spawn(move || {
+        let worker = std::thread::spawn(move || {
             // 线程内持有 NetSampler（首拍无基线 → 返回 None，上层据此返回空列表）
             let mut sampler = trim_finder::perf::NetSampler::new();
             while !flag.load(Ordering::Relaxed) {
@@ -86,9 +88,25 @@ fn ensure_sampler() {
             }
         });
         s.stop = Some(stop);
-        log::write_log("info", "实时网速采样器启动（进程内 NetSampler，原生 GetIfTable2）");
+        s.worker = Some(worker);
+        // R1d-L06：启动日志放在 SAMPLER 临界区外，避免把写日志算进全局状态锁域。
     });
+    if crate::engine::now_ms() != 0 {
+        // 上一临界区只负责初始化/启动标记，不携带日志写入。
+        if with_sampler(|s| s.stop.is_some()) {
+            log::write_log("info", "实时网速采样器启动（进程内 NetSampler，原生 GetIfTable2）");
+        }
+    }
     start_reaper_once();
+}
+
+/// R1d-L06：测试钩子不经过真实 NetSampler；只验证 stop/join 协议。
+#[cfg(test)]
+fn spawn_test_collector(stop: Arc<AtomicBool>, worker: std::thread::JoinHandle<()>) {
+    with_sampler(|s| {
+        s.stop = Some(stop);
+        s.worker = Some(worker);
+    });
 }
 
 /// 空闲回收线程（进程内只启动一次）
@@ -124,6 +142,9 @@ fn stop_sampler_if_idle(now: i64) -> bool {
         match s.stop.take() {
             Some(flag) => {
                 flag.store(true, Ordering::Relaxed);
+                if let Some(worker) = s.worker.take() {
+                    let _ = worker.join();
+                }
                 true
             }
             None => false,
@@ -140,6 +161,9 @@ fn stop_sampler(cause: &str) {
     let stopped = with_sampler(|s| match s.stop.take() {
         Some(flag) => {
             flag.store(true, Ordering::Relaxed);
+            if let Some(worker) = s.worker.take() {
+                let _ = worker.join();
+            }
             true
         }
         None => false,
@@ -955,7 +979,10 @@ mod tests {
     #[test]
     fn 报告删除与清空共用同一道根判定() {
         let src = include_str!("realtime.rs");
-        let prod = src.split("#[cfg(test)]").next().unwrap_or("");
+        // B-W4 的 R1d-L06 在文件前段加了一个 `#[cfg(test)]` 测试钩子块，
+        // 再用「第一个 #[cfg(test)]」截断会把 `report_root_receipt` 整个切掉 ——
+        // 生产段应以**真正的测试模块**为界。
+        let prod = src.split("mod tests {").next().unwrap_or("");
         assert_eq!(
             prod.matches("fn report_root_receipt(").count(),
             1,
@@ -980,6 +1007,28 @@ mod tests {
         assert!(!idle_stop_needed(false, 0, 1_000_000));
         assert!(!idle_stop_needed(true, 1_000_000, 1_000_000 + IDLE_STOP_MS));
         assert!(idle_stop_needed(true, 1_000_000, 1_000_001 + IDLE_STOP_MS));
+    }
+
+    /// R1d-L06：回收线程必须能用 AtomicBool 停并 join；start/stop 后不得留下活动线程。
+    /// 判红自证：把 stop_sampler 里的 join 恢复成不 join，或测试钩子恢复无退出条件，本条超时红。
+    #[test]
+    fn r1d_realtime_collector_stops() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let worker = std::thread::spawn(move || {
+            let mut ticks = 0u32;
+            while !flag.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(10));
+                ticks += 1;
+                if ticks > 1000 {
+                    return;
+                }
+            }
+        });
+        spawn_test_collector(stop, worker);
+        stop_sampler("测试停机");
+        let alive = with_sampler(|s| s.stop.is_some() || s.worker.is_some());
+        assert!(!alive, "start/stop 后 stop 与 JoinHandle 都必须清空");
     }
 
     /// R1d-M13：写侧体积闸与读上限同源（1e6 样本不再能保存成打不开的文件）。

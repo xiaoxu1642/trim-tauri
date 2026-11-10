@@ -129,7 +129,7 @@ function toStrUnwraps(text, rel, exempt = []) {
     }
     return lo;
   };
-  const re = /\.(to_str|to_string)\(\)\s*\.unwrap\(\)/g;
+  const re = /\.(to_str|to_string)\(\)\s*\.(unwrap|expect)\(/g;
   let m;
   while ((m = re.exec(text)) !== null) {
     const lnIdx = lineOf(m.index);
@@ -151,14 +151,15 @@ function toStrUnwraps(text, rel, exempt = []) {
   );
   const aOk = tempScriptDowngrades('fn x(p: &Path) -> Result<(), E> { let t = paths::temp_script_dir()?; Ok(()) }', 'fake.rs');
   const bBad = toStrUnwraps('fn y(p: &Path) { let s = p.to_str().unwrap(); }', 'fake.rs');
+  const bExpect = toStrUnwraps('fn y(p: &Path) { let s = p.to_str().expect("utf8"); }', 'fake.rs');
   const bOk = toStrUnwraps('// 迁移说明：旧写法 p.to_str().unwrap() 已由 ok()? 替代\nfn z(p: &Path) -> Option<&str> { p.to_str() }', 'fake.rs');
-  if (aBad.length !== 1 || aOk.length !== 0 || bBad.length !== 1 || bOk.length !== 0) {
+  if (aBad.length !== 1 || aOk.length !== 0 || bBad.length !== 1 || bExpect.length !== 1 || bOk.length !== 0) {
     g.fail(
       `fail-closed 判定器自检失败：A 违例=${aBad.length}（应 1） A 干净=${aOk.length}（应 0） ` +
-        `B 违例=${bBad.length}（应 1） B 注释/干净=${bOk.length}（应 0）`,
+        `B unwrap=${bBad.length}（应 1） B expect=${bExpect.length}（应 1） B 注释/干净=${bOk.length}（应 0）`,
     );
   } else {
-    console.log('✓ 判定器自检：A/B 违例样本必中、干净与注释样本放行（四样本）');
+    console.log('对照: A/B 违例样本（含 expect）必中、干净与注释样本放行');
   }
 }
 const aHits = [];

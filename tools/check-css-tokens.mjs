@@ -180,6 +180,20 @@ function inlineColorViolations(text, rel) {
     const t = raw.trim();
     if (!t || t.startsWith('//') || t.startsWith('*') || (t[0] === '/' && t[1] === '*')) continue;
     if (/cssVar\(|getCssColor\(/.test(raw)) continue;
+    // T1d-L07：`<meta name="theme-color" content="#…">` 与
+    // `setAttribute('content', '#…')` 原先不入网 —— 它们同样是把颜色写死在代码里。
+    // 这两类命中后交由「主题色单源」判据裁决（必须等于 --bg-app），不在这里直接判红：
+    // 4 份 HTML 的静态 meta 是合法载体，需要的是「与 token 对拍」而不是「禁写」。
+    const metaThemeColor = /<meta\s+name="theme-color"\s+content="(#[0-9a-fA-F]{3,8})"/i.exec(raw);
+    if (metaThemeColor) {
+      out.push({ line, prop: 'theme-color', value: metaThemeColor[1], text: t, metaThemeColor: true });
+      continue;
+    }
+    const setAttrThemeColor = /setAttribute\(\s*['"]content['"]\s*,\s*['"](#[0-9a-fA-F]{3,8})['"]/i.exec(raw);
+    if (setAttrThemeColor) {
+      out.push({ line, prop: 'theme-color', value: setAttrThemeColor[1], text: t, metaThemeColor: true });
+      continue;
+    }
     const isProp = /(?:^|[;{'"`\s])(color|background|background-color|border-color|fill|stroke)\s*:/i.test(raw)
       || /\.style\.(color|background|backgroundColor|borderColor|fill|stroke)\s*=/i.test(raw);
     if (!isProp) continue;
@@ -377,6 +391,22 @@ for (const file of jsFiles) {
 // T1d-M07 颜色侧：用户可见颜色属性不得出现未登记的硬编码色。
 const colorBad = [];
 const colorHits = [];
+
+// ==================== P3 C-01..C-04 新增判据 ====================
+// 本段落补齐五组判据，逐条对应 P3 施工卡的一项验收；每组都带注入反例的对照自检。
+//   ① 同选择器重复圆角：同选择器（同媒体上下文）出现两个不同圆角值 → 红
+//   ② ds.css 组件层纪律：圆角/浮层投影/字号三处不得再写字面量 → 红
+//   ③ CSS 版式：`}` 与 `@media` 不得紧贴同一行 → 红
+//   ④ 主题色单源：4 份 HTML 的 theme-color 必须等于 --bg-app，JS 不得写死 → 红
+//   ⑤ 动效 token 对拍：xtable.js 的 duration/easing 必须等于 --duration-slow/--ease-standard → 红
+
+// 主题色真源：main.css 的 .theme-light 段里的 --bg-app（应用恒浅色，取浅色档）。
+const MAIN_CSS_TEXT = readFileSync(join(REPO_ROOT, 'src', 'styles', 'main.css'), 'utf8');
+const THEME_BG_APP = (() => {
+  const block = /\.theme-light\s*\{([\s\S]*?)\n\}/.exec(blankComments(MAIN_CSS_TEXT));
+  const m = block && /--bg-app:\s*(#[0-9a-fA-F]{3,8})/.exec(block[1]);
+  return m ? m[1] : '';
+})();
 for (const file of cssFiles) {
   const rel = file.slice(REPO_ROOT.length + 1).replace(/\\/g, '/');
   colorHits.push(...colorViolations(blankComments(readFileSync(file, 'utf8')), rel).map((h) => ({ ...h, rel })));
@@ -391,6 +421,18 @@ for (const file of htmlFiles) {
 }
 const colorAllowCount = new Map(COLOR_ALLOW.map((a, i) => [i, 0]));
 for (const h of colorHits) {
+  // T1d-L07 主题色单源：4 份 HTML 的静态 meta 合法，但必须与 --bg-app 同值；
+  // JS 侧写死主题色（setAttribute('content', '#…')）一律红 —— 它应当从计算样式读。
+  if (h.metaThemeColor) {
+    if (h.rel.endsWith('.html')) {
+      if (h.value.toLowerCase() !== THEME_BG_APP.toLowerCase()) {
+        colorBad.push(`${h.rel}:${h.line} theme-color=${h.value} 与 --bg-app=${THEME_BG_APP} 不等（标题栏底色必须与 token 同源）`);
+      }
+      continue;
+    }
+    colorBad.push(`${h.rel}:${h.line} theme-color 写死为 ${h.value}（必须从 --bg-app 计算样式读）`);
+    continue;
+  }
   const idx = COLOR_ALLOW.findIndex((a) => a.file === h.rel && (a.fileWide || h.text.includes(a.anchor)));
   if (idx >= 0) {
     colorAllowCount.set(idx, colorAllowCount.get(idx) + 1);
@@ -594,7 +636,208 @@ const tripletProblems = [];
 }
 if (tripletProblems.length) for (const p of tripletProblems) console.log(`✗ 三值同步：${p}`);
 
-if (!bad.length && !radiusBad.length && !curveBad.length && !tripletProblems.length && !colorBad.length) {
+// ==================== P3 C-01..C-04：新增判据本体 ====================
+// 逐条对应一张施工卡的验收项，全部能靠注入反例判红（见下方对照自检）。
+
+/** 扫出 CSS 规则（按大括号配对，支持 @media 嵌套），返回 { ctx, prelude, body }。
+ * ctx 是外层 @-rule 链：媒体查询里的响应式覆盖不算「同选择器二次声明」。 */
+function cssRules(text) {
+  const out = [];
+  const walk = (src, ctx) => {
+    let buf = '';
+    let i = 0;
+    while (i < src.length) {
+      const ch = src[i];
+      if (ch === '{') {
+        const prelude = buf.trim();
+        buf = '';
+        let depth = 1;
+        let j = i + 1;
+        while (j < src.length && depth > 0) {
+          if (src[j] === '{') depth++;
+          else if (src[j] === '}') depth--;
+          j++;
+        }
+        const body = src.slice(i + 1, j - 1);
+        if (prelude.startsWith('@')) walk(body, ctx ? `${ctx}|${prelude}` : prelude);
+        else out.push({ ctx, prelude, body });
+        i = j;
+        continue;
+      }
+      if (ch === '}') {
+        buf = '';
+        i++;
+        continue;
+      }
+      buf += ch;
+      i++;
+    }
+  };
+  walk(text, '');
+  return out;
+}
+
+/** 圆角档位表：`6px` 与 `var(--radius-small)` 视为同档，避免同义写法被当成冲突。 */
+function radiusTokenTable(cssText) {
+  const table = new Map();
+  for (const m of cssText.matchAll(/--radius-([a-z-]+)\s*:\s*(\d+)px/g)) table.set(`${m[2]}px`, `--radius-${m[1]}`);
+  return table;
+}
+
+/** 归一圆角取值。 */
+function normalizeRadiusValue(value, pxToToken) {
+  const v = value.trim();
+  if (pxToToken.has(v)) return pxToToken.get(v);
+  const varM = /^var\((--radius-[a-z-]+)\)$/.exec(v);
+  return varM ? varM[1] : v;
+}
+
+/** ① 同选择器重复圆角（同一媒体上下文内出现两个不同圆角）→ 违例。 */
+function cssRadiusDuplicateViolations(entries, pxToToken) {
+  const out = [];
+  for (const { rel, text } of entries) {
+    const seen = new Map();
+    for (const rule of cssRules(text)) {
+      const m = rule.body.match(/border[a-z-]*radius\s*:\s*([^;}]+)/i);
+      if (!m) continue;
+      const value = normalizeRadiusValue(m[1], pxToToken);
+      for (const sel of rule.prelude.split(',')) {
+        const name = sel.trim().replace(/\s+/g, ' ');
+        if (!name) continue;
+        const key = `${rule.ctx}|${name}`;
+        if (!seen.has(key)) seen.set(key, { value, rel, name });
+        else if (seen.get(key).value !== value) {
+          out.push(`${rel}: ${name} 同时出现 ${seen.get(key).value} 与 ${value}（同选择器两个圆角 = 后者静默改写前者）`);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** ② ds.css 组件层纪律：圆角走 token、浮层投影走 --shadow-*、字号走 --fs-*。 */
+const DS_RADIUS_ALLOWED = new Set(['999px', '50%']);
+const DS_SHADOW_ALLOWED = new Set(['0 1px 4px rgba(0, 0, 0, 0.35)']);
+const DS_FONT_BARE_PX = new Set(['10px', '11.5px']);
+function dsCssLiteralViolations(text) {
+  const out = [];
+  for (const rule of cssRules(text)) {
+    for (const m of rule.body.matchAll(/(border[a-z-]*radius|box-shadow|font-size)\s*:\s*([^;}]+)/gi)) {
+      const prop = m[1].toLowerCase();
+      const value = m[2].trim();
+      if (prop.startsWith('border') && prop.endsWith('radius')) {
+        if (!/^var\(--radius-[a-z-]+\)$/.test(value) && !DS_RADIUS_ALLOWED.has(value)) {
+          out.push(`ds.css ${prop}: ${value}（组件层圆角必须走 var(--radius-*)，胶囊/圆形除外）`);
+        }
+      } else if (prop === 'box-shadow') {
+        if (!/^var\(--shadow-[a-z-]+\)$/.test(value) && !DS_SHADOW_ALLOWED.has(value)) {
+          out.push(`ds.css box-shadow: ${value}（浮层投影必须走 var(--shadow-*)，控件投影需登记）`);
+        }
+      } else if (prop === 'font-size') {
+        const bare = /^calc\(([\d.]+)px\s*\*\s*var\(--font-size-scale/.exec(value);
+        if (!/^var\(--fs-[a-z-]+\)$/.test(value) && !(bare && DS_FONT_BARE_PX.has(`${bare[1]}px`))) {
+          out.push(`ds.css font-size: ${value}（有字阶 token 的字号必须走 var(--fs-*)，无 token 的裸值需登记）`);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/** ③ CSS 版式：`}` 与 `@media`/`@supports` 不得紧贴同一行。 */
+function cssLayoutViolations(entries) {
+  const out = [];
+  for (const { rel, text } of entries) {
+    text.split('\n').forEach((line, idx) => {
+      if (/}\s*@(media|supports)\b/.test(line)) {
+        out.push(`${rel}:${idx + 1} \`}\` 与 \`@media\` 紧贴同一行（闭合块与媒体查询之间须换行）`);
+      }
+    });
+  }
+  return out;
+}
+
+/** ⑤ 动效 token 对拍：xtable.js 的 duration/easing 必须等于 --duration-slow/--ease-standard。 */
+function motionTokenViolations(jsText, rel, durationSlowMs, easeStandard) {
+  const out = [];
+  const dur = /duration:\s*(\d+)/.exec(jsText);
+  if (dur && Number(dur[1]) !== durationSlowMs) {
+    out.push(`${rel}: duration ${dur[1]}ms 与 --duration-slow ${durationSlowMs}ms 不等（改 token 后动画时长会静默漂移）`);
+  }
+  const ease = /easing:\s*'([^']+)'/.exec(jsText);
+  if (ease) {
+    const norm = (s) => s.replace(/\s+/g, '');
+    if (norm(ease[1]) !== norm(easeStandard)) {
+      out.push(`${rel}: easing ${ease[1]} 与 --ease-standard ${easeStandard} 不等`);
+    }
+  }
+  return out;
+}
+
+const PX_TO_TOKEN = radiusTokenTable(MAIN_CSS_TEXT);
+const CSS_ENTRIES = cssFiles.map((f) => ({
+  rel: f.slice(REPO_ROOT.length + 1).replace(/\\/g, '/'),
+  text: blankComments(readFileSync(f, 'utf8'))
+}));
+
+const radiusDupBad = cssRadiusDuplicateViolations(CSS_ENTRIES, PX_TO_TOKEN);
+const dsLiteralBad = dsCssLiteralViolations(blankComments(readFileSync(join(REPO_ROOT, 'src', 'styles', 'ds.css'), 'utf8')));
+const layoutBad = cssLayoutViolations(CSS_ENTRIES);
+const durationSlowM = /--duration-slow:\s*(\d+)ms/.exec(MAIN_CSS_TEXT);
+const easeStandardM = /--ease-standard:\s*(cubic-bezier\([^)]*\))/.exec(MAIN_CSS_TEXT);
+const motionBad = durationSlowM && easeStandardM
+  ? motionTokenViolations(
+      readFileSync(join(REPO_ROOT, 'src', 'scripts', 'xtable.js'), 'utf8'),
+      'src/scripts/xtable.js',
+      Number(durationSlowM[1]),
+      easeStandardM[1]
+    )
+  : ['main.css 解析不到 --duration-slow / --ease-standard（动效对拍失明）'];
+
+console.log(`同选择器重复圆角：${radiusDupBad.length ? `${radiusDupBad.length} 处冲突` : '✓ 无同选择器双圆角'}`);
+for (const v of radiusDupBad) console.log(`✗ ${v}`);
+console.log(`ds.css 组件层字面量：${dsLiteralBad.length ? `${dsLiteralBad.length} 处违例` : '✓ 圆角/投影/字号全部走 token'}`);
+for (const v of dsLiteralBad) console.log(`✗ ${v}`);
+console.log(`CSS 版式：${layoutBad.length ? `${layoutBad.length} 处紧贴写法` : '✓ 无 `}@media` 紧贴'}`);
+for (const v of layoutBad) console.log(`✗ ${v}`);
+console.log(`动效 token 对拍：${motionBad.length ? `${motionBad.length} 处漂移` : '✓ xtable.js 时长/曲线与 token 一致'}`);
+for (const v of motionBad) console.log(`✗ ${v}`);
+
+// 新增判据的正向对照：每条断言「注入违例必红 / 合规必放行」，否则恒绿等于没写。
+{
+  const problems = [];
+  const expect = (label, got, want) => {
+    if (got !== want) problems.push(`${label}（期望 ${want}，实得 ${got}）`);
+  };
+  // ① 同选择器两次不同圆角必红；同值不算冲突
+  expect('① 同选择器两次不同圆角判红',
+    cssRadiusDuplicateViolations([{ rel: 's.css', text: '.a{border-radius:6px}\n.b{border-radius:14px}\n.a{border-radius:10px}' }], PX_TO_TOKEN).length > 0, true);
+  expect('① 同选择器同值不判红',
+    cssRadiusDuplicateViolations([{ rel: 's.css', text: '.a{border-radius:6px}\n.a{border-radius:var(--radius-small)}' }], PX_TO_TOKEN).length, 0);
+  // ② ds.css 字面量必红；合规放行
+  expect('② ds.css 圆角字面量判红', dsCssLiteralViolations('.x{border-radius:6px}').length > 0, true);
+  expect('② ds.css 浮层投影字面量判红', dsCssLiteralViolations('.x{box-shadow:0 6px 18px rgba(0,0,0,.3)}').length > 0, true);
+  expect('② ds.css 字号字面量判红', dsCssLiteralViolations('.x{font-size:12px}').length > 0, true);
+  expect('② ds.css 合规写法放行',
+    dsCssLiteralViolations('.x{border-radius:var(--radius-small);box-shadow:var(--shadow-flyout);font-size:var(--fs-meta)}').length, 0);
+  // ③ 版式紧贴判红；换行放行
+  expect('③ `}@media` 紧贴判红', cssLayoutViolations([{ rel: 's.css', text: '.a{color:red}@media (max-width:9px){' }]).length > 0, true);
+  expect('③ 换行写法放行', cssLayoutViolations([{ rel: 's.css', text: '.a{color:red}\n\n@media (max-width:9px){' }]).length, 0);
+  // ⑤ 动效对拍：漂移必红；一致放行
+  expect('⑤ duration 漂移判红', motionTokenViolations("{duration: 320}", 'x.js', 280, 'cubic-bezier(0.23, 1, 0.32, 1)').length > 0, true);
+  expect('⑤ easing 漂移判红', motionTokenViolations("{easing: 'cubic-bezier(0.4, 0, 0.2, 1)'}", 'x.js', 320, 'cubic-bezier(0.23, 1, 0.32, 1)').length > 0, true);
+  expect('⑤ 完全一致放行', motionTokenViolations("{duration: 320, easing: 'cubic-bezier(0.23, 1, 0.32, 1)'}", 'x.js', 320, 'cubic-bezier(0.23, 1, 0.32, 1)').length, 0);
+  if (problems.length) {
+    console.error(`✗ 新增判据正向对照失败（恒绿断言视同没写）：\n  ${problems.join('\n  ')}`);
+    process.exit(1);
+  }
+  console.log('✓ 新增判据正向对照 11 组全部命中（①~③、⑤ 注入违例必红 + 合规必放行）');
+}
+
+if (
+  !bad.length && !radiusBad.length && !curveBad.length && !tripletProblems.length && !colorBad.length
+  && !radiusDupBad.length && !dsLiteralBad.length && !layoutBad.length && !motionBad.length
+) {
   console.log('✓ 全部引用的自定义属性都有定义（无静默 fallback、无被丢弃的声明）；硬编码颜色均有登记');
   process.exit(0);
 }

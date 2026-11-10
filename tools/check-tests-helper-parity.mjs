@@ -58,7 +58,7 @@ function parseHelpers(src) {
  */
 function auditContent(content, helpers) {
   const problems = [];
-  const code = stripComments(content);
+  const code = blankNonCode(content, 'rs', { keepStrings: true });
   const defRe = (name) => new RegExp(`\\b(?:pub\\s+)?(?:async\\s+)?fn\\s+${name}\\s*[(<]`);
   for (const h of helpers) {
     if (defRe(h).test(code)) {

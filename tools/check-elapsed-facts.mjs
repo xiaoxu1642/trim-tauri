@@ -28,6 +28,7 @@
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { blankNonCode } from './lib/src-scan.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -40,6 +41,8 @@ const check = (ok, label, detail = '') => {
 const read = (...p) => readFileSync(join(ROOT, ...p), 'utf8');
 const startupRs = read('src-tauri', 'src', 'commands', 'startup.rs');
 const perfRs = read('native-scanner', 'src', 'perf.rs');
+const startupCode = blankNonCode(startupRs, 'rs', { keepStrings: true });
+const perfCode = blankNonCode(perfRs, 'rs', { keepStrings: true });
 
 // ============================================================
 // 判据①（反向）：耗时参与判定
@@ -171,12 +174,12 @@ function scanFailPathTimer(src, failRe) {
 const DOMAINS = [
   {
     label: 'startup（启动项删除）',
-    src: startupRs,
+    src: startupCode,
     needle: '"elapsedMs".into(),',
   },
   {
     label: 'perf（内存清理分区）',
-    src: perfRs,
+    src: perfCode,
     needle: '\\"elapsedMs\\":{elapsed_ms}',
   },
 ];

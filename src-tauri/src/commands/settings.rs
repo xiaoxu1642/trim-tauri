@@ -59,7 +59,7 @@ pub(crate) const PREF_KEYS: &[&str] = &[
     "mouseTrail",
 ];
 
-/// settings:get-prefs —— UI 偏好键的批量读取（五窗可调：副窗也要读）。
+/// settings:get-prefs —— UI 偏好键的批量读取（四个窗口 label 可调：三个子窗也要读）。
 /// 缺失键返回 null（前端据此区分「未设置」与「已设置」）。
 #[tauri::command]
 pub fn settings_get_prefs<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
@@ -92,7 +92,7 @@ pub async fn settings_set_pref<R: tauri::Runtime>(
     if !PREF_KEYS.contains(&key.as_str()) {
         return json!({ "success": false, "message": "未知的偏好键" });
     }
-    // R1a-L09：四个偏好键语义都是布尔；副窗不能借 64KB 体积闸灌任意形状进 settings.json。
+    // R1a-L09：白名单偏好键语义都是布尔；副窗不能借 64KB 体积闸灌任意形状进 settings.json。
     if !value.is_boolean() {
         return json!({ "success": false, "message": "偏好值必须是布尔" });
     }
@@ -1180,7 +1180,8 @@ pub fn settings_load<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Valu
 pub const CDP_PORT: u16 = 9222;
 
 /// 当前进程是否**真的**暴露着 CDP 端口（启动期定下，运行中不再变）。
-static CDP_ACTIVE_NOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+// 文件级 static ⇒ 登记在 `commands/state.rs`（命令层全局状态的唯一清单），实现在那里。
+use crate::commands::state::CDP_ACTIVE_NOW;
 
 /// 环境变量名：与 `lib.rs::with_browser_args` 的读取侧互为契约（那边负责把 wry 默认串拼回来，
 /// `additional_browser_args` 是替换不是追加）。改一侧必须同步另一侧。
@@ -1284,6 +1285,20 @@ pub fn settings_cdp_state<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value 
     let pref = read_cdp_pref(is_admin);
     let active = CDP_ACTIVE_NOW.load(Ordering::SeqCst);
     let want = cdp_want_on_next_start(is_admin, pref, cfg!(debug_assertions));
+    cdp_receipt(
+        active,
+        want,
+        pref.is_some(),
+        if active != want {
+            "需重启后生效"
+        } else {
+            "当前状态与下次启动意图一致"
+        },
+    )
+}
+
+/// CDP state / set 共用回执形状；重启口径必须两边同源。
+fn cdp_receipt(active: bool, want: bool, manually_set: bool, message: &str) -> Value {
     json!({
         "success": true,
         "activeNow": active,
@@ -1291,7 +1306,8 @@ pub fn settings_cdp_state<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value 
         "requiresRestart": active != want,
         "port": CDP_PORT,
         "devBuild": cfg!(debug_assertions),
-        "manuallySet": pref.is_some(),
+        "manuallySet": manually_set,
+        "message": message,
     })
 }
 
@@ -1327,18 +1343,16 @@ pub async fn settings_cdp_set<R: tauri::Runtime>(window: WebviewWindow<R>, enabl
         "info",
         &format!("CDP 远程调试偏好已设为 {enabled}（当前进程 activeNow={active}，需重启才一致）"),
     );
-    json!({
-        "success": true,
-        "activeNow": active,
-        "wantOnNextStart": enabled,
-        "requiresRestart": true,
-        "port": CDP_PORT,
-        "message": if active == enabled {
+    cdp_receipt(
+        active,
+        enabled,
+        true,
+        if active == enabled {
             "已记录；当前进程的状态与之一致"
         } else {
             "已记录，但本进程的调试端口无法在运行中改变——重启 Trim 后生效"
         },
-    })
+    )
 }
 
 #[cfg(test)]
@@ -1349,6 +1363,8 @@ mod tests_cdp_admin_gate {
     use super::cdp_startup_decision;
     use super::cdp_want_on_next_start;
     use super::CdpStartupDecision;
+    use super::cdp_receipt;
+    use serde_json::Value;
 
     #[test]
     fn elevated_ignores_pref_that_enables_debug_port() {
@@ -1405,6 +1421,21 @@ mod tests_cdp_admin_gate {
             cdp_startup_decision(false, false, Some(false), true),
             CdpStartupDecision::Disable
         );
+    }
+
+    /// R1a-L08：set 与 state 的重启口径同源；请求值与下一次启动态一致时不要求重启。
+    #[test]
+    fn r1a_cdp_set_requires_restart_matches_state() {
+        for _debug_build in [true, false] {
+            let receipt = cdp_receipt(false, true, true, "测试");
+            assert_eq!(receipt["activeNow"], Value::Bool(false));
+            assert_eq!(receipt["wantOnNextStart"], Value::Bool(true));
+            assert_eq!(
+                receipt["requiresRestart"],
+                receipt["activeNow"].as_bool().unwrap() != receipt["wantOnNextStart"].as_bool().unwrap()
+            );
+            assert_eq!(receipt["requiresRestart"], Value::Bool(true));
+        }
     }
 }
 

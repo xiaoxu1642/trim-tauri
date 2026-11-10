@@ -140,8 +140,13 @@ pub fn cm_restart_explorer() -> Result<Value, String> {
         let mut killed = 0usize;
         for (pid, _) in &targets {
             if let Ok(h) = OpenProcess(PROCESS_TERMINATE, false, *pid) {
-                // R5a-L07：PID 在枚举与终止之间可能被复用——拿到句柄后按句柄重查镜像，
+                // R5a-L07：PID 在枚举与终止之间可能被复用——按 **PID 重新开句柄**查镜像，
                 // 仍是系统 explorer 才终止（K03 的按名收紧不能留复用窗口）。
+                //
+                // B03（方案 R5a-L07）：原注释写「拿到句柄后按句柄重查镜像」，与实现不符 ——
+                // 这里的 `h` 是**终止句柄**（`PROCESS_TERMINATE`），不携带镜像路径；
+                // 查镜像是 `get_process_path(pid)` 另开一次查询。PID 复用窗口仍在
+                // （重新开句柄到终止之间，PID 还可能再被复用），句柄版重查要另开 P2。
                 let still_explorer = get_process_path(*pid)
                     .is_some_and(|p| is_system_explorer_image(&p));
                 if !still_explorer {
@@ -390,10 +395,10 @@ unsafe fn verb_hidden(hk: HKEY) -> bool {
     for vn in ["LegacyDisable", "Blocked", "ProgrammaticAccessOnly"] {
         if reg_value_exists(hk, vn) { return true; }
     }
-    if let Some(v) = reg_read_dword_val(hk, "HideBasedOnVelocityId") {
+      if let Some(v) = reg_read_dword_u32(hk, "HideBasedOnVelocityId") {
         if v == 0x639bc8 { return true; }
     }
-    if let Some(v) = reg_read_dword_val(hk, "CommandFlags") {
+      if let Some(v) = reg_read_dword_u32(hk, "CommandFlags") {
         if (v % 16) >= 8 { return true; }
     }
     false
@@ -423,7 +428,7 @@ const KNOWN_SYSTEM: &[&str] = &[
 ///
 /// `company` 传的是「CLSID 键的 Company 值，缺省时退回 PE 的 CompanyName」（见 cm_scan 的
 /// P1-9 注释）—— 只认注册表那一个值会把大批条目当成"没有厂商信息"。
-fn is_third_party(name: &str, company: &str, source: &str, file_path: &str) -> bool {
+fn is_third_party(name: &str, company: &str, source: &str, file_path: &str, system_root: &str) -> bool {
     let cl = company.to_lowercase();
     if cl.contains("microsoft") || cl.contains("windows corporation") { return false; }
     let fl = file_path.to_lowercase();
@@ -431,7 +436,11 @@ fn is_third_party(name: &str, company: &str, source: &str, file_path: &str) -> b
     // 的落点（NVIDIA 的壳扩展 dll 就在那），WinSxS 同理混装 —— 拿它当"系统原生"会把
     // 最该标第三方的那批压成绿色。这两个存储目录不算。
     let in_driver_store = fl.contains(r"\driverstore\filerepository\") || fl.contains(r"\winsxs\");
-    if company.is_empty() && fl.starts_with(r"c:\windows") && !in_driver_store { return false; }
+    // R5a-L01：系统根用**实际**系统盘根，不硬编码 `c:\windows` ——
+    // Windows 装在 D: 时，`D:\Windows\System32\shell32.dll` 会被误判成第三方。
+    let sys = system_root.to_lowercase();
+    let in_system_root = !sys.is_empty() && fl.starts_with(&sys);
+    if company.is_empty() && in_system_root && !in_driver_store { return false; }
     if KNOWN_SYSTEM.contains(&name) { return false; }
     if source == "shell" {
         let nl = name.to_lowercase();
@@ -902,6 +911,10 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
         // CLSID 视图
         let clsid_views: Vec<(HKEY, String)> = vec![
             (HKEY_CURRENT_USER, r"Software\Classes\CLSID".to_string()),
+            // R5a-L02：32 位**逐用户**视图。旧形态只扫 HKLM 的 Wow6432Node，
+            // 于是装在 HKCU 下的 32 位逐用户项（用户自己装的 shell 扩展）整个扫不到，
+            // 界面显示「没有」而实际存在。
+            (HKEY_CURRENT_USER, r"Software\Classes\Wow6432Node\CLSID".to_string()),
             (HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes\CLSID".to_string()),
             (HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes\Wow6432Node\CLSID".to_string()),
         ];
@@ -910,6 +923,8 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
         // 场景注册表视图根
         let scene_views: Vec<(HKEY, String)> = vec![
             (HKEY_CURRENT_USER, r"Software\Classes".to_string()),
+            // R5a-L02：同上，32 位逐用户场景视图。
+            (HKEY_CURRENT_USER, r"Software\Classes\Wow6432Node".to_string()),
             (HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes".to_string()),
             (HKEY_LOCAL_MACHINE, r"SOFTWARE\Classes\Wow6432Node".to_string()),
         ];
@@ -918,22 +933,13 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
         let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         // ---- 场景扫描 ----
-        let scenes: &[(&str, &[&str])] = &[
-            ("文件", &["*", "AllFilesystemObjects"]),
-            ("EXE文件", &["exefile", r"SystemFileAssociations\.exe"]),
-            ("LNK文件", &["lnkfile", r"SystemFileAssociations\.lnk"]),
-            ("目录", &["Directory"]),
-            ("文件夹", &["Folder"]),
-            ("驱动器", &["Drive"]),
-            ("目录背景", &[r"Directory\Background"]),
-            ("桌面背景", &["DesktopBackground"]),
-            ("回收站", &[r"CLSID\{645FF040-5081-101B-9F08-00AA002F954E}", "RecycleBinFolder"]),
-            ("此电脑", &[r"CLSID\{20D04FE0-3AEA-1069-A2D8-08002B30309D}"]),
-            ("库", &["LibraryFolder", r"LibraryFolder\Background", "UserLibraryFolder"]),
-        ];
+        // R5a-L06：扫描侧与写侧共用**同一张表**（`cm_scenes_scan_table`），
+        // 两张表不再各写一份字面量 ⇒ 结构上就不会分叉；
+        // 集合对拍由 `cm_scenes_scan_suffixes` / `cm_scenes_write_suffixes` 的测试钉住。
+        let scenes = cm_scenes_scan_table();
 
         for (category, suffixes) in scenes {
-            for suffix in *suffixes {
+            for suffix in suffixes {
                 for (hive, base) in &scene_views {
                     let scene_path = format!("{base}\\{suffix}");
                     // shell 子键
@@ -1191,7 +1197,7 @@ pub fn cm_scan() -> Result<Vec<Value>, String> {
             // 修法是把 PE 的厂商与解析出的真实文件路径喂进同一条判据，不另起一套。
             let company_eff = if item.company.trim().is_empty() { pe.company.as_str() } else { &item.company };
             let path_eff = if item.file_path.is_empty() { owner_file.as_str() } else { &item.file_path };
-            let is_tp = is_third_party(&item.name, company_eff, &item.source, path_eff);
+            let is_tp = is_third_party(&item.name, company_eff, &item.source, path_eff, &system_root);
             let risk = if is_protected { "protected" } else if is_tp { "high" } else { "low" };
             let component_missing =
                 cm_component_missing(&item.clsid, &item.file_path, &item.handler_missing);
@@ -1298,7 +1304,14 @@ unsafe fn scan_shell_items(
         // 启用状态
         let mut enabled = !verb_hidden(chk);
         let mut unknown_conv = false;
-        if child.to_lowercase().starts_with("autorunsdisabled") {
+        // R5a-L05：键名恰为 `AutorunsDisabled`（无后缀）时，它是**不可反转**的禁用约定，
+        // 回「未识别」而不是「已启用」——键名一动没动却报成功，是最坏的一种假成功。
+        let child_lower = child.to_lowercase();
+        if child_lower == "autorunsdisabled" {
+            enabled = false;
+            unknown_conv = true;
+            name = format!("{name}（未识别的禁用约定）");
+        } else if child_lower.starts_with("autorunsdisabled") {
             enabled = false;
             unknown_conv = true;
             name = format!("{name}（未识别的禁用约定）");
@@ -1605,6 +1618,63 @@ const CM_SCENES: &[&str] = &[
     "recyclebinfolder", "libraryfolder", r"libraryfolder\background", "userlibraryfolder",
 ];
 
+/// R5a-L06：扫描面 `scenes` 与写侧 `CM_SCENES` 的**集合**对拍（不只比计数）。
+///
+/// 为什么必须比集合：两张表是两份独立字面量，新增场景只改一处时，
+/// 计数可能恰好相同（例如一进一出），而实际口径已经分叉 ——
+/// 扫得到但写不掉的项会被界面显示成「可禁用」却什么也没发生。
+fn cm_scenes_scan_table() -> Vec<(&'static str, Vec<&'static str>)> {
+    vec![
+        ("文件", vec!["*", "AllFilesystemObjects"]),
+        ("EXE文件", vec!["exefile", r"SystemFileAssociations\.exe"]),
+        ("LNK文件", vec!["lnkfile", r"SystemFileAssociations\.lnk"]),
+        ("目录", vec!["Directory"]),
+        ("文件夹", vec!["Folder"]),
+        ("驱动器", vec!["Drive"]),
+        ("目录背景", vec![r"Directory\Background"]),
+        ("桌面背景", vec!["DesktopBackground"]),
+        (
+            "回收站",
+            vec![
+                r"CLSID\{645FF040-5081-101B-9F08-00AA002F954E}",
+                "RecycleBinFolder",
+            ],
+        ),
+        (
+            "此电脑",
+            vec![r"CLSID\{20D04FE0-3AEA-1069-A2D8-08002B30309D}"],
+        ),
+        (
+            "库",
+            vec![
+                "LibraryFolder",
+                r"LibraryFolder\Background",
+                "UserLibraryFolder",
+            ],
+        ),
+    ]
+}
+
+/// 扫描场景表的**归一**后缀集合（与 `CM_SCENES` 同口径：小写）。
+#[cfg(test)]
+fn cm_scenes_scan_suffixes() -> Vec<String> {
+    let mut out: Vec<String> = cm_scenes_scan_table()
+        .into_iter()
+        .flat_map(|(_, suffixes)| suffixes.into_iter())
+        .map(|s| s.to_ascii_lowercase())
+        .collect();
+    out.sort();
+    out
+}
+
+/// 写侧场景表的**归一**后缀集合。
+#[cfg(test)]
+fn cm_scenes_write_suffixes() -> Vec<String> {
+    let mut out: Vec<String> = CM_SCENES.iter().map(|s| s.to_ascii_lowercase()).collect();
+    out.sort();
+    out
+}
+
 /// 注册表臂容器：hive 必须是 HKCU/HKLM 全称形态，子键必须落在本域扫描面产出的
 /// Classes 容器形状内。Wow6432Node 视图按原生形态折回后同判（句柄层 32 位视图由
 /// resolve_native_reg_path 决定，containment 只认键形）。
@@ -1701,8 +1771,16 @@ fn cm_shellex_external_disable(leaf: &str) -> Option<&'static str> {
     // 仍叫外部禁用名，照样反转不了（旧实现会把它改名成 `AutorunsDisabled_x` 再回
     // 「已启用」——同一类假成功）。
     let rest = leaf.trim_start_matches('-').to_ascii_lowercase();
-    rest.starts_with("autorunsdisabled")
-        .then_some("该项由外部工具以改名方式禁用，Trim 不改动")
+    if !rest.starts_with("autorunsdisabled") {
+        return None;
+    }
+    // R5a-L05：键名**恰好**是 `AutorunsDisabled`（无后缀）时，它本身就是禁用约定，
+    // 没有「去掉前缀」这一步可做 —— 反转不了。旧实现一律回「已启用」，
+    // 前端据此翻勾并弹「已启用」，而键名一动没动。
+    if rest == "autorunsdisabled" {
+        return Some("该键名本身即禁用约定（AutorunsDisabled），Trim 不猜它如何还原");
+    }
+    Some("该项由外部工具以改名方式禁用，Trim 不改动")
 }
 
 /// R5a-L10：屏蔽表的**写侧档位计划**——`(目标是否为启用, 扫描侧记录的来源档)`。
@@ -2009,7 +2087,7 @@ unsafe fn toggle_cm_item(
                     let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
                 }
                 // CommandFlags 清 0x8 位
-                if let Some(cf) = reg_read_dword_val(hk, "CommandFlags") {
+                  if let Some(cf) = reg_read_dword_u32(hk, "CommandFlags") {
                     let cleared = cf & !0x8;
                     if cleared == 0 {
                         let nm = to_wide("CommandFlags");
@@ -2423,17 +2501,39 @@ mod owner_tests {
     #[test]
     fn third_party_verdict_uses_pe_company_and_not_the_windows_prefix() {
         // PE 厂商是微软 → 系统原生。真机原状：「旧版 Windows Media Player」被标成第三方
-        assert!(!is_third_party("旧版 Windows Media Player", "Microsoft Corporation", "openwith", ""));
+        assert!(!is_third_party("旧版 Windows Media Player", "Microsoft Corporation", "openwith", "", r"C:\Windows"));
         // DriverStore 是第三方驱动包的落点，不能因「在 C:\Windows 下」就压成绿色
         assert!(is_third_party("NvAppShExt Class", "", "shellex",
-            r"C:\Windows\System32\DriverStore\FileRepository\nv_dispsi.inf_amd64_d95662815b9b13a8\nv3dappshext.dll"));
-        assert!(is_third_party("某组件", "", "shellex", r"C:\Windows\WinSxS\amd64_x\some.dll"));
+            r"C:\Windows\System32\DriverStore\FileRepository\nv_dispsi.inf_amd64_d95662815b9b13a8\nv3dappshext.dll", r"C:\Windows"));
+        assert!(is_third_party("某组件", "", "shellex", r"C:\Windows\WinSxS\amd64_x\some.dll", r"C:\Windows"));
         // 而真正躺在 System32 根下的系统文件仍算系统原生（这条不许被上面两条带坏）
-        assert!(!is_third_party("库项", "", "shellex", r"C:\Windows\System32\shell32.dll"));
+        assert!(!is_third_party("库项", "", "shellex", r"C:\Windows\System32\shell32.dll", r"C:\Windows"));
         // 已知系统动词名一律不标第三方
-        assert!(!is_third_party("Open", "", "shell", ""));
+        assert!(!is_third_party("Open", "", "shell", "", r"C:\Windows"));
         // 普通第三方
-        assert!(is_third_party("WinRAR 压缩", "win.rar GmbH", "shellex", r"C:\Program Files\WinRAR\rarext.dll"));
+        assert!(is_third_party("WinRAR 压缩", "win.rar GmbH", "shellex", r"C:\Program Files\WinRAR\rarext.dll", r"C:\Windows"));
+    }
+
+    /// R5a-L01：系统根用**实际**系统盘根，不硬编码 `c:\windows`。
+    /// Windows 装在 D: 时，`D:\Windows\System32\shell32.dll` 必须仍算系统原生。
+    /// 破坏自证：把 `system_root` 形参去掉、恢复硬编码 `c:\windows` ⇒ 本用例红。
+    #[test]
+    fn r5a_third_party_uses_system_root() {
+        // 系统根在 D: ⇒ D 盘下的系统目录项必须判为系统原生（非第三方）。
+        assert!(
+            !is_third_party("库项", "", "shellex", r"D:\Windows\System32\shell32.dll", r"D:\Windows"),
+            "系统根在 D: 时 D:\\Windows 下的系统文件必须算系统原生"
+        );
+        // 反向：系统根在 D: 时，C 盘下的同名路径**不再**享受系统目录豁免。
+        assert!(
+            is_third_party("某组件", "", "shellex", r"C:\Windows\System32\some.dll", r"D:\Windows"),
+            "系统根不在 C: 时 C:\\Windows 不得享受系统目录豁免"
+        );
+        // 反向：系统根在 C: 时 C 盘系统目录仍豁免。
+        assert!(
+            !is_third_party("库项", "", "shellex", r"C:\Windows\System32\shell32.dll", r"C:\Windows"),
+            "系统根在 C: 时系统目录豁免必须保留"
+        );
     }
 
     /// 真机只读：跑一次完整扫描，打印「按软件分组」的分布。    ///
@@ -2638,6 +2738,63 @@ mod cm_toggle_scope_tests {
         assert!(cm_shellex_external_disable("").is_none());
         // 理由与界面 tooltip 同源：用户看到的必须是同一句话
         assert!(cm_shellex_external_disable("AutorunsDisabled_X").unwrap().contains("外部工具"));
+    }
+
+    /// R5a-L05：键名**恰为** `AutorunsDisabled`（无后缀）时，它本身就是禁用约定，
+    /// 没有「去掉前缀」这一步可做 —— 不得回「已启用」，必须如实回 unsupported/skip。
+    /// 破坏自证：把 `rest == "autorunsdisabled"` 这个分支去掉（统一回「外部工具」那句）⇒
+    /// 本用例最后一条断言红。
+    #[test]
+    fn r5a_exact_autorunsdisabled_is_not_success() {
+        let msg = cm_shellex_external_disable("AutorunsDisabled")
+            .expect("键名本身即禁用约定时必须给出理由，不得回成功");
+        assert!(
+            msg.contains("本身") && msg.contains("不猜"),
+            "无后缀形态必须说明「它本身就是禁用约定、Trim 不猜怎么还原」，实得：{msg}"
+        );
+        // 带后缀的仍是「外部工具改名」形态，理由不同。
+        let msg2 = cm_shellex_external_disable("AutorunsDisabled_Foo").unwrap();
+        assert!(
+            msg2.contains("外部工具") && !msg2.contains("本身"),
+            "带后缀形态的理由不得与无后缀形态混同，实得：{msg2}"
+        );
+    }
+
+    /// R5a-L06：扫描场景表与写侧 `CM_SCENES` 必须**集合相等**（不只比计数）。
+    /// 破坏自证：给扫描表加一个后缀（或从写侧删一个）⇒ 集合不等 ⇒ 本用例红。
+    #[test]
+    fn r5a_scenes_scan_and_write_sets_match() {
+        let scan = cm_scenes_scan_suffixes();
+        let write = cm_scenes_write_suffixes();
+        assert_eq!(
+            scan.len(),
+            write.len(),
+            "两张表长度必须一致（实得 scan={} write={}）",
+            scan.len(),
+            write.len()
+        );
+        let missing_in_write: Vec<&String> = scan.iter().filter(|s| !write.contains(s)).collect();
+        let missing_in_scan: Vec<&String> = write.iter().filter(|s| !scan.contains(s)).collect();
+        assert!(
+            missing_in_write.is_empty(),
+            "扫描面有、写侧没有的场景后缀：{missing_in_write:?}"
+        );
+        assert!(
+            missing_in_scan.is_empty(),
+            "写侧有、扫描面没有的场景后缀：{missing_in_scan:?}"
+        );
+    }
+
+    /// R5a-L02：32 位**逐用户**视图必须被扫到（HKCU 下的 Wow6432Node）。
+    /// 破坏自证：删掉 `Software\Classes\Wow6432Node`（HKCU）这一项 ⇒ 本用例红。
+    #[test]
+    fn r5a_scans_hkcu_wow6432node() {
+        let src = include_str!("contextmenu.rs");
+        assert!(
+            src.contains(r#"r"Software\Classes\Wow6432Node\CLSID""#)
+                || src.contains(r#"r"Software\Classes\Wow6432Node""#),
+            "必须扫描 HKCU 下的 32 位逐用户视图（Wow6432Node）"
+        );
     }
 
     /// R5a-L10：屏蔽表的写侧档位计划。扫描侧两档同时屏蔽时只记 machine，所以解除

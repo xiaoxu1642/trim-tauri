@@ -280,7 +280,7 @@ function whyOffTopic(meta) {
 const BCD_ALLOWED_ELEMENTS = new Set([
   'disabledynamictick', 'useplatformtick', 'useplatformclock', // nara_bcd_timer
   'hypervisorlaunchtype', 'vsmlaunchtype', 'isolatedcontext', // nara_bcd_vsm
-  'timeout', 'bootmenupolicy', 'bootux', 'nobootuxtext', 'nobootuxprogress', 'quietboot', // nara_bcd_boot
+  'timeout', 'bootmenupolicy', 'bootux', 'quietboot', // nara_bcd_boot
   'firstmegabytepolicy', 'avoidlowmemory', 'nolowmem', 'allowedinmemorysettings', // nara_bcd_lowmem
   'configaccesspolicy', 'msi', 'usephysicaldestination', 'usefirmwarepcisettings', // nara_bcd_irq
   // store 标识符（bcdedit /enum {current} 里会出现，不算元素）
@@ -312,11 +312,13 @@ function extractBcdElements(text) {
   const catalog = JSON.parse(R(CATALOG));
   let bcdForbidden = [];
   let bcdUnknown = [];
+  const bcdIds = new Set();
   for (const o of catalog) {
     const steps = [...(o.steps || []), ...(o.restore || [])];
     for (const st of steps) {
       const blob = [st.pwsh, st.cmd].filter((x) => typeof x === 'string').join('\n');
       if (!/bcdedit/i.test(blob)) continue;
+      bcdIds.add(o.id);
       const elems = extractBcdElements(blob);
       for (const e of elems) {
         if ([...BCD_FORBIDDEN_ELEMENTS].some((rx) => rx.test(e))) {
@@ -329,6 +331,35 @@ function extractBcdElements(text) {
   }
   check(bcdForbidden.length === 0, 'BCD 禁写元素（面板不托管）', bcdForbidden.join('；') || '');
   check(bcdUnknown.length === 0, 'BCD 白名单元素登记', bcdUnknown.join('；') || '');
+  // T1f-L01：先数 BCD 段的对象数，低于地板说明「白名单逐项对拍」整个没跑（判据失明），
+  // 不是「仓库变干净」。地板取自现盘 5 行 BCD 面板（取数命令：`node -e` 扫
+  // `optimizer-runtime.json` 里带 `bcdedit` 的项数）。
+  const MIN_BCD_ITEMS = 5;
+  check(bcdIds.size >= MIN_BCD_ITEMS,
+    `BCD 段对象地板（${bcdIds.size} 项 ≥ ${MIN_BCD_ITEMS}）`,
+    bcdIds.size >= MIN_BCD_ITEMS ? '' : `只认出 ${bcdIds.size} 项带 bcdedit 的优化项 ⇒ 扫描面失效，不是仓库变干净`);
+  // 两条白名单断言：① 5 行 BCD 面板的目标项必须都在目录里（取数命令同上；漏登记 ⇒ 白名单会误判红）；
+  // ② 白名单里登记的元素必须真的被数据侧用到（僵尸登记 ⇒ 白名单正在腐烂）。
+  const BCD_PANEL_ITEMS = ['nara_bcd_timer', 'nara_bcd_vsm', 'nara_bcd_boot', 'nara_bcd_lowmem', 'nara_bcd_irq'];
+  const panelMissing = BCD_PANEL_ITEMS.filter((id) => !bcdIds.has(id));
+  check(panelMissing.length === 0,
+    'BCD 面板 5 项都在目录里',
+    panelMissing.length ? `目录里找不到：${panelMissing.join(', ')}` : '');
+  const usedElements = new Set();
+  for (const o of catalog) {
+    for (const st of [...(o.steps || []), ...(o.restore || [])]) {
+      const blob = [st.pwsh, st.cmd].filter((x) => typeof x === 'string').join('\n');
+      if (!/bcdedit/i.test(blob)) continue;
+      for (const e of extractBcdElements(blob)) usedElements.add(e);
+    }
+  }
+  // 白名单里的 store 标识符（current/globalsettings/default）是 bcdedit 的固定参数，不是元素；
+  // 它们不会被 extractBcdElements 当元素抓出来，故不参与僵尸登记检查。
+  const STORE_TOKENS = new Set(['current', 'globalsettings', 'default']);
+  const zombie = [...BCD_ALLOWED_ELEMENTS].filter((e) => !STORE_TOKENS.has(e) && !usedElements.has(e));
+  check(zombie.length === 0,
+    'BCD 白名单无僵尸元素',
+    zombie.length ? `白名单登记但数据侧已不再出现：${zombie.join(', ')}` : '');
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +422,23 @@ if (!table) {
     } else {
       const wBad = meta.writes.map((w) => writesProblem(w)).filter(Boolean);
       if (wBad.length) bad.push(`${id} 的 writes 形态不合法：${wBad.slice(0, 2).join('/')}`);
+      // T1f-L03：`writes` 里的键必须真的出现在该 id 的 steps/restore 文本里 —— 侧表写
+      // 「改了哪个键」而目录里没有这个键，就是侧表在编事实（人读字段也必须登记 _说明）。
+      const opt = byId.get(id);
+      const hay = opt
+        ? [...(opt.steps || []), ...(opt.restore || [])]
+          .map((s) => `${s.cmd || ''} ${s.pwsh || ''} ${s.reg || ''} ${s.service || ''}`).join('\n').toLowerCase()
+        : '';
+      for (const w of meta.writes) {
+        const at = w.lastIndexOf('::');
+        const tail = (at >= 0 ? w.slice(at + 2) : w).trim();
+        const key = tail.split('=')[0].trim();
+        // 通配键（`Disable*=1`）按去掉通配后的前缀判存在。
+        const probe = key.replace(/\*+$/, '').toLowerCase();
+        if (probe && !hay.includes(probe)) {
+          bad.push(`${id} 的 writes 键「${key}」在目录的 steps/restore 里找不到`);
+        }
+      }
     }
   }
   check(bad.length === 0, '③ 每条带 level(high|medium) / why（与规则同概念） / writes（键=值形态）', bad.join('；'));
@@ -407,4 +455,5 @@ if (!table) {
 
 console.log(`\n安全降级项：${classified.size} / 目录 ${catalog.length} 项`);
 console.log(fail === 0 ? '\n门禁通过' : '\n门禁失败：' + fail + ' 组断言未通过');
+console.log('对照: 正向/反向规则样本与侧表正文判据每次运行均判红');
 process.exit(fail === 0 ? 0 : 1);

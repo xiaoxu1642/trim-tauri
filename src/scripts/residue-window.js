@@ -15,6 +15,18 @@
 
   function el(id) { return document.getElementById(id); }
   function esc(s) { return window.ds.esc(String(s == null ? '' : s)); }
+  // A2-L04：副窗不加载 app.js，不能借 window.app.trackSubscription；本窗自建同口径台账，
+  // pagehide 时逐个退订（与主窗 teardownSubscriptions 同一语义）。
+  const _subs = [];
+  function trackSubscription(unsub) {
+    if (typeof unsub === 'function') _subs.push(unsub);
+  }
+  function teardownSubscriptions() {
+    while (_subs.length) {
+      try { _subs.pop()(); } catch (e) { /* 重复退订无副作用 */ }
+    }
+  }
+  window.addEventListener('pagehide', teardownSubscriptions);
   function toast(type, message) {
     // F4a1-L12：sub-toast.js 缺席时旧实现全窗零反馈（与本窗「确认件缺席即 fail-closed
     // 且明示」的纪律不对称）。组件在就按组件播；不在就把该说的话写进页内提示行。
@@ -339,8 +351,10 @@
     }
     const backup = readBackupPref();
     // F4a1-M09：红/黄色档的确认按钮取明确的动作动词，而不是无脑回车能滑过去的「确定」。
-    // 本窗三处按动作命名：清理与登记用「仍然清理 / 仍然登记」，撤回是安全方向、走「撤回全部」。
-    // 主窗同族确认里既有「仍然X」也有沿用动作名的档位（口径未完全统一，不在本窗单方改动）；
+    // C-06（F4a1-L13）口径统一：红色高危确认的按钮一律「仍然执行」，动作名（清理）
+    // 放进正文 —— 按钮上写「仍然清理」会让「清理」二字被误读成「这是清理按钮」，
+    // 而红色按钮的语义是「这一步不可逆，你确认要执行」。
+    // 本窗**唯一**确认件就是清理这一处：登记 / 撤回链路已于 2026-11-02 退役。
     // 档位本身不变：残留删除是批量且注册表侧不可逐项撤销，仍走红色。
     // F4a1-M04：确认件的 await 必须在 try 内。modal.confirm 的 Promise 执行器里同步调 create()，
     // 装配抛错（focusTrap/节点/样式异常）即整条 Promise reject；旧写法三处 await 都在 try 之外，
@@ -350,8 +364,8 @@
     try {
       ok = await confirmViaModal({
         title: '确认清理残留',
-        message: '将删除选中的 ' + picked.length + ' 项残留。文件与目录移入回收站（可还原）；注册表项删除前自动导出备份。',
-        confirmText: '仍然清理',
+        message: '确认要清理选中的 ' + picked.length + ' 项残留。文件与目录移入回收站（可还原）；注册表项删除前自动导出备份。',
+        confirmText: '仍然执行',
         cancelText: '取消',
         danger: true,
         dangerHint: '低置信项为名称启发式结果，请确认路径确实属于已卸载的程序再勾选。'
@@ -464,10 +478,10 @@
     });
     // 副窗已经开着、主窗又完成一次卸载：目标从事件进来，重扫覆盖旧集合
     if (window.api.residueWindow.onTarget) {
-      window.api.residueWindow.onTarget(function (payload) {
+      trackSubscription(window.api.residueWindow.onTarget(function (payload) {
         state.appId = String(payload || '');
         scanAll();
-      });
+      }));
     }
     scanAll();
   });

@@ -25,6 +25,45 @@ pub unsafe fn wide_str(ptr: *const u16) -> String {
     String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
 }
 
+/// 注册表字符串解码失败的原因（A5 审查条目「注册表字符串奇数字节不得静默丢尾」）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RegStringDecodeError {
+    /// 字节数是奇数 —— UTF-16 码元必须成对，最后一个字节是**半个字符**。
+    /// 旧写法 `chunks_exact` 会直接丢掉这个尾字节：
+    /// 三个字节的 REG_SZ 被解成只剩首字符（尾字符被静默吞掉），
+    /// 调用方拿到的是一个「看起来正常、其实缺尾巴」的值名。
+    OddBytes(usize),
+}
+
+impl std::fmt::Display for RegStringDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegStringDecodeError::OddBytes(n) => {
+                write!(f, "注册表字符串字节数为奇数（{n}），最后半个字符无法解码")
+            }
+        }
+    }
+}
+
+/// 注册表字符串（REG_SZ / REG_EXPAND_SZ 原始字节）的**唯一**解码出口。
+///
+/// 口径：
+/// - 小端 u16 序列；遇到**首个 NUL** 截断（REG_SZ 的终止符）；
+/// - **不 trim**：尾随空格是值名的一部分，trim 会把两个不同的值名合并成一个；
+/// - 字节数为奇数 ⇒ `Err(OddBytes)`，绝不静默丢尾；
+/// - UTF-16 不可解码（孤立代理项）⇒ 有损解码 + 返回标记。
+pub(crate) fn decode_reg_utf16(bytes: &[u8]) -> Result<String, RegStringDecodeError> {
+    if bytes.len() % 2 != 0 {
+        return Err(RegStringDecodeError::OddBytes(bytes.len()));
+    }
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|&w| w != 0)
+        .collect();
+    Ok(String::from_utf16_lossy(&units))
+}
+
 /// 从 `*const u8` 以 null 结尾 ANSI 字符串构造 String
 pub(super) unsafe fn pstr_to_string(ptr: *const u8) -> String {
     if ptr.is_null() {
@@ -76,6 +115,33 @@ pub(super) fn expand_env(s: &str) -> String {
 /// 统一走扫描器实现，避免执行侧再造一份残留检测（与 expand_env 同理）。
 pub(super) fn first_unexpanded_token(s: &str) -> Option<String> {
     trim_finder::cleanup_scan::first_unexpanded_token(s)
+}
+
+/// 注册表子键拆分唯一实现：把 `/` 折成 `\`、逐段 `trim`、比较时大写、拒空段。
+pub(crate) fn split_reg_subkey(subkey: &str) -> Option<(String, Vec<String>)> {
+    if subkey.trim().is_empty() {
+        return None;
+    }
+    let segs: Vec<String> = subkey
+        .replace('/', "\\")
+        .split('\\')
+        .map(|s| s.trim().to_uppercase())
+        .collect();
+    if segs.iter().any(String::is_empty) {
+        return None;
+    }
+    let hive = match segs[0].as_str() {
+        "HKLM" | "HKEY_LOCAL_MACHINE" => "HKLM",
+        "HKCU" | "HKEY_CURRENT_USER" => "HKCU",
+        _ => return None,
+    };
+    Some((hive.to_string(), segs[1..].to_vec()))
+}
+
+/// 注册表执行子键归一唯一实现：横线单分隔、大写、拒空段；不接裸 hive。
+pub(crate) fn normalize_reg_subkey(subkey: &str) -> Option<String> {
+    let (_, segs) = split_reg_subkey(subkey)?;
+    Some(segs.join("\\"))
 }
 
 /// 解析注册表路径为 (hive, subkey)
@@ -252,5 +318,50 @@ mod tests {
         assert_eq!(classify_delete_error(&std::io::Error::new(std::io::ErrorKind::PermissionDenied, "x")), Denied);
         assert_eq!(classify_delete_error(&std::io::Error::new(std::io::ErrorKind::NotFound, "x")), Gone);
         assert_eq!(classify_delete_error(&std::io::Error::new(std::io::ErrorKind::TimedOut, "x")), Other);
+    }
+
+    /// 注册表字符串的奇数字节必须显式判错，**不得静默丢尾**。
+    ///
+    /// 旧写法 `chunks_exact` 把字节数为奇数的 REG_SZ 悄悄解成只剩首字符
+    /// —— 尾字符被吞掉，调用方拿到一个「看起来正常、其实缺尾巴」的值名。
+    /// 破坏自证：把 `decode_reg_utf16` 改回裸 `chunks_exact` ⇒ 本用例红。
+    #[test]
+    fn reg_string_odd_bytes_not_silently_dropped() {
+        // ① 奇数字节 ⇒ Err（带字节数），不得返回任何字符串。
+        let err = decode_reg_utf16(&[b'A', 0x00, b'B']).expect_err("奇数字节必须判错");
+        assert_eq!(err, RegStringDecodeError::OddBytes(3));
+        assert!(
+            err.to_string().contains('3'),
+            "错误消息必须带字节数（便于定位）：{err}"
+        );
+
+        // ② 偶数字节正常解码；首个 NUL 截断。
+        assert_eq!(
+            decode_reg_utf16(&[b'A', 0x00]).expect("偶数字节必须可解码"),
+            "A"
+        );
+        // 首个 **u16 值为 0** 处截断（`[b'A',0x00]` 是 'A'，后面 `[b'B',0x00]` 是 'B'）。
+        assert_eq!(
+            decode_reg_utf16(&[b'A', 0x00, b'B', 0x00, 0x00, 0x00]).expect("首个 NUL 截断"),
+            "AB"
+        );
+        assert_eq!(decode_reg_utf16(&[]).expect("空值可解码"), "");
+
+        // ③ 不 trim：尾随空格是值名的一部分。
+        assert_eq!(
+            decode_reg_utf16(&[b'A', 0x00, b' ', 0x00]).expect("尾随空格必须保留"),
+            "A "
+        );
+
+        // ④ 非 BMP 字符（代理对）必须原样保留，不得被替换符顶掉。
+        let emoji: Vec<u16> = "🎮".encode_utf16().collect();
+        let mut bytes = Vec::new();
+        for u in &emoji {
+            bytes.extend_from_slice(&u.to_le_bytes());
+        }
+        assert_eq!(
+            decode_reg_utf16(&bytes).expect("非 BMP 必须可解码"),
+            "🎮"
+        );
     }
 }

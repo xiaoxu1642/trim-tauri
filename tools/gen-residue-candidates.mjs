@@ -35,6 +35,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { writeFileAtomic } from './lib/atomic-write.mjs';
+import { loadSchema } from './rule-schema.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 // T1c-L09：临时件落仓根 tmp/（.gitignore 已忽略），不落全局 %TEMP%——
@@ -42,9 +43,12 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TMP_DIR = path.join(ROOT, 'tmp');
 const RULES = path.join(ROOT, 'src-tauri', 'data', 'uninstall-residue-rules.json');
 
-// 与 rule-schema.json residue 段对齐的上限（草案逐条预检；改 schema 后这里要人工同步）
-const LIMITS = { maxRules: 400, maxResiduePerRule: 64, maxTargetLen: 260, maxSegments: 32, maxNoteLen: 40 };
-const TOKENS = ['APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMW6432', 'COMMONPROGRAMFILES', 'USERPROFILE', 'WINDIR', 'SYSTEMROOT'];
+const residueSchema = loadSchema().residue;
+const LIMITS = {
+  ...residueSchema.limits,
+  maxNoteLen: residueSchema.limits.maxTextLen,
+};
+const TOKENS = residueSchema.tokens.allowed;
 const KIND_ORDER = { folder: 0, file: 1, shortcut: 2, reg_key: 3, reg_value: 4 };
 
 // ==================== 高产程序知识模板（公开安装惯例，人工维护） ====================
@@ -409,15 +413,33 @@ const UNINSTALL_ROOTS = [
 // 中文系统上 reg query 的管道输出是 GBK，Node 零依赖解不了（乱码 displayName 会污染草案）。
 // 改走 reg export：.reg 文件是 UTF-16LE，Node 原生 utf16le 解码；每根一次导出，快且无编码坑。
 // 临时文件写在仓根 tmp/，读完即删（dev 工具自清理，不碰全局 %TEMP%，见 TMP_DIR 注释）。
-function exportRoot(root) {
+const NOTES = [];
+
+function exportRegistry(args, timeout, root) {
+  return execFileSync('reg', args, {
+    encoding: 'utf8',
+    timeout,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function exportRoot(root, exec = exportRegistry) {
   fs.mkdirSync(TMP_DIR, { recursive: true });
   const tmp = path.join(TMP_DIR, `trim-residue-probe-${process.pid}-${Math.random().toString(36).slice(2)}.reg`);
   try {
-    execFileSync('reg', ['export', root, tmp, '/y'], { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'ignore'] });
+    exec(['export', root, tmp, '/y'], 30_000, root);
     const text = fs.readFileSync(tmp, 'utf16le');
-    return text;
-  } catch {
-    return '';
+    return { text, note: null };
+  } catch (e) {
+    const exists = regExists(root, exec);
+    if (!exists) {
+      const note = `注册表根不存在，跳过：${root}`;
+      NOTES.push(note);
+      return { text: '', note };
+    }
+    const stderr = String(e.stderr || e.message || '');
+    const code = e.status ?? e.code ?? 'unknown';
+    throw new Error(`reg export 失败：root=${root} exit=${code} stderr=${stderr}`);
   } finally {
     try { fs.unlinkSync(tmp); } catch { /* 文件没生成也算导出失败，已兜底返回空串 */ }
   }
@@ -441,10 +463,10 @@ function parseRegExport(text) {
 }
 
 /** 枚举一个卸载根：返回 [{ keyName, displayName, publisher, installLocation, systemComponent, windowsInstaller }] */
-function enumUninstallRoot(root) {
+function enumUninstallRoot(root, exec = exportRegistry) {
   const hivePrefix = root.split('\\')[0]; // HKLM / HKCU（.reg 键路径用长名，解析时归一）
   const items = [];
-  for (const { keyPath, values } of parseRegExport(exportRoot(root))) {
+  for (const { keyPath, values } of parseRegExport(exportRoot(root, exec).text)) {
     const idx = keyPath.toLowerCase().lastIndexOf('uninstall\\');
     if (idx < 0) continue;
     const sub = keyPath.slice(idx + 'uninstall\\'.length);
@@ -463,9 +485,9 @@ function enumUninstallRoot(root) {
 }
 
 /** 注册表键存在性（探测面只读） */
-function regExists(key) {
+function regExists(key, exec = exportRegistry) {
   try {
-    execFileSync('reg', ['query', key], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] });
+    exec(['query', key], 10_000, key);
     return true;
   } catch {
     return false;
@@ -580,6 +602,43 @@ function slugBase(s) {
 
 function main() {
   const argv = process.argv.slice(2);
+  if (argv.includes('--self-test')) {
+    const fakeRoot = 'HKCU\\Software\\__TrimP3A2SelfTestMissingRoot__';
+    const failingExec = () => {
+      const e = new Error('injected reg export failure');
+      e.status = 1;
+      e.stderr = 'injected stderr';
+      throw e;
+    };
+    let threw = false;
+    try {
+      exportRoot(fakeRoot, (args, timeout, root) => {
+        if (args[0] === 'query') return '';
+        return failingExec();
+      });
+    } catch (e) {
+      threw = String(e.message).includes(`root=${fakeRoot}`) && String(e.message).includes('exit=1');
+    }
+    if (!threw) {
+      console.error('✗ --self-test：注入的 reg export 失败没有被点名抛出');
+      process.exit(1);
+    }
+    const before = NOTES.length;
+    const missing = exportRoot(fakeRoot, (args) => {
+      if (args[0] === 'query') {
+        const e = new Error('not found');
+        e.status = 1;
+        throw e;
+      }
+      return failingExec();
+    });
+    if (missing.text !== '' || !missing.note || NOTES.length !== before + 1) {
+      console.error('✗ --self-test：缺失根未按 note 跳过');
+      process.exit(1);
+    }
+    console.log(`✓ --self-test：注入失败点名 ${fakeRoot} 并判红；缺失根只记 note`);
+    return;
+  }
   const outIdx = argv.indexOf('--out');
   const libOnly = argv.includes('--lib-only');
   const probeOnly = argv.includes('--probe-only');
@@ -785,6 +844,7 @@ function main() {
       excludedCount: excluded.length,
       totalRulesAfterMerge: totalRules,
       overLimit,
+      notes: NOTES,
     },
     excluded,
     rules: normalized,

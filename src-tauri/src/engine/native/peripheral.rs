@@ -6,7 +6,9 @@
 use crate::engine::systembin::system_tool;
 use serde_json::{Value, json};
 use windows::core::PCWSTR;
-use windows::Win32::System::Registry::{HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_CREATED_NEW_KEY, REG_DWORD, REG_OPTION_NON_VOLATILE, RegCloseKey, RegCreateKeyExW, RegSetValueExW};
+use windows::Win32::System::Registry::{HKEY, HKEY_LOCAL_MACHINE, KEY_WRITE, REG_CREATED_NEW_KEY, REG_DWORD, REG_OPTION_NON_VOLATILE, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegSetValueExW};
+use windows::Win32::Foundation::SYSTEMTIME;
+use windows::Win32::System::SystemInformation::GetLocalTime;
 use super::common::*;
 use super::registry::*;
 
@@ -20,9 +22,9 @@ use super::registry::*;
 pub fn peripheral_query() -> Result<Value, String> {
     // R5c-L04：旧入口用 -1 表示失败，而 0xFFFFFFFF 转 i32 也是 -1（哨兵与合法值撞车）。
     // 改用 Option 口径：读不到 ⇒ null，前端按「未知」显示，不再把假值当数据。
-    let win32 = read_reg_dword_opt(HKEY_LOCAL_MACHINE,
+    let win32 = read_reg_dword_u32_as_i64(HKEY_LOCAL_MACHINE,
         r"SYSTEM\CurrentControlSet\Control\PriorityControl", "Win32PrioritySeparation");
-    let mouse = read_reg_dword_opt(HKEY_LOCAL_MACHINE,
+    let mouse = read_reg_dword_u32_as_i64(HKEY_LOCAL_MACHINE,
         r"SYSTEM\CurrentControlSet\Services\mouclass\Parameters", "MouseDataQueueSize");
     Ok(json!({
         "win32": win32,
@@ -31,6 +33,57 @@ pub fn peripheral_query() -> Result<Value, String> {
 }
 
 // ==================== B9 peripheral_apply：外设优化应用 ====================
+
+/// 备份文件名时间戳：`YYYYMMDD_HHMMSS`（本地时间）。
+///
+/// R5e-L01：解析侧 `commands::peripheral::backup_batch_of` 只认 15 位 `YYYYMMDD_HHMMSS`，
+/// 而旧生成侧用 `now_ms()` 的 13 位毫秒串——生成的备份永远无法被 prune/restore 识别，
+/// 既不修剪也无上限增长。生成侧改为与解析侧同一格式，roundtrip 成立。
+pub(crate) fn backup_stamp() -> String {
+    let t: SYSTEMTIME = unsafe { GetLocalTime() };
+    format!(
+        "{:04}{:02}{:02}_{:02}{:02}{:02}",
+        t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+    )
+}
+
+/// 顺序写入一组 HKLM 值；后续键失败时回滚已写键，并返回带 win32 码与
+/// `admin_required` 提示的错误。
+///
+/// `write_one(subkey, name, value)` 返回 `Err(win32 错误码)`；`read_one` 返回原值
+/// （`None` = 原本不存在）；`restore_one(subkey, name, original)` 把值恢复原状。
+///
+/// R5e-L07：旧实现第一个键写成功后第二个键失败，直接返回 Err——第一个键的修改
+/// 已落盘却不回滚，回执也没有 win32 码/权限提示，用户看到的是含糊的「写入失败」。
+fn write_peripheral_values(
+    targets: &[(&str, &str, &str, i64)],
+    mut write_one: impl FnMut(&str, &str, u32) -> Result<(), u32>,
+    mut read_one: impl FnMut(&str, &str) -> Option<i64>,
+    mut restore_one: impl FnMut(&str, &str, Option<i64>) -> Result<(), u32>,
+) -> Result<(), String> {
+    // (subkey, name, 原值)
+    let mut written: Vec<(&str, &str, Option<i64>)> = Vec::new();
+    for (_key, subkey, name, value) in targets {
+        if *value < 0 { continue; }
+        let original = read_one(subkey, name);
+        if let Err(code) = write_one(subkey, name, *value as u32) {
+            // 回滚已写键（逆序），任一回滚失败都要如实报告。
+            for (w_sub, w_name, orig) in written.iter().rev() {
+                if let Err(rollback_code) = restore_one(w_sub, w_name, *orig) {
+                    return Err(format!(
+                        "写入 {name} 失败（win32 {code}），且回滚 {w_sub}\\{w_name} 也失败（win32 {rollback_code}）"
+                    ));
+                }
+            }
+            let admin_hint = if code == 5 { "，需要管理员权限" } else { "" };
+            return Err(format!(
+                "写入 {name} 失败（win32 错误 {code}{admin_hint}）"
+            ));
+        }
+        written.push((subkey, name, original));
+    }
+    Ok(())
+}
 
 /// 外设优化应用（原 PS 时代脚本 peripheral_apply.ps1，已退役；S3）
 ///
@@ -51,7 +104,7 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
     // 备份目录（v2-M19：写入恒新根，还原侧按新老两根找最新一批）
     let backup_dir = crate::engine::paths::backup_write_dir("peripheral-backup");
     std::fs::create_dir_all(&backup_dir).map_err(|e| format!("创建备份目录失败: {e}"))?;
-    let stamp = crate::engine::now_ms().to_string();
+    let stamp = backup_stamp();
 
     // 备份每个需要修改的父键
     //
@@ -102,39 +155,55 @@ pub fn peripheral_apply(options: &Value) -> Result<(), String> {
         crate::engine::reg_backup::write_reg_backup_seals("peripheral", &backup_file, &reg_path);
     }
 
-    // 写入值
-    unsafe {
-        for (_key, subkey, name, value) in &targets {
-            if *value < 0 { continue; }
-            let sk = to_wide(subkey);
-            let mut hk = HKEY::default();
-            let mut disp = REG_CREATED_NEW_KEY;
-            if RegCreateKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), None, PCWSTR::default(),
-                REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disp)).is_err() {
-                return Err(format!("无法打开注册表键: {subkey}"));
-            }
-            let nm = to_wide(name);
-            // R5b-L09：`as u32` 会把超出 32 位的值静默截断成一个不同的数值。
-            // 引擎层再做一次范围闸，不把合法性全押在命令层白名单上。
-            let val = u32::try_from(*value)
-                .map_err(|_| format!("外设优化值超出 DWORD 范围: {name}={value}"))?;
-            if RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_DWORD, Some(&val.to_le_bytes())).is_err() {
+    // 写入值（R5e-L07：顺序写 + 失败回滚 + win32 码/admin_required 提示）
+    write_peripheral_values(
+        &targets,
+        |subkey, name, val| {
+            unsafe {
+                let sk = to_wide(subkey);
+                let mut hk = HKEY::default();
+                let mut disp = REG_CREATED_NEW_KEY;
+                let cr = RegCreateKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), None,
+                    PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disp));
+                if cr.is_err() {
+                    return Err(cr.0);
+                }
+                let nm = to_wide(name);
+                let r = RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_DWORD, Some(&val.to_le_bytes()));
                 let _ = RegCloseKey(hk);
-                return Err(format!("写入注册表失败: {name}"));
+                if r.is_err() {
+                    return Err(r.0);
+                }
+                // R5e-M01：写后回读——策略/重定向可能把值改成别的数，不能凭 Set 返回成功就报绿。
+                let actual = read_reg_dword_u32_as_i64(HKEY_LOCAL_MACHINE, subkey, name);
+                if actual != Some(val as i64) {
+                    // 用非权限错误码（1 = ERROR_INVALID_FUNCTION）表示回读不一致。
+                    return Err(1);
+                }
+                Ok(())
             }
-            let _ = RegCloseKey(hk);
-            // R5e-M01：写后回读——策略/重定向可能把值改成别的数，不能凭 Set 返回成功就报绿。
-            let actual = read_reg_dword_opt(HKEY_LOCAL_MACHINE, subkey, name);
-            if actual != Some(val as i64) {
-                return Err(format!(
-                    "写入后回读不一致: {name} 期望 {val} 实际 {}",
-                    actual.map(|v| v.to_string()).unwrap_or_else(|| "读不到".to_string())
-                ));
+        },
+            |subkey, name| read_reg_dword_u32_as_i64(HKEY_LOCAL_MACHINE, subkey, name),
+        |subkey, name, original| {
+            unsafe {
+                let sk = to_wide(subkey);
+                let mut hk = HKEY::default();
+                let mut disp = REG_CREATED_NEW_KEY;
+                let cr = RegCreateKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), None,
+                    PCWSTR::default(), REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut hk, Some(&mut disp));
+                if cr.is_err() {
+                    return Err(cr.0);
+                }
+                let nm = to_wide(name);
+                let r = match original {
+                    Some(v) => RegSetValueExW(hk, PCWSTR(nm.as_ptr()), Some(0), REG_DWORD, Some(&(v as u32).to_le_bytes())),
+                    None => RegDeleteValueW(hk, PCWSTR(nm.as_ptr())),
+                };
+                let _ = RegCloseKey(hk);
+                if r.is_err() { Err(r.0) } else { Ok(()) }
             }
-        }
-    }
-
-    Ok(())
+        },
+    )
 }
 // ==================== B9 peripheral_restore：外设优化恢复 ====================
 
@@ -463,6 +532,85 @@ mod k11_restore_admit_tests {
         assert_eq!(peripheral_restore_reason(1, 2, 0, 0), "partial", "只导进一部分仍是 partial");
         assert_eq!(peripheral_restore_reason(0, 2, 1, 0), "unverifiable", "全部被拒且有拒因");
         assert_eq!(peripheral_restore_reason(0, 2, 0, 0), "import-failed", "全部失败且无拒因");
+    }
+}
+
+#[cfg(test)]
+mod r5e_l07_tests {
+    use super::*;
+
+    /// R5e-L07：第二个键写失败时，第一个键必须被回滚，且错误带 win32 码与
+    /// `admin_required` 提示。
+    /// 判红自证：把 `write_peripheral_values` 的失败分支恢复成直接 `Err`
+    /// （不回滚、不带 win32 码）⇒ 回滚断言与 win32 断言都红。
+    #[test]
+    fn r5e_peripheral_two_key_failure_is_partial() {
+        let targets: Vec<(&str, &str, &str, i64)> = vec![
+            ("win32", r"SYSTEM\CurrentControlSet\Control\PriorityControl", "Win32PrioritySeparation", 38),
+            ("mouse", r"SYSTEM\CurrentControlSet\Services\mouclass\Parameters", "MouseDataQueueSize", 16),
+        ];
+
+        // 记录写操作与回滚操作。
+        let mut writes: Vec<String> = Vec::new();
+        let mut restores: Vec<String> = Vec::new();
+        let write_one = |subkey: &str, name: &str, _val: u32| -> Result<(), u32> {
+            writes.push(format!("{subkey}\\{name}"));
+            if name == "MouseDataQueueSize" {
+                Err(5) // 第二键失败：ERROR_ACCESS_DENIED
+            } else {
+                Ok(())
+            }
+        };
+        let read_one = |_subkey: &str, _name: &str| -> Option<i64> { Some(2) };
+        let restore_one = |subkey: &str, name: &str, original: Option<i64>| -> Result<(), u32> {
+            restores.push(format!("{subkey}\\{name}={original:?}"));
+            Ok(())
+        };
+
+        let err = write_peripheral_values(&targets, write_one, read_one, restore_one).unwrap_err();
+        assert!(
+            err.contains("win32 错误 5"),
+            "错误必须带 win32 码：{err}"
+        );
+        assert!(
+            err.contains("需要管理员权限"),
+            "权限拒绝必须提示 admin_required：{err}"
+        );
+        assert_eq!(
+            writes,
+            vec![
+                r"SYSTEM\CurrentControlSet\Control\PriorityControl\Win32PrioritySeparation",
+                r"SYSTEM\CurrentControlSet\Services\mouclass\Parameters\MouseDataQueueSize",
+            ],
+            "两个键都要尝试写"
+        );
+        assert_eq!(
+            restores,
+            vec![
+                r"SYSTEM\CurrentControlSet\Control\PriorityControl\Win32PrioritySeparation=Some(2)",
+            ],
+            "第二键失败后第一键必须回滚到原值：{restores:?}"
+        );
+    }
+
+    /// R5e-L07 正向对照：全部写成功时不得回滚。
+    #[test]
+    fn r5e_peripheral_all_keys_ok_no_rollback() {
+        let targets: Vec<(&str, &str, &str, i64)> = vec![
+            ("win32", r"SYSTEM\CurrentControlSet\Control\PriorityControl", "Win32PrioritySeparation", 38),
+            ("mouse", r"SYSTEM\CurrentControlSet\Services\mouclass\Parameters", "MouseDataQueueSize", 16),
+        ];
+        let mut writes = 0;
+        let mut restores = 0;
+        let result = write_peripheral_values(
+            &targets,
+            |_, _, _| { writes += 1; Ok(()) },
+            |_, _| Some(2),
+            |_, _, _| { restores += 1; Ok(()) },
+        );
+        assert!(result.is_ok());
+        assert_eq!(writes, 2);
+        assert_eq!(restores, 0, "全部成功不得回滚");
     }
 }
 

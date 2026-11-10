@@ -42,6 +42,13 @@
     const mq = reducedMotionQuery();
     return !!(mq && mq.matches);
   }
+  function reducedMotionFallback() {
+    try {
+      return !!window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    } catch (_) {
+      return true;
+    }
+  }
 
   // 审查 v2-L7：这里曾有**第二张转义表**（`'` → `&#039;`）与下方 ⑩ 唯一真源 `esc()`（`&#39;`）并存——
   // 解码结果相同但 §2 要「一张表」（两份表的下场是改一处漏一处）。ds.js 内部一律走 esc()：
@@ -423,6 +430,10 @@
       if (el.scrollWidth <= el.clientWidth + 1) return;
       const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
       if (!delta) return;
+      const maxScroll = el.scrollWidth - el.clientWidth;
+      const atStart = el.scrollLeft <= 0 && delta < 0;
+      const atEnd = el.scrollLeft >= maxScroll - 1 && delta > 0;
+      if (atStart || atEnd) return;
       e.preventDefault();
       el.scrollLeft += delta;
     }, { passive: false });
@@ -559,6 +570,68 @@
   // 新交互统一走 window.ds.reducedMotion()（AGENTS §2「新交互先查 ds 有没有现成件」）。
   ds.reducedMotion = reducedMotion;
   ds.reducedMotionQuery = reducedMotionQuery;
+  ds.reducedMotionFallback = reducedMotionFallback;
+
+  /**
+   * C-W3 / A3-L02：分段栏键盘与 ARIA 桩。
+   * 调用形态：ds.bindTablist(nav, { panelSelector: '[data-tab-panel]' })。
+   * tab 必须有 id，静态 tab 在 HTML 补 aria-controls；panelSelector 缺省为空时
+   * 只做 roving tabindex、方向键与 aria-selected 同步，panel 状态仍归页面主控。
+   */
+  function bindTablist(nav, { panelSelector } = {}) {
+    if (!nav) return;
+    if (nav.__dsTablist) return;
+    nav.__dsTablist = true;
+    const tabs = () => Array.from(nav.querySelectorAll('[role="tab"]'));
+    const panels = () => {
+      if (!panelSelector) return [];
+      return Array.from(document.querySelectorAll(panelSelector)).filter(p => p.id);
+    };
+    const select = (tab, focus) => {
+      if (!tab) return;
+      tabs().forEach(t => {
+        const on = t === tab;
+        t.classList.toggle('active', on);
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+        t.tabIndex = on ? 0 : -1;
+      });
+      const targetId = tab.getAttribute('aria-controls');
+      panels().forEach(p => {
+        const on = !!targetId && p.id === targetId;
+        p.classList.toggle('active', on);
+        p.setAttribute('aria-hidden', on ? 'false' : 'true');
+      });
+      if (focus) tab.focus();
+    };
+    const focusAt = (index) => {
+      const items = tabs();
+      if (!items.length) return;
+      const next = items[(index + items.length) % items.length];
+      select(next, true);
+    };
+    nav.addEventListener('keydown', (e) => {
+      const items = tabs();
+      const current = items.indexOf(document.activeElement);
+      if (current < 0) return;
+      if (e.key === 'ArrowLeft') { e.preventDefault(); focusAt(current - 1); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); focusAt(current + 1); }
+      else if (e.key === 'Home') { e.preventDefault(); focusAt(0); }
+      else if (e.key === 'End') { e.preventDefault(); focusAt(items.length - 1); }
+    });
+    nav.addEventListener('click', (e) => {
+      const tab = e.target && e.target.closest ? e.target.closest('[role="tab"]') : null;
+      if (!tab || !nav.contains(tab)) return;
+      select(tab, false);
+    });
+    tabs().forEach((tab, index) => {
+      if (!tab.id) tab.id = 'ds-tab-' + (index + 1);
+      tab.tabIndex = tab.classList.contains('active') ? 0 : -1;
+      if (!tab.hasAttribute('aria-controls')) tab.setAttribute('aria-controls', tab.id);
+    });
+    const active = tabs().find(tab => tab.classList.contains('active')) || tabs()[0];
+    if (active) select(active, false);
+  }
+  ds.bindTablist = bindTablist;
 
   /**
    * P3-1（可达性）：`span/div.checkbox` 伪装控件的键盘激活。
@@ -568,6 +641,8 @@
    */
   ds.bindCheckboxKeys = function (host, selector) {
     if (!host) return;
+    if (host.__dsCheckboxKeys) return;
+    host.__dsCheckboxKeys = true;
     host.addEventListener('keydown', (e) => {
       if (e.key !== ' ' && e.key !== 'Enter') return;
       // F1b-M01：长按 Space/Enter 只触发一次，避免重复翻转。
@@ -578,6 +653,27 @@
       t.click();
     });
   };
+
+    /**
+     * C-08（F4b-L06）：async 事件处理器的统一收口（单一真源）。
+     *
+     * 为什么收在这里：async 事件处理器一旦 reject 就是浮动 Promise —— 用户侧表现为
+     * 「点了没反应」，只有一条渲染层未处理拒绝进日志。此前 `optimizer.js` 与 `finder.js`
+     * 各写了一份**逐字相同**的 `guardAsync`，改一处就漂一处；两份实现散在业务文件里，
+     * 也没有任何门禁看得见「又出现了第三份」。
+     *
+     * 语义：包装整段 async 处理器 → 捕获 reject → 落 toast + 日志，绝不静默。
+     * 与各文件 init 里的 guardBatch（v2-M22）同一口径。
+     */
+    ds.guardAsync = function (label, handler) {
+      return (...args) => {
+        Promise.resolve(handler(...args)).catch((e) => {
+          const msg = (e && e.message) || e;
+          window.app?.toast?.('error', label + '失败: ' + msg);
+          window.app?.log?.('error', label + '异常: ' + msg);
+        });
+      };
+    };
 
   window.ds = ds;
 })();

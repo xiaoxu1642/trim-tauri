@@ -108,8 +108,7 @@ function testRanges(code, rel) {
     const brace = blanked.indexOf('{', m.index);
     if (brace < 0) continue;
     // fn 的体在 `)` 之后的 `{}`；mod 的体直接在 `{}`
-    const open = blanked.slice(m.index, brace).includes('fn') ? brace : brace;
-    out.push([m.index, skipBraces(blanked, open)]);
+    out.push([m.index, skipBraces(blanked, brace)]);
   }
   // ③ 整文件测试模块（按命名约定）
   if (/_tests\.rs$/.test(rel)) out.push([0, code.length]);

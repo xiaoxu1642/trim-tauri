@@ -19,7 +19,7 @@
 //
 // 用法：node tools/check-handle-lifecycle.mjs
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -256,6 +256,60 @@ if (viol === 0) {
     `句柄生命周期三闸在位：搜索句柄获取点 ${findSites} 处、句柄绑定点 ${bindSites} 处、` +
       `Toolhelp 快照点 ${snapSites} 处，全部合规`,
   );
+}
+
+// ---------- JS 订阅台账（P2/A2-L04）----------
+// 主窗用 window.app.trackSubscription 统一收账；子窗/独立模块用自己的同名台账。
+// 判据只看「on* 调用前 160 字符内是否出现 trackSubscription」——比函数级更紧，
+// 防止「文件里别处有台账」被当成已收账。C-W2 的两处在途用 TRANSITION 登记。
+const JS_SUB_SITES = [
+  { file: 'src/scripts/cleanup.js', anchor: 'window.api.cleanup.onScanProgress(', label: 'cleanup.onScanProgress' },
+  { file: 'src/scripts/cleanup.js', anchor: 'window.api.cleanup.onExecuteProgress(', label: 'cleanup.onExecuteProgress' },
+  { file: 'src/scripts/memoryclean.js', anchor: 'window.api.window.onResized(', label: 'memoryclean.onResized' },
+  { file: 'src/scripts/overview.js', anchor: 'window.api.window.onResized(', label: 'overview.onResized' },
+  { file: 'src/scripts/residue-window.js', anchor: 'window.api.residueWindow.onTarget(', label: 'residueWindow.onTarget' },
+  { file: 'src/scripts/finder.js', anchor: 'window.api.finder.onProgress(', label: 'finder.onProgress' },
+  { file: 'src/scripts/optimizer.js', anchor: 'window.api.optimizer.onProgress(', label: 'optimizer.onProgress' },
+  { file: 'src/scripts/window-material.js', anchor: 'window.api.appearance?.onMaterialChanged?.(', label: 'window-material.onMaterialChanged' },
+  { file: 'src/scripts/window-material.js', anchor: 'window.api.window?.onFocusState?.(', label: 'window-material.onFocusState' },
+  { file: 'src/scripts/maintenance.js', anchor: 'window.api.maintenance.onOutput(', label: 'maintenance.onOutput' },
+  { file: 'src/scripts/pathbinding-material.js', anchor: 'window.api?.appearance?.onMaterialChanged?.(', label: 'pathbinding-material.onMaterialChanged' },
+];
+const JS_SUB_TRANSITION = new Map([
+]);
+const readFileSafe = (abs) => (existsSync(abs) ? readFileSync(abs, 'utf8') : null);
+{
+  const subProbe = (text, anchor) => {
+    const at = text.indexOf(anchor);
+    if (at < 0) return false;
+    return text.slice(Math.max(0, at - 160), at).includes('trackSubscription');
+  };
+  const POS = 'window.app?.trackSubscription?.(window.api.cleanup.onScanProgress(cb));';
+  const NEG = 'window.api.cleanup.onScanProgress(cb);';
+  if (!subProbe(POS, 'window.api.cleanup.onScanProgress(') || subProbe(NEG, 'window.api.cleanup.onScanProgress(')) {
+    g.fail('A2-L04 正向对照失败：JS 订阅台账判定器失真（必须能把「包 trackSubscription」与「裸订阅」分开）');
+  }
+  let jsBad = 0;
+  for (const site of JS_SUB_SITES) {
+    const abs = join(ROOT, site.file);
+    const key = `${site.file}#${site.anchor}`;
+    if (!readFileSafe(abs)) { g.fail(`A2-L04：${site.file} 不存在（判定对象缺失）`); jsBad++; continue; }
+    const hit = subProbe(readFileSafe(abs), site.anchor);
+    const tr = JS_SUB_TRANSITION.get(key);
+    if (tr) {
+      if (hit) {
+        g.fail(`A2-L04：TRANSITION 条目失效：${key}（${tr.batch}）⇒ 已收账，必须回收本行`);
+        jsBad++;
+      }
+      continue;
+    }
+    if (!hit) {
+      g.fail(`A2-L04：${site.file} 的 ${site.label} 未交给 trackSubscription ⇒ 退订时无账可查`);
+      jsBad++;
+    }
+  }
+  if (JS_SUB_SITES.length < 11) g.fail(`A2-L04：JS 订阅站点只登记 ${JS_SUB_SITES.length} 处（地板 11）⇒ 判据形状漂移`);
+  if (jsBad === 0) g.ok(`A2-L04：JS 订阅台账 ${JS_SUB_SITES.length} 处（${JS_SUB_TRANSITION.size} 处 C-W2 在途豁免）全部收账`);
 }
 
 g.finish('check-handle-lifecycle: 全部通过');

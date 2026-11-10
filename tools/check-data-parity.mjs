@@ -204,6 +204,13 @@ const FALLBACK_REL = join('src', 'scripts', 'cleanup-fallback.generated.js');
         roots: Object.fromEntries(Object.entries(f.roots).map(([k, v]) => [k, v.filter(neutral)])),
         vectors: f.vectors.filter(v => neutral(v.p)).map(v => `${v.p}=${v.protected}`).sort(),
       });
+      const freshNeutral = pick(freshNoPs);
+      const committedNeutral = pick(committedNoPs);
+      const neutralVectors = freshNeutral.vectors.length;
+      const neutralRoots = Object.values(freshNeutral.roots).reduce((sum, v) => sum + v.length, 0);
+      if (neutralVectors < 30 || neutralRoots < 35) {
+        detail.push(`机器中立子集塌陷（vectors=${neutralVectors} < 30 / roots=${neutralRoots} < 35）⇒ 本节未校验`);
+      }
       const a = JSON.stringify(pick(freshNoPs));
       const b = JSON.stringify(pick(committedNoPs));
       if (a !== b) detail.push('机器中立部分不一致 ⇒ 基线口径变了');

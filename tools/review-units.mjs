@@ -74,7 +74,7 @@ export const UNITS = [
   {
     id: 'R6a', owner: 'main', name: 'engine 红线核心（主 agent 自审）',
     files: [`${E}/guard.rs`, `${E}/protect.rs`, `${E}/paths.rs`, `${E}/snapshot.rs`,
-      `${E}/systembin.rs`, `${E}/reg_backup.rs`, `${E}/rules_signature.rs`, `${E}/rule_schema.rs`,
+      `${E}/systembin.rs`, `${E}/rules_signature.rs`, `${E}/rule_schema.rs`,
       `${E}/mod.rs`],
     contract: 'guard 档位 / protect 受保护路径 / 数据目录 / 快照槽 / 规则验签',
     boundary: '产出《红线口径基线》，定性优先于任何域单元；条目单列、不并入 subagent 已审统计',
@@ -82,6 +82,13 @@ export const UNITS = [
     // 按本门禁自述口径「优先按页面/执行链，其次按目录」把 PS 双通道编译器 pssteps.rs
     // （整包 2210 行）切给紧随其后点名的 R6c —— 上限不放宽，其余红线件留在本单元。
     gates: ['check-guard-tiers', 'check-ps-callsites', 'check-rule-schema-sync'],
+  },
+  {
+    id: 'R6d', owner: 'sub', name: 'engine 注册表备份执行链',
+    files: [`${E}/reg_backup.rs`],
+    contract: '注册表备份读写 / 导入还原 / 失败坐标与形状契约',
+    boundary: '红线口径一律引用 R6a 基线、不自解释；触发备份的命令体归各自域单元',
+    gates: ['check-delete-callsites', 'check-registry-delete-guard'],
   },
   {
     // 必须排在 R6b 之前：R6b 用 engine 顶层目录兜底认领，兜底只吃此前无人认领的文件。
@@ -163,7 +170,8 @@ export const UNITS = [
     id: 'R2a', owner: 'sub', name: 'uninstall 残留链（扫描→更新）',
     files: [`${U}/residue.rs`, `${U}/residue_update.rs`,
       `${U}/backup_report.rs`, `${U}/vendor_registry.rs`, `${U}/dead.rs`, `${U}/authenticode.rs`,
-      `${U}/helpers.rs`, `${U}/mod.rs`, `${U}/residue_trace_tests.rs`,
+      `${U}/helpers.rs`, `${U}/mod.rs`,
+      // P2：跨契约面回归网移入 R2c（整目录认领被新增代码顶破 U2 上限后重切）。
       // P2-02：gameclean.rs 是「游戏残留」扫描（消费 uninstall 平台索引），
       // 显式点名优先于 R1b 的 commands 目录兜底（否则 R1b 超 8000 行单元上限）
       `${C}/gameclean.rs`],
@@ -195,9 +203,33 @@ export const UNITS = [
   },
   {
     id: 'R2b', owner: 'sub', name: 'uninstall 孤儿与执行（列表/运行/七类孤儿）',
-    dirs: [{ dir: U, ext: ['.rs'] }],
+    // P2：整目录认领被新增代码顶破 U2 上限，按门禁自述口径「优先按页面/执行链」重切 ——
+    // 跨契约面的回归网 `residue_trace_tests.rs`（无法归属单一契约面）单独成 R2c 单元，
+    // 本单元改为显式文件列表（`residue_trace_tests.rs` 归 R2c）。
+    files: [
+      `${U}/appx.rs`, `${U}/capability_orphan.rs`, `${U}/com_orphan.rs`,
+      `${U}/drivers_orphan.rs`,
+      `${U}/ifeo_orphan.rs`, `${U}/list_run.rs`, `${U}/minifilter_orphan.rs`,
+      `${U}/ownership.rs`, `${U}/run_keys.rs`, `${U}/services_orphan.rs`,
+    ],
     contract: 'uninstall_run 等待链 / services_orphan / game_platform_orphan / run_keys / com_orphan 等',
     boundary: '等待链「不强杀卸载器、超时如实上报」是红线（AGENTS §5.24）',
+    gates: ['check-delete-exits', 'check-guard-tiers'],
+  },
+  {
+    id: 'R2c', owner: 'sub', name: 'uninstall 跨契约回归网（残留/追踪）',
+    files: [`${U}/residue_trace_tests.rs`],
+    contract: 'list_run 第三方模块口径 / residue 前缀反查 / 本机学习库判定 / C3 阈值表 / M2 静默知识',
+    boundary: '跨契约面回归网，无法归属单一域文件；实现搬走即反映成编译错误',
+    gates: ['check-delete-exits'],
+  },
+  {
+    // P2：R2b 仍超 U2 上限，按「按页面/执行链」把两个**平台孤儿扫描族**单列 ——
+    // 它们与列表执行链是两回事：一个扫「某个平台装了哪些游戏」，一个跑卸载动作。
+    id: 'R2d', owner: 'sub', name: 'uninstall 平台孤儿扫描族（Steam/Epic/Wine 等）',
+    files: [`${U}/game_platform_orphan.rs`],
+    contract: '平台索引构建（Steam/Epic/Wine/腾讯 等） / 孤儿游戏目录扫描 / 平台目录闸',
+    boundary: '列表执行链与等待链归 R2b；本单元只审平台索引与孤儿目录扫描',
     gates: ['check-delete-exits', 'check-guard-tiers'],
   },
   {
@@ -318,11 +350,20 @@ export const UNITS = [
   {
     id: 'F4b', owner: 'sub', name: '优化与查询链脚本',
     files: [`${S}/optimizer.js`, `${S}/finder.js`, `${S}/overview.js`, `${S}/models-window.js`,
-      `${S}/modelpicker.js`, `${S}/diskbench.js`, `${S}/netspeed.js`, `${S}/netspeed-detector.js`,
-      `${S}/netcheck.js`, `${S}/realtime.js`, `${S}/processes.js`, `${S}/process-manager-window.js`],
+      `${S}/diskbench.js`, `${S}/netspeed.js`, `${S}/netspeed-detector.js`,
+      `${S}/netcheck.js`, `${S}/realtime.js`, `${S}/processes.js`],
     contract: '优化项执行 / 磁盘查找 / 测速 / 实时视图',
     boundary: '灰态与回执三态的消费侧形状按 R3/R4 契约写',
     gates: ['check-channel-map', 'check-treemap-layout'],
+  },
+  {
+    // P2：F4b 被新增代码顶破 U2 上限，按「按页面/执行链」把两个**独立窗口脚本**
+    // 单列 —— 模型选择器与进程管理面板各自成窗，与优化/查询执行链无耦合。
+    id: 'F4d', owner: 'sub', name: '模型选择器与进程面板窗口脚本',
+    files: [`${S}/modelpicker.js`, `${S}/process-manager-window.js`],
+    contract: '模型选择器弹窗 / 进程管理面板窗口的渲染与事件',
+    boundary: '只审这两个独立窗口脚本；主优化页与查询链归 F4b',
+    gates: ['check-channel-map', 'check-subwindow-init'],
   },
   {
     id: 'F4c', owner: 'sub', name: '系统面板与更新脚本（新增前端脚本自动落入）',
@@ -415,13 +456,26 @@ export const UNITS = [
     // 无人认领的文件，T1d 若排在 T1b 之后，点名会成装饰（U3 判红实测过）。
     id: 'T1d', owner: 'sub', name: '门禁·样式与前端面',
     files: ['tools/check-contrast.mjs', 'tools/check-css-tokens.mjs', 'tools/check-css-hygiene.mjs',
-      'tools/check-a11y.mjs', 'tools/check-subwindow-css.mjs',
+      'tools/check-a11y.mjs', 'tools/check-subwindow-css.mjs', 'tools/check-material-parity.mjs',
       'tools/check-html-contract.mjs', 'tools/check-first-paint.mjs',
       'tools/check-treemap-layout.mjs', 'tools/check-assets-used.mjs',
       'tools/check-asset-size.mjs'],
     contract: '样式 token / 对比度 / CSS 卫生 / 可达性 / 首屏预算 / HTML 与资产契约',
     boundary: '审的是「界面面」的自动判据；真机观感不属本单元（目检走 §1.5 纪律）',
     gates: ['check-css-tokens', 'check-css-hygiene', 'check-contrast', 'check-first-paint'],
+  },
+  {
+    // 2026-11-10 P3：新增门禁与注释口径扩充后，T1b 的兜底形态越 U2 上限（现算见 U2 输出）。
+    // 沿用 T1d/T1e/T1f 的同一处置：按主题点名成独立单元，上限不放宽。
+    // 拆出的是「注释 / 坐标 / 文档承诺」这一族——它们共享同一判据面（文本口径），
+    // 与数据对拍、规则域契约不是同一件事。必须排在 T1b 之前（T1b 是兜底认领位）。
+    id: 'T1k', owner: 'sub', name: '门禁·注释坐标与文档承诺',
+    files: ['tools/check-comment-rot.mjs', 'tools/check-comment-coords.mjs',
+      'tools/check-tools-doc-paths.mjs',
+      'tools/check-readme-claims.mjs', 'tools/check-readme-negative-claims.mjs'],
+    contract: '注释数字与坐标不腐烂 / 文档引用可解析 / readme 承诺与现算对拍 / 工具不把 docs 当数据源',
+    boundary: '审的是「文本口径」的自动判据；数据与签名面归 T1b/D1',
+    gates: ['check-comment-rot', 'check-doc-refs', 'check-readme-claims'],
   },
   {
     // 2026-10-25 B0/B1：四道「施工前置判红门禁」新增后，T1b 的兜底形态达 8096 行越 U2

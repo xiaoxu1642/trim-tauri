@@ -18,7 +18,7 @@
 //
 // 用法：node tools/check-fixture-freshness.mjs
 'use strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -27,6 +27,7 @@ import { fixtureText } from './gen-residue-fixture.mjs';
 import { projectWinerrorDoc } from './gen-winerror-codes.mjs';
 import { buildDoc } from './gen-finder-delete-modes.mjs';
 import { buildDoc as buildRulesCanonicalDoc } from './fixtures/rules-canonical/gen.mjs';
+import { serializeOptimizerRuntime } from './gen-optimizer-runtime.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const g = gate(import.meta.url);
@@ -34,9 +35,14 @@ const g = gate(import.meta.url);
 const TARGETS = [
   { out: 'tools/fixtures/residue-contract.json', build: fixtureText },
   { out: 'src-tauri/data/winerror-codes.json', build: projectWinerrorDoc },
+  { out: 'src-tauri/data/optimizer-runtime.json', build: serializeOptimizerRuntime },
   { out: 'tools/fixtures/finder-delete-modes.json', build: buildDoc },
   { out: 'tools/fixtures/rules-canonical/cases.json', build: buildRulesCanonicalDoc },
 ];
+if (TARGETS.length < 5) {
+  g.fail(`夹具目标只有 ${TARGETS.length} 项（< 5）⇒ 判定对象塌陷`);
+  g.finish();
+}
 
 /** 比对器（唯一实现）：主断言与正向对照共用，不许各写一份。 */
 function isFresh(have, want) {
@@ -60,7 +66,12 @@ function isFresh(have, want) {
 const stale = [];
 for (const { out, build } of TARGETS) {
   const want = build();
-  const have = readFileSync(join(ROOT, out), 'utf8');
+  const abs = join(ROOT, out);
+  if (!existsSync(abs)) {
+    stale.push(`${out} 不存在 ⇒ 本节未校验，按失败处理`);
+    continue;
+  }
+  const have = readFileSync(abs, 'utf8');
   if (!isFresh(have, want)) stale.push(`${out} 与生成器输出不一致（手改或改源未重跑；重跑对应 gen-*.mjs）`);
   else g.ok(`${out} 与生成器输出逐字节一致`);
 }

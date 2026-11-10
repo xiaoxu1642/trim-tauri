@@ -27,10 +27,14 @@ import { blankNonCode } from './lib/src-scan.mjs';
 const appJs = readFileSync(join(REPO_ROOT, 'src', 'scripts', 'app.js'), 'utf8');
 
 // 从 app.js 现场提取延迟加载清单（新增文件自动纳入，不用回来改本门禁）
+function parseScriptList(block) {
+  return [...block.matchAll(/['"]([^'"]+)['"]/g)].map((x) => x[1]);
+}
+
 function extractIdle() {
   const m = appJs.match(/const IDLE_SCRIPTS = \[([^\]]*)\]/);
   if (!m) throw new Error('app.js 里找不到 IDLE_SCRIPTS 清单');
-  return [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
+  return parseScriptList(m[1]).filter((s) => s.endsWith('.js'));
 }
 
 function extractPages() {
@@ -38,9 +42,7 @@ function extractPages() {
   if (!m) throw new Error('app.js 里找不到 PAGE_SCRIPTS 清单');
   // 只取脚本路径（块里混有页面 key 等非路径字符串）；T1h-M04：不能再只认 scripts/，
   // vendor/litebox.js 也是运行时注入件，必须进守卫扫描面。
-  return [...m[1].matchAll(/'([^']+)'/g)]
-    .map((x) => x[1])
-    .filter((s) => s.endsWith('.js'));
+  return parseScriptList(m[1]).filter((s) => s.endsWith('.js'));
 }
 
 const files = [...new Set([...extractIdle(), ...extractPages()])];
@@ -51,6 +53,15 @@ const check = (ok, label, detail = '') => {
   console.log(`${ok ? '✓' : '✗'} ${label}${detail ? ' — ' + detail : ''}`);
   if (!ok) fail++;
 };
+
+const parseSelfChecks = [
+  ['单引号清单', parseScriptList("['a.js', 'b.js']").join(',') === 'a.js,b.js'],
+  ['双引号清单', parseScriptList('["a.js", "b.js"]').join(',') === 'a.js,b.js'],
+  ['单双混写清单', parseScriptList(`['a.js', "b.js"]`).join(',') === 'a.js,b.js'],
+];
+for (const [label, ok] of parseSelfChecks) {
+  check(ok, `清单解析判定器自检（${label}）`, ok ? '' : `${label} 未被解析或数量不符`);
+}
 
 console.log('=== 延迟加载脚本 DOMContentLoaded 守卫门禁 ===\n');
 

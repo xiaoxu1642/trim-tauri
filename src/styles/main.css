@@ -1008,7 +1008,6 @@ body {
   padding: 16px;
   background: var(--bg-card);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-medium);
   /* 批次②判定：保留 all。同一批元素还挂着 overview-card / health-card /
      overview-res-card 等类别名（现算 index.html 的 class 属性），命中面比本选择器宽；
      tilt.js 又给它写内联 transform 与内联 transition；theme-light / [data-preset-bg] /
@@ -1349,7 +1348,6 @@ body {
     linear-gradient(var(--lg-tint-primary), var(--lg-tint-primary)),
     var(--bg-elevated);
   padding: 4px;
-  border-radius: var(--radius-small);
   border: 1px solid var(--border-default);
   width: fit-content;
 }
@@ -1527,7 +1525,6 @@ body.lg-reduce-motion .lg-thumb {
   align-items: center;
   justify-content: center;
   padding: 2px 8px;
-  border-radius: var(--radius-btn);
   font-size: calc(10px * var(--font-size-scale, 1));
   font-weight: calc(600 * var(--font-weight-scale, 1));
   text-transform: uppercase;
@@ -2308,10 +2305,12 @@ input[type="radio"]:focus-visible {
   outline-offset: 2px;
 }
 
-/* Windows 11 圆角规范微调（25H2 略增圆角） */
+/* Windows 11 圆角规范微调（25H2 略增圆角）
+   .summary-card 与 .overview-card 恒成对出现（概览指标卡），故同列本档 14px。
+   这两个选择器不再进下方「全局白容器统一参数」块 —— 同一特异度下源序更后者会赢，
+   进去就等于 14px 档从未上屏。.metric-card / .settings-section 仍由统一块给 10px。 */
 .summary-card,
-.metric-card,
-.settings-section {
+.overview-card {
   border-radius: var(--radius-large); /* 14px，对齐 Win11 25H2 卡片规范 */
 }
 
@@ -2580,11 +2579,10 @@ input[type="radio"]:focus-visible {
 
 /* 第四轮新增：全局圆角视觉规范（三级分层，深浅主题一致）
    外层大面板大圆角 / 内部子控件小圆角，边框阴影同步裁剪 */
-/* 小控件统一小圆角 */
-.checkbox,
-.filter-tab,
+/* 小控件统一小圆角：只列基类没有圆角声明的控件；其余控件在自己的基类里已经写了
+   同一个档位（.checkbox / .filter-tab / .category-risk），此处再列一遍是同值冗余，
+   还会把 :focus-visible 段的焦点圆角（--radius-small）顶掉。 */
 .badge,
-.category-risk,
 .path-auto-tag {
   border-radius: var(--radius-badge);
 }
@@ -2629,6 +2627,7 @@ input[type="radio"]:focus-visible {
   color: var(--fg-secondary);
   overflow: hidden;
   white-space: nowrap;
+  min-width: 56px;
   border-radius: var(--radius-badge);
 }
 .xtable-th.sortable { cursor: pointer; }
@@ -3655,7 +3654,6 @@ body.mw-window {
 .mw-group:nth-child(5) { animation-delay: 160ms; }
 .mw-group {
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-small);
   margin-bottom: 10px;
   overflow: hidden;
   background: var(--bg-card);
@@ -5184,15 +5182,17 @@ body.lg-mode-frost .btn-accent:hover:not(:disabled) {
 }
 
 /* 指针弹性形变（full 档，liquid-glass.js 写入 --lg-* 变量）：
-   靠近平移 + 方向性缩放，按压回弹由 --lg-press 承担 */
+   靠近平移 + 方向性缩放，按压回弹由 --lg-press 承担。
+   三条颜色过渡与 .btn 段落同口径（--duration-fast / --ease-standard）；
+   transform 那条走回弹曲线，不属 token 档位，保持字面。 */
 .lg-elastic {
   transform: translate3d(var(--lg-tx, 0px), var(--lg-ty, 0px), 0)
              scale(calc(var(--lg-sx, 1) * var(--lg-press, 1)), calc(var(--lg-sy, 1) * var(--lg-press, 1)));
   transition:
     transform 260ms cubic-bezier(0.34, 1.56, 0.64, 1),
-    background-color 180ms ease,
-    border-color 180ms ease,
-    color 180ms ease;
+    background-color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
   will-change: transform;
 }
 
@@ -5341,7 +5341,6 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
   body[data-skin="glass"] .card,
   body[data-skin="glass"] .usage-modal,
   body[data-skin="glass"] .filter-tabs,
-  body[data-skin="glass"] .maint-tabs,
   /* 批次：悬浮岛侧边栏 —— 系统关透明度时岛同步回实色，磨砂缺失也不影响可读 */
   body[data-skin="glass"] .sidebar,
   body.electron-mica .card,
@@ -5394,8 +5393,6 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
    磨砂只剩 .ds-menu / .ds-tooltip 消费 --glass-blur-mid；此处不声明 border/background。 */
 .card,
 .table-card,
-.summary-card,
-.overview-card,
 .settings-section,
 .appearance-card,
 .empty-state,

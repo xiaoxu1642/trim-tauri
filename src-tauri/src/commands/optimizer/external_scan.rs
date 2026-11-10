@@ -103,7 +103,7 @@ fn judge_external(current: Option<i64>, hits: &[(i64, &'static str)]) -> Option<
 
 /// 单个外部键的一次读取结果（P1-6B）。
 ///
-/// 旧写法只调 `read_reg_dword_opt`，它的 `None` 同时代表**三种不同的事实**：键/值不存在、
+/// 旧写法只调 `read_reg_dword_u32_as_i64`，它的 `None` 同时代表**三种不同的事实**：键/值不存在、
 /// 类型不是 DWORD、访问被拒或解码失败。而回执里 `scanned` 又恒等于表长，于是
 /// 「一次访问拒绝」被记成「扫过了、没命中」——账外核对这个面板的全部意义就是说真话。
 #[derive(Debug, PartialEq)]
@@ -112,7 +112,7 @@ pub(super) enum ExtRead {
     Absent,
     /// 读到了值，但不是可读的 DWORD：算「核对过」，不参与命中判定
     NotDWord,
-    /// 读到的 DWORD 现值（按无符号口径，与 `read_reg_dword_opt` 一致）
+    /// 读到的 DWORD 现值（按无符号口径，与 `read_reg_dword_u32_as_i64` 一致）
     DWord(i64),
     /// 读不出来（访问拒绝 / 其它 Win32 错误 / 解码失败），载荷是错误码名
     Unreadable(String),
@@ -144,7 +144,7 @@ fn dword_from_reg_text(text: &str) -> Option<i64> {
 }
 
 /// 把一次三态读器的结果折成 `ExtRead`。DWORD 的无符号口径在这里复刻一次：
-/// `read_reg_value_state` 按 i32 回报（对齐 .NET/PS），`read_reg_dword_opt` 按 u32→i64，
+/// `read_reg_value_state` 按 i32 回报（对齐 .NET/PS），`read_reg_dword_u32_as_i64` 按 u32→i64，
 /// 两者差的就是这一步转换 —— 不复刻会让 `0xFFFFFFFF` 这类阈值形态永远命中不上。
 fn read_ext_dword(hive: windows::Win32::System::Registry::HKEY, subkey: &str, name: &str) -> ExtRead {
     use crate::engine::native::RegReadState;
@@ -159,40 +159,61 @@ fn read_ext_dword(hive: windows::Win32::System::Registry::HKEY, subkey: &str, na
     }
 }
 
-#[tauri::command]
-pub fn optimizer_external_scan<R: Runtime>(window: WebviewWindow<R>) -> Value {
-    if let Err(msg) = guard::guard(&window, guard::MAIN) {
-        return json!({ "success": false, "message": msg });
-    }
-    let hive = hive_hklm();
-    let mut findings: Vec<Value> = Vec::new();
-    let mut scanned = 0usize;
-    let mut unreadable = 0usize;
-    let mut unreadable_ids: Vec<&'static str> = Vec::new();
-    for t in EXTERNAL_TWEAKS.iter() {
-        let read = read_ext_dword(hive, t.subkey, t.value_name);
-        if read.is_read() {
-            scanned += 1;
-        } else {
-            unreadable += 1;
-            unreadable_ids.push(t.id);
-        }
-        let shape = judge_external(match &read { ExtRead::DWord(v) => Some(*v), _ => None }, t.hits);
-        if let Some(s) = shape {
-            findings.push(json!({
+/// 可测的回执装配：`findings` 必须覆盖表内每一项，状态沿用 `ext_state` 五档。
+fn scan_findings(reads: &[ExtRead]) -> Vec<Value> {
+    EXTERNAL_TWEAKS
+        .iter()
+        .zip(reads)
+        .map(|(t, read)| {
+            let shape = judge_external(match read { ExtRead::DWord(v) => Some(*v), _ => None }, t.hits);
+            json!({
                 "id": t.id,
                 "title": t.title,
                 "hive": "HKLM",
                 "subkey": t.subkey,
                 "value": t.value_name,
-                "current": match &read { ExtRead::DWord(v) => json!(*v), _ => Value::Null },
-                "shape": s,
+                "current": match read { ExtRead::DWord(v) => json!(*v), _ => Value::Null },
+                "shape": shape,
                 "note": t.note,
-                // P1-6B：单项状态随条目一起给出，前端不必再从「有没有这条」反推
-                "state": ext_state(&read, t.hits),
-            }));
-        }
+                "state": ext_state(read, t.hits),
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub async fn optimizer_external_scan<R: Runtime>(window: WebviewWindow<R>) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
     }
+    let scan = tauri::async_runtime::spawn_blocking(move || {
+        let hive = hive_hklm();
+        let mut scanned = 0usize;
+        let mut unreadable = 0usize;
+        let mut unreadable_ids: Vec<&'static str> = Vec::new();
+        let reads: Vec<ExtRead> = EXTERNAL_TWEAKS
+            .iter()
+            .map(|t| read_ext_dword(hive, t.subkey, t.value_name))
+            .collect();
+        for (t, read) in EXTERNAL_TWEAKS.iter().zip(&reads) {
+            if read.is_read() {
+                scanned += 1;
+            } else {
+                unreadable += 1;
+                unreadable_ids.push(t.id);
+            }
+        }
+        (scan_findings(&reads), scanned, unreadable, unreadable_ids)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        crate::engine::log::write_log(
+            "error",
+            &format!("账外核对阻塞池任务异常: {e}"),
+        );
+        (Vec::new(), 0, EXTERNAL_TWEAKS.len(), EXTERNAL_TWEAKS.iter().map(|t| t.id).collect())
+    });
+    let (findings, scanned, unreadable, unreadable_ids) = scan;
     // 「成功」只在没有读不出的键时成立（方案 P1-6B）。partial 一并带回，前端据此把
     // 「N 个键没能核对」显示出来，而不是把一条部分失败的扫描渲染成「一切正常，只是没命中」。
     let data = json!({
@@ -224,7 +245,7 @@ mod tests {
     #[test]
     fn 命中判定按无符号值比对() {
         let hits = hits_of("ext_net_throttle_off");
-        // 0xFFFFFFFF 必须按无符号 4294967295 命中（read_reg_dword_opt 已按无符号读出）
+        // 0xFFFFFFFF 必须按无符号 4294967295 命中（read_reg_dword_u32_as_i64 已按无符号读出）
         assert_eq!(judge_external(Some(4294967295), hits), Some("限流关闭"));
         assert_eq!(judge_external(Some(10), hits), None, "其它值不算命中");
         assert_eq!(judge_external(None, hits), None, "值不存在不命中");
@@ -251,9 +272,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn external_scan_emits_non_matched_states() {
+        let reads: Vec<ExtRead> = EXTERNAL_TWEAKS
+            .iter()
+            .map(|_| ExtRead::Absent)
+            .collect();
+        let findings = scan_findings(&reads);
+        assert_eq!(findings.len(), EXTERNAL_TWEAKS.len(), "每个表项都要下发条目");
+        assert!(
+            findings.iter().all(|f| f["state"] == json!("absent")),
+            "非 matched 项必须带现码五档中的 absent，恢复只 push 命中项会空表"
+        );
+    }
+
     /// 真机探针：只读扫描本机账外 tweak，走**生产读取路径**（`read_ext_dword` 四态）。
     ///
-    /// R3b-M16：旧探针走 `read_reg_dword_opt`（`None` 把「不存在/类型不符/无权限」折成一档，
+    /// R3b-M16：旧探针走 `read_reg_dword_u32_as_i64`（`None` 把「不存在/类型不符/无权限」折成一档，
     /// 正是 P1-6B 要修的形态）且只打印不判红 —— 发布门禁真跑它时三态分流零实测覆盖。
     /// 现在断言三件事：计数守恒（scanned + unreadable == 表长）、unreadable 必须点名错误码、
     /// 至少读出一档非 Unreadable（证明本机真的开得动 HKLM 那几个子键）。
@@ -311,7 +346,7 @@ mod p1_6b_three_state_tests {
     use super::*;
 
     /// P1-6B：`absent` / `notDWord` / `unreadable` / `matched` / `present` 五档必须互不相同。
-    /// 旧实现里前四种全被 `read_reg_dword_opt` 的 `None` 折成一档，回执的 `scanned` 又恒等于
+    /// 旧实现里前四种全被 `read_reg_dword_u32_as_i64` 的 `None` 折成一档，回执的 `scanned` 又恒等于
     /// 表长 ⇒ 一次访问拒绝被记成「扫过了、没命中」。
     ///
     /// 判红自证：① 把 `ext_state` 的 `Unreadable` 支并进 `Absent` ⇒ 第三条断言红；

@@ -3,8 +3,11 @@
 (function () {
   'use strict';
 
-  // 启动黑闪修复：首帧上报只由 tauri-api.js 在自身末尾调用一次 notifyFirstPaint()（内部等 DOMContentLoaded 后双 rAF
-  // 才真正发送，主进程收到后才显示主窗口）。本文件原先在第 8 行又调了一次（F3-M08）：tauri-api 在 defer 序中先于
+  // 启动黑闪修复：首帧上报只由 tauri-api.js 在自身末尾调用一次 notifyFirstPaint()。
+  // C-05（F3-L11）口径订正：不是「等 DOMContentLoaded 才发首帧」——本文件以 defer 加载，
+  // 执行时 `document.readyState` 已是 `interactive`，走的是 `arm()` **立即**双 rAF + 200ms 竞速（取数命令：读 src/scripts/tauri-api.js 的 arm() 里 setTimeout(send, …) 的实参）；
+  // 只有 `readyState === 'loading'` 时才挂 DCL 监听兜底（正常路径走不到）。
+  // 本文件原先在第 8 行又调了一次（F3-M08）：tauri-api 在 defer 序中先于
   // app.js，那次就是第二次——两份 DCL 监听 + 两次 invoke，而「尽早触发」的前提并不成立（真正发送本来就要等 DCL）。
 
   // 审查 L13 → v2-M22：全局兜底 unhandledrejection 的真源已挪进 ds.js（⑪ 节）——原先只有主窗这一份，四个子窗
@@ -274,7 +277,14 @@
     _initedModules.add(name);
     // LG-7（2026-09-15）：init 必须逐个 try/catch——此前裸调用，任一模块抛错会让
     // window.app 未及时挂载、所有 window.app?.toast?.() 静默变空操作，比卡死更难诊断。
-    try { window[name]?.init?.(); } catch (e) { console.warn(`[Trim] 模块 ${name} 初始化失败:`, e); }
+    try {
+      window[name]?.init?.();
+    } catch (e) {
+      // A2-L02：只 console.warn 的话日志页看不到「哪个模块初始化失败」——
+      // 用户界面像卡住，日志页也是空的，排查只能靠复现。
+      console.warn(`[Trim] 模块 ${name} 初始化失败:`, e);
+      window.app?.log?.('error', `模块 ${name} 初始化失败: ${(e && e.message) || e}`);
+    }
   }
 
   function initModuleOf(src) {
@@ -404,6 +414,9 @@
     try {
     if (pageName === 'logs') await window.logger?.load?.();
     if (pageName === 'startup') await window.startup?.load?.();
+    // F4a1-L17：卸载页每次进入都要重新枚举安装列表；
+    // 只在 init 时读一次的话，第二次进页仍是首次缓存。
+    if (pageName === 'uninstall') await window.uninstall?.refresh?.();
     // 审查 K3：这两处原本是裸 `?.init?.()`，与 ensurePageScripts 的那次 init 叠在一起，
     // 第一次进页就会绑两份监听器。quickcmds 的 renderTabs/renderList 只在首绑时需要
     // （页面 DOM 是 display 切换、不重建）。
@@ -590,7 +603,8 @@
     container.appendChild(el);
 
     let removeTimer;
-    const entry = { el };
+    // F3-L15：pinned 条目（进度 Toast）常驻，普通提示的 FIFO 挤出不得动它。
+    const entry = { el, pinned: options.pinned === true };
     entry.remove = () => {
       clearTimeout(removeTimer);
       const i = activeToasts.indexOf(entry);
@@ -618,7 +632,7 @@
   function trimToasts() {
     let guard = activeToasts.length + 1;
     while (activeToasts.length > MAX_VISIBLE_TOASTS && guard-- > 0) {
-      const idx = activeToasts.findIndex((t) => t && t.el);
+      const idx = activeToasts.findIndex((t) => t && t.el && !t.pinned);
       if (idx < 0) return;
       const oldest = activeToasts[idx];
       if (typeof oldest.remove === 'function') oldest.remove();
@@ -836,7 +850,9 @@
       setInfo('infoChrome', info.chrome || 'N/A');
       setInfo('infoOS', `${info.osVersion} (${info.arch})`);
       setInfo('infoBuild', `Build ${info.osBuild || '未知'}`);
-      const fluentText = { full: '完整支持 (Mica + Acrylic)', partial: '部分支持 (基础 Mica)', none: '不支持' };
+      // A1-L02：unknown 是「查不到」这一档，必须显示「未知」；
+      // 少了它时查询失败会被后面的兜底折成「不支持」（none 档），等于谎报。
+      const fluentText = { full: '完整支持 (Mica + Acrylic)', partial: '部分支持 (基础 Mica)', unknown: '未知', none: '不支持' };
       setInfo('infoFluent', fluentText[info.fluentSupport] || info.fluentSupport || '未知');
       setInfo('infoMica', info.micaEnabled ? '已启用（原生）' : '未启用');
       setInfo('infoUser', info.username);

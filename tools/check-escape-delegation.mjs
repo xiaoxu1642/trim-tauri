@@ -616,4 +616,31 @@ if (TRANSITION.length) {
   g.ok(`过渡表（只减不增）：${TRANSITION.map((t) => `${t.file}#${t.fn}#${t.operand}×${t.count}（${t.why}）`).join('；')}`);
 }
 
+// ---- D. 属性插值点名（P2/C-W1：F4b-L04 / F4b-L09）----
+// 这两处不是 innerHTML 汇聚点（模板直接返回/表格行拼接），C 段扫不到；
+// 单独钉死「属性值/时间列必须经 ds 转义」，并给正反样本证明判据能变红。
+const ATTR_SITES = [
+  { file: 'optimizer.js', ok: 'data-tip="${escapeHtml(tip)}"', bad: 'data-tip="${tip}"', label: '优化器专项行 data-tip' },
+  { file: 'diskbench.js', ok: 'escapeHtml(formatTime(r.timestamp))', bad: '${formatTime(r.timestamp)}', label: '测速历史时间列' },
+];
+{
+  const probe = (text, ok, bad) => text.includes(ok) && !text.includes(bad);
+  const POS = '<div data-tip="${escapeHtml(tip)}">x</div>';
+  const NEG = '<div data-tip="${tip}">x</div>';
+  if (!probe(POS, ATTR_SITES[0].ok, ATTR_SITES[0].bad)
+    || probe(NEG, ATTR_SITES[0].ok, ATTR_SITES[0].bad)) {
+    g.fail('F4b-L04 正向对照失败：data-tip 插值判定器失真（裸 ${tip} 必须判红）');
+  }
+  let attrBad = 0;
+  for (const site of ATTR_SITES) {
+    const src = sources.find((s) => s.rel === site.file);
+    if (!src) { g.fail(`P2/C-W1 属性插值：${site.file} 不在扫描面（判定对象缺失）`); attrBad++; continue; }
+    if (!probe(src.text, site.ok, site.bad)) {
+      g.fail(`P2/C-W1 属性插值：${site.file} 的${site.label}未走 ds 转义（缺「${site.ok}」或仍有「${site.bad}」）`);
+      attrBad++;
+    }
+  }
+  if (attrBad === 0) g.ok('P2/C-W1：优化器 data-tip 与测速时间列均已走 ds 转义');
+}
+
 g.finish('本地转义/字节格式化门禁通过（唯一真源 ds.js，他处只许委托）');

@@ -48,7 +48,9 @@
     "nara_kbd_output_all": "reboot",
     "nara_kbd_wpp_ts": "reboot",
     "nara_win32prio": "reboot",
-    "nara_mouse_queue": "reboot"
+    "nara_mouse_queue": "reboot",
+    "telemetry_optimize": "reboot",
+    "tf_nvidia_telemetry": "reboot"
   }
 }
 

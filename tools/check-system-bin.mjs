@@ -99,22 +99,22 @@ const RAW_EXEMPT = [
   },
   {
     file: 'src-tauri/src/engine/native/cleanup.rs',
-    anchor: 'let out = std::process::Command::new("cmd")',
+    anchor: 'let mut mk_jtarget_link = std::process::Command::new("cmd")',
     reason: '2026-10-04 审计 §4.5 测试夹具：mklink /J 造 junction 验证备份裁剪包含性核验（cfg(test) 专用，native-scanner/tests 同款；junction 无稳定 Rust API，symlink_dir 需特权）',
   },
   {
     file: 'src-tauri/src/engine/native/cleanup.rs',
-    anchor: 'let backup_link = std::process::Command::new("cmd")',
+    anchor: 'let mut mk_backup_link = std::process::Command::new("cmd")',
     reason: 'R5a-M11 测试夹具：mklink /J 把备份根换成 junction，验证 land_backup 判根后拒绝写出（cfg(test) 专用）',
   },
   {
     file: 'src-tauri/src/engine/native/cleanup.rs',
-    anchor: 'let collect_link = std::process::Command::new("cmd")',
+    anchor: 'let mut mk_collect_link = std::process::Command::new("cmd")',
     reason: 'R5a-M12 测试夹具：mklink /J 造 junction 验证采集阶段丢弃单独成档（cfg(test) 专用）',
   },
   {
     file: 'src-tauri/src/commands/fileclean.rs',
-    anchor: 'std::process::Command::new("cmd")',
+    anchor: 'let mut mk_img_link = std::process::Command::new("cmd")',
     reason: '2026-10-14 P2-E §5.3 第三条的真机 #[ignore] 探针：mklink /J 造 junction（与上面 cleanup.rs 夹具同口径，cfg(test) 专用、非生产执行面；junction 无稳定 Rust API，symlink_dir 需特权）',
   },
   {
@@ -124,38 +124,48 @@ const RAW_EXEMPT = [
   },
   {
     file: 'src-tauri/src/commands/uninstall/residue_trace_tests.rs',
-    anchor: 'let st = Command::new("cmd")',
+    anchor: 'let mut mk_j12_link = Command::new("cmd")',
     reason: 'J12（2026-10-16）双向咬合用例：mklink /J 造（活/断）junction 验证「断链放行、活链仍拒」（cfg(test) 专用、非生产执行面；junction 无稳定 Rust API，symlink_dir 需特权）',
   },
   {
     file: 'src-tauri/src/engine/protect.rs',
-    anchor: 'let ok = std::process::Command::new("cmd")',
+    anchor: 'let mut mk_protected_link = std::process::Command::new("cmd")',
     reason: 'Kudu S2（5073673）别名解析真机用例①：mklink /J 造指向受保护子树的 junction，验证解析后命中保护（cfg(test) 专用、非生产执行面；与 cleanup.rs/fileclean.rs 夹具同口径，P0-B 全量跑时补登记）',
   },
   {
     file: 'src-tauri/src/engine/protect.rs',
-    anchor: 'let ok2 = std::process::Command::new("cmd")',
+    anchor: 'let mut mk_plain_link = std::process::Command::new("cmd")',
     reason: '同上用例③对照组：mklink /J 造指向普通目录的 junction，验证不得误判受保护（锚点带 ok2 前缀与上一条区分，避免 0/2 歧义判红）',
   },
   {
     file: 'src-tauri/src/engine/restore_pack.rs',
-    anchor: 'let made = std::process::Command::new("cmd")',
+    anchor: 'let mut mk_restore_link = std::process::Command::new("cmd")',
     reason: 'P0-4（R4-M09）真机 #[ignore] 探针（B1）：mklink /J 在 lib 单测隔离数据根内造 junction，验证还原写回拒绝「父链带链接」的新建目标（cfg(test) 专用、非生产执行面；与 cleanup.rs / fileclean.rs / protect.rs 夹具同口径）',
   },
   {
     file: 'src-tauri/src/engine/paths.rs',
-    anchor: 'let made = std::process::Command::new("cmd")',
+    anchor: 'let mut mk_legacy_link = std::process::Command::new("cmd")',
     reason: 'P0-2B（B2）枚举夹具：mklink /J 把「老根」换成指向外部目录的 junction，验证 read_entries_across_roots 整根跳过、链接另一头不被当备份上报（cfg(test) 专用、非生产执行面；与 cleanup.rs / restore_pack.rs 夹具同口径）',
   },
   {
     file: 'src-tauri/src/engine/paths.rs',
-    anchor: 'let built = std::process::Command::new("cmd")',
+    anchor: 'let mut mk_prune_link = std::process::Command::new("cmd")',
     reason: 'P0-2A（B2）真机 #[ignore] 探针：mklink /J 在 lib 单测隔离数据根内造 junction 当裁根，验证 prune_backups_ext / prune_stamped_files 整轮跳过且另一头 5 份备份完好（cfg(test) 专用、非生产执行面）',
   },
   {
     file: 'src-tauri/src/engine/backup_write.rs',
-    anchor: 'let out = std::process::Command::new("cmd")',
+    anchor: 'let mut mk_backup_link = std::process::Command::new("cmd")',
     reason: 'B2-2 验收用例：mklink /J 把备份根换成指向沙箱另一目录的 junction，验证 land_backup 判根拒绝且链接另一头零新增文件（cfg(test) 专用、非生产执行面；与 cleanup.rs / fileclean.rs / protect.rs 夹具同口径，junction 无稳定 Rust API）',
+  },
+  {
+    file: 'src-tauri/src/engine/testcmd.rs',
+    anchor: 'let mut cmd = Command::new("cmd");',
+    reason: 'A14（X1-L01）测试子进程执行器自带的合成样本：拿它验证「超时返回 Timeout / 正常命令拿到 stdout」（非生产执行面；本模块只被测试调用）',
+  },
+  {
+    file: 'src-tauri/src/engine/testcmd.rs',
+    anchor: 'let listing = Command::new("tasklist")',
+    reason: 'A14（X1-L01）超时后「不留孤儿」自证的观测端：查 ping.exe 是否还在（只读观测，非生产执行面）',
   },
 ];
 
@@ -349,6 +359,9 @@ console.log('=== 系统工具裸进程名门禁 ===\n');
 // A/B 组失明（裸字面量与误塞实参都看不见），正是 K01 想堵的缝。
 const quiet = hits.filter((h) => h.kind !== 'Command::new(');
 const raw = hits.filter((h) => h.kind === 'Command::new(');
+if (quiet.length < 40 || hits.length < 40) {
+  g.fail(`扫描对象地板：quiet=${quiet.length} / hits=${hits.length}（均须 ≥ 40）⇒ A/B 组失去判定对象`);
+}
 
 // ---- A. 字面量必须经 system_tool 包裹或登记豁免 ----
 const bare = quiet.filter((h) => !h.wrapped && h.name !== null && !ALLOW_BARE[h.name]);

@@ -90,7 +90,7 @@ pub(super) fn build_script(steps: &[Value]) -> String {
             l.push("'@".into());
             l.push("Set-Content -Path $___rf -Value $___rc -Encoding Unicode".into());
             l.push("& reg.exe import $___rf *> $null".into());
-            l.push(format!("if ($LASTEXITCODE -ne 0) {{ $failedSteps++; Write-TFDiag -Stage 'optimizer.reg' -Mutation 'rolled_back' -Detail ('step ' + ({i} + 1) + ' [' + {label_ps} + '] reg import exit=' + $LASTEXITCODE) }}"));
+            l.push(format!("if ($LASTEXITCODE -ne 0) {{ $failedSteps++; Write-TFDiag -Stage 'optimizer.reg' -Mutation 'failed' -Detail ('step ' + ({i} + 1) + ' [' + {label_ps} + '] reg import exit=' + $LASTEXITCODE) }}"));
             l.push("Remove-Item $___rf -Force -ErrorAction SilentlyContinue".into());
         } else if let Some(cmd) = s.get("cmd").and_then(|v| v.as_str()) {
             // 注意：PS 轨这条 `& $env:ComSpec /c $___cmd` 与已修的 `run_cmd_step` 是同一类
@@ -120,7 +120,7 @@ pub(super) fn build_script(steps: &[Value]) -> String {
                     Err(reason) => {
                         l.push(format!("Write-TFDiag -Stage 'optimizer.service' -Mutation 'failed' -Detail {}", ps_quote(&reason)));
                         l.push("$failedSteps++".into());
-                        None
+                        return l.join("\n");
                     }
                 },
                 None => None,
@@ -141,7 +141,7 @@ pub(super) fn build_script(steps: &[Value]) -> String {
                 });
                 l.push(format!("Set-Service -Name {svc_ps} -StartupType {st} -ErrorAction SilentlyContinue"));
             }
-            l.push(format!("if (-not (Get-Service -Name {svc_ps} -ErrorAction SilentlyContinue)) {{ $failedSteps++; Write-TFDiag -Stage 'optimizer.service' -Mutation 'rolled_back' -Detail ('step ' + ({i} + 1) + ' [' + {label_ps} + '] 服务不存在: ' + {svc_ps}) }}"));
+            l.push(format!("if (-not (Get-Service -Name {svc_ps} -ErrorAction SilentlyContinue)) {{ $failedSteps++; Write-TFDiag -Stage 'optimizer.service' -Mutation 'failed' -Detail ('step ' + ({i} + 1) + ' [' + {label_ps} + '] 服务不存在: ' + {svc_ps}) }}"));
         } else if let Some(pwsh) = s.get("pwsh").and_then(|v| v.as_str()) {
             l.push("$___eap = $ErrorActionPreference".into());
             l.push("try {".into());
@@ -346,6 +346,41 @@ pub(super) fn classify_recycle_line(rest: &str, seen: &mut std::collections::Has
     })
 }
 
+/// `@@RECYCLE2@@` 的载荷只收 base64(UTF-16LE)，不再接受 lossy 路径串。
+fn decode_recycle2_path(payload: &str) -> Result<std::ffi::OsString, String> {
+    use std::os::windows::ffi::OsStringExt;
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .map_err(|_| "RECYCLE2 载荷不是合法 base64".to_string())?;
+    if bytes.len() % 2 != 0 {
+        return Err("RECYCLE2 载荷字节数不是 wide 单元宽度".into());
+    }
+    let wide: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    Ok(std::ffi::OsString::from_wide(&wide))
+}
+
+#[cfg(test)]
+mod recycle2_tests {
+    use super::decode_recycle2_path;
+
+    #[test]
+    fn recycle_protocol_roundtrip_unpaired_surrogate() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let original = std::ffi::OsString::from_wide(&[0xD800, 0x0041]);
+        let wide: Vec<u16> = original.encode_wide().collect();
+        let bytes: Vec<u8> = wide.iter().flat_map(|u| u.to_le_bytes()).collect();
+        use base64::Engine;
+        let payload = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let decoded = decode_recycle2_path(&payload).expect("合法 RECYCLE2 载荷必须可还原");
+        assert_eq!(decoded.encode_wide().collect::<Vec<u16>>(), wide, "wide 单元必须逐字相等");
+        assert!(decode_recycle2_path("not-base64").is_err(), "旧 lossy 路径/非法载荷必须拒");
+    }
+}
+
 /// 原生执行优化步骤（对应 optimizer_build.ps1 模板，S1）
 ///
 /// 支持 reg/cmd/service 三种 step 类型；pwsh 类型交给 pssteps 解释器
@@ -397,6 +432,7 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
             // 随机名后按名导入；句柄在导入完成前不释放，名字也不再是「可预测时间戳」。
             let mut reg_hold: Option<std::fs::File> = None;
             let mut write_err: Option<String> = None;
+            let expected_digest = crate::engine::hash::sha256_bytes(&reg_bytes);
             for _ in 0..3 {
                 // B2-1：名字由 `engine::tmpnames` 的形态声明拼出，与清扫白名单共用同一份
                 // （此前这里与白名单各写一份字面量，改名会让另一侧静默失效）。
@@ -452,7 +488,15 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
                     // 文件仍按 UTF-16LE+BOM 写（那是这份 .reg 文本格式既有的约定，v2 明令不动），
                     // 读侧的编码感知在 reg_backup::read_reg_text_file。
                     // 失败原因现在进 failed_reasons —— 旧实现只说"返回非零"，用户看不到为什么。
-                    match crate::engine::reg_backup::reg_import_apply(std::path::Path::new(&reg_path)) {
+                    let read = std::fs::read(&reg_path).map_err(|e| e.to_string());
+                    let imported = match read {
+                        Ok(bytes) => crate::engine::reg_backup::reg_import_from_bytes(&bytes, &expected_digest),
+                        Err(reason) => Err(crate::engine::reg_backup::RegImportFailure {
+                            stat: Default::default(),
+                            reason,
+                        }),
+                    };
+                    match imported {
                         Ok(_) => {}
                         Err(e) => {
                             // P2-05：失败回执带统计（已写入/已删除多少），
@@ -508,9 +552,7 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
                 Some(l) => match crate::engine::native::start_type_from_label(l) {
                     Ok(v) => Some(v),
                     Err(reason) => {
-                        failed += 1;
-                        failed_reasons.push(step_reason(i, label, &reason));
-                        None
+                        return Err(format!("未知启动类型，未停服: {reason}"));
                     }
                 },
                 None => None,
@@ -739,6 +781,20 @@ pub struct RunParams {
 /// 项会互相覆盖记账。整条执行链持全局互斥（Drop 复位，覆盖全部早退路径）——前端
 /// 批量本就是串行 await，此锁只拦「重复点击/双入口并发」，不影响正常吞吐。
 pub(super) static OPT_RUN_INFLIGHT: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+pub(super) static OPT_WRITE_LOCK: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
+pub(super) struct OptWriteGuard;
+impl OptWriteGuard {
+    pub(super) fn acquire() -> Option<OptWriteGuard> {
+        let mut slot = OPT_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if *slot { None } else { *slot = true; Some(OptWriteGuard) }
+    }
+}
+impl Drop for OptWriteGuard {
+    fn drop(&mut self) {
+        *OPT_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    }
+}
 
 pub(super) struct OptRunGuard;
 impl OptRunGuard {
@@ -983,6 +1039,51 @@ pub(super) fn ledger_note(action: &str, ok: bool) -> String {
     format!("（{action}记账失败，界面状态可能滞后，详见日志）")
 }
 
+/// B-06 ①：执行前的**备份前置闸**。
+///
+/// 为什么要有这道闸：值级还原的唯一依据是 `optimizer-backups.json` 台账
+/// （`backup_restore.rs` 的 `load_opt_backups_state`）。台账里没有这一项 ⇒ 还原时
+/// 没有原值可依 ⇒ 改完就回不去。渲染层本来会在执行前先调 `optimizer:backup-reg`
+/// （`src/scripts/optimizer.js` 的 `runOptionActive`），这里是**后端侧同一道闸**，
+/// 不靠前端自觉。
+///
+/// 豁免（少了任何一条都会把正常项整批锁死）：
+/// - 还原方向（`restore = true`）：还原本身不需要新备份；
+/// - 没有写点的步骤：没有可备份面；
+/// - 没有值级备份目标的项（`option_targets` 为空，例如纯 `cmd` 类项）：
+///   本来就没有值级还原面，要求「先备份」等于把这类项全部拒绝。
+pub(super) fn ensure_opt_backup_present(
+    option_id: &str,
+    steps: &[Value],
+    restore: bool,
+) -> Result<(), String> {
+    if restore {
+        return Ok(());
+    }
+    if classify_step_kinds(steps).is_empty() {
+        return Ok(());
+    }
+    if option_targets(option_id).unwrap_or_default().is_empty() {
+        return Ok(());
+    }
+    let ledger = load_opt_backups_state().map_err(|e| {
+        format!("优化项备份台账读取失败，无法确认是否已备份（{e}）；请先备份再执行")
+    })?;
+    ensure_opt_backup_present_in(option_id, &ledger)
+}
+
+/// 纯判定（可测）：台账里必须有这一项。
+///
+/// 抽成纯函数是为了能测：真台账要管理员封条、落在数据目录里，测试链写不动。
+pub(super) fn ensure_opt_backup_present_in(option_id: &str, ledger: &Value) -> Result<(), String> {
+    if ledger.get(option_id).is_some() {
+        return Ok(());
+    }
+    Err(format!(
+        "优化项「{option_id}」尚无值级备份，请先备份再执行（备份台账里没有这一项，还原时没有原值可依）"
+    ))
+}
+
 #[tauri::command]
 pub async fn optimizer_run<R: Runtime>(
     window: WebviewWindow<R>,
@@ -994,6 +1095,9 @@ pub async fn optimizer_run<R: Runtime>(
     }
     let Some(_inflight) = OptRunGuard::acquire() else {
         return json!({ "success": false, "message": "已有优化项正在执行，请稍候" });
+    };
+    let Some(_write_guard) = OptWriteGuard::acquire() else {
+        return json!({ "success": false, "message": "另一个优化写入正在进行" });
     };
     let option_id = option_id.unwrap_or_default();
     let Some(opt) = find_option(&option_id) else {
@@ -1061,6 +1165,16 @@ pub async fn optimizer_run<R: Runtime>(
     };
     if steps.is_empty() {
         return json!({ "success": false, "message": "选项无可执行步骤" });
+    }
+
+    // B-06 ①：备份前置闸 —— 放在**执行前记账之前**：记账是执行前动作，
+    // 不该给一个注定被拒的执行留下 pending 记录。
+    if let Err(message) = ensure_opt_backup_present(&option_id, &steps, p.restore) {
+        log::write_log(
+            "warn",
+            &format!("优化项备份前置闸拒绝执行: {option_id}（{message}）"),
+        );
+        return json!({ "success": false, "message": message });
     }
 
     // P1-02（G-02）：用 SCM 核对本次涉及的服务/驱动，收集本机不存在（执行 foreach
@@ -1203,7 +1317,13 @@ pub async fn optimizer_run<R: Runtime>(
         let mut seen = std::collections::HashSet::new();
         for raw in stdout.lines() {
             let line = raw.trim();
-            let Some(rest) = line.strip_prefix("@@RECYCLE@@") else { continue };
+            let (rest, recycle2) = if let Some(payload) = line.strip_prefix("@@RECYCLE2@@") {
+                (payload, true)
+            } else if let Some(payload) = line.strip_prefix("@@RECYCLE@@") {
+                (payload, false)
+            } else {
+                continue;
+            };
             // 审查 M-1（2026-10-03 L3）：畸形行**必须计数并告警**，不能静默丢。
             // 与 cleanup/scan_execute.rs 的 count_malformed 同口径：否则 PS 输出被
             // 截断/掺噪声时，用户与审计者都无从知道有目录漏进回收站。
@@ -1219,6 +1339,18 @@ pub async fn optimizer_run<R: Runtime>(
                 // 重复行按「同一个目录只投一次」去重，属正常收敛，不计畸形。
                 RecycleLine::Duplicate => continue,
                 RecycleLine::Path(t) => t,
+            };
+            let target_path = if recycle2 {
+                match decode_recycle2_path(rest) {
+                    Ok(path) => path,
+                    Err(reason) => {
+                        rec_malformed += 1;
+                        log::write_log("warn", &format!("优化回收站协议 RECYCLE2 解码失败（{reason}）: {rest}"));
+                        continue;
+                    }
+                }
+            } else {
+                std::ffi::OsString::from(&target.path)
             };
             // R3-L06：失败文案带上协议行的归因（id / isDir）与具体路径 —— 只报数字
             // 时用户不知道是哪个附带项没清干净。
@@ -1242,7 +1374,7 @@ pub async fn optimizer_run<R: Runtime>(
             }
             // 审查 v2-F1：走 `_os` 版。路径来自 PS stdout 的 @@RECYCLE@@ 协议，
             // 含孤立代理项的名字经 `&str` 往返会被改写，导致删错或删不到。
-            match trim_finder::scan::recycle::send_to_trash_os(std::path::Path::new(p).as_os_str()) {
+            match trim_finder::scan::recycle::send_to_trash_os(&target_path) {
                 Ok(()) => rec_ok += 1,
                 Err(e) => {
                     rec_fail += 1;
@@ -1650,6 +1782,42 @@ mod r3_m04_cmd_reason_tests {
         assert!(
             src.contains("CMD_STEP_TIMEOUT"),
             "cmd 步骤的超时常量不见了（超时路径可能整条被摘）"
+        );
+    }
+}
+
+#[cfg(test)]
+mod backup_gate_tests {
+    use super::ensure_opt_backup_present_in;
+    use serde_json::json;
+
+    /// B-06 ①：台账里没有这一项 ⇒ 必须拒，并点名「请先备份」。
+    ///
+    /// 判红自证：把 `ensure_opt_backup_present_in` 的 `is_some()` 判据反过来
+    /// （或直接返回 Ok）⇒ 本用例红。
+    #[test]
+    fn 备份前置闸缺台账条目必须拒() {
+        let err = ensure_opt_backup_present_in("tf_demo", &json!({}))
+            .expect_err("台账里没有这一项必须拒");
+        assert!(err.contains("请先备份"), "拒因必须点名先备份: {err}");
+        assert!(err.contains("tf_demo"), "拒因必须点名是哪一项: {err}");
+        // 别人的条目不算本项有：台账不是「非空即通过」
+        let other = json!({ "tf_other": { "at": "2026-11-10T00:00:00Z", "values": [] } });
+        assert!(
+            ensure_opt_backup_present_in("tf_demo", &other).is_err(),
+            "别人的备份条目不得当成本项的备份放行"
+        );
+    }
+
+    /// 有条目 ⇒ 放行（正常备份链仍绿）。
+    #[test]
+    fn 备份前置闸有条目放行() {
+        let ledger = json!({
+            "tf_demo": { "at": "2026-11-10T00:00:00Z", "values": [ { "root": "HKLM" } ] }
+        });
+        assert!(
+            ensure_opt_backup_present_in("tf_demo", &ledger).is_ok(),
+            "台账里有这一项必须放行（正常备份链不得被闸门挡住）"
         );
     }
 }

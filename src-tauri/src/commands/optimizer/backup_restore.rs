@@ -617,9 +617,11 @@ fn walk_ps_ops_for_start(ops: &[crate::engine::pssteps::PsOp], out: &mut Vec<Reg
 pub(super) fn svc_names_writing_start(cmd: &str) -> Vec<String> {
     let is_name_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.');
     let mut names = Vec::new();
+    let low = cmd.to_ascii_lowercase();
+    let start_with_value = low.contains("/v start") || low.contains("/v \"start\"");
 
     // A：注册表路径形态
-    if cmd.to_ascii_lowercase().contains("/v start") {
+    if start_with_value {
         let mut from = 0usize;
         while let Some(p) = cmd[from..].find("Services\\") {
             let at = from + p + "Services\\".len();
@@ -645,7 +647,6 @@ pub(super) fn svc_names_writing_start(cmd: &str) -> Vec<String> {
     //
     // 边界：仍然要求这一步**确实写了 start=**（外层前置门），否则不收 ——
     // 宁可漏收（少一条基线）也不要把无关命令当成改启动类型收进来。
-    let low = cmd.to_ascii_lowercase();
     if low.contains("start=") {
         let mut from = 0usize;
         while let Some(rel) = low[from..].find("config") {
@@ -722,6 +723,9 @@ pub async fn optimizer_backup_reg<R: Runtime>(
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
+    let Some(_write_guard) = super::apply::OptWriteGuard::acquire() else {
+        return json!({ "success": false, "message": "另一个优化写入正在进行" });
+    };
     let option_id = option_id.unwrap_or_default();
     if find_option(&option_id).is_none() {
         return json!({ "success": false, "message": "未知的优化选项" });
@@ -834,6 +838,9 @@ pub async fn optimizer_restore_reg<R: Runtime>(
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
+    let Some(_write_guard) = super::apply::OptWriteGuard::acquire() else {
+        return json!({ "success": false, "message": "另一个优化写入正在进行" });
+    };
     let option_id = option_id.unwrap_or_default();
     // 退役项已不在目录里，但它们的备份必须还能还原（v2-M14）；两份清单都不认的 id 仍然拒。
     if find_option(&option_id).is_none() && !is_retired_id(&option_id) {
@@ -929,8 +936,16 @@ pub async fn optimizer_restore_reg<R: Runtime>(
     // R3-M02（v7.2 C04，AGENTS §3）：值级还原马上要写回 HKLM/HKCU 备份值——
     // 动手前把日志强制落盘，防尾部日志丢失（与 optimizer_run 执行链同口径）。
     log::flush_sync();
-    if !restore_backup_values(&ops) {
-        return json!({ "success": false, "message": "还原脚本执行失败" });
+    let restore_failures = restore_backup_values_with_report(&ops);
+    if !restore_failures.is_empty() {
+        let first = &restore_failures[0];
+        return json!({
+            "success": false,
+            "message": format!(
+                "还原失败 {} 项，首个坐标 {}\\{}::{}（{}）",
+                restore_failures.len(), first.hive, first.key, first.value, first.code
+            ),
+        });
     }
     // M3：写完**独立回读**验证。RegSetValueExW 返回成功不等于「值写对了」——
     // 类型标签映射错、字节序错、REG_MULTI_SZ 的双 NUL 终止漏一个都会让 API 成功
@@ -1352,28 +1367,63 @@ fn canonical_type_label(kind: windows::Win32::System::Registry::REG_VALUE_TYPE) 
 /// 构造只发生一次，回读校验（`verify_restore_ops`）也复用同一份 ops。
 ///
 /// R3-K01：只收 [`AdmittedRestoreOps`] —— 这是「写入必须已经过目标准入」的类型级闸门。
-pub(super) fn restore_backup_values(ops: &AdmittedRestoreOps) -> bool {
+pub(super) fn restore_backup_values_with_report(ops: &AdmittedRestoreOps) -> Vec<ValueRestoreFailure> {
     use crate::engine::native;
-    let mut failed = 0usize;
+    let mut failures: Vec<ValueRestoreFailure> = Vec::new();
     for op in ops.as_slice() {
         let ok = match op {
             RestoreOp::Write { hive, sub, key, typ, bytes } => {
-                let Some(h) = restore_hive(&hive) else {
-                    failed += 1;
-                    continue;
-                };
-                native::reg_restore_write(h, &sub, &key, restore_reg_kind(&typ), &bytes)
+                if let Some(h) = restore_hive(&hive) {
+                    native::reg_restore_write(h, &sub, &key, restore_reg_kind(&typ), &bytes)
+                } else {
+                    false
+                }
             }
             RestoreOp::Delete { hive, sub, key } => match restore_hive(&hive) {
-                Some(h) => native::reg_restore_delete(h, &sub, &key),
+                Some(h) => !h.is_invalid() && native::reg_restore_delete(h, &sub, &key),
                 None => false,
             },
         };
         if !ok {
-            failed += 1;
+            failures.push(match op {
+                RestoreOp::Write { hive, sub, key, .. } => ValueRestoreFailure {
+                    hive: hive.clone(),
+                    key: sub.clone(),
+                    value: key.clone(),
+                    code: "writeFailed".into(),
+                },
+                RestoreOp::Delete { hive, sub, key } => ValueRestoreFailure {
+                    hive: hive.clone(),
+                    key: sub.clone(),
+                    value: key.clone(),
+                    code: "deleteFailed".into(),
+                },
+            });
         }
     }
-    failed == 0
+    if !failures.is_empty() {
+        let first = &failures[0];
+        crate::engine::log::write_log(
+            "error",
+            &format!(
+                "值级还原失败 {} 项，首个坐标 {}\\{}::{}（{}）",
+                failures.len(), first.hive, first.key, first.value, first.code
+            ),
+        );
+    }
+    failures
+}
+
+pub(super) fn restore_backup_values(ops: &AdmittedRestoreOps) -> bool {
+    restore_backup_values_with_report(ops).is_empty()
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ValueRestoreFailure {
+    hive: String,
+    key: String,
+    value: String,
+    code: String,
 }
 
 #[cfg(test)]

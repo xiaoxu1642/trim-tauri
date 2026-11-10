@@ -26,7 +26,6 @@
 //! `denyFaceKeepsIt` 写进证据，第二阶段真要动它时那是「为什么不能直接给删除按钮」的记录。
 
 use serde_json::{Value, json};
-use std::path::Path;
 use super::helpers::{open_key_read, reg_sz};
 use super::residue::reg_enum_subkeys;
 use super::residue_update::contribs;
@@ -190,16 +189,30 @@ enum ServerCell {
     Alive,
     /// 取出路径且本机已不存在
     Missing(String),
+    /// 路径存在性读不出来（权限/IO 失败）——不是「不存在」，也不是「取不出路径」
+    Unknown(String),
 }
 
-fn probe_server_cell(raw: Option<&str>, present: &dyn Fn(&str) -> bool) -> ServerCell {
+/// 路径存在性三态（R2b-L02）：`Unknown` 不得折成 `Missing`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PathState {
+    Exists,
+    Missing,
+    Unknown,
+}
+
+fn probe_server_cell(raw: Option<&str>, present: &dyn Fn(&str) -> PathState) -> ServerCell {
     let Some(v) = raw.map(str::trim) else { return ServerCell::Absent };
     if v.is_empty() {
         return ServerCell::Absent;
     }
     match server_path(v) {
         None => ServerCell::Unparseable,
-        Some(p) => if present(&p) { ServerCell::Alive } else { ServerCell::Missing(p) },
+        Some(p) => match present(&p) {
+            PathState::Exists => ServerCell::Alive,
+            PathState::Missing => ServerCell::Missing(p),
+            PathState::Unknown => ServerCell::Unknown(p),
+        },
     }
 }
 
@@ -217,6 +230,8 @@ pub(super) enum ComProbe {
     NoServer,
     /// 值存在但形态解不出可信路径 ⇒ 无证据，不猜
     Undecodable,
+    /// 服务器路径取出了，但存在性读不出来（权限/IO）⇒ 无证据，不猜
+    Unknown { path: String },
 }
 
 /// 纯判定：`present` 注入「这个路径在本机存在吗」（单测因此不碰磁盘）。
@@ -224,7 +239,7 @@ pub(super) enum ComProbe {
 /// 优先级保留旧口径：`InprocServer32` 只要**取出了路径**（无论存活与否）就压过
 /// `LocalServer32`——Inproc 存活时绝不因 LocalServer32 缺席而报（有断言钉着）。
 /// 两个服务器值都判不出失踪 ⇒ 不报。
-pub(super) fn classify_com(raw: &ComRaw, present: &dyn Fn(&str) -> bool) -> ComProbe {
+pub(super) fn classify_com(raw: &ComRaw, present: &dyn Fn(&str) -> PathState) -> ComProbe {
     use ServerCell as C;
     let inproc = probe_server_cell(raw.inproc.as_deref(), present);
     let local = probe_server_cell(raw.local.as_deref(), present);
@@ -236,24 +251,28 @@ pub(super) fn classify_com(raw: &ComRaw, present: &dyn Fn(&str) -> bool) -> ComP
         },
         // Inproc 存活 ⇒ 整条按「仍在用」处理（不再看 LocalServer32）
         (C::Alive, _) => ComProbe::Alive,
+        // Inproc 存在性读不出来 ⇒ 不能判它缺失（安全方向是少报）
+        (C::Unknown(p), _) => ComProbe::Unknown { path: p.clone() },
         (C::Absent | C::Unparseable, C::Missing(p)) => ComProbe::Missing {
             class: "com_local_missing",
             reason: "LocalServer32 指向的程序在本机已不存在",
             path: p.clone(),
         },
         (C::Absent | C::Unparseable, C::Alive) => ComProbe::Alive,
+        (C::Absent | C::Unparseable, C::Unknown(p)) => ComProbe::Unknown { path: p.clone() },
         (C::Absent, C::Absent) => ComProbe::NoServer,
         _ => ComProbe::Undecodable,
     }
 }
 
 /// 产出 COM 候选。`present` 注入存在性判定，单测不碰磁盘。
-pub(super) fn com_findings(raws: &[ComRaw], present: &dyn Fn(&str) -> bool, cap: usize) -> (Vec<Value>, Vec<String>) {
+pub(super) fn com_findings(raws: &[ComRaw], present: &dyn Fn(&str) -> PathState, cap: usize) -> (Vec<Value>, Vec<String>) {
     let mut out = Vec::new();
     let mut notes = Vec::new();
     let mut alive = 0usize;
     let mut no_server = 0usize;
     let mut undecodable = 0usize;
+    let mut unknown = 0usize;
     for raw in raws {
         let (class, reason, path) = match classify_com(raw, present) {
             ComProbe::Missing { class, reason, path } => (class, reason, path),
@@ -267,6 +286,10 @@ pub(super) fn com_findings(raws: &[ComRaw], present: &dyn Fn(&str) -> bool, cap:
             }
             ComProbe::Undecodable => {
                 undecodable += 1;
+                continue;
+            }
+            ComProbe::Unknown { .. } => {
+                unknown += 1;
                 continue;
             }
         };
@@ -309,6 +332,9 @@ pub(super) fn com_findings(raws: &[ComRaw], present: &dyn Fn(&str) -> bool, cap:
     }
     if undecodable > 0 {
         notes.push(format!("{undecodable} 条 CLSID 的服务器值形态解不出可信路径（引号未闭合 / 变量展开不了 / 后缀不认识），已按无证据跳过——判不准的方向是少报"));
+    }
+    if unknown > 0 {
+        notes.push(format!("{unknown} 条 CLSID 的服务器路径存在性读不出来（权限或 IO 失败），已按无证据跳过——不是「组件不存在」"));
     }
     if alive > 0 {
         notes.push(format!("{alive} 条 CLSID 登记的可执行组件仍在本机（正常注册，不作为残留）"));
@@ -514,22 +540,43 @@ pub(super) fn app_reg_findings(raws: &[AppRegRaw], exe_present: &dyn Fn(&str) ->
 /// 两个 hive 都查：`Classes` 是合并视图（HKCR 语义），同一 ProgID 可能只登记在
 /// HKCU（用户级安装）或只登记在 HKLM（机器级）。只查 HKLM 会把用户级安装的
 /// 正常关联误报成悬空。
-pub(super) unsafe fn progid_key_exists_any(progid: &str) -> bool {
+pub(super) unsafe fn progid_key_exists_any(progid: &str) -> crate::engine::native::KeyState {
     use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
-    [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER].iter().any(|hk| {
-        let root = if *hk == HKEY_CURRENT_USER { r"Software\Classes" } else { r"SOFTWARE\Classes" };
-        crate::engine::native::reg_key_exists(*hk, &format!("{root}\\{progid}"))
-    })
+    use crate::engine::native::KeyState;
+    let mut unknown = None;
+    for hk in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+        let root = if hk == HKEY_CURRENT_USER { r"Software\Classes" } else { r"SOFTWARE\Classes" };
+        match crate::engine::native::reg_key_exists_state(hk, &format!("{root}\\{progid}")) {
+            KeyState::Exists => return KeyState::Exists,
+            KeyState::Missing => {}
+            KeyState::Unknown(code) => unknown = Some(code),
+        }
+    }
+    unknown.map(KeyState::Unknown).unwrap_or(KeyState::Missing)
 }
 
-/// 路径是否存在（真机谓词）。
-pub(super) fn path_file_exists(p: &str) -> bool {
-    Path::new(p).is_file()
+/// 路径是否存在（真机谓词，三态）。权限/IO 失败是 `Unknown`，不是 `Missing`。
+pub(super) fn path_file_state(p: &str) -> PathState {
+    match std::fs::metadata(p) {
+        Ok(md) if md.is_file() => PathState::Exists,
+        // 存在但不是文件：对「服务器 exe/dll」语义等同目标缺失
+        Ok(_) => PathState::Missing,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => PathState::Missing,
+        Err(_) => PathState::Unknown,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn live_if_live(p: &str) -> PathState {
+        if p.starts_with(r"C:\Live") { PathState::Exists } else { PathState::Missing }
+    }
+
+    fn gone(_: &str) -> PathState {
+        PathState::Missing
+    }
 
     fn com(clsid: &str, inproc: Option<&str>, local: Option<&str>) -> ComRaw {
         ComRaw {
@@ -574,7 +621,7 @@ mod tests {
             // 两个服务器值都取不出来 ⇒ 不报（TypeLib / ProgID 等注册形态）
             com("{33333333-3333-3333-3333-333333333333}", None, None),
         ];
-        let (items, notes) = com_findings(&raws, &|p: &str| p.starts_with(r"C:\Live"), 10);
+        let (items, notes) = com_findings(&raws, &live_if_live, 10);
         assert_eq!(items.len(), 1, "只有指向已消失文件的那条该报: {items:?}");
         assert_eq!(items[0]["class"], "com_inproc_missing");
         assert_eq!(items[0]["defaultChecked"], false);
@@ -585,12 +632,12 @@ mod tests {
     #[test]
     fn only_local_server_falls_back_to_local_check() {
         let raws = vec![com("{44444444-4444-4444-4444-444444444444}", None, Some(r"C:\Gone\srv.exe"))];
-        let (items, _) = com_findings(&raws, &|_: &str| false, 10);
+        let (items, _) = com_findings(&raws, &gone, 10);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["class"], "com_local_missing");
         // InprocServer32 存在且存活时，LocalServer32 缺不缺席都不报（Inproc 优先）
         let raws2 = vec![com("{55555555-5555-5555-5555-555555555555}", Some(r"C:\Live\a.dll"), Some(r"C:\Gone\srv.exe"))];
-        let (items2, _) = com_findings(&raws2, &|p: &str| p.starts_with(r"C:\Live"), 10);
+        let (items2, _) = com_findings(&raws2, &live_if_live, 10);
         assert!(items2.is_empty(), "Inproc 存活时不得因为 LocalServer32 缺席而报: {items2:?}");
     }
 
@@ -601,7 +648,7 @@ mod tests {
         a.view = ComView::Hkcu;
         let mut b = com("{66666666-6666-6666-6666-666666666666}", Some(r"C:\Gone\a.dll"), None);
         b.view = ComView::HklmWow6432;
-        let (items, _) = com_findings(&[a, b], &|_: &str| false, 10);
+        let (items, _) = com_findings(&[a, b], &gone, 10);
         assert_eq!(items.len(), 2, "同名 GUID 挂在不同视图上必须各是一条: {items:?}");
         let targets: Vec<&str> = items.iter().map(|i| i["target"].as_str().unwrap_or("")).collect();
         assert!(targets.iter().any(|t| t.starts_with(r"HKCU\Software\Classes\CLSID\")), "{targets:?}");
@@ -658,7 +705,7 @@ mod tests {
         let raws: Vec<ComRaw> = (0..5)
             .map(|i| com(&format!("{{00000000-0000-0000-0000-00000000000{i}}}"), Some(r"C:\Gone\a.dll"), None))
             .collect();
-        let (items, notes) = com_findings(&raws, &|_: &str| false, 2);
+        let (items, notes) = com_findings(&raws, &gone, 2);
         assert_eq!(items.len(), 2);
         assert!(notes.iter().any(|n| n.contains("已达上限")));
         for it in &items {
@@ -683,7 +730,7 @@ mod tests {
             // undecodable：值存在但形态解不出可信路径（未登记的变量）
             com("{DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDDDD}", Some(r"%NO_SUCH_TOKEN_XYZ%\d.dll"), None),
         ];
-        let (items, notes) = com_findings(&raws, &|p: &str| p.starts_with(r"C:\Live"), 10);
+        let (items, notes) = com_findings(&raws, &live_if_live, 10);
         assert_eq!(items.len(), 1);
         let joined = notes.join("\n");
         assert!(joined.contains("1 条 CLSID 登记的可执行组件仍在本机"), "alive 计数缺失: {notes:?}");
@@ -697,7 +744,7 @@ mod tests {
     #[test]
     fn blank_server_value_counts_as_no_server_not_undecodable() {
         let raws = vec![com("{EEEEEEEE-EEEE-EEEE-EEEE-EEEEEEEEEEEEEEEE}", Some("   "), Some(""))];
-        let (_, notes) = com_findings(&raws, &|_: &str| false, 10);
+        let (_, notes) = com_findings(&raws, &gone, 10);
         assert!(notes.iter().any(|n| n.contains("没有可取出的服务器路径")), "{notes:?}");
         assert!(!notes.iter().any(|n| n.contains("形态解不出可信路径")), "{notes:?}");
     }
@@ -720,5 +767,30 @@ mod tests {
             "Classes 枚举已触顶（读到 {} > {CLASSES_ENUM_CAP}）却没出截断注记: {notes:?}",
             total.len()
         );
+    }
+
+    /// R2b-L02：路径存在性读不出来（权限/IO）必须是 Unknown，不得折成 Missing。
+    #[test]
+    fn r2b_com_orphan_unknown_on_access_denied() {
+        let raw = com(
+            "{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}",
+            Some(r"C:\Denied\component.dll"),
+            None,
+        );
+        let denied = |_: &str| PathState::Unknown;
+        assert!(
+            matches!(
+                probe_server_cell(raw.inproc.as_deref(), &denied),
+                ServerCell::Unknown(_)
+            ),
+            "Inproc 存在性 Unknown 必须保留为 Unknown"
+        );
+        assert!(
+            matches!(classify_com(&raw, &denied), ComProbe::Unknown { .. }),
+            "权限拒绝不得报成 com_inproc_missing"
+        );
+        let (items, notes) = com_findings(&[raw], &denied, 10);
+        assert!(items.is_empty(), "Unknown 不得产出「已失踪」候选: {items:?}");
+        assert!(notes.iter().any(|n| n.contains("读不出来")), "Unknown 必须留可见注记: {notes:?}");
     }
 }

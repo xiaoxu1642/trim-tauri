@@ -28,6 +28,7 @@ import { join, relative } from 'node:path';
 
 import { REPO_ROOT } from './ps-origin.mjs';
 import { walkRs } from './lib/fs-walk.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 import { gate } from './lib/gate.mjs';
 
 const SRC = join(REPO_ROOT, 'src-tauri', 'src');
@@ -89,7 +90,7 @@ const RUN_INLINE_PS_SITES = [
   // spawn_blocking，调用点的宿主函数名随之变——anchor 带函数名正是为了让这种搬动**必须留痕**，
   // 登记跟着代码走，不是放宽判据。
   { anchor: 'fn restore_check_body | let Some(out) = run_inline_ps(ps, 30, None) else', reason: 'optimizer:check-restore 最近还原点（执行体见 restore_check_body）', timeout: 30 },
-  { anchor: 'fn count_restore_points | let out = run_inline_ps(ps, 30, None)?;', reason: '创建前后计数（含回读轮询）。「创建前」那一次已于 v3 §3.2 并入预检，此处只剩回读轮询', timeout: 30 },
+  { anchor: 'fn count_restore_points_once | let out = run_inline_ps(ps, 30, None)?;', reason: '创建前后计数（含回读轮询）。「创建前」那一次已于 v3 §3.2 并入预检，此处只剩回读轮询；绝对截止轮询拆出同名 helper 后锚点随实现更新', timeout: 30 },
   { anchor: 'fn create_restore_inner | let Some(out) = run_inline_ps(pre, 50, None) else', reason: '创建前系统保护预检（fail-closed 扩展版：全局开关 / 组件存在性 / 受保护卷一次探完）。2026-10-14 v3 §3.2 合批：本调用同时承担「创建前还原点计数」（原为单独一次 run_inline_ps），超时取 20+30 两段原登记值之和 ⇒ 只放宽不收紧', timeout: 50 },
   { anchor: 'fn create_restore_inner | let Some(out) = run_inline_ps(create_ps, 120', reason: '创建还原点脚本本体（2026-10-06 摘条目后内联；原经 build_script 生成）', timeout: 120 },
   { anchor: 'fn restore_list_body | let Some(out) = run_inline_ps(ps, 30, None) else', reason: 'optimizer:list-restore 列表（执行体见 restore_list_body）', timeout: 30 },
@@ -160,27 +161,34 @@ function splitArgs(args) {
 /** 扫一个调用 token → 命中清单（注释行、函数定义行不算调用点） */
 function collect(text, file, token) {
   const hits = [];
+  const clean = blankNonCode(text, 'rs', { keepStrings: true });
+  const cleanLines = clean.split(/\r?\n/);
+  const originalLines = text.split(/\r?\n/);
   // 定义行不算调用点：这里的 defRe 历史上就够不到函数名（before 截到 token 前为止），
   // 真正生效的是 D/F 组各自的 isDefLine 过滤；保留本正则只为兼容旧形态，
   // 但可见性分支已放宽到 pub(...)，避免以后有人把它当唯一出口来改。
   const defRe = new RegExp(`(pub(\\(\\w+\\))?\\s+)?(async\\s+)?(unsafe\\s+)?fn\\s+${token.slice(0, -1).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
-  let idx = text.indexOf(token);
-  while (idx >= 0) {
-    const lineStart = text.lastIndexOf('\n', idx - 1) + 1;
-    const lineEnd = text.indexOf('\n', lineStart);
-    const lineText = text.slice(lineStart, lineEnd < 0 ? undefined : lineEnd);
-    const before = text.slice(lineStart, idx);
-    if (!before.trimStart().startsWith('//') && !defRe.test(before.replace(/\s+/g, ' ').replace('fn ', 'fn'))) {
-      const args = argsOf(text, idx + token.length - 1);
+  for (let lineIndex = 0; lineIndex < cleanLines.length; lineIndex++) {
+    const cleanLine = cleanLines[lineIndex];
+    const lineText = originalLines[lineIndex] ?? '';
+    let from = 0;
+    let idx;
+    while ((idx = cleanLine.indexOf(token, from)) >= 0) {
+      const before = cleanLine.slice(0, idx);
+      if (!defRe.test(before.replace(/\s+/g, ' ').replace('fn ', 'fn'))) {
+        const lineStart = text.split(/\r?\n/).slice(0, lineIndex).reduce((sum, line) => sum + line.length + 1, 0);
+        const absoluteIdx = lineStart + idx;
+        const args = argsOf(text, absoluteIdx + token.length - 1);
       hits.push({
         file,
-        line: text.slice(0, idx).split('\n').length,
+        line: lineIndex + 1,
         raw: lineText.trim(),
         args,
-        desc: `fn ${enclosingFn(text, idx)} | ${lineText.trim()}`,
+        desc: `fn ${enclosingFn(text, absoluteIdx)} | ${lineText.trim()}`,
       });
+      }
+      from = idx + token.length;
     }
-    idx = text.indexOf(token, idx + token.length);
   }
   return hits;
 }

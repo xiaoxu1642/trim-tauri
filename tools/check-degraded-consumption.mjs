@@ -32,6 +32,11 @@ const SRC_JS = join(ROOT, 'src', 'scripts');
 const MIN_COMMANDS = 8; // 命令地板：低于此数说明命令解析失效，不是「大家都接好了」
 const MIN_HELPERS = 1; // helper 地板：现盘只剩 power_plan_state 一处，归零即判据失明
 const MIN_JS_CONSUMERS = 5; // 前端消费函数地板：低于此数说明 JS 扫描面塌了
+// T1e-L02：地板改成「现值 − 显式退役量」。任何被判定退役的发射/消费都必须显式登记到
+// 对应 RETIRED_* 列表，删除时同步登记才能保持绿；漏登记 ⇒ 地板不达标判红。
+const RETIRED_COMMANDS = [];
+const RETIRED_HELPERS = [];
+const RETIRED_JS_CONSUMERS = [];
 
 const relOf = (abs) => relative(ROOT, abs).split('\\').join('/');
 const keyOf = (file, fn) => `${file}#${fn}`;
@@ -67,8 +72,14 @@ const TABLE = [
     anchor: { file: 'src/scripts/cleanup.js', fn: 'renderRegBackupList', text: 'respU?.data?.degraded' } },
   { file: 'src-tauri/src/commands/uninstall/backup_report.rs', fn: 'uninstall_batch_list', status: 'consumed',
     anchor: { file: 'src/scripts/cleanup.js', fn: 'renderRegBackupList', text: 'packData.degraded' } },
-  { file: 'src-tauri/src/commands/uninstall/list_run.rs', fn: 'uninstall_list', status: 'consumed',
+  { file: 'src-tauri/src/commands/uninstall/list_run.rs', fn: 'uninstall_list_receipt', status: 'consumed',
+    via: 'uninstall_list',
     anchor: { file: 'src/scripts/uninstall.js', fn: 'loadApps', text: 'resp.data.degraded' } },
+  // P2/B-W2b（R2a-L01 / R2a-L07）：残留扫描与卸载键读不到时必须显式分态，
+  // 否则「库停用 / 读不到」在界面上与「没有命中」同形。
+  { file: 'src-tauri/src/commands/uninstall/residue.rs', fn: 'residue_scan_data', status: 'consumed',
+    via: 'uninstall_residue_scan',
+    anchor: { file: 'src/scripts/residue-window.js', fn: 'scanResidue', text: 'res.data.notes' } },
   { file: 'src-tauri/src/commands/log.rs', fn: 'log_read', status: 'consumed',
     anchor: { file: 'src/scripts/logger.js', fn: 'load', text: 'resp.degraded' } },
   { file: 'src-tauri/src/engine/log.rs', fn: 'read_log_state', status: 'consumed',
@@ -84,11 +95,25 @@ const TABLE = [
     anchor: { file: 'src/scripts/window-material.js', text: 'degraded' } },
   { file: 'src-tauri/src/commands/optimizer/overview.rs', fn: 'optimizer_state_overview', status: 'consumed',
     anchor: { file: 'src/scripts/optimizer.js', fn: 'loadStateOverview', text: 'resp.degraded' } },
+  { file: 'src-tauri/src/commands/optimizer/catalog.rs', fn: 'catalog_load_failure', status: 'exempt',
+    batch: 'P2/A-09', via: 'optimizer_list',
+    reason: 'helper 只给五条命令拼统一拒收回执；success:false + 稳定错误码由渲染层按回执三态消费，degraded 不再另开前端分态' },
+  { file: 'src-tauri/src/commands/optimizer/overview.rs', fn: 'catalog_response', status: 'exempt',
+    batch: 'P2/A-09', via: 'optimizer_list',
+    reason: 'optimizer:list 的验签拒因 helper 与 catalog_load_failure 共用 success:false + 稳定错误码；degraded 不作为独立渲染层状态' },
   { file: 'src-tauri/src/commands/overview.rs', fn: 'overview_hardware', status: 'consumed',
     anchor: { file: 'src/scripts/overview.js', fn: 'loadHardware', text: 'resp.degraded === true' } },
   { file: 'src-tauri/src/engine/native/syspanel.rs', fn: 'power_plan_state', status: 'consumed',
     via: 'syspanel_power_plan_get',
     anchor: { file: 'src/scripts/syspanel.js', fn: 'onApplyPower', text: 'resp.data.degraded' } },
+  // P2/A-10（R4-L05）：清理规则来源分态。C-01 已在前端消费并显示回退横幅。
+  { file: 'src-tauri/src/commands/cleanup/rules.rs', fn: 'load_merged_rules_uncached', status: 'consumed',
+    via: 'cleanup_rules',
+    anchor: { file: 'src/scripts/cleanup.js', fn: 'loadRulesFromMain', text: 'resp.data.degraded === true' } },
+  { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', fn: 'cleanup_scan_headless', status: 'exempt',
+    via: 'cleanup_scan',
+    batch: 'P2/A-10',
+    reason: '无头 CLI 扫描通道：与 cleanup_scan 共用 run_cleanup_scan_core，分态只进 stdout 协议行，无渲染层消费方' },
 ];
 
 const walk = (dir, ext) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
@@ -389,9 +414,9 @@ for (const p of judgeReconciliation(emitters, table, anchorJudge, knownCommands)
 // ── 地板：命令 / helper / 前端消费函数任一归零都说明判据失明，不是仓库变安全 ─────────
 const commandCount = [...emitters.values()].filter((e) => e.kind === 'command').length;
 const helperCount = [...emitters.values()].filter((e) => e.kind === 'helper').length;
-if (commandCount < MIN_COMMANDS) g.fail(`断言对象地板不成立：只认出 ${commandCount} 个 degraded 发射命令（地板 ${MIN_COMMANDS}）`);
-if (helperCount < MIN_HELPERS) g.fail(`断言对象地板不成立：只认出 ${helperCount} 个 degraded 发射 helper（地板 ${MIN_HELPERS}）`);
-if (consumers.size < MIN_JS_CONSUMERS) g.fail(`前端扫描面地板不成立：只认出 ${consumers.size} 个 degraded 消费函数（地板 ${MIN_JS_CONSUMERS}）⇒ 前端消费面解析失效`);
+if (commandCount + RETIRED_COMMANDS.length < MIN_COMMANDS) g.fail(`断言对象地板不成立：只认出 ${commandCount} 个 degraded 发射命令（现值 ${commandCount} + 退役 ${RETIRED_COMMANDS.length} < 地板 ${MIN_COMMANDS}）`);
+if (helperCount + RETIRED_HELPERS.length < MIN_HELPERS) g.fail(`断言对象地板不成立：只认出 ${helperCount} 个 degraded 发射 helper（现值 ${helperCount} + 退役 ${RETIRED_HELPERS.length} < 地板 ${MIN_HELPERS}）`);
+if (consumers.size + RETIRED_JS_CONSUMERS.length < MIN_JS_CONSUMERS) g.fail(`前端扫描面地板不成立：只认出 ${consumers.size} 个 degraded 消费函数（现值 ${consumers.size} + 退役 ${RETIRED_JS_CONSUMERS.length} < 地板 ${MIN_JS_CONSUMERS}）⇒ 前端消费面解析失效`);
 const consumed = [...emitters.keys()].filter((k) => table.get(k)?.status === 'consumed').length;
 const pending = [...emitters.keys()].filter((k) => table.get(k)?.status === 'pending').length;
 g.ok(`degraded 契约对账（双视图 / 函数级）：发射 ${commandCount} 命令 + ${helperCount} helper；前端消费函数 ${consumers.size} 个（${[...consumers.values()].map((c) => `${c.file}#${c.fn}`).join('、')}）；已接 ${consumed} / 过渡 pending ${pending}`);
@@ -548,4 +573,55 @@ g.ok(`degraded 契约对账（双视图 / 函数级）：发射 ${commandCount} 
   if (bad === 0) g.ok('F4b-M13：settings_load 的两个消费方都接了 degraded 且都有用户可见提示');
 }
 
+// ---------- P2/C-01：侧表失败可见 + 清理规则回退横幅（A1-L04 / A1-M05）----------
+// A1-L04 的失败面不是后端 `degraded` 字段（两条侧表命令回 success:false），但同样是
+// 「后端已分态、前端不得折成静默」；这里用同一份锚点判据核验失败原因与入口卡文案。
+// A1-M05 的 `rulesSource` 已在上表转 consumed，这一段补「用户可见提示」这条腿。
+{
+  const codeKeep = (src) => blankNonCode(src, 'js', { keepStrings: true });
+  const sideProbe = (src) => {
+    const code = codeKeep(src);
+    return code.includes('NARA_PANEL_DEGRADED')
+      && code.includes('PRIVACY_PANEL_DEGRADED')
+      && code.includes('专项数据暂不可用')
+      && !code.includes('naraPanel?.().catch(() => null)')
+      && !code.includes('privacyPanel?.().catch(() => null)');
+  };
+  const SIDE_POS = "let NARA_PANEL_DEGRADED = ''; let PRIVACY_PANEL_DEGRADED = '';\n"
+    + 'const card = `专项数据暂不可用`;';
+  const SIDE_NEG = 'window.api.optimizer.naraPanel?.().catch(() => null);';
+  if (!sideProbe(SIDE_POS) || sideProbe(SIDE_NEG)) {
+    g.fail('A1-L04 正向对照失败：侧表失败可见性判定器失真（必须能区分 degraded 状态与静默 catch(null)）');
+  }
+  const optAbs = join(ROOT, 'src', 'scripts', 'optimizer.js');
+  if (!existsSync(optAbs)) g.fail('A1-L04：src/scripts/optimizer.js 不存在（判定对象缺失）');
+  else if (!sideProbe(readFileSync(optAbs, 'utf8'))) {
+    g.fail('A1-L04：optimizer.js 未同时具备侧表失败状态、日志与「专项数据暂不可用」入口卡文案 ⇒ 失败仍会被静默清空隐藏集合');
+  } else {
+    g.ok('A1-L04：永劫/隐私侧表失败均保留 degraded 状态，入口卡显示「专项数据暂不可用」并说明成员回主列表');
+  }
+
+  const rulesProbe = (src) => {
+    const code = codeKeep(src);
+    return code.includes('resp.data.degraded === true')
+      && code.includes("rulesSource === '内置副本'")
+      && code.includes('setRulesDegradedNotice')
+      && code.includes('已回退内置规则，用户自定义规则未生效');
+  };
+  const RULES_POS = "if (resp.data.degraded === true || resp.data.rulesSource === '内置副本') {\n"
+    + "  setRulesDegradedNotice('已回退内置规则，用户自定义规则未生效');\n}";
+  const RULES_NEG = 'if (resp && resp.success && resp.data) { render(); }';
+  if (!rulesProbe(RULES_POS) || rulesProbe(RULES_NEG)) {
+    g.fail('A1-M05 正向对照失败：规则来源回退可见性判定器失真');
+  }
+  const cleanupAbs = join(ROOT, 'src', 'scripts', 'cleanup.js');
+  if (!existsSync(cleanupAbs)) g.fail('A1-M05：src/scripts/cleanup.js 不存在（判定对象缺失）');
+  else if (!rulesProbe(readFileSync(cleanupAbs, 'utf8'))) {
+    g.fail('A1-M05：cleanup.js 未消费 rulesSource/degraded 或没有可见回退横幅 ⇒ 自定义规则失效仍静默');
+  } else {
+    g.ok('A1-M05：清理规则回退内置副本时显示「已回退内置规则，用户自定义规则未生效」并可判红');
+  }
+}
+
+console.log('对照: 发射判定器 / 消费锚点 / 对账判据三组带可执行正反样本');
 g.finish(`check-degraded-consumption: 全部通过（双视图发射 ${emitters.size} 条；过渡表 pending ${pending} 条，只减不增）`);

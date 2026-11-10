@@ -42,7 +42,7 @@ function layeringHit(line, aliases = []) {
 /** 从文件里现算 `use crate::commands as <alias>;` 的别名表（剥注释后再找）。 */
 function commandAliases(text) {
   const clean = blankNonCode(text, 'rs');
-  return [...clean.matchAll(/\buse\s+crate::commands\s+as\s+([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]);
+  return [...clean.matchAll(/\buse\s+crate::\{?\s*commands\s+as\s+([A-Za-z_][A-Za-z0-9_]*)\s*\}?\s*;/g)].map((m) => m[1]);
 }
 {
   // 正向对照五件：代码行必中；**注释行也必中**（口径明写「注释里的字样不豁免」——
@@ -54,10 +54,14 @@ function commandAliases(text) {
   const aliased = layeringHit('c::contextmenu::open();', ['c']);
   const aliasUnwired = layeringHit('c::contextmenu::open();');
   const clean = layeringHit('use crate::engine::paths;');
+  const bracedAlias = commandAliases('use crate::{commands as c};')[0] === 'c'
+    && layeringHit('c::contextmenu::open();', ['c']);
   if (!code || !comment || !shortPath || !aliased || aliasUnwired || clean) {
     g.fail(`layering 判定器自检失败：代码行=${code} 注释行=${comment} 短路径=${shortPath} 别名=${aliased}（应 true） 无别名表=${aliasUnwired} 干净行=${clean}（应 false）`);
+  } else if (!bracedAlias) {
+    g.fail('layering 判定器自检失败：花括号 commands as 别名未被抽取或解引用未判红');
   } else {
-    console.log('✓ 判定器自检：代码行/注释行/短路径/别名解引用必中、干净行放行（五样本）');
+    console.log('对照: 代码行/注释行/短路径/别名解引用/花括号别名必中、干净行放行');
   }
 }
 const hits = [];

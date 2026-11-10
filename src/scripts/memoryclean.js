@@ -68,10 +68,10 @@
     fitMemValue();
   }
   if (window.api?.window?.onResized) {
-    window.api.window.onResized((bounds) => {
+    window.app?.trackSubscription?.(window.api.window.onResized((bounds) => {
       maximized = !!(bounds && bounds.maximized);
       applyLayout();
-    });
+    }));
   }
 
   // ==================== 内存信息 ====================
@@ -242,6 +242,8 @@
         openIntro(row.dataset.id);
       });
       row.addEventListener('keydown', (e) => {
+        // C-06（F4a1-L14）：长按按键会连发 keydown（e.repeat），每次都打开一次详情。
+        if (e.repeat) return;
         if ((e.key === 'Enter' || e.key === ' ') && e.target === row) {
           e.preventDefault();
           openIntro(row.dataset.id);
@@ -330,9 +332,9 @@
     if (dangerous.length) {
       const ok = await window.app?.confirmDanger?.(
         '高危内存清理确认',
-        `以下区域属于高危操作，可能导致系统短暂卡顿或需要重新读取数据：\n\n` +
+        `以下区域属于高危操作，确认要清理（可能导致系统短暂卡顿或需要重新读取数据）：\n\n` +
         dangerous.map(r => `· ${r.name}`).join('\n'),
-        '仍然清理',
+        '仍然执行',
         '取消',
         '此操作可能影响正在运行的应用，请确认已了解风险。'
       );
@@ -400,7 +402,7 @@
       '将结束 MuMu 模拟器 / 网易 UU 远程 / 抖音 / 剪映 / WPS 金山办公 / 微软电脑管家 的后台常驻与守护进程。\n\n' +
       '注意：同名进程会被一并结束，可能包含你正在使用的前台窗口，未保存的文档、剪辑工程与游戏进度将丢失。\n' +
       '已保存好工作内容后再继续。',
-      '仍然结束',
+      '仍然执行',
       '取消',
       '此操作不可撤销，请先保存所有工作内容。'
     );

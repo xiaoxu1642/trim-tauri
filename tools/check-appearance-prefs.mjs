@@ -1,7 +1,7 @@
-// uE-gate.snippet.mjs —— P1-W3 单元代理交付的门禁片段（覆盖 R6b-L07 渲染层半边 + F4a1-M08）
+// check-appearance-prefs.mjs —— 外观偏好渲染层与后端写面的一致性门禁
 //
-// 合并目标：tools/check-appearance-prefs.mjs（无扩展名写法 tools/check-appearance-prefs 注册进
-// check-gate-roster.mjs 的 MUST_RUN 表；本片段自带目录遍历，合并后可换用 lib/fs-walk.mjs）。
+// 覆盖 R6b-L07 渲染层半边与 F4a1-M08：两侧换算、非法值拒收、真源回读顺序、
+// 迁移写入与命令登记都必须同时成立；只改一侧即判红。
 //
 // 抓什么（两组、每组都能判红）：
 //  A 组「bgOpacity → 雾化」换算的跨语言口径对拍（R6b-L07）
@@ -342,7 +342,8 @@ console.log('\n[C] 外观域真源迁后端（键表对拍 / 迁移口径 / 四�
   }
 
   // C5/C6 迁移口径四条（与 B 组卸载页同形，覆盖外观域）
-  const noPushBeforeRead = /function queueAppearancePush[\s\S]*?if\s*\(\s*!apBackendState\s*\)\s*return/.test(pathbindingJs);
+  const queuePushBody = sliceFn(pathbindingJs, /function queueAppearancePush\s*\(/, '\n  }', 'C5 queueAppearancePush') || '';
+  const noPushBeforeRead = /if\s*\(\s*!apBackendState\s*\)\s*return/.test(queuePushBody);
   if (noPushBeforeRead) {
     ok('C5 真源回读前不推：镜像的一次性迁移写不会把「后端优先」反转成「镜像反压后端」');
   } else {

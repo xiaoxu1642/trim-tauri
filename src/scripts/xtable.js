@@ -56,7 +56,7 @@
         data-col="${col.key}" style="${style}" data-align="${align}"${a11y}${sortable ? ' data-tip="点击排序"' : ''}>
         <span class="xtable-th-label">${window.ds.esc(col.label)}</span>
         ${sortable && state ? sortIndicatorHtml(state, col.key) : ''}
-        ${col.resizable === false ? '' : `<span class="xtable-resizer" data-resize="${col.key}" data-tip="拖动或方向键调整列宽" tabindex="0" role="separator" aria-orientation="vertical" aria-label="调整列宽" aria-valuemin="0"></span>`}
+        ${col.resizable === false ? '' : `<span class="xtable-resizer" data-resize="${col.key}" data-tip="拖动或方向键调整列宽" tabindex="0" role="separator" aria-orientation="vertical" aria-label="调整列宽" aria-valuemin="${RESIZE_MIN_WIDTH}" aria-valuemax="${RESIZE_MIN_WIDTH}"></span>`}
       </div>`;
     }).join('');
     return `<div class="xtable-head${opts.compact ? ' xtable-head-compact' : ''}" role="row">${cells}</div>`;
@@ -91,7 +91,7 @@
   let activeResize = null;
 
   // 列宽下限：再窄表头文案与排序箭头放不下（与键盘步进共用同一口径）
-  const RESIZE_MIN_WIDTH = 48;
+  const RESIZE_MIN_WIDTH = 56;
   // 键盘单次步进：一次方向键的列宽增量
   const RESIZE_KEY_STEP = 8;
 
@@ -142,6 +142,8 @@
       });
       // P3-1（可达性）：键盘 Enter/Space 与点击同路（Space 默认滚动，需拦掉）
       th.addEventListener('keydown', e => {
+        // C-06（F4a1-L14）：长按会连发 keydown ⇒ 表头被反复排序。
+        if (e.repeat) return;
         if (e.key !== 'Enter' && e.key !== ' ') return;
         e.preventDefault();
         applySort();
@@ -359,15 +361,6 @@
   // 绝对定位放置：看板按当前顺序依次放入「最矮列」底部，列数按容器宽度自适应，
   // 1 列时单看板占满整行；容器高度 = 最高列；重排（resize/宽度变化）使用 FLIP 平滑过渡。
   window.kanbanMasonry = (function () {
-    // F5-L10：RM 判定 fail-closed 收口——原 `window.ds?.reducedMotion?.()` 在 ds 缺席时
-    // 得 undefined，FLIP 照飞。ds.reducedMotion() 是全仓统一真源（缓存 MQL、.matches
-    // 实时读，ds.js 已导出）；ds 缺席/媒体查询异常时兜底自证 matchMedia，且判定失败
-    // 一律按 reduce 处理（宁可不动画，不违背「RM 下无动画」红线）。
-    function isReduceMotion() {
-      if (window.ds && typeof window.ds.reducedMotion === 'function') return !!window.ds.reducedMotion();
-      try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (_) { return true; }
-    }
-
     function capture(container, selector) {
       const map = new Map();
       container.querySelectorAll(selector).forEach(n => map.set(n, n.getBoundingClientRect()));
@@ -378,8 +371,14 @@
       if (!first) return;
       // M-4（2026-10-03 L3）：看板 FLIP 走 Web Animations API，CSS 的
       // prefers-reduced-motion 通配归零管不到 Element.animate()（独立时间线）。
-      // 系统开「减少动态效果」时必须整体跳过，否则窗口宽度变化仍会平移 300ms。
-      if (isReduceMotion()) return;
+      // 系统开「减少动态效果」时必须整体跳过；判定复用 ds.reducedMotionFallback。
+      if (window.ds && typeof window.ds.reducedMotion === 'function') {
+        if (window.ds.reducedMotion()) return;
+      } else if (typeof window.ds?.reducedMotionFallback === 'function') {
+        if (window.ds.reducedMotionFallback()) return;
+      } else {
+        return;
+      }
       container.querySelectorAll(selector).forEach(n => {
         const f = first.get(n);
         if (!f) return;

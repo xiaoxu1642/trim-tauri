@@ -252,14 +252,22 @@ fn read_json_state_shape(path: &Path, want_array: bool) -> JsonState {
                 } else {
                     // R7-M04：结构不符按损坏处理但**留现场**（不隔离），必须留痕；
                     // update_json 的回执措辞依赖这条日志可查。
+                    //
+                    // R7-L01：留现场的代价是「下一次写入口仍看到同一个坏形状」——
+                    // 隔离后写入口读到 `Absent` ⇒ 可自愈（重新写一份新配置）；
+                    // 不隔离则每次写都被同一个坏形状挡死，用户只能手删文件。
+                    let reason = format!(
+                        "配置结构不符（期望{}）",
+                        if want_array { "数组" } else { "对象" }
+                    );
                     crate::engine::log::write_log(
                         "warn",
                         &format!(
-                            "配置结构不符（期望{}）: {}",
-                            if want_array { "数组" } else { "对象" },
-                            path.display()
+                            "{reason}: {}（已隔离，写入口可自愈）",
+                            path.display(),
                         ),
                     );
+                    quarantine_file(path, &reason);
                     JsonState::Corrupt
                 }
             }
@@ -397,24 +405,30 @@ fn quarantine_name_for(original: &str, ts_ms: u128) -> String {
 /// `notes.corrupt-123`（例如别的软件的坏件、或用户手工改名的备份）当垃圾永久删掉。
 /// R7-L05：回收原子写遗留的 `.<name>.<hex>.tmp`（panic/断电/被杀时不会走失败分支）。
 /// 只删 24h 前的普通文件，不跟随 reparse，限深 4 层。
-pub fn prune_stale_atomic_temps(dir: &Path) -> usize {
+pub fn prune_stale_atomic_temps(dir: &Path) -> (usize, usize) {
     let now = SystemTime::now();
     // P0-2A：本函数删的是**永久删**（`.tmp` 不是用户资产，不进回收站），根被换成
     // junction 时链接另一头 `*.tmp` 形态的别人文件会被一起清掉。
     let verdict = crate::engine::protect::inspect_root(dir, crate::engine::paths::data_root_base(dir).as_deref());
     if !verdict.is_trusted() {
         crate::engine::protect::note_root_skipped("原子写临时件清扫", dir, &verdict);
-        return 0;
+        return (0, 0);
     }
     let mut skipped = 0usize;
-    let removed = prune_stale_temps_depth(dir, now, 0, &mut skipped);
+    let (removed, failed) = prune_stale_temps_depth(dir, now, 0, &mut skipped);
+    if failed > 0 {
+        crate::engine::log::write_log(
+            "warn",
+            &format!("清扫失败 {failed} 处: {}", dir.display()),
+        );
+    }
     if removed > 0 {
         crate::engine::log::write_log(
             "info",
             &format!("已清理过期原子写临时件 {removed} 个，跳过 {skipped} 个（非本工具精确命名/非普通文件）"),
         );
     }
-    removed
+    (removed, failed)
 }
 
 /// R7-M01：只认 `.{原文件名}.{16 hex}.tmp` 这一种本文件生成形态。
@@ -425,10 +439,16 @@ fn is_atomic_temp_name(name: &str) -> bool {
     hex.len() == 16 && hex.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn prune_stale_temps_depth(dir: &Path, now: SystemTime, depth: usize, skipped: &mut usize) -> usize {
-    if depth > 4 { return 0; }
-    let Ok(entries) = fs::read_dir(dir) else { return 0 };
+fn prune_stale_temps_depth(
+    dir: &Path,
+    now: SystemTime,
+    depth: usize,
+    skipped: &mut usize,
+) -> (usize, usize) {
+    if depth > 4 { return (0, 0); }
+    let Ok(entries) = fs::read_dir(dir) else { return (0, 1); };
     let mut removed = 0;
+    let mut failed = 0;
     for entry in entries {
         let Ok(entry) = entry else {
             *skipped += 1;
@@ -441,7 +461,9 @@ fn prune_stale_temps_depth(dir: &Path, now: SystemTime, depth: usize, skipped: &
         };
         if md.is_dir() {
             if !crate::engine::protect::is_reparse(&md) {
-                removed += prune_stale_temps_depth(&p, now, depth + 1, skipped);
+                let (sub_removed, sub_failed) = prune_stale_temps_depth(&p, now, depth + 1, skipped);
+                removed += sub_removed;
+                failed += sub_failed;
             }
             continue;
         }
@@ -456,13 +478,13 @@ fn prune_stale_temps_depth(dir: &Path, now: SystemTime, depth: usize, skipped: &
         if old && !crate::engine::protect::is_reparse(&md) {
             match fs::remove_file(&p) {
                 Ok(()) => removed += 1,
-                Err(_) => *skipped += 1,
+                Err(_) => failed += 1,
             }
         } else {
             *skipped += 1;
         }
     }
-    removed
+    (removed, failed)
 }
 
 pub fn prune_quarantined(dir: &Path) -> usize {    let removed = prune_quarantined_in(dir, SystemTime::now());
@@ -595,7 +617,8 @@ pub fn transform_secrets(
 /// 为什么要它：`transform_secrets` 是**整树重建**（每个对象新建 Map、每个值 clone），
 /// 而它被夹在持全局 `UPDATE_JSON_LOCK` 的闭包里跑（`commands/settings.rs` 的
 /// `update_settings`：解密一遍 + 加密一遍）。绝大多数 `settings.json` 根本没有密钥字段
-/// （本机现算 696 B、零 secret 键），却照样付两遍全树克隆加一次主密钥读取。
+/// （实际体积与键数以 `%APPDATA%\com.xiaoxu.trim\settings.json` 现算；便携模式在 exe
+/// 同级 `data\` 下），却照样付两遍全树克隆加一次主密钥读取。
 /// 无该键时整棵变换按定义是恒等的 ⇒ 直接返回原值，既不遍历也不取密钥。
 /// 判据只写这一份，加/解密两侧共用（AGENTS §5.16：同判定不许两套实现）。
 fn has_secret_field(value: &serde_json::Value) -> bool {
@@ -713,6 +736,30 @@ pub fn decrypt_settings_with_oscrypt(settings: &serde_json::Value) -> serde_json
 mod tests {
     use super::*;
 
+    /// R7-L05 判红样本：文件路径当目录传入时，列目录失败不得被静默成零清理。
+    /// 判红自证：把 `read_dir` 失败分支改回 `(0, 0)` ⇒ 本用例红。
+    #[test]
+    fn prune_stale_temps_counts_read_error() {
+        let file = std::env::temp_dir().join(format!(
+            "trim-security-read-error-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&file, b"not-a-directory").expect("写入判红样本失败");
+        let now = SystemTime::now();
+        let (removed, failed) = prune_stale_temps_depth(&file, now, 0, &mut 0);
+        let log_line = crate::engine::log::write_log(
+            "warn",
+            &format!("清扫失败 {failed} 处: {}", file.display()),
+        );
+        std::fs::remove_file(&file).expect("清理判红样本失败");
+        assert_eq!((removed, failed), (0, 1));
+        assert!(log_line.contains("清扫失败"), "{log_line}");
+        assert!(log_line.contains(&file.to_string_lossy().into_owned()), "{log_line}");
+    }
+
     /// 一次性沙箱：唯一命名 + 结束自删。测试不得具备改动真实数据目录的能力。
     fn sandbox(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -725,6 +772,47 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// R7-L01：合法 JSON 但**形态不符**时也必须隔离，让下一次写入口能自愈。
+    ///
+    /// 旧实现只写日志不隔离 ⇒ 文件还在、形状还是错 ⇒ 每次写都被同一个坏形状挡死，
+    /// 用户只能手删文件。
+    /// 判红自证：把 `quarantine_file(path, &reason)` 去掉 ⇒ 本用例红。
+    #[test]
+    fn shape_mismatch_quarantines_and_recovers() {
+        let dir = sandbox("shape-mismatch");
+        let cfg = dir.join("settings.json");
+        // 合法 JSON，但是**数组** —— 对象读者的期望形状是对象。
+        fs::write(&cfg, b"[]").expect("写入判红样本失败");
+
+        let state = read_json_state(&cfg);
+        assert!(
+            matches!(state, JsonState::Corrupt),
+            "形态不符必须判 Corrupt"
+        );
+        assert!(
+            !cfg.exists(),
+            "形态不符必须把坏文件隔离掉（否则写入口永远被同一个坏形状挡死）"
+        );
+        // 隔离件留痕在同目录（*.corrupt-*），便于事后追查。
+        let quarantined: Vec<_> = fs::read_dir(&dir)
+            .expect("读取沙箱目录失败")
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains("corrupt"))
+            .collect();
+        assert!(
+            !quarantined.is_empty(),
+            "隔离件必须留在同目录（事后可追查）"
+        );
+
+        // 自愈：隔离后读到 Absent ⇒ 写入口可以重新写一份新配置。
+        assert!(
+            matches!(read_json_state(&cfg), JsonState::Absent),
+            "隔离后必须读到 Absent（写入口据此自愈）"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // ==================== 审查 R7-L03：模块注释不引用已退役的渲染层符号 ====================
@@ -1040,9 +1128,24 @@ mod tests {
         );
         assert!(
             matches!(read_json_state(&arr), JsonState::Corrupt),
-            "对象读器对数组按损坏处理（留现场、不隔离）"
+            "对象读器对数组按损坏处理"
         );
-        assert!(arr.exists(), "形态不符不得隔离原件");
+        // R7-L01：形态不符现在**也要隔离**（旧口径是「留现场、不隔离」，
+        // 已被本轮取代）—— 隔离后写入口读到 Absent ⇒ 可自愈；
+        // 不隔离则每次写都被同一个坏形状挡死，用户只能手删文件。
+        assert!(
+            !arr.exists(),
+            "形态不符必须隔离原件（R7-L01：不隔离 ⇒ 写入口永远被同一个坏形状挡死）"
+        );
+        let quarantined: Vec<_> = std::fs::read_dir(&dir)
+            .expect("读取沙箱目录失败")
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains("corrupt"))
+            .collect();
+        assert!(
+            !quarantined.is_empty(),
+            "隔离件必须留在同目录（事后可追查）"
+        );
 
         // ② 对象：对象读器 Ok、数组读器 Corrupt（对称）
         let obj = dir.join("conf.json");
@@ -1108,13 +1211,31 @@ mod tests {
         fs::write(&q, "{\"a\":1}").unwrap();
         let err = update_json_array(&q, |_| Ok(())).unwrap_err();
         assert!(err.contains("本次写入已拒绝"), "形状不符必须拒写: {err}");
-        assert_eq!(fs::read_to_string(&q).unwrap(), "{\"a\":1}", "拒写时原文件不得被改");
+        // R7-L01：形态不符会被隔离，原路径此时可能已无文件 ——
+        // 但**内容**绝不能被改写（隔离件里的内容必须逐字节等于原内容）。
+        let content = if q.exists() {
+            fs::read_to_string(&q).unwrap()
+        } else {
+            let quarantined = fs::read_dir(&root)
+                .expect("读取沙箱目录失败")
+                .flatten()
+                .map(|e| e.path())
+                .find(|p| {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().contains("corrupt"))
+                        .unwrap_or(false)
+                })
+                .expect("形态不符必须留下隔离件");
+            fs::read_to_string(&quarantined).unwrap()
+        };
+        assert_eq!(content, "{\"a\":1}", "拒写时原内容不得被改写");
         let _ = fs::remove_dir_all(&root);
     }
 
     /// 审查 v3 裁定①：树里没有密钥字段时，加/解密入口必须**恒等返回**且不触碰主密钥。
     /// 这条正是把「持全局 `UPDATE_JSON_LOCK` 期间读盘取密钥 + 全树重建」省掉的那一半
-    /// （本机 `settings.json` 现算 696 B、零 secret 键，属绝大多数情形）。
+    /// （`settings.json` 的实际体积以 `%APPDATA%\com.xiaoxu.trim\settings.json` 现算，
+    /// 零 secret 键属绝大多数情形）。
     #[test]
     fn 无密钥字段时加解密入口恒等返回() {
         let plain = serde_json::json!({

@@ -90,13 +90,13 @@ pub(super) fn watermark_file() -> PathBuf {
 pub(super) static RULES_CACHE: Mutex<Option<(String, Arc<Value>)>> = Mutex::new(None);
 
 /// `safeReadJson`：只接受「能解析且 `groups` 是数组」的 JSON 对象
-pub(super) fn safe_read_json(file: &Path) -> Option<Value> {
-    let text = std::fs::read_to_string(file).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
+pub(super) fn safe_read_json(file: &Path) -> Result<Value, String> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("读文件失败: {e}"))?;
+    let v: Value = serde_json::from_str(&text).map_err(|e| format!("JSON 解析失败: {e}"))?;
     if v.get("groups").map(|g| g.is_array()).unwrap_or(false) {
-        Some(v)
+        Ok(v)
     } else {
-        None
+        Err("groups 缺失或不是数组".to_string())
     }
 }
 
@@ -438,7 +438,7 @@ pub(super) fn validate_cleanup_package(pkg: &Value) -> Result<(), String> {
     let mut seen_targets: HashMap<String, String> = HashMap::new();
     let mut item_count = 0usize;
 
-    for g in groups {
+    for (group_idx, g) in groups.iter().enumerate() {
         let Some(go) = g.as_object() else {
             return Err("groups 条目不是对象".to_string());
         };
@@ -455,7 +455,10 @@ pub(super) fn validate_cleanup_package(pkg: &Value) -> Result<(), String> {
         if owned_subs.len() > req_number("cleanup", "maxSubGroupsPerGroup")? {
             return Err("subGroups 数量超上限".to_string());
         }
-        for io in owned_items.iter().filter_map(Value::as_object) {
+        for (item_idx, item) in owned_items.iter().enumerate() {
+            let io = item.as_object().ok_or_else(|| {
+                format!("groups[{group_idx}].items[{item_idx}] 不是对象")
+            })?;
             check_cleanup_item(io, &mut item_count, &mut seen_ids, &mut seen_targets, Ctx {
                 item_fields: &item_fields,
                 item_required: &item_required,
@@ -478,7 +481,10 @@ pub(super) fn validate_cleanup_package(pkg: &Value) -> Result<(), String> {
                 pkg_ver: ver,
             })?;
         }
-        for sg in owned_subs.iter().filter_map(Value::as_object) {
+        for (sub_idx, sg_value) in owned_subs.iter().enumerate() {
+            let sg = sg_value.as_object().ok_or_else(|| {
+                format!("groups[{group_idx}].subGroups[{sub_idx}] 不是对象")
+            })?;
             if let Some(k) = unknown_rule_field(sg, &sub_fields) {
                 return Err(format!("子组未知字段 {k}"));
             }
@@ -488,7 +494,12 @@ pub(super) fn validate_cleanup_package(pkg: &Value) -> Result<(), String> {
                 }
             }
             let sg_items = sg.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
-            for io in sg_items.iter().filter_map(Value::as_object) {
+            for (item_idx, item) in sg_items.iter().enumerate() {
+                let io = item.as_object().ok_or_else(|| {
+                    format!(
+                        "groups[{group_idx}].subGroups[{sub_idx}].items[{item_idx}] 不是对象"
+                    )
+                })?;
                 check_cleanup_item(io, &mut item_count, &mut seen_ids, &mut seen_targets, Ctx {
                     item_fields: &item_fields,
                     item_required: &item_required,
@@ -1319,21 +1330,63 @@ fn rules_cache_sig() -> (String, Vec<PathBuf>) {
 /// 未命中时的装载：验签数据目录 > 内置副本 > 空集，再逐个套 custom 开关。
 /// 只在 `rules_value_arc` 判定签名变化后才被调用（每轮装载各打一条日志）。
 /// `custom` 来自 [`rules_cache_sig`] 的那一次目录快照（见其注释）。
-fn load_merged_rules_uncached(custom: Vec<PathBuf>) -> Value {
+
+/// 规则来源（回执用）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RuleSource {
+    DataDir,
+    BuiltinCopy,
+    Unavailable,
+}
+
+impl RuleSource {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            RuleSource::DataDir => "数据目录",
+            RuleSource::BuiltinCopy => "内置副本",
+            RuleSource::Unavailable => "无可用规则",
+        }
+    }
+}
+
+pub(super) fn load_merged_rules_uncached(custom: Vec<PathBuf>) -> Value {
     // 来源要记进日志（V2 P2-A1）：用户反馈"上次报了这次没报"时，第一句要能回答
     // 「当时吃的是哪一版、是数据目录那份还是内置那份」—— 整库 rulesVersion 相同但来源不同，
     // 结论完全不同
     let (mut rules, rules_source) = match read_verified_data_rules() {
-        Some(v) => (v, "数据目录"),
+        Some(v) => (v, RuleSource::DataDir),
         None => match read_builtin_rules() {
-            Some(v) => (v, "内置副本"),
+            Some(v) => (v, RuleSource::BuiltinCopy),
             // 两条路都不通就是空规则集，装载侧不猜、不静默沿用上一版缓存
-            None => (json!({ "version": 0, "rulesVersion": 0, "groups": [] }), "无可用规则"),
+            None => (
+                json!({ "version": 0, "rulesVersion": 0, "groups": [] }),
+                RuleSource::Unavailable,
+            ),
         },
     };
+    let mut skipped_custom = Vec::new();
     for path in &custom {
-        let Some(parsed) = safe_read_json(path) else {
-            continue;
+        let parsed = match safe_read_json(path) {
+            Ok(v) => v,
+            Err(reason) => {
+                let label = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                log::write_log(
+                    "warn",
+                    &format!(
+                        "[cleanup] 自定义规则文件已跳过: {} —— {reason}",
+                        path.display()
+                    ),
+                );
+                skipped_custom.push(json!({
+                    "file": label,
+                    "path": path.to_string_lossy(),
+                    "reason": reason,
+                }));
+                continue;
+            }
         };
         let label = path
             .file_name()
@@ -1355,9 +1408,35 @@ fn load_merged_rules_uncached(custom: Vec<PathBuf>) -> Value {
     log::write_log(
         "info",
         &format!(
-            "清理规则库已装载: 来源={rules_source} rulesVersion={rules_version} 条目={rule_items}"
+            "清理规则库已装载: 来源={} rulesVersion={rules_version} 条目={rule_items}{}",
+            rules_source.as_str(),
+            if skipped_custom.is_empty() {
+                String::new()
+            } else {
+                format!("（跳过 custom {}）", skipped_custom.len())
+            }
         ),
     );
+    // 不用 expect：装载结果不是对象时如实回「不可用」分态，
+    // 不在生产面 panic（N10 登记面：panic/unwrap 只能只减不增）。
+    let Some(rules_obj) = rules.as_object_mut() else {
+        return json!({
+            "success": false,
+            "message": "规则装载结果不是对象，已按不可用处理",
+            "degraded": true,
+            "rulesSource": RuleSource::Unavailable.as_str(),
+        });
+    };
+    if rules_source == RuleSource::Unavailable {
+        rules_obj.insert("degraded".into(), Value::Bool(true));
+        rules_obj.insert("rulesSource".into(), json!(rules_source.as_str()));
+        rules_obj.insert(
+            "message".into(),
+            json!("两条规则来源都不可用，本轮未装载任何清理规则"),
+        );
+    } else {
+        rules_obj.insert("skippedCustomRules".into(), Value::Array(skipped_custom));
+    }
     rules
 }
 

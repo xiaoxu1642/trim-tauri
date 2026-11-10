@@ -27,8 +27,8 @@
 // 与既有 T1e-L05 同粒度；守卫写在 call 之后同函数体也算过，这是本门禁已知的精度上限。
 //
 // 过渡基线：本门禁随 B0 落地、随 B2 兑现。B2（2026-10-25）已把 15 条里的 14 条接进
-// `protect::inspect_root`。G0.2（2026-11-01）后盘上只剩两条：已裁定不补的枚举工具
-// （附书面理由）+ P0-4 待修复的 `realtime_report_save` 调用点（补守卫后必须删条目）。
+// `protect::inspect_root`。G0.2（2026-11-01）后盘上只剩一条：已裁定不补的枚举工具
+// （附书面理由）；`realtime_report_save`（R1d-K01）的守卫已于 P0 补上，对应条目已回收。
 // `TRANSITION` 里每条都要 `{file, fn, batch, reason}`，
 // 且**双向咬合**：代码补上判定后若豁免表还留着 ⇒ 判红（防「修完了台账还挂着」的第二类假绿）。
 //
@@ -47,7 +47,9 @@ const SRC = join(ROOT, 'src-tauri', 'src');
 const NATIVE = join(ROOT, 'native-scanner', 'src');
 const GUARD = 'inspect_root(';
 const READ = 'read_dir(';
-const DESTRUCTIVE = ['remove_file(', 'remove_dir_all(', 'send_to_trash_os(', 'delete_file_with_panic('];
+// T1e-L04：增 `remove_dir(` / `recycle_one(` 两类删除原语；`delete_file_with_panic(` 在仓内零命中（已退役），
+// 删掉以免掩耳盗铃。任何「read_dir + 2 跳内出现下列原语」的站点未判根即红。
+const DESTRUCTIVE = ['remove_file(', 'remove_dir_all(', 'remove_dir(', 'send_to_trash_os(', 'recycle_one('];
 const MIN_DESTRUCTIVE_ROOTS = 5; // 对象地板：低于此数说明判定正则失明，不说明仓库变安全
 
 // B2（2026-10-25）清零：原 15 条已逐条接入 `protect::inspect_root`。G0.2（2026-11-01）把判据
@@ -297,6 +299,18 @@ const CONTROLS = [
     label: 'C10 同形状但两个 caller 都判过 ⇒ 不判红（逐调用点全部成立即可，不要求执行体自判）',
     code: 'fn a(p: &Path) { let _ = std::fs::read_dir(p); let _ = std::fs::remove_file(p); }\nfn good1(p: &Path) { if crate::engine::protect::inspect_root(p, None).is_trusted() { a(p); } }\nfn good2(p: &Path) { if crate::engine::protect::inspect_root(p, None).is_trusted() { a(p); } }',
     expectViolation: false,
+  },
+  {
+    // T1e-L04：新增的 `remove_dir(` 原语必须同样被「read_dir + 2 跳内删除」判据捕获。
+    label: 'C11 read_dir + remove_dir( 未判根 ⇒ 必须判红（新增原语对照）',
+    code: 'fn top(p: &Path) { let _ = std::fs::read_dir(p); let _ = std::fs::remove_dir(p); }',
+    expectViolation: true,
+  },
+  {
+    // T1e-L04：recycle_one( 作为回收站封装同样算删除原语，未判根必红。
+    label: 'C12 read_dir + recycle_one( 未判根 ⇒ 必须判红（新增原语对照）',
+    code: 'fn top(p: &Path) { let _ = std::fs::read_dir(p); let _ = recycle_one(p); }',
+    expectViolation: true,
   },
 ];
 let ctrlBad = 0;

@@ -163,8 +163,15 @@ pub fn device_info() -> Result<Value, String> {
                 if !ok || size == 0 { return None; }
                 // REG_SZ / REG_EXPAND_SZ: UTF-16
                 if ty.0 == 1 || ty.0 == 2 {
-                    let words: Vec<u16> = buf.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&w| w != 0).collect();
-                    Some(String::from_utf16_lossy(&words).trim().to_string())
+                    // A5-L01：走统一解码出口 —— 奇数字节（半个字符）必须显式判错，
+                    // 旧写法 `chunks_exact(2)` 会把尾字节静默丢掉。
+                    match crate::engine::native::decode_reg_utf16(&buf) {
+                        Ok(s) => Some(s.trim().to_string()),
+                        Err(e) => {
+                            crate::engine::log::write_log("warn", &format!("注册表字符串解码失败：{e}"));
+                            None
+                        }
+                    }
                 } else {
                     None
                 }

@@ -337,7 +337,7 @@ pub fn uninstall_reg_backup_restore<R: tauri::Runtime>(
 // 给同一个危险动作开第二个入口，等于让四道闸变成「挑一条走」。
 
 /// uninstall:batch-list —— 本机还原包（**MAIN 档**，与同门 `uninstall_reg_backup_list` 一致：
-/// 只有主窗的备份弹窗调它，四子窗没有消费方，按 readonly 放行等于白给一个目录列举面）。
+/// 只有主窗的备份弹窗调它，三个子窗没有消费方，按 readonly 放行等于白给一个目录列举面）。
 /// 带体积与「zip 是否还在」的自检，界面据此能说清「这个包点还原到底会不会成功」，
 /// 而不是等用户点下去才报错。
 #[tauri::command]

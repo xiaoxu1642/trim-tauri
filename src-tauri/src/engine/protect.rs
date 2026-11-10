@@ -127,11 +127,26 @@ pub fn is_reparse(md: &std::fs::Metadata) -> bool {
 
 /// 环境变量取值（Windows 下 std::env::var 本身大小写不敏感，等价 JS 的三写法兜底）
 fn env(name: &str) -> String {
-    std::env::var(name)
-        .ok()
-        .map(|v| v.trim().to_string())
+    // 覆盖表装上时**整体取代**本机环境：表里没有的键一律当空（测试要的是
+    // 「变量缺失」这一形态，不是「另一个真实值」）。
+    let raw = match ENV_OVERRIDE.with(|o| o.borrow().as_ref().map(|m| m.get(name).cloned())) {
+        Some(Some(v)) => Some(v),
+        Some(None) => None,
+        None => std::env::var(name).ok(),
+    };
+    raw.map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_default()
+}
+
+// 测试注入的环境变量覆盖表（B-01 ⑤）。
+//
+// 为什么需要它：单测不能改**本机进程**的环境变量（并行跑的用例会互相污染），
+// 也不该依赖真实用户目录 —— 「环境变量缺失」这类形态根本造不出来。
+// 覆盖表是**线程局部**的：只在当前测试线程生效，别的线程与真实运行期一律读真环境。
+thread_local! {
+    static ENV_OVERRIDE: std::cell::RefCell<Option<std::collections::HashMap<String, String>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// 判据唯一实现在 native-scanner 的 util（扫描器与执行侧共用，AGENTS N6）。
@@ -435,7 +450,8 @@ pub fn build_default_roots() -> ProtectRoots {
     };
     let home = {
         // 对照 JS `env('USERPROFILE') || os.homedir()`：USERPROFILE 缺失时退到 HOMEDRIVE+HOMEPATH，
-        // 仍取不到则留空——空值会在 norm() 里被丢弃，不会产生 "\Desktop" 这类伪根。
+        // 仍取不到则留空；空基座拼出来的伪根（形如单个反斜杠 + Desktop）由 norm() 整条丢弃
+        // （见下方 norm 的过滤），不会再被归一成当前盘根下的假路径。
         let h = env("USERPROFILE");
         if !h.is_empty() {
             h
@@ -462,6 +478,13 @@ pub fn build_default_roots() -> ProtectRoots {
     let norm = |list: Vec<String>| -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for x in list {
+            // B-01 ⑤：以单个反斜杠开头的条目是「基座为空」拼出来的伪根
+            // （用户目录缺失时的桌面/文档/下载、AppData 回退串）——归一后会被当成
+            // 当前盘根下的真实路径（形如 c:\desktop），既保护不到真目录，
+            // 又让清单看起来「配了」。这里整条不产出，而不是产出后归一成假路径。
+            if x.starts_with(std::path::MAIN_SEPARATOR) {
+                continue;
+            }
             let n = normalize_for_compare(&x);
             if n.ok && !n.low.is_empty() && !out.contains(&n.low) {
                 out.push(n.low);
@@ -2064,11 +2087,12 @@ mod tests {
         let _cleanup = Cleanup(dir.clone());
 
         let link = dir.join("jlink");
-        let ok = std::process::Command::new("cmd")
-            .args(["/C", &format!(r#"mklink /J "{}" "{}""#, link.display(), target)])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+          // X1-L01：带超时 + 杀整树（夹具命令挂住时不得拖死整轮验收）。
+          let mut mk_protected_link = std::process::Command::new("cmd");
+          mk_protected_link.args(["/C", &format!(r#"mklink /J "{}" "{}""#, link.display(), target)]);
+          let ok = crate::engine::testcmd::run_test_cmd(&mut mk_protected_link, std::time::Duration::from_secs(10))
+              .map(|o| o.status.success())
+              .unwrap_or(false);
         if !ok {
             eprintln!("SKIP：建 junction 失败（受限环境），junction 分支未校验");
             return;
@@ -2080,11 +2104,11 @@ mod tests {
         );
         // ③ 对照：指向普通目录（temp 自身）的 junction 不得误报
         let link2 = dir.join("jlink2");
-        let ok2 = std::process::Command::new("cmd")
-            .args(["/C", &format!(r#"mklink /J "{}" "{}""#, link2.display(), dir.display())])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+          let mut mk_plain_link = std::process::Command::new("cmd");
+          mk_plain_link.args(["/C", &format!(r#"mklink /J "{}" "{}""#, link2.display(), dir.display())]);
+          let ok2 = crate::engine::testcmd::run_test_cmd(&mut mk_plain_link, std::time::Duration::from_secs(10))
+              .map(|o| o.status.success())
+              .unwrap_or(false);
         if ok2 {
             let probe2 = link2.join("sub").join("probe.txt");
             assert!(
@@ -2303,5 +2327,102 @@ mod tests {
         // 两种给法都必须拒；措辞随停止位置不同可变，档位必须一致
         assert!(with.starts_with("Rejected") && without.starts_with("Rejected"),
             "基内/基外都要拒，实得 with={with} without={without}");
+    }
+
+    /// 在当前线程装上环境变量覆盖表，跑一次闭包，再摘掉。
+    ///
+    /// 覆盖表**整体取代**本机环境：表里没有的键一律当空 —— 测试要的是
+    /// 「变量缺失」这一形态，而不是「另一个真实值」。
+    fn with_env_override<F, T>(vars: &[(&str, &str)], f: F) -> T
+    where
+        F: FnOnce() -> T,
+    {
+        let map: std::collections::HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        ENV_OVERRIDE.with(|o| *o.borrow_mut() = Some(map));
+        let out = f();
+        ENV_OVERRIDE.with(|o| *o.borrow_mut() = None);
+        out
+    }
+
+    /// B-01 ⑤：环境变量缺失时**不得**产出伪根。
+    ///
+    /// 旧实现把空基座拼进根清单，归一后变成「当前盘根下的真实路径」形态 ——
+    /// 既不是任何用户的桌面，又让清单看起来「配了」。
+    /// 判红自证：把 `build_default_roots` 里 `norm` 的伪根过滤去掉 ⇒ 本用例红。
+    #[test]
+    fn 环境变量缺失时不产生伪根() {
+        let sep = std::path::MAIN_SEPARATOR;
+        let roots = with_env_override(&[], build_default_roots);
+        for name in ["desktop", "documents", "downloads"] {
+            let suffix = format!("{sep}{name}");
+            assert!(
+                !roots.exact.iter().any(|r| r.ends_with(&suffix)),
+                "环境变量缺失时不得产出伪根 {name}，实得 {:?}",
+                roots.exact
+            );
+        }
+        for name in ["roaming", "local"] {
+            let suffix = format!("{sep}appdata{sep}{name}");
+            assert!(
+                !roots.exact.iter().any(|r| r.ends_with(&suffix)),
+                "环境变量缺失时不得产出伪根 {name}，实得 {:?}",
+                roots.exact
+            );
+        }
+        assert!(
+            !roots.subtree.iter().any(|r| r.ends_with(&format!("{sep}trim"))),
+            "环境变量缺失时不得产出伪根子树，实得 {:?}",
+            roots.subtree
+        );
+        // 盘符回退出来的系统根仍然要在（它们不依赖 home）
+        assert!(
+            roots.exact.iter().any(|r| r.ends_with(&format!("{sep}windows"))),
+            "系统根必须照常产出，实得 {:?}",
+            roots.exact
+        );
+    }
+
+    /// B-01 ⑤：环境变量齐全时，四类用户目录根、两个 AppData 根与应用数据子树照常产出
+    /// （不能因为修伪根把真根一起删掉）。
+    /// 判红自证：把 `norm` 的伪根过滤放宽成「全部丢弃」⇒ 本用例红。
+    #[test]
+    fn 用户目录有效时四类根照常产出() {
+        let sep = std::path::MAIN_SEPARATOR;
+        let home = format!("C:{sep}Users{sep}Tester");
+        let roots = with_env_override(
+            &[("USERPROFILE", home.as_str()), ("SystemDrive", "C:")],
+            build_default_roots,
+        );
+        assert!(
+            roots.exact.iter().any(|r| r.ends_with(&format!("{sep}users{sep}tester"))),
+            "home 本身必须在清单里，实得 {:?}",
+            roots.exact
+        );
+        for name in ["desktop", "documents", "downloads"] {
+            let suffix = format!("{sep}users{sep}tester{sep}{name}");
+            assert!(
+                roots.exact.iter().any(|r| r.ends_with(&suffix)),
+                "有效用户目录必须产出 {name}，实得 {:?}",
+                roots.exact
+            );
+        }
+        assert!(
+            roots.exact.iter().any(|r| r.ends_with(&format!("{sep}appdata{sep}roaming"))),
+            "AppData 回退根必须产出，实得 {:?}",
+            roots.exact
+        );
+        assert!(
+            roots.exact.iter().any(|r| r.ends_with(&format!("{sep}appdata{sep}local"))),
+            "LocalAppData 回退根必须产出，实得 {:?}",
+            roots.exact
+        );
+        assert!(
+            roots.subtree.iter().any(|r| r.ends_with(&format!("{sep}trim"))),
+            "应用自身数据子树必须产出，实得 {:?}",
+            roots.subtree
+        );
     }
 }

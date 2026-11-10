@@ -340,6 +340,16 @@
         if (window.getSelection && window.getSelection().toString()) return;
         openDetail(item);
       });
+      el.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const key = el.dataset.itemKey;
+        const item = items.find(i => getItemKey(i) === key);
+        if (!item) return;
+        if (e.target.closest('.checkbox')) return;
+        e.preventDefault();
+        if (window.getSelection && window.getSelection().toString()) return;
+        openDetail(item);
+      });
     });
 
     // 列底「全选本软件」：批量启用/禁用该软件全部可操作项
@@ -435,7 +445,7 @@
     const enabled = item.enabled !== false;
     const toggleable = isToggleable(item);
     return `
-      <div class="ctx-kanban-row ${item.risk === 'protected' ? 'protected' : ''} ${enabled ? '' : 'disabled-row'}" data-item-key="${escapeHtml(key)}" data-tip="单击查看详情">
+      <div class="ctx-kanban-row ${item.risk === 'protected' ? 'protected' : ''} ${enabled ? '' : 'disabled-row'}" data-item-key="${escapeHtml(key)}" data-tip="单击查看详情" tabindex="0" role="button" aria-label="查看 ${escapeHtml(item.name)}">
         <div class="checkbox ${enabled ? 'checked' : ''} ${toggleable ? '' : 'disabled'}" role="checkbox" tabindex="0" aria-checked="${enabled ? 'true' : 'false'}" aria-label="勾选 ${window.ds.escAttr(item.name)}"${toggleable ? '' : ' aria-disabled="true"'} data-tip="${enabled ? '取消勾选禁用此项' : '勾选启用此项'}"></div>
         <span class="ctx-row-index">${index}</span>
         <span class="ctx-row-main">
@@ -443,7 +453,7 @@
           <span class="ctx-row-where">${escapeHtml(item.category || '其他')}</span>
           <span class="ctx-row-badges">${typeBadgeHtml(item, opts)}</span>
         </span>
-        <span class="ctx-row-side"><span class="ctx-row-detail" data-tip="查看详情">
+        <span class="ctx-row-side"><span class="ctx-row-detail" data-tip="查看详情" tabindex="0" role="button" aria-label="查看详情">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z"/></svg>
         </span></span>
       </div>
@@ -577,6 +587,7 @@
         e.preventDefault();
         regJump.click();
       });
+      if (!regJump.hasAttribute('role')) regJump.setAttribute('role', 'button');
     }
   }
 
@@ -773,7 +784,7 @@
         const ok = await window.app?.confirmDanger(
           '禁用基础打开项',
           `即将禁用 ${risky.length} 项。`,
-          '仍然禁用',
+        '仍然执行',
           '取消',
           '这类项承载资源管理器的默认「打开/浏览」行为，禁用后可能出现双击无反应，需重新启用才能恢复。',
           risky.map(p => ({
@@ -980,7 +991,7 @@
       const ok = await window.app?.confirmDanger(
         '重启资源管理器',
         '将结束并重新打开当前会话的资源管理器（explorer.exe）。\n桌面与任务栏会短暂消失后自动恢复，已打开的文件夹窗口会被关闭。',
-        '仍然重启',
+        '仍然执行',
         '取消',
         '只影响当前登录会话；其他用户与服务会话的资源管理器不受影响。'
       );

@@ -64,7 +64,9 @@
         const resp = await window.api?.appearance?.getMaterial?.();
         if (resp && resp.material) current = resp.material;
         materialOn = resp ? resp.materialEnabled !== false : true;
-      } catch (e) {}
+      } catch (e) {
+        window.pathbindingAppearance?.log?.('warn', '读取窗口材质状态失败：' + ((e && e.message) || e));
+      }
       // 「无材质」卡片已移除（设置页整合4）：存储值为 none 时与总开关关闭等价，按关闭态展示；
       // 不回写主进程，用户重开总开关或点选任一材质卡后自然覆盖
       if (current === 'none' && materialOn) materialOn = false;
@@ -73,10 +75,10 @@
     })();
     // 主进程材质广播：所有窗口（含本窗）统一跟随，body[data-material] 实时驱动 CSS 分级
     // （广播载荷是「生效材质」：总开关关闭时为 'none'，此时卡片高亮保持用户所选值不变）
-    window.api?.appearance?.onMaterialChanged?.((m) => {
+    window.app?.trackSubscription?.(window.api?.appearance?.onMaterialChanged?.((m) => {
       document.body.dataset.material = m;
       if (materialOn) refreshMaterialCards(m);
-    });
+    }));
     materialCards.forEach(card => {
       card.addEventListener('click', async () => {
         if (!materialOn) return; // 总开关关闭期间材质卡为暂停态

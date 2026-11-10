@@ -161,27 +161,28 @@ mod tests {
         let root = sb.join("backups");
         // 建 junction：参数分开传（整串塞给 `/C` 时 cmd 的引号剥离规则会把路径弄坏）。
         // 造不出 ≠ 不会发生：下面显式报「未校验」，不假绿也不假红。
-        let out = std::process::Command::new("cmd")
-            .args([
-                "/C",
-                "mklink",
-                "/J",
-                &root.to_string_lossy(),
-                &other.to_string_lossy(),
-            ])
-            .output();
+          // X1-L01：带超时 + 杀整树（夹具命令挂住时不得拖死整轮验收）。
+          let mut mk_backup_link = std::process::Command::new("cmd");
+          mk_backup_link.args([
+              "/C",
+              "mklink",
+              "/J",
+              &root.to_string_lossy(),
+              &other.to_string_lossy(),
+          ]);
+          let out =
+              crate::engine::testcmd::run_test_cmd(&mut mk_backup_link, std::time::Duration::from_secs(10));
+          let detail = match &out {
+              Ok(o) => format!(
+                  "code={:?} stdout={:?} stderr={:?}",
+                  o.status.code(),
+                  String::from_utf8_lossy(&o.stdout),
+                  String::from_utf8_lossy(&o.stderr)
+              ),
+              Err(e) => e.to_string(),
+          };
         let made = out.as_ref().map(|o| o.status.success()).unwrap_or(false);
         if !made {
-            let detail = out
-                .map(|o| {
-                    format!(
-                        "code={:?} stdout={:?} stderr={:?}",
-                        o.status.code(),
-                        String::from_utf8_lossy(&o.stdout),
-                        String::from_utf8_lossy(&o.stderr)
-                    )
-                })
-                .unwrap_or_else(|e| e.to_string());
             eprintln!("SKIP 备份根换成junction时必拒且连接另一头零新增：本环境建不出 junction（{detail}），该判据未校验");
             return;
         }

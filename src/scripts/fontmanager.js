@@ -174,7 +174,7 @@
       const ok = await window.app?.confirmDanger?.(
         '删除已导入字体',
         `确定删除已导入字体「${importedFamily}」吗？本地副本将一并删除（不影响原始文件），界面将回退到默认系统字体（微软雅黑）。`,
-        '删除',
+        '仍然执行',
         '取消',
         '删除后无法从应用内恢复该字体副本。'
       );
@@ -274,8 +274,13 @@
   // 应用启动时恢复已保存的字体设置（不弹窗）
   async function restore() {
     if (!window.api?.fonts?.list) return;
-    await load(true);
-    applyToRoot();
+    try {
+      await load(true);
+      applyToRoot();
+    } catch (e) {
+      window.app?.log?.('error', `字体恢复失败，已用默认字体：${(e && e.message) || e}`);
+      window.app?.toast?.('error', '字体恢复失败，已用默认字体');
+    }
   }
 
   function close() {

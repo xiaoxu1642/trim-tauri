@@ -187,6 +187,10 @@ try {\n\
 }
 
 pub(super) fn count_restore_points() -> Option<i64> {
+    poll_restore_points(std::time::Instant::now() + std::time::Duration::from_secs(15), count_restore_points_once, None).ok().flatten()
+}
+
+fn count_restore_points_once(_remaining: std::time::Duration) -> Option<i64> {
     let ps = "$ErrorActionPreference = \"Stop\"\n\
 try {\n\
   $rp = @(Get-ComputerRestorePoint)\n\
@@ -199,6 +203,34 @@ try {\n\
         .lines()
         .map(str::trim)
         .find_map(|l| l.strip_prefix("RPCOUNT|")?.trim().parse::<i64>().ok())
+}
+
+/// 可注入的绝对截止轮询：每轮先算剩余预算，count 只拿剩余预算，不再睡完再判。
+pub(super) fn poll_restore_points(
+    deadline: std::time::Instant,
+    count: impl Fn(std::time::Duration) -> Option<i64>,
+    initial: Option<i64>,
+) -> Result<Option<i64>, ()> {
+    let mut last = initial;
+    loop {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Ok(last);
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let Some(n) = count(remaining) else {
+            return Err(());
+        };
+        last = Some(n);
+        if let Some(b) = initial {
+            if n > b {
+                return Ok(last);
+            }
+        } else {
+            return Ok(last);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1).min(remaining));
+    }
 }
 
 pub(super) static RESTORE_INFLIGHT: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
@@ -508,27 +540,9 @@ Write-Output \"@@DONE@@\"";
     let mut read_failed = false;
     let mut last = before;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-        match count_restore_points() {
-            Some(n) => {
-                last = Some(n);
-                if let Some(b) = before {
-                    if n > b {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-            None => {
-                read_failed = true;
-                break;
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            break;
-        }
+    match poll_restore_points(deadline, |_remaining| count_restore_points(), before) {
+        Ok(n) => last = n,
+        Err(()) => read_failed = true,
     }
     if read_failed {
         log::write_log(

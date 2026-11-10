@@ -280,6 +280,14 @@
       const btn = e.currentTarget;
       btn.disabled = true;
       try {
+        const ok = await window.app?.confirmDanger?.(
+          '应用外设调优到注册表',
+          '将按当前选择写入 HKLM 注册表，Win32 计时精度与鼠标队列大小会影响系统行为。',
+      '仍然执行',
+          '取消',
+          '写入需要管理员权限，改动不会在关闭窗口后自动回退。'
+        );
+        if (!ok) return;
         const resp = await window.api.peripheralWindow.apply(payload);
         // 后端 PE-4 门禁回传 needAdmin：主窗直接发起提权（提权成功会以管理员重启）。
         if (resp && resp.needAdmin) {
@@ -311,7 +319,7 @@
       const ok = await window.app?.confirmDanger?.(
         '还原外设备份（导入 .reg）',
         '将从最近一批备份导入注册表键值。备份是 .reg 文本：若被替换或改动，导入可能包含「删除段」（整键删除）或覆盖其他键值。\nTrim 只接受带封条且哈希匹配的自产备份——旧版本备份没有封条，将无法还原。',
-        '仍然还原',
+      '仍然执行',
         '取消',
         '导入后受影响键的值会被备份内容覆盖；还原前请确认这份备份是 Trim 在你改动前生成的。'
       );
@@ -351,7 +359,7 @@
       const ok = await window.app?.confirmDanger?.(
         '恢复 Windows 默认外设值',
         '将把「Win32 计时精度」与「鼠标队列大小」写回 Windows 出厂默认值（win32=2 / mouse=100）。\n这不是你修改前的值——想回到改动前请用「还原修改前的值」（导入备份）。',
-        '仍然恢复默认',
+      '仍然执行',
         '取消',
         '该操作写入 HKLM，需要管理员权限；应用后需重启电脑才会生效。'
       );

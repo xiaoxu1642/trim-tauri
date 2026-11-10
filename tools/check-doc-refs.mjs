@@ -237,6 +237,11 @@ check(
   `2c. 本机资料区路径零暴露（扫 ${localDocScanned} 个文件：src/src 前端/tools/vendor/native-scanner/capabilities/data）`,
   localDocHits.length ? localDocHits.slice(0, 10).join('；') + (localDocHits.length > 10 ? ` …共 ${localDocHits.length} 处` : '') : '无暴露',
 );
+check(
+  localDocScanned >= 100,
+  `2c-a. 本机资料区扫描对象地板（现算 ${localDocScanned} 个文件 ≥ 100）`,
+  localDocScanned < 100 ? '扫描面塌陷；零暴露不能顶账' : '',
+);
 const missingLocalDocWl = LOCALDOC_WHITELIST.map((w, i) => ({ w, i })).filter(({ i }) => !localDocWlHits.has(i));
 check(
   missingLocalDocWl.length === 0,

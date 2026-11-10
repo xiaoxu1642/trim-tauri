@@ -1,5 +1,21 @@
 # 更新日志
 
+## 版本 0.9.0（2026-11-10 全仓重审收口与发布闸）
+
+> 本版把第六轮全仓重审 P0/P1/P2/P3 与后续遗留收口一起发行；重点是回执诚实度、删除与注册表安全边界、门禁假绿、测试卫生和真机验证链，无新增用户功能。
+
+① **临时脚本句柄不再挡住 PowerShell 执行** —— 症状：真机组出现 `CommandNotFoundException`，脚本路径明明存在却打不开。根因：`TempScript` 成功写出 `.ps1` 后一直持有写句柄，子进程按 `powershell.exe -File` 读同一文件被独占挡住。修法：写完立即释放句柄，保留写入失败删空壳的守卫，生产执行语义不变。
+
+② **真机用例的生产段边界不再被测试钩子截断** —— 症状：递归删除后键必须消失的真机用例报「找不到 `reg_key_remove_checked`」。根因：用例把源码按首个 `#[cfg(test)]` 截断，而生产文件很早就有测试钩子，目标函数被一并切掉。修法：边界改按 `mod tests` 定位，与同文件既有用例一致，递归分支断言原样保留。
+
+③ **高危及测试执行器的警告清零** —— 症状：`cargo check --all-targets` 仍有 4 条 `unused_mut` 与 7 条既存 `dead_code` / `non_snake_case` 警告。根因：管道读取变量多写了 `mut`，测试专用辅助函数在 lib 档仍参与编译，中文函数名触发命名 lint。修法：只删 4 个多余 `mut`，把 3 个测试专用函数收进 `#[cfg(test)]`，3 个既有中文测试名加局部 `#[allow(non_snake_case)]`；生产逻辑不动。
+
+④ **CDP 取证链补齐** —— 症状：上一版仍有子窗交互、真实指针 hover、拖拽、原生对话框、3s Performance 录制未取证。根因：CDP 只能驱动 DOM/CSSOM 与合成输入，OS 级指针/原生对话框不在其能力面。修法：用真实 debug 构建开 9222，取证主窗可见按钮 hover、DOM 级拖拽、3s 性能计数、危险确认框红色「仍然执行」主按钮聚焦与取消回执、三个子窗各 spawn 真实 CDP target；OS 级 hover/拖拽/原生对话框按 AGENTS §4.1 如实保留未验证，不用「看起来对」替代结论。
+
+⑤ **干净克隆与索引条件矩阵** —— 症状：旧交接把「干净克隆复核」列为未跑。根因：门禁里有两条依赖本机资产/构建目录的断言，换空仓复核会判红。修法：从 GitHub 真实干净克隆到 `dffdfea` 复跑门禁，定位 `check-desktop-entry` 与 `check-doc-refs` 两条条件依赖并写进条件矩阵；srclight 重算 7 个改动文件、6 个新符号 embedding，`check_freshness=verified-fresh`、`embedding_status=100.0%`。
+
+⑥ **本版验证（如实标注）** —— `cargo check --all-targets` 双 crate 零 warning；`cargo test` lib `1148 passed / 0 failed / 77 ignored`，集成快组 `14 + 55 + 1 = 70 passed / 0 failed`，native-scanner `165 passed / 0 failed / 10 ignored`；串行与并行 `#[ignore]` 真机组各 `77 passed / 0 failed`，release 档串行真机组 `77 passed / 0 failed`（524.34s）；最终重签后真实 `cargo tauri build --bundles nsis` 重跑一次（3m45s），按 `--app-version 0.9.0` 手工签名并重出两份清单，`check-release-artifacts` 三方对拍通过（sha256 `ad20c5a1c48f…`）。必跑 Node 门禁 `73/73 exit 0`，另有 21 条子门禁自报 SKIP/未校验/0 对象，逐条单列且不计通过。CDP 证据与索引重算日志落在仓库 `docs/_logs/`。**本版未做的验证**：OS 级真实指针 hover、OS 拖拽、原生对话框、安装包升级安装人工目检；干净克隆的两条红按「本机资产 / 构建目录」条件依赖留痕，未在本机工作树强行改绿。
+
 ## 版本 0.8.9（2026-11-02 中危余量与发布闸收口）
 
 > 本版把第五轮全仓重审遗留在 P1/P2 施工面之外的 25 条中危、R2b-L09 死字段、D1-L03 发布产物签名闸与 T1g 三条夹具缺口一起收口，并补上用户可见颜色的硬编码门禁。无新增用户功能。

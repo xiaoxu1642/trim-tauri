@@ -24,6 +24,10 @@ const table = postPkg.postActions || {};
 
 // 收集全部清理项（顶层 items 与 subGroups.items 两层都算，口径见 tools/lib/rule-shape.mjs）
 const items = allItems(rulesPkg);
+if (items.length < 100) {
+  g.fail(`清理规则库只解析出 ${items.length} 项（< 100）⇒ 判定对象塌陷，不能据此判侧表一致`);
+  g.finish();
+}
 
 /** 机械判定：从一条规则的目标位置推导后置动作。 */
 function derivePostAction(it) {

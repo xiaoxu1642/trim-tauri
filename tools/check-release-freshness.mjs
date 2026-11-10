@@ -64,8 +64,10 @@ function mtime(p) {
  *
  * 口径与理由：
  *   · `src/`、`src-tauri/src`、`src-tauri/*.toml`、`src-tauri/data`、`src-tauri/ps`、
- *     `native-scanner/src`、`vendor/`、`tools/`（含门禁与生成器）—— 凡是能进包的
+ *     `native-scanner/src`、`vendor/` —— 凡是能进包的
  *     都要算，漏一个方向就漏一类陈旧产物。
+ *     `tools/` 只含开发期门禁与生成器，不进安装包；发版脚本在产物生成后回写
+ *     工具文件会让它比产物更新，按构建输入计会把成功发版推成红。
  *   · **排除** `target/`（构建目录本身，mtime 永远最新，会把一切判成新鲜）、
  *     `node_modules`、`docs/`（不入库的分析资料）、`build-release` 自身。
  *   · 只认文件，不认目录（目录 mtime 会被「新建/删除文件」改动，与内容无关）。
@@ -82,7 +84,6 @@ const SRC_ROOTS = [
   'native-scanner/src',
   'native-scanner/Cargo.toml',
   'vendor',
-  'tools',
   'src-tauri/capabilities',
   'src-tauri/icons',
 ];

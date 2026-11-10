@@ -24,6 +24,9 @@
 pub mod cleanup_scan;
 pub mod perf;
 pub mod scan;
+/// A14（X1-L01 一族）：测试用子进程执行器（带超时 + 杀整树）。
+/// 不加 `#[cfg(test)]`：集成测试编译时 cfg(test) 对被依赖 crate 不生效。
+pub mod testcmd;
 pub mod util;
 
 // 保持 `crate::json_escape` / `crate::is_reparse` / `crate::to_long_path` 既有引用可解析

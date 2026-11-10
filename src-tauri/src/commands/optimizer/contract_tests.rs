@@ -224,6 +224,78 @@ fn strip_js_comments(src: &str) -> String {
         assert!(service_need_stop(false, None), "纯停服步仍要停服");
     }
 
+    #[test]
+    fn ps_track_failure_not_labeled_rolled_back() {
+        let reg_step = json!({ "label": "导入", "reg": "Windows Registry Editor Version 5.00" });
+        let service_step = json!({ "label": "服务", "service": "TrimProbeSvc" });
+        let script = build_script(&[reg_step, service_step]);
+        assert!(!script.contains("Mutation 'rolled_back'"), "PS 轨没有回滚链，不得自称 rolled_back: {script}");
+        assert!(script.contains("Mutation 'failed'"), "失败诊断必须如实标 failed: {script}");
+    }
+
+    #[test]
+    fn unknown_start_type_does_not_stop_service() {
+        let step = json!({ "label": "未知启动类型", "service": "TrimProbeSvc", "startType": "不存在的档位" });
+        let script = build_script(&[step]);
+        assert!(!script.contains("Stop-Service"), "未知启动类型不得停服: {script}");
+        assert!(script.contains("未知启动类型"), "失败诊断要带拒因: {script}");
+        let src = include_str!("apply.rs");
+        let native = src
+            .split("let start_label = s.get(\"startType\")")
+            .nth(2)
+            .unwrap_or_default();
+        assert!(
+            native.contains("return Err(format!(\"未知启动类型，未停服: {reason}\"))"),
+            "native 轨未知启动类型必须提前拒掉，不得继续停服"
+        );
+    }
+
+    #[test]
+    fn cmd_start_baseline_handles_quoted_value() {
+        let cmd = r#"REG ADD "HKLM\SYSTEM\CurrentControlSet\Services\Spooler" /v "Start" /t REG_DWORD /d 4 /f"#;
+        let got = svc_names_writing_start(cmd);
+        assert!(got.contains(&"Spooler".to_string()), "引号形态也要收到服务基线: {got:?}");
+    }
+
+    #[test]
+    fn optimizer_write_serializes_backup_and_restore() {
+        let first = OptWriteGuard::acquire().expect("首个写入闩锁必须可取");
+        assert!(OptWriteGuard::acquire().is_none(), "同一个写入锁内第二条命令必须 busy");
+        drop(first);
+        assert!(OptWriteGuard::acquire().is_some(), "释放后必须可再次进入");
+    }
+
+    #[test]
+    fn restore_point_poll_stays_within_15s() {
+        let start = std::time::Instant::now();
+        let deadline = start + std::time::Duration::from_millis(15);
+        let result = poll_restore_points(deadline, |remaining| {
+            assert!(remaining <= std::time::Duration::from_millis(15), "count 只拿剩余预算");
+            Some(0)
+        }, Some(0));
+        assert_eq!(result, Ok(Some(0)));
+        assert!(start.elapsed() < std::time::Duration::from_secs(1), "绝对截止轮询不得睡满旧窗口");
+    }
+
+    #[test]
+    fn reg_import_rejects_swapped_file() {
+        let bytes = b"Windows Registry Editor Version 5.00\n\n[HKEY_CURRENT_USER\\Software\\TrimProbe]\n\"A\"=dword:00000001\n".to_vec();
+        let digest = crate::engine::hash::sha256_bytes(&bytes);
+        let swapped = b"Windows Registry Editor Version 5.00\n\n[HKEY_CURRENT_USER\\Software\\TrimProbe]\n\"A\"=dword:00000002\n".to_vec();
+        let err = crate::engine::reg_backup::reg_import_from_bytes(&swapped, &digest)
+            .expect_err("换件后摘要不符必须拒");
+        assert!(err.reason.contains("摘要不一致"), "实到拒因: {}", err.reason);
+    }
+
+    #[test]
+    fn temp_script_rejects_write_while_running() {
+        let src = include_str!("../../pwsh/mod.rs");
+        assert!(
+            src.contains("pub struct TempScript {") && src.contains("file: Option<std::fs::File>"),
+            "TempScript 必须持有 File 句柄直到子进程结束"
+        );
+    }
+
     /// R0-a 判据 4：未知 `startType` 值必须 fail-closed。
     ///
     /// 猜一个默认值 = 凭空造一个静默盲区（这正是 v0.5.0 的病根）。解析函数是
@@ -1740,7 +1812,7 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
         use windows::Win32::System::Registry::{
             HKEY_CURRENT_USER, REG_BINARY, REG_DWORD,
         };
-        use crate::engine::native::{read_reg_binary_opt, read_reg_dword_opt, reg_key_ensure, reg_restore_write};
+        use crate::engine::native::{read_reg_binary_opt, read_reg_dword_u32_as_i64, reg_key_ensure, reg_restore_write};
 
         let sub = "Software\\Trim\\m2-binary-probe";
         assert!(reg_key_ensure(HKEY_CURRENT_USER, sub), "建夹具键失败");
@@ -1769,7 +1841,7 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
         );
         // 反向护栏：DWORD 读侧不受影响
         assert_eq!(
-            read_reg_dword_opt(HKEY_CURRENT_USER, sub, "Dword"),
+            read_reg_dword_u32_as_i64(HKEY_CURRENT_USER, sub, "Dword"),
             Some(42),
             "新增二进制原语后 DWORD 读侧被影响 ⇒ 原语抢活"
         );
@@ -1877,7 +1949,7 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
     #[ignore = "要真改 HKLM 下的 WindowsUpdate 策略键，发布前门禁组跑"]
     fn m2_删除语义判据方向正确() {
         use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, REG_DWORD};
-        use crate::engine::native::{read_reg_dword_opt, reg_key_ensure, reg_restore_write};
+        use crate::engine::native::{read_reg_dword_u32_as_i64, reg_key_ensure, reg_restore_write};
 
         // R3b-K01：守卫按原值恢复（原本有值 ⇒ 写回原值；原本没有 ⇒ 删掉）。
         struct RestoreReg {
@@ -1915,7 +1987,7 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
         let value = r.value;
 
         // 先读原值、再挂守卫 —— 顺序反了会把「用户的真实策略」当成夹具值覆盖掉。
-        let original = read_reg_dword_opt(HKEY_LOCAL_MACHINE, sub, value);
+        let original = read_reg_dword_u32_as_i64(HKEY_LOCAL_MACHINE, sub, value);
         let _restore = RestoreReg {
             sub: sub.to_string(),
             value: value.to_string(),
@@ -1926,7 +1998,7 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
         reg_key_ensure(HKEY_LOCAL_MACHINE, sub);
         reg_restore_write(HKEY_LOCAL_MACHINE, sub, value, REG_DWORD, &1u32.to_le_bytes());
         assert_eq!(
-            read_reg_dword_opt(HKEY_LOCAL_MACHINE, sub, value),
+            read_reg_dword_u32_as_i64(HKEY_LOCAL_MACHINE, sub, value),
             Some(1),
             "前提失效：夹具值写不进 HKLM（需要管理员）"
         );
@@ -1941,7 +2013,7 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
         // 删掉键 ⇒ 判「已生效」
         let _ = crate::engine::native::reg_restore_delete(HKEY_LOCAL_MACHINE, sub, value);
         assert_eq!(
-            read_reg_dword_opt(HKEY_LOCAL_MACHINE, sub, value),
+            read_reg_dword_u32_as_i64(HKEY_LOCAL_MACHINE, sub, value),
             None,
             "前提失效：夹具值删不掉"
         );
@@ -2039,7 +2111,7 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
     #[test]
     fn m2c_enum判据三态真机往返() {
         use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_DWORD};
-        use crate::engine::native::{read_reg_dword_opt, reg_key_ensure, reg_restore_write};
+        use crate::engine::native::{read_reg_dword_u32_as_i64, reg_key_ensure, reg_restore_write};
 
         let opt = find_option("svc_mem_gb").unwrap();
         let template = collect_checks(opt);
@@ -2054,7 +2126,7 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
             "SvcHostSplitThresholdInKB",
         );
         assert!(
-            read_reg_dword_opt(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB").is_none(),
+            read_reg_dword_u32_as_i64(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB").is_none(),
             "前提失效：上一次运行的夹具残留没清干净"
         );
         assert!(reg_key_ensure(HKEY_CURRENT_USER, probe), "建夹具键失败");
@@ -2070,7 +2142,7 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
             reg_restore_write(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB", REG_DWORD, &8_388_608u32.to_le_bytes()),
             "写夹具值失败"
         );
-        assert_eq!(read_reg_dword_opt(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB"), Some(8_388_608));
+        assert_eq!(read_reg_dword_u32_as_i64(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB"), Some(8_388_608));
         assert!(judge_check(&c), "8GB 是合法档位，必须判已生效");
 
         // ③ 值不在集合内（1234567）⇒ 未生效
@@ -2131,7 +2203,7 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
     #[test]
     fn m2c_两种新形态的判定分支真实生效() {
         use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_DWORD};
-        use crate::engine::native::{read_reg_dword_opt, reg_key_ensure, reg_restore_write};
+        use crate::engine::native::{read_reg_dword_u32_as_i64, reg_key_ensure, reg_restore_write};
 
         // 造一个集合外的值（1234567）：enum 判据对它必须判 false。
         // 若 `regEnum` 分支被摘掉，它会落进 dword 分支与整个集合字符串比，
@@ -2149,7 +2221,7 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
 
         // 集合内的值（8GB）⇒ 必须 true。`regEnum` 分支被摘时这条必红。
         assert!(reg_restore_write(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB", REG_DWORD, &8_388_608u32.to_le_bytes()));
-        assert_eq!(read_reg_dword_opt(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB"), Some(8_388_608));
+        assert_eq!(read_reg_dword_u32_as_i64(HKEY_CURRENT_USER, probe, "SvcHostSplitThresholdInKB"), Some(8_388_608));
         assert!(
             judge_check(&c),
             "8GB 在 enum 集合里却判未生效 —— regEnum 判定分支被摘掉了？（落进 dword 分支会恒 false）"

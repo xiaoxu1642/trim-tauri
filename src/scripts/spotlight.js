@@ -11,7 +11,9 @@
   // 运行中切换系统「减少动态效果」偏好永不生效。
   // A3-L06：MediaQueryList 对象的缓存与实时求值统一由 ds.reducedMotion() 承担。
   function isReducedMotion() {
-    return !!(window.ds && window.ds.reducedMotion && window.ds.reducedMotion());
+    if (window.ds && typeof window.ds.reducedMotion === 'function') return !!window.ds.reducedMotion();
+    if (window.ds && typeof window.ds.reducedMotionFallback === 'function') return !!window.ds.reducedMotionFallback();
+    return true;
   }
 
   var HOST_SELECTOR = '.btn, .filter-tab, .maint-tab, .material-card';

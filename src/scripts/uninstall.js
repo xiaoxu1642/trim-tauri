@@ -511,7 +511,7 @@
         isAppx
           ? `将从当前用户移除 Windows 应用「${app.displayName}」（Remove-AppxPackage，不弹确认界面）。`
           : `将卸载「${app.displayName}」：支持静默的安装器（msi/inno/nsis）先尝试静默卸载，否则自动弹出原厂卸载界面，按其提示操作。`,
-        '开始卸载',
+        '仍然执行',
         '取消',
         isAppx
           ? '移除后其 %LOCALAPPDATA%\\Packages\\<包名> 应用数据将进入残留扫描候选，可一并清理（进回收站，可还原）。'
@@ -616,7 +616,7 @@
       ok = await window.app?.confirmDanger?.(
         `确认${label}`,
         `将打开「${app.displayName}」自带的${label}程序（来自注册表 ModifyPath），按其界面提示操作。`,
-        `开始${label}`,
+        '仍然执行',
         '取消'
       );
     } catch (e) {
@@ -852,7 +852,9 @@
     loadApps();
   }
 
-  window.uninstall = { init };
+  // F4a1-L17：进页钩子。init 有 inited 守卫，第二次进入不会再枚举；
+  // switchPage 每次进页调用 refresh() 重新读安装列表。
+  window.uninstall = { init, refresh: loadApps };
 
   // 进页动态注入时 readyState 已是 complete/interactive，直接初始化（check-idle-scripts 口径）
   if (document.readyState === 'loading') {

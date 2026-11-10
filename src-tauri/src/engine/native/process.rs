@@ -18,6 +18,23 @@ use super::registry::reg_read_string;
 use super::services::*;
 // ==================== B2：进程控制 ====================
 
+/// 镜像名校验：`Ok(())` = 通过；`Err` = 拒绝终止的原因。
+///
+/// R5e-L06：镜像名取不到或与期望不符都必须拒绝终止——这是防 PID 复用的最后一道闸，
+/// 独立成纯函数便于单测钉住「PID 被复用成别的进程时不得终止」。
+fn verify_process_image(exe_name: &str, expected_name: &str) -> Result<(), &'static str> {
+    if expected_name.is_empty() {
+        return Ok(());
+    }
+    if exe_name.is_empty() {
+        return Err("无法读取进程镜像名，已拒绝结束（防 PID 复用误杀）");
+    }
+    if exe_name.to_lowercase() != expected_name.to_lowercase() {
+        return Err("进程 ID 已被系统复用，已拒绝结束");
+    }
+    Ok(())
+}
+
 
 
 
@@ -25,7 +42,11 @@ use super::services::*;
 
 pub fn kill_process(pid: u32, expected_name: &str) -> Result<Value, String> {
     unsafe {
-        let h = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+        // R5e-L06：只开一次带 PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION
+        // 权限的句柄，镜像校验与 TerminateProcess 共用同一句柄。旧实现先开查询句柄
+        // 校验镜像、关闭，再开终止句柄——两次打开之间进程可退出、PID 被复用，
+        // 新进程顶替后仍可能被终止。
+        let h = match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, false, pid) {
             Ok(h) => h,
             Err(_) => return Ok(json!({"success": false, "message": "进程不存在或已退出"})),
         };
@@ -35,25 +56,16 @@ pub fn kill_process(pid: u32, expected_name: &str) -> Result<Value, String> {
             let path = String::from_utf16_lossy(&name_buf[..name_len as usize]);
             std::path::Path::new(&path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_lowercase()
         } else { String::new() };
-        let _ = CloseHandle(h);
-        let expected_lower = expected_name.to_lowercase();
-        // v2-L4P-55（C-10）：镜像名**取不到即拒**（调用方给了期望名时）。旧口径
-        // `!exe_name.is_empty()` 才比对——QueryFullProcessImageNameW 失败 = 比对整体
-        // 跳过，剩下的 PID 复用窗口（旧 PID 已死、新进程顶上）会被直接 Terminate。
-        if !expected_name.is_empty() {
-            if exe_name.is_empty() {
-                return Ok(json!({"success": false, "message": "无法读取进程镜像名，已拒绝结束（防 PID 复用误杀）"}));
-            }
-            if exe_name != expected_lower {
-                return Ok(json!({"success": false, "message": "进程 ID 已被系统复用，已拒绝结束"}));
-            }
+        // v2-L4P-55（C-10）：镜像名校验与 TerminateProcess 共用同一句柄（R5e-L06）。
+        if let Err(reason) = verify_process_image(&exe_name, expected_name) {
+            let _ = CloseHandle(h);
+            return Ok(json!({"success": false, "message": reason}));
         }
-        let h_term = OpenProcess(PROCESS_TERMINATE, false, pid).map_err(|_| "无法打开进程（权限不足）".to_string())?;
         let name_display = if exe_name.is_empty() { format!("PID {pid}") } else { exe_name.clone() };
         // 先接住结果再关句柄：`?` 早退会让 CloseHandle 被跳过，反复对受保护进程
         // 点「结束」就每次泄漏一个内核句柄。
-        let terminated = TerminateProcess(h_term, 1);
-        let _ = CloseHandle(h_term);
+        let terminated = TerminateProcess(h, 1);
+        let _ = CloseHandle(h);
         terminated.map_err(|_| "结束进程失败".to_string())?;
         std::thread::sleep(std::time::Duration::from_millis(300));
         // v4 R5-M06：同 `h_term` 的纪律 —— `is_ok()` 直接丢弃句柄，反复对同名进程
@@ -72,6 +84,7 @@ pub fn kill_process(pid: u32, expected_name: &str) -> Result<Value, String> {
         }
     }
 }
+
 
 /// 顽固软件专杀的目标进程名（小写，不含 .exe）
 ///
@@ -448,8 +461,16 @@ fn stubborn_task_rel_matches(rel: &str) -> bool {
 }
 
 /// 任务全名 → 备份文件名（`\Folder\Name` 形态不能直接当文件名）。
+///
+/// R5e-L02：扁平化只替换 `\`，`\A\B` 与 `\A_B` 会碰撞成同一个文件名，后写覆盖先写，
+/// 两个任务的还原凭据只剩一份。追加原任务路径的 8 位哈希后缀，保证不同任务路径
+/// 落盘为不同文件（Windows 文件名不允许 `\`，哈希只来自路径本身，稳定且无状态）。
 fn stubborn_task_backup_name(task: &str) -> String {
-    task.trim_start_matches('\\').replace('\\', "_")
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    task.hash(&mut hasher);
+    let suffix = format!("{:08x}", hasher.finish() & 0xFFFF_FFFF);
+    format!("{}_{}", task.trim_start_matches('\\').replace('\\', "_"), suffix)
 }
 
 /// 计划任务库遍历的深度上限（R5b-M13）：与 `cleanup::ENGINE_WALK_MAX_DEPTH` /
@@ -457,6 +478,37 @@ fn stubborn_task_backup_name(task: &str) -> String {
 const STUBBORN_TASKS_MAX_DEPTH: usize = 64;
 
 // ==================== 任务 XML 备份的落盘形态（R5b-M01） ====================
+
+/// 计划任务存在性查询的判读：只有「任务确实不存在」映射 `Ok(false)`，
+/// 其他错误（system_tool 解析失败 / 命令超时 / 非「不存在」的退出码）返回 `Err`。
+///
+/// R5e-L03：旧实现 `.unwrap_or(false)` 把超时、解析失败、权限错误全部当成
+/// 「任务不存在」——schtasks 工具链整体不可用时所有任务都被静默跳过，
+/// 回执显示「成功但什么都没改」。调用方拿到 `Err` 必须记入 `fail_tasks`。
+fn task_exists_verdict(query: Result<std::process::Output, std::io::Error>) -> Result<bool, String> {
+    match query {
+        Ok(o) if o.status.success() => Ok(true),
+        Ok(o) => {
+            let stderr = crate::engine::systembin::decode_native_output(&o.stderr).to_lowercase();
+            let stdout = crate::engine::systembin::decode_native_output(&o.stdout).to_lowercase();
+            let not_found = stderr.contains("does not exist")
+                || stderr.contains("找不到指定的任务")
+                || stderr.contains("找不到")
+                || stdout.contains("does not exist")
+                || stdout.contains("找不到指定的任务")
+                || stdout.contains("找不到");
+            if not_found {
+                Ok(false)
+            } else {
+                Err(format!(
+                    "schtasks 查询失败 exit={:?}，无法确认任务状态",
+                    o.status.code()
+                ))
+            }
+        }
+        Err(e) => Err(format!("schtasks 无法执行: {e}")),
+    }
+}
 
 /// 从 XML 文本里取声明中 `encoding` **属性值**的字节区间（`None` = 没声明 / 声明里没这项）。
 ///
@@ -753,7 +805,9 @@ pub fn stubborn_block() -> Result<Value, String> {
     unsafe {
         // v5 M-P2：先判运行态再停。上游 PS 有 `if ($wc.Status -eq 'Running')` 前置，平移丢了
         // 之后「服务本已停止」会被算成失败（1062），于是重复执行同一条持久策略反而报部分失败。
-        let running = service_status("wpscloudsvr").map(|(s, _)| s == 4).unwrap_or(false);
+        let running = service_status("wpscloudsvr")
+            .map(|s| s == super::services::SVC_RUNNING)
+            .unwrap_or(false);
         if running {
             if service_stop_pub("wpscloudsvr").is_ok() {
                 changed_services.push("wpscloudsvr".to_string());
@@ -792,8 +846,9 @@ pub fn stubborn_block() -> Result<Value, String> {
     }
     for task in &task_enum.tasks {
         // 检查任务是否存在
-        // v6-K01（P0-2）：解析失败与执行失败同语义（按「任务不存在」跳过）
-        let exists = crate::engine::systembin::system_tool("schtasks")
+        // R5e-L03：只有「任务确实不存在」映射 false（跳过）；工具解析失败/命令超时/
+        // 非「不存在」的退出码都返回 Err，必须记入 fail_tasks，不得静默跳过。
+        let query = crate::engine::systembin::system_tool("schtasks")
             .map_err(std::io::Error::other)
             .and_then(|exe| {
                 crate::engine::systembin::quiet_cmd_timeout(
@@ -801,9 +856,19 @@ pub fn stubborn_block() -> Result<Value, String> {
                     &["/Query", "/TN", task, "/NH"],
                     crate::engine::systembin::REG_EXPORT_TIMEOUT,
                 )
-            })
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+            });
+        let exists = match task_exists_verdict(query) {
+            Ok(exists) => exists,
+            Err(e) => {
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("顽固软件治理：{task} 存在性查询失败: {e}，已放弃删除"),
+                );
+                fail_tasks.push(format!("{task}（存在性查询失败，未删除）"));
+                failed += 1;
+                continue;
+            }
+        };
         if !exists { continue; }
 
         // 备份：导出件是「当时任务长什么样」的唯一凭据 —— 拿不到 / 空 / 不像 XML /
@@ -879,8 +944,10 @@ pub fn stubborn_block() -> Result<Value, String> {
         }
 
         // 删除（只有备份已确认落盘才会走到这一行）
-        // v6-K01（P0-2）：解析失败与执行失败同语义（按「删除失败」记账）
-        let deleted = crate::engine::systembin::system_tool("schtasks")
+        // R5e-L03：删除命令的工具解析失败/超时同样不得折成「删除失败」的假象——
+        // 统一返回 Err 由调用方记入 fail_tasks（旧 `unwrap_or(false)` 与「任务不存在」
+        // 同形，掩盖工具链故障）。
+        let deleted = match crate::engine::systembin::system_tool("schtasks")
             .map_err(std::io::Error::other)
             .and_then(|exe| {
                 crate::engine::systembin::quiet_cmd_timeout(
@@ -890,7 +957,18 @@ pub fn stubborn_block() -> Result<Value, String> {
                 )
             })
             .map(|o| o.status.success())
-            .unwrap_or(false);
+        {
+            Ok(v) => v,
+            Err(e) => {
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("顽固软件治理：{task} 删除命令无法执行: {e}，已放弃删除"),
+                );
+                fail_tasks.push(format!("{task}（删除命令无法执行，未删除）"));
+                failed += 1;
+                continue;
+            }
+        };
         if deleted {
             changed_tasks.push(task.to_string());
         } else {
@@ -1096,16 +1174,144 @@ mod stubborn_block_selector_tests {
         }
     }
 
-    /// 任务全名 → 备份文件名：文件夹路径要拍平成文件名（`\` 不能留在文件名里）。
+    /// 任务全名 → 备份文件名：文件夹路径要拍平成文件名（`\` 不能留在文件名里），
+    /// 并追加 8 位哈希后缀（R5e-L02）。
     #[test]
     fn 任务备份名把路径拍平() {
-        assert_eq!(
-            stubborn_task_backup_name("\\WpsUpdateTask_Administrator"),
-            "WpsUpdateTask_Administrator"
+        let a = stubborn_task_backup_name("\\WpsUpdateTask_Administrator");
+        assert!(a.starts_with("WpsUpdateTask_Administrator_"), "{a}");
+        assert_eq!(a.len(), "WpsUpdateTask_Administrator_".len() + 8, "{a}");
+
+        let b = stubborn_task_backup_name(
+            "\\QuarkCloudDriveUpdaterSystem\\QuarkCloudDriveUpdaterTaskSystem1.0.0.11",
         );
+        assert!(
+            b.starts_with("QuarkCloudDriveUpdaterSystem_QuarkCloudDriveUpdaterTaskSystem1.0.0.11_"),
+            "{b}"
+        );
+    }
+
+    /// R5e-L02：`\A\B` 与 `\A_B` 扁平化后不再碰撞——两个任务必须落成两个不同文件。
+    /// 判红自证：把 `stubborn_task_backup_name` 恢复成裸 `replace('\\', "_")` ⇒
+    /// 两个名字相同，第二个文件写盘后第一个被覆盖，断言红。
+    #[test]
+    fn r5e_backup_names_do_not_collide() {
+        let task_a = r"\A\B";
+        let task_b = r"\A_B";
+        let name_a = stubborn_task_backup_name(task_a);
+        let name_b = stubborn_task_backup_name(task_b);
+        assert_ne!(name_a, name_b, "扁平化后不得碰撞：{name_a} == {name_b}");
+
+        let sb = crate::testutil::Sandbox::new(&format!("r5el02-{}", std::process::id()));
+        let pa = sb.join(format!("{name_a}.xml"));
+        let pb = sb.join(format!("{name_b}.xml"));
+        std::fs::write(&pa, "<Task/>").expect("写 A");
+        std::fs::write(&pb, "<Task/>").expect("写 B");
+        assert!(pa.is_file(), "任务 A 的备份文件必须存在");
+        assert!(pb.is_file(), "任务 B 的备份文件必须存在");
+    }
+
+    /// R5e-L03：`system_tool` 解析失败/命令超时不得折成「任务不存在」。
+    /// 只有「任务确实不存在」映射 `Ok(false)`，其余一律 `Err`。
+    /// 判红自证：把 `task_exists_verdict` 恢复成 `.unwrap_or(false)` ⇒ 超时返回
+    /// `Ok(false)`，本条 Err 断言红。
+    #[test]
+    fn r5e_system_tool_failure_is_not_false() {
+        use std::io::{Error, ErrorKind};
+        use std::process::Output;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt;
+
+        // 退出码用 `ExitStatus::from_raw` 直接构造：不 spawn 子进程，
+        // 也不引入裸 `Command::new`（后台 spawn 必须走 quiet_cmd，见 check-system-bin）。
+        let status_with = |code: i32| {
+            #[cfg(windows)]
+            {
+                std::process::ExitStatus::from_raw((code & 0xff) as u32)
+            }
+            #[cfg(not(windows))]
+            {
+                std::process::ExitStatus::from_raw((code & 0xff) << 24)
+            }
+        };
+
+        // 命令超时（io::Error）→ 必须 Err，不能是 Ok(false)。
+        let timeout = Err(Error::new(ErrorKind::TimedOut, "模拟超时"));
+        assert!(
+            task_exists_verdict(timeout).is_err(),
+            "命令超时必须返回 Err，不得伪装成「任务不存在」"
+        );
+
+        // system_tool 解析失败（io::Error::other）→ 必须 Err。
+        let parse_fail = Err(Error::new(ErrorKind::NotFound, "schtasks 不在系统目录"));
+        assert!(task_exists_verdict(parse_fail).is_err());
+
+        // 任务确实不存在（退出码非 0 + stderr 含 does not exist）→ Ok(false)。
+        let not_found = Output {
+            status: status_with(1),
+            stdout: Vec::new(),
+            stderr: b"ERROR: The specified task name \"X\" does not exist.\r\n".to_vec(),
+        };
         assert_eq!(
-            stubborn_task_backup_name("\\QuarkCloudDriveUpdaterSystem\\QuarkCloudDriveUpdaterTaskSystem1.0.0.11"),
-            "QuarkCloudDriveUpdaterSystem_QuarkCloudDriveUpdaterTaskSystem1.0.0.11"
+            task_exists_verdict(Ok(not_found)),
+            Ok(false),
+            "任务确实不存在才允许映射 false"
+        );
+
+        // 非「不存在」的退出码（如权限不足）→ Err，不得伪装成不存在。
+        let other_err = Output {
+            status: status_with(5),
+            stdout: Vec::new(),
+            stderr: b"ERROR: Access is denied.\r\n".to_vec(),
+        };
+        assert!(task_exists_verdict(Ok(other_err)).is_err());
+
+        // 查询成功 → Ok(true)。
+        let ok = Output {
+            status: status_with(0),
+            stdout: b"Task: X\r\n".to_vec(),
+            stderr: Vec::new(),
+        };
+        assert_eq!(task_exists_verdict(Ok(ok)), Ok(true));
+    }
+
+    /// R5e-L06：PID 被复用成别的进程时，镜像校验必须拒绝终止。
+    /// 判红自证：把 `verify_process_image` 的镜像比对改回「镜像名取不到才拒」⇒
+    /// 复用场景返回 Ok，本条红。
+    #[test]
+    fn r5e_terminate_uses_verified_handle() {
+        // 模拟 PID 复用：期望 notepad.exe，实际镜像已是别的进程 → 拒绝。
+        assert_eq!(
+            verify_process_image("other.exe", "notepad.exe"),
+            Err("进程 ID 已被系统复用，已拒绝结束"),
+            "PID 复用成别的进程必须拒绝终止"
+        );
+        // 镜像名取不到 → 拒绝。
+        assert_eq!(
+            verify_process_image("", "notepad.exe"),
+            Err("无法读取进程镜像名，已拒绝结束（防 PID 复用误杀）")
+        );
+        // 镜像名匹配（大小写不敏感）→ 放行。
+        assert_eq!(verify_process_image("NOTEPAD.EXE", "notepad.exe"), Ok(()));
+        // 调用方没给期望名 → 放行。
+        assert_eq!(verify_process_image("anything.exe", ""), Ok(()));
+
+        // 源码形态：kill_process 必须只开一次句柄，且权限同时含 TERMINATE 与 QUERY。
+        let src = include_str!("process.rs");
+        let body = {
+            let start = src.find("pub fn kill_process").expect("找到 kill_process");
+            let tail = &src[start..];
+            let cut = tail.find("\nfn ").or_else(|| tail.find("\n/// ")).unwrap_or(tail.len());
+            &tail[..cut]
+        };
+        assert_eq!(
+            body.matches("OpenProcess(").count(),
+            2,
+            "kill_process 应只有一次打开（另一次是终止后的存活回读）：\n{body}"
+        );
+        assert!(
+            body.contains("PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE"),
+            "单次打开必须同时带查询与终止权限（R5e-L06）"
         );
     }
 

@@ -84,6 +84,9 @@ fn split_scan_results(
     (keepers, rejected)
 }
 
+/// `paths_save` 的路径长度上限。按字符数判定，口径见 `engine::paths::exceeds_char_len`。
+const MAX_ALLOWED_PATH_LEN: usize = 1024;
+
 /// 可写 key 白名单（与渲染层 GROUPS 同源）
 const ALLOWED_KEYS: &[&str] = &[
     // QQ
@@ -136,7 +139,10 @@ pub fn paths_load<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_j
 pub async fn paths_save<R: tauri::Runtime>(window: WebviewWindow<R>, key: String, value: String) -> Result<serde_json::Value, String> {
     // R1a-M01：本命令写入的路径会被清理扫描原样采纳并永久删除，只在主窗配置页调用。
     guard::guard(&window, guard::MAIN)?;
-    if !ALLOWED_KEYS.contains(&key.as_str()) || value.len() > 1024 || value.contains('\0') {
+    if !ALLOWED_KEYS.contains(&key.as_str())
+        || crate::engine::paths::exceeds_char_len(&value, MAX_ALLOWED_PATH_LEN)
+        || value.contains('\0')
+    {
         return Ok(serde_json::json!({ "success": false, "message": "路径配置无效" }));
     }
     if let Some(why) = path_value_problem(&value) {
@@ -254,8 +260,30 @@ pub(crate) fn icon_source_reject_reason(path: &std::path::Path) -> Option<&'stat
     // 分隔符的结果），外壳取的是那个盘根目录的图标，同属本机命名空间，不收它等于拒
     // 「整盘的文件夹图标」这种合法请求
     let b = n.low.as_bytes();
+    if n.low.starts_with("\\\\") {
+        return Some("图标来源必须落在本机盘符命名空间（映射盘与远程共享形态不收）");
+    }
     let drive_rooted = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\';
     if drive_rooted || n.drive_root {
+        let root = if n.drive_root {
+            n.low.to_ascii_uppercase()
+        } else {
+            format!("{}:", (b[0] as char).to_ascii_uppercase())
+        };
+        let mut wide: Vec<u16> = root.encode_utf16().collect();
+        wide.push(0);
+        // 只拒**网络/映射盘**（DRIVE_REMOTE = 4）：它会把外壳解析引到别的机器上，
+        // 是本次要收紧的那一类。其余盘型（固定盘 3 / 可移动 2 / 光驱 5）照常放行。
+        let drive_type =
+            unsafe { windows::Win32::Storage::FileSystem::GetDriveTypeW(windows::core::PCWSTR(wide.as_ptr())) };
+        // 盘不存在时 GetDriveTypeW 返回 DRIVE_NO_ROOT_DIR(1)：此时无法用盘型判，
+        // 但 `Z:` 是 Windows 映射盘的**约定盘符**（`net use` 默认把映射盘挂到 Z:），
+        // 且盘符可用 `GetLogicalDrives` 复核 —— 映射盘必在位、必是远程型。
+        // 组合判据：远程型一律拒；Z: 盘符（无论当前是否可达）一律拒；
+        // 其余「盘不存在」形态（如未挂载的 D:）放行，避免把合法路径打死。
+        if drive_type == 4 || root.starts_with("Z:") {
+            return Some("图标来源必须落在本机盘符命名空间（映射盘与远程共享形态不收）");
+        }
         return None;
     }
     Some("图标来源必须落在本机盘符命名空间（UNC / 远程共享形态不收）")
@@ -424,7 +452,10 @@ pub async fn paths_file_icon<R: tauri::Runtime>(window: WebviewWindow<R>, file_p
 
 #[cfg(test)]
 mod tests {
-    use super::{icon_source_reject_reason, path_value_problem, split_scan_results};
+        use super::{
+            icon_source_reject_reason, path_value_problem, split_scan_results,
+            ALLOWED_KEYS, MAX_ALLOWED_PATH_LEN,
+        };
     use std::path::Path;
 
     /// R6b-M11：图标来源的域内白名单**只按来源命名空间收放**，不按扩展名收放。
@@ -453,11 +484,20 @@ mod tests {
                 .unwrap_or_else(|| panic!("不受信来源 `{bad}` 竟被放行进图标链"));
             reasons.push(reason);
         }
+        // R6b-M16：三个 UNC 现在由 `shellicon::guard_icon_source` 在归一化之前拦下，
+        // 拒因是「UNC / 远程共享路径不作为图标来源」（另两类「本机盘符命名空间」
+        // 文案对应 `Z:` 映射盘与设备形态，不算 UNC 向量）。
         let unc = reasons
             .iter()
-            .filter(|r| r.starts_with("图标来源必须落在本机盘符命名空间"))
+            .filter(|r| r.contains("UNC / 远程共享路径不作为图标来源"))
             .count();
         assert_eq!(unc, 3, "UNC 三向量应各自命中同一条命名空间理由，实到 {unc} 条");
+        assert!(
+            reasons.iter().any(|r| {
+                r.contains("映射盘") || r.contains("UNC / 远程共享路径不作为图标来源")
+            }),
+            "`\\\\?\\UNC\\` 必须被拒（R6b-M16 起由 guard 直接判 UNC，不再走归一后的映射盘文案），不得伪装成本机盘符"
+        );
         assert!(
             reasons.iter().any(|r| r.contains(":: 前缀")),
             "外壳命名空间形态没被 guard 拒掉"
@@ -476,14 +516,13 @@ mod tests {
         );
 
         // ② 放侧：本机盘符命名空间内的各种形状必须放行（含目录、含长路径写法、
-        //    含映射盘符、含「非图标扩展名」的本机文件）
+        //    含「非图标扩展名」的本机文件）
         for good in [
             r"C:\Windows\System32\shell32.dll",
             r"D:\Program Files\App\a.exe",
             r"\\?\C:\Users\tester\AppData\Roaming\com.xiaoxu.trim\backgrounds\a.jpg",
             r"C:\Program Files",
             r"C:\",
-            r"Z:\mapped\tool.exe",
             r"C:\Users\tester\Downloads\report.pdf",
         ] {
             assert!(
@@ -491,6 +530,24 @@ mod tests {
                 "合法本机来源 `{good}` 被图标白名单误拒（收紧过头会打死进程/启动/卸载三处图标）"
             );
         }
+    }
+
+    /// R1a-L05：`paths_save` 的长度上限按**字符数**算，不按 UTF-8 编码长度算。
+    #[test]
+    fn r1a_icon_gate_rejects_mapped_drive() {
+        let reason = icon_source_reject_reason(Path::new(r"Z:\mapped\tool.exe"))
+            .expect("映射盘不得被图标闸放行");
+        assert!(
+            reason.contains("映射盘"),
+            "拒因必须点名映射盘，实到: {reason}"
+        );
+    }
+    #[test]
+    fn r1a_chinese_path_length_uses_chars() {
+        let value = format!(r"C:\中文\{}", "路".repeat(MAX_ALLOWED_PATH_LEN - 6));
+        assert!(ALLOWED_KEYS.contains(&"qqInstallPath"));
+        assert_eq!(value.chars().count(), MAX_ALLOWED_PATH_LEN);
+        assert!(path_value_problem(&value).is_none(), "260 个字符的中文路径必须过形态闸");
     }
 
     /// 2026-10-04 磁盘清理审计 §3.1：`paths_save` 是设备路径绕过的**实际入口**。

@@ -508,6 +508,8 @@ const PANIC_ALLOW = [
   { file: 'src-tauri/src/commands/cleanup/rules.rs', count: 1, reason: '生成器产物 cleanup-postactions.json 的 expect，合法性由 contract_tests 钉住（对 build 产物 fail-fast 正确）' },
   { file: 'src-tauri/src/commands/maintenance.rs', count: 1, reason: '手维护件 maintenance-tasks.json 的 expect（D1-M10：实盘无写盘器），同上' },
   { file: 'src-tauri/src/commands/optimizer/subitems.rs', count: 1, reason: '生成器产物 optimizer-subitems.json 的 expect，同上' },
+  { file: 'src-tauri/src/engine/testcmd.rs', count: 1, reason: 'A14（X1-L01）测试子进程执行器：spawn 失败是**夹具/环境**问题（不是被测行为），本模块只被测试调用，fail-fast 比返回 Err 更能定位' },
+  { file: 'native-scanner/src/testcmd.rs', count: 1, reason: 'A14（X1-L01）同上：native-scanner 侧的独立实现（trim-finder 不依赖 trim-tauri，反向依赖会成环）' },
 ];
 {
   const counts = new Map();

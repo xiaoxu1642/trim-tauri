@@ -207,6 +207,7 @@
     return defendStore.enabled === true;
   }
   function setDefendEnabled(v) { saveStore(DEFEND_ENABLED_KEY, !!v); }
+  let backendScanState = false;
   function updateDefendToggleUI() {
     const t = el('startupDefendToggle');
     if (t) t.checked = isDefendEnabled();
@@ -227,7 +228,7 @@
       return await window.app.confirmDanger(
         '删除被拦截的启动项',
         `「${itemName}」${reason}\n\n删除后该项将不再随本次扫描保留；若程序再次自行创建，下次扫描将再次提示。是否删除？`,
-        '仍然删除',
+        '仍然执行',
         '取消',
         '此操作将删除该启动项（不可恢复，删除前请确认无需再随系统启动）'
       );
@@ -469,16 +470,20 @@
   //   · 有时间戳且 ≥ 12h：读缓存后静默后台重扫（不打断用户）。
   //   · 手动「扫描/刷新」不受间隔限制（scan(true) 走真实扫描并刷新时间戳）。
   async function load() {
-    let last = 0;
-    try { last = Number(localStorage.getItem(SCAN_TS_KEY)) || 0; } catch (e) { /* 同上 */ }
-    if (!last) {
-      // 首次：render() 在 items 为空时本就显示「尚未扫描」引导（cta 指向扫描按钮）
-      render();
-      return;
-    }
-    await scan(false);
-    if (Date.now() - last >= SCAN_INTERVAL_MS && !loading) {
-      void scan(true, true);
+    try {
+      await scan(false);
+      backendScanState = !!(cacheInfo.cached && cacheInfo.cachedAt > 0);
+      if (!backendScanState) {
+        // 首次使用（后端也没有缓存）：render() 在 items 为空时本就显示「尚未扫描」引导
+        render();
+        return;
+      }
+      if (Date.now() - cacheInfo.cachedAt >= SCAN_INTERVAL_MS && !loading) {
+        void scan(true, true);
+      }
+    } catch (e) {
+      window.app?.log?.('warn', `启动项缓存加载失败: ${(e && e.message) || e}`);
+      renderError('启动项列表读取失败，请重试');
     }
   }
 
@@ -530,32 +535,33 @@
   }
 
   function render() {
-    // 逐项回执只服务「刚做完操作的那一屏」：本次渲染消费完立即清账，否则下次手动重扫
-    // 会把旧说明贴回同名项（id 稳定，故残留一定会贴错）。
-    const notes = new Map(receiptNotes);
-    receiptNotes.clear();
-    const enabledCount = items.filter(i => i.enabled).length;
-    const disabledCount = items.length - enabledCount;
-    el('startupTotal').textContent = items.length;
-    el('startupEnabled').textContent = enabledCount;
-    el('startupDisabled').textContent = disabledCount;
-    el('startupListCount').textContent = `${items.length} 项`;
+    try {
+      // 逐项回执只服务「刚做完操作的那一屏」：本次渲染消费完立即清账，否则下次手动重扫
+      // 会把旧说明贴回同名项（id 稳定，故残留一定会贴错）。
+      const notes = new Map(receiptNotes);
+      receiptNotes.clear();
+      const enabledCount = items.filter(i => i.enabled).length;
+      const disabledCount = items.length - enabledCount;
+      el('startupTotal').textContent = items.length;
+      el('startupEnabled').textContent = enabledCount;
+      el('startupDisabled').textContent = disabledCount;
+      el('startupListCount').textContent = `${items.length} 项`;
 
-    const listEl = el('startupList');
-    const filtered = getFiltered();
-    // 真实项为空但仍有幽灵项时，也要把幽灵项渲染出来（否则用户看不到"它们已消失"这条信息）
-    if (!items.length && !ghosts.length) {
-      listEl.innerHTML = window.emptyState
-        ? window.emptyState({ icon: 'search', title: '尚未扫描启动项', desc: '扫描将检测启动文件夹、注册表 Run 键与计划任务中的开机自启项目', cta: { text: '立即扫描', target: 'btnScanStartup' } })
-        : '<div class="empty-state"><p>点击右上角「扫描启动项」开始检测</p></div>';
-      return;
-    }
-    if (!filtered.length) {
-      listEl.innerHTML = window.emptyState
-        ? window.emptyState({ icon: 'box', title: '当前筛选下没有启动项', desc: '尝试切换上方筛选条件，或重新扫描启动项' })
-        : '<div class="empty-state"><p>当前筛选下没有启动项</p></div>';
-      return;
-    }
+      const listEl = el('startupList');
+      const filtered = getFiltered();
+      // 真实项为空但仍有幽灵项时，也要把幽灵项渲染出来（否则用户看不到"它们已消失"这条信息）
+      if (!items.length && !ghosts.length) {
+        listEl.innerHTML = window.emptyState
+          ? window.emptyState({ icon: 'search', title: '尚未扫描启动项', desc: '扫描将检测启动文件夹、注册表 Run 键与计划任务中的开机自启项目', cta: { text: '立即扫描', target: 'btnScanStartup' } })
+          : '<div class="empty-state"><p>点击右上角「扫描启动项」开始检测</p></div>';
+        return;
+      }
+      if (!filtered.length) {
+        listEl.innerHTML = window.emptyState
+          ? window.emptyState({ icon: 'box', title: '当前筛选下没有启动项', desc: '尝试切换上方筛选条件，或重新扫描启动项' })
+          : '<div class="empty-state"><p>当前筛选下没有启动项</p></div>';
+        return;
+      }
 
     listEl.innerHTML = filtered.map(i => {
       const meta = SOURCE_META[i.source] || SOURCE_META.registry;
@@ -566,8 +572,8 @@
           ? window.ds.badgeHtml('danger', '已从系统消失', { small: true })
           : '<span class="startup-badge ghost">已从系统消失</span>';
         const gLoc = i.location || (SOURCE_META[i.source] || SOURCE_META.registry).label;
-        return `
-        <div class="startup-item ghost" data-id="${escapeHtml(i.id)}" data-ghost="1">
+      return `
+        <div class="startup-item ghost" data-id="${escapeHtml(i.id)}" data-ghost="1" tabindex="0" role="button" aria-label="查看幽灵启动项说明">
           <span class="startup-check" aria-hidden="true"></span>
           <div class="startup-item-icon ${meta.cls}">
             <svg class="startup-item-glyph" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
@@ -658,7 +664,7 @@
           })
         : '';
       return `
-        <div class="startup-item ${i.enabled ? '' : 'disabled'}" data-id="${escapeHtml(i.id)}">
+        <div class="startup-item ${i.enabled ? '' : 'disabled'}" data-id="${escapeHtml(i.id)}" tabindex="0" role="button" aria-label="查看 ${escapeHtml(i.name || '未命名')}">
           <input type="checkbox" class="startup-check startup-item-check" data-id="${escapeHtml(i.id)}"${guarded ? ' disabled' : ''} aria-label="选择 ${escapeHtml(i.name || '未命名')}${guarded ? '（系统组件，不可操作）' : ''}">
           <div class="startup-item-icon ${meta.cls}">
             <svg class="startup-item-glyph" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
@@ -691,6 +697,9 @@
 
     // B2：有路径的项提取真实程序图标，失败或无路径时统一兜底为 Trim.ico
     applyStartupIcons(listEl);
+    } finally {
+      unlockListHeight();
+    }
   }
 
   // 启动项图标异步应用：优先 fileIcon(项路径)，失败回退 Trim.ico（icon-fallback 共享缓存）；
@@ -897,7 +906,7 @@ ${enable ? '（启用后该项将随系统启动运行）' : '（禁用后可随
       ok = await window.app.confirmDanger(
         '删除启动项',
         `将删除以下 ${selItems.length} 个启动项（删除前会自动备份）。`,
-        '仍然删除',
+        '仍然执行',
         '取消',
         '此操作不可逆，删除后需重新配置才能恢复。',
         selItems.map(i => ({ name: i.name, text: i.command || i.location || '' }))
@@ -1119,6 +1128,15 @@ ${enable ? '（启用后该项将随系统启动运行）' : '（禁用后可随
     // 复选框变化 -> 更新批量按钮
     el('startupList')?.addEventListener('change', (e) => {
       if (e.target.classList.contains('startup-item-check')) updateBatchButtons();
+    });
+    el('startupList')?.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const row = e.target.closest?.('.startup-item');
+      if (!row || e.target.closest('button, input, label')) return;
+      e.preventDefault();
+      const item = items.find(i => i.id === row.dataset.id);
+      if (item) showIntro(item);
+      else if (row.dataset.ghost) window.app?.toast?.('info', '该项已从系统消失，无可查看的详情');
     });
     // 筛选标签
     el('startupFilter')?.addEventListener('click', (e) => {

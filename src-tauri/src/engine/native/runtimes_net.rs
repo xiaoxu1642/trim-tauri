@@ -7,7 +7,7 @@
 use crate::engine::systembin::system_tool;
 use serde_json::{Value, json};
 use windows::core::PCWSTR;
-use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_DWORD, RegCloseKey, RegOpenKeyExW, RegSetValueExW};
+use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE, REG_DWORD, RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW};
 use super::common::*;
 use super::registry::*;
 use super::services::*;
@@ -89,6 +89,33 @@ fn mask_proxy(s: &str) -> String {
     if had_userinfo { format!("***:***@{mask}") } else { mask }
 }
 
+/// PAC（AutoConfigURL）代理状态。
+///
+/// R5b-L02：`AutoConfigURL` 存在时，代理状态必须如实报告为 PAC，而不是
+/// 「用户代理未启用」。返回 `(status, detail, evidence, repair_id)`。
+fn pac_proxy_status(
+    has_pac: bool,
+    pac: &str,
+    p_gpo: bool,
+    p_enable: bool,
+    p_server: &str,
+) -> (Option<&'static str>, String, Vec<String>, Option<&'static str>) {
+    if !has_pac {
+        return (None, String::new(), Vec::new(), None);
+    }
+    let mut evidence = vec![format!("PAC（自动配置脚本）：{}", mask_proxy(pac))];
+    let (status, detail) = if p_gpo {
+        ("warn", "代理由组策略下发 PAC（由组织管理），本工具不提供修复入口".to_string())
+    } else if p_enable && !p_server.is_empty() {
+        evidence.push(format!("用户代理已启用：{}", mask_proxy(p_server)));
+        ("warn", "已配置固定代理且启用 PAC，浏览器将同时应用两者".to_string())
+    } else {
+        ("ok", "检测到 PAC 自动配置脚本，系统代理未启用".to_string())
+    };
+    let repair = if p_gpo { None } else { Some("reset-pac") };
+    (Some(status), detail, evidence, repair)
+}
+
 /// 单端点监听判定：Some(true/false) = 有结论；None = 不可判定（无端口 / 非本机 /
 /// 双栈探针都不可用）。IPv4 与 IPv6 各探一次，任一在听即算在听。
 fn endpoint_listening(host: &str, port: Option<u16>) -> Option<bool> {
@@ -105,6 +132,84 @@ fn endpoint_listening(host: &str, port: Option<u16>) -> Option<bool> {
     if probes.iter().any(|p| *p == Some(true)) { Some(true) }
     else if probes.iter().any(|p| p.is_some()) { Some(false) }
     else { None }
+}
+
+/// 外网连通性探测（受总 deadline 约束）。
+///
+/// R5b-L03：`resolve` 与 `connect` 均为可注入闭包（生产路径分别是 `to_socket_addrs`
+/// 与 `TcpStream::connect_timeout`）。`resolve` 在独立线程执行，主线程只等剩余预算；
+/// 串行探测共享同一个 `deadline`，超时立即收口返回，绝不无限等待黑洞 DNS。
+fn probe_external_connectivity(
+    resolve: &std::sync::Arc<dyn Fn(&str, u16) -> Option<Vec<std::net::SocketAddr>> + Send + Sync>,
+    connect: &std::sync::Arc<dyn Fn(&std::net::SocketAddr, std::time::Duration) -> bool + Send + Sync>,
+    deadline: std::time::Instant,
+) -> (bool, Vec<String>) {
+    use std::sync::mpsc::channel;
+    const PER_CONNECT_CAP: std::time::Duration = std::time::Duration::from_millis(2500);
+    let mut evidence = Vec::new();
+    let mut ok = false;
+    for (host, port) in [("223.5.5.5", 443u16), ("www.baidu.com", 443u16)] {
+        if ok { break; }
+        let now = std::time::Instant::now();
+        if now >= deadline { break; }
+        let remaining = deadline.saturating_duration_since(now);
+        // DNS 解析在独立线程跑，主线程只等 remaining；超时即放弃该端点。
+        let (tx, rx) = channel();
+        let host_owned = host.to_string();
+        let tx_owned = tx.clone();
+        let resolve_arc = std::sync::Arc::clone(resolve);
+        std::thread::spawn(move || {
+            let _ = tx_owned.send(resolve_arc(&host_owned, port));
+        });
+        drop(tx);
+        let addrs = match rx.recv_timeout(remaining) {
+            Ok(Some(a)) => a,
+            Ok(None) => {
+                evidence.push(format!("外网 {host}:{port}：DNS 解析无结果"));
+                continue;
+            }
+            Err(_) => {
+                evidence.push(format!("外网 {host}:{port}：DNS 解析超时"));
+                continue;
+            }
+        };
+        if addrs.is_empty() {
+            evidence.push(format!("外网 {host}:{port}：DNS 解析无结果"));
+            continue;
+        }
+        for addr in addrs {
+            if std::time::Instant::now() >= deadline { break; }
+            let per_connect = deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .min(PER_CONNECT_CAP);
+            if connect(&addr, per_connect) {
+                ok = true;
+                evidence.push(format!("外网 {host}:{port}：可达"));
+                break;
+            }
+        }
+    }
+    if !ok && std::time::Instant::now() < deadline {
+        // 兜底：仅验证 DNS 可解析也算一种连通性证据（与旧行为一致）。
+        let (tx, rx) = channel();
+        let tx_owned = tx.clone();
+        let resolve_arc = std::sync::Arc::clone(resolve);
+        std::thread::spawn(move || {
+            let _ = tx_owned.send(resolve_arc("www.baidu.com", 443));
+        });
+        drop(tx);
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(Some(_)) => {
+                ok = true;
+                evidence.push("DNS 解析 www.baidu.com 成功".to_string());
+            }
+            _ => {
+                evidence.push("外网探测不可达（TCP 443 与 DNS 解析均失败）".to_string());
+            }
+        }
+    }
+    (ok, evidence)
 }
 
 pub fn runtimes_status() -> Result<Value, String> {
@@ -130,7 +235,7 @@ pub fn runtimes_status() -> Result<Value, String> {
             let sk = to_wide(reg_path);
             let mut hk = HKEY::default();
             let installed = if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok() {
-                let inst = reg_read_dword_val(hk, "Installed").unwrap_or(0) == 1;
+                let inst = reg_read_dword_u32(hk, "Installed").unwrap_or(0) == 1;
                 let ver = reg_read_string(hk, "Version").unwrap_or_default();
                 let _ = RegCloseKey(hk);
                 (inst, ver)
@@ -170,8 +275,8 @@ pub fn runtimes_status() -> Result<Value, String> {
         let sk = to_wide(ndp_path);
         let mut hk = HKEY::default();
         if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok() {
-            let install = reg_read_dword_val(hk, "Install").unwrap_or(0) == 1;
-            let release = reg_read_dword_val(hk, "Release").unwrap_or(0);
+            let install = reg_read_dword_u32(hk, "Install").unwrap_or(0) == 1;
+            let release = reg_read_dword_u32(hk, "Release").unwrap_or(0);
             let _ = RegCloseKey(hk);
             if install && release > 0 {
                 let mut ver_name = format!("4.x（Release {release}）");
@@ -208,7 +313,7 @@ pub fn runtimes_status() -> Result<Value, String> {
         let sk = to_wide(ndp35_path);
         let mut hk = HKEY::default();
         let net35_installed = if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok() {
-            let inst = reg_read_dword_val(hk, "Install").unwrap_or(0) == 1;
+            let inst = reg_read_dword_u32(hk, "Install").unwrap_or(0) == 1;
             let _ = RegCloseKey(hk);
             inst
         } else { false };
@@ -565,9 +670,14 @@ pub fn netcheck_status() -> Result<Value, String> {
             ServiceQuery::NotFound => ("warn", "未找到 Dhcp 服务".to_string(), Value::Null, vec!["Dhcp 服务：未找到".to_string()]),
             ServiceQuery::Unknown => ("warn", "Dhcp 服务查询失败（权限或 SCM 异常）".to_string(), Value::Null, vec!["Dhcp 服务：查询失败".to_string()]),
             ServiceQuery::State(state) => {
-                let state_str = match state { 4 => "Running", 1 => "Stopped", _ => "Unknown" };
+                // B03（方案 R5e-L04）：裸 4 / 1 换成服务状态常量。
+                let state_str = match state {
+                    super::services::SVC_RUNNING => "Running",
+                    super::services::SVC_STOPPED => "Stopped",
+                    _ => "Unknown",
+                };
                 let ev = format!("Dhcp 服务：{state_str}；DHCP 网卡启用：{dhcp_in_use}");
-                if state == 4 {
+                if state == super::services::SVC_RUNNING {
                     ("ok", "Dhcp 服务运行正常".to_string(), Value::Null, vec![ev])
                 } else if dhcp_in_use {
                     ("fail", "有网卡使用 DHCP（自动获取 IP），但 DHCP 服务未运行".to_string(),
@@ -585,7 +695,7 @@ pub fn netcheck_status() -> Result<Value, String> {
         let mut dns_evidence: Vec<String> = Vec::new();
         let mut dns_unknown = false;
         let dns_svc = match dns_query {
-            ServiceQuery::State(state) => Some((state, 0)),
+            ServiceQuery::State(state) => Some(state),
             ServiceQuery::NotFound => None,
             ServiceQuery::Unknown => {
                 dns_unknown = true;
@@ -593,8 +703,13 @@ pub fn netcheck_status() -> Result<Value, String> {
                 None
             }
         };
-        if let Some((state, _)) = dns_svc {
-            let state_str = match state { 4 => "Running", 1 => "Stopped", _ => "Unknown" };
+        if let Some(state) = dns_svc {
+            // B03（方案 R5e-L04）：裸 4 / 1 换成服务状态常量。
+            let state_str = match state {
+                super::services::SVC_RUNNING => "Running",
+                super::services::SVC_STOPPED => "Stopped",
+                _ => "Unknown",
+            };
             dns_evidence.push(format!("Dnscache 服务：{state_str}"));
         }
         let mut has_dns = false;
@@ -604,7 +719,8 @@ pub fn netcheck_status() -> Result<Value, String> {
                 dns_evidence.push(format!("DNS {}：{}", n.name, n.dns.join(", ")));
             }
         }
-        let dns_svc_stopped = dns_svc.map(|(s, _)| s != 4).unwrap_or(false);
+        // B03（方案 R5e-L04）：裸 4 换成服务状态常量。
+        let dns_svc_stopped = dns_svc.map(|s| s != super::services::SVC_RUNNING).unwrap_or(false);
         let (dns_status, dns_detail, dns_repair) = if dns_unknown {
             ("warn", "DNS Client 服务查询失败，无法确认其运行状态".to_string(), Value::Null)
         } else if dns_svc_stopped || !has_dns {
@@ -632,18 +748,19 @@ pub fn netcheck_status() -> Result<Value, String> {
         let ie_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
         let sk = to_wide(ie_path);
         let mut hk = HKEY::default();
-        let (p_enable, p_server) = if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok() {
-            let enable = reg_read_dword_val(hk, "ProxyEnable").unwrap_or(0) == 1;
+        let (p_enable, p_server, p_pac) = if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok() {
+            let enable = reg_read_dword_u32(hk, "ProxyEnable").unwrap_or(0) == 1;
             let server = reg_read_string(hk, "ProxyServer").unwrap_or_default();
+            let pac = reg_read_string(hk, "AutoConfigURL").unwrap_or_default();
             let _ = RegCloseKey(hk);
-            (enable, server)
-        } else { (false, String::new()) };
+            (enable, server, pac)
+        } else { (false, String::new(), String::new()) };
         // 组策略代理
         let gpo_path = r"Software\Policies\Microsoft\Windows\CurrentVersion\Internet Settings";
         let gsk = to_wide(gpo_path);
         let mut ghk = HKEY::default();
         let p_gpo = if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(gsk.as_ptr()), Some(0), KEY_READ, &mut ghk).is_ok() {
-            let g = reg_read_dword_val(ghk, "ProxyEnable").unwrap_or(0) == 1;
+            let g = reg_read_dword_u32(ghk, "ProxyEnable").unwrap_or(0) == 1;
             let _ = RegCloseKey(ghk);
             g
         } else { false };
@@ -651,7 +768,20 @@ pub fn netcheck_status() -> Result<Value, String> {
         // API 读取失败是「未知」，不能当成「无代理」。
         let winhttp_proxy = winhttp_proxy_native();
         let winhttp_has_proxy = matches!(winhttp_proxy, Some(Some(_)));
-        if p_gpo {
+        // R5b-L02：PAC（AutoConfigURL）存在时是独立状态——既不等于「用户代理未启用」，
+        // 也不等于固定代理。旧实现只读 ProxyEnable/ProxyServer，PAC 存在时落入
+        // 「未启用」分支，UI 会给出错误的修复建议。
+        let (pac_status, pac_detail, pac_evidence, pac_repair) = pac_proxy_status(
+            !p_pac.trim().is_empty(), &p_pac, p_gpo, p_enable, &p_server,
+        );
+        if let Some(st) = pac_status {
+            proxy_status = st;
+            proxy_detail = pac_detail;
+            proxy_evidence.extend(pac_evidence);
+            if let Some(rep) = pac_repair {
+                proxy_repair = json!({"id": rep});
+            }
+        } else if p_gpo {
             proxy_status = "warn";
             proxy_evidence.push("检测到组策略下发的代理（由组织管理）".to_string());
             proxy_detail = "代理由组策略下发，本工具不提供修复入口".to_string();
@@ -735,28 +865,18 @@ pub fn netcheck_status() -> Result<Value, String> {
         } else {
             net_evidence.push("无默认网关，跳过网关探测".to_string());
         }
-        // 外网探测
-        let mut net_ok = false;
-        for (host, port) in [("223.5.5.5", 443u16), ("www.baidu.com", 443u16)] {
-            if let Ok(addrs) = (host, port).to_socket_addrs() {
-                for addr in addrs {
-                    if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(2500)).is_ok() {
-                        net_ok = true;
-                        net_evidence.push(format!("外网 {host}:{port}：可达"));
-                        break;
-                    }
-                }
-            }
-            if net_ok { break; }
-        }
-        if !net_ok {
-            if std::net::ToSocketAddrs::to_socket_addrs(&("www.baidu.com", 443)).is_ok() {
-                net_ok = true;
-                net_evidence.push("DNS 解析 www.baidu.com 成功".to_string());
-            } else {
-                net_evidence.push("外网探测不可达（TCP 443 与 DNS 解析均失败）".to_string());
-            }
-        }
+        // R5b-L03：外网探测必须受**总 deadline** 约束。旧实现每个 connect 各自 2.5s 超时，
+        // 但 `to_socket_addrs` 是同步阻塞、没有超时（黑洞 DNS 可挂十几秒），且多个端点
+        // 串行累加。这里给整段探测 8s 总预算：DNS 解析在独立线程跑、主线程用
+        // `recv_timeout` 等剩余预算，串行探测共享同一 deadline，任何一环超时立即收口。
+        const PROBE_TOTAL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
+        let deadline = std::time::Instant::now() + PROBE_TOTAL_DEADLINE;
+        let resolve: std::sync::Arc<dyn Fn(&str, u16) -> Option<Vec<std::net::SocketAddr>> + Send + Sync> =
+            std::sync::Arc::new(|h, p| (h, p).to_socket_addrs().ok().map(|i| i.collect()));
+        let connect: std::sync::Arc<dyn Fn(&std::net::SocketAddr, std::time::Duration) -> bool + Send + Sync> =
+            std::sync::Arc::new(|addr, timeout| std::net::TcpStream::connect_timeout(addr, timeout).is_ok());
+        let (net_ok, probe_evidence) = probe_external_connectivity(&resolve, &connect, deadline);
+        net_evidence.extend(probe_evidence);
         let (net_status, net_detail) = if gw_ok && net_ok {
             ("ok", String::new())
         } else if gw_ok {
@@ -976,6 +1096,26 @@ pub fn netcheck_repair(action_id: &str, repair: &Value) -> Result<Value, String>
                 Ok(json!({"ok": false, "message": "WinHTTP 代理重置失败"}))
             }
         }
+        "reset-pac" => {
+            // R5b-L02：删除 AutoConfigURL 即清除 PAC 自动配置脚本。残留 PAC 会导致
+            // 「代理未启用但流量仍被劫持」，必须给独立修复入口。
+            unsafe {
+                let key = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+                let sk = to_wide(key);
+                let mut hk = HKEY::default();
+                if RegOpenKeyExW(HKEY_CURRENT_USER, PCWSTR(sk.as_ptr()), Some(0), KEY_WRITE, &mut hk).is_err() {
+                    return Ok(json!({"ok": false, "message": "无法打开代理设置键"}));
+                }
+                let nm = to_wide("AutoConfigURL");
+                let r = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));
+                let _ = RegCloseKey(hk);
+                if r.is_ok() {
+                    Ok(json!({"ok": true, "message": "PAC 自动配置脚本已清除"}))
+                } else {
+                    Ok(json!({"ok": false, "message": "PAC 清除失败（值不存在或权限不足）"}))
+                }
+            }
+        }
         _ => Err(format!("未知的修复动作: {action_id}")),
     }
 }
@@ -1081,5 +1221,111 @@ mod tests {
         let masked = mask_proxy("http://user:secret@127.0.0.1:8080");
         assert!(!masked.contains("user") && !masked.contains("secret"), "{masked}");
         assert!(masked.starts_with("***:***@"), "带 userinfo 的回显必须显式掩码：{masked}");
+    }
+
+    /// R5b-L02：存在 AutoConfigURL（PAC）时，状态不得是「用户代理未启用」。
+    /// 判红自证：删掉 `pac_proxy_status` 的 PAC 分支（has_pac 恒返回 None）⇒ 本条红。
+    #[test]
+    fn r5b_pac_autoconfig_is_reported() {
+        let (status, detail, evidence, repair) = pac_proxy_status(
+            true,
+            "http://127.0.0.1:8080/proxy.pac",
+            false,
+            false,
+            "",
+        );
+        assert_eq!(status, Some("ok"), "纯 PAC 应判 ok：{detail}");
+        assert!(detail.contains("PAC"), "detail 必须点名 PAC：{detail}");
+        assert!(evidence.iter().any(|e| e.contains("PAC")), "{evidence:?}");
+        assert_eq!(repair, Some("reset-pac"), "必须提供 PAC 修复入口");
+
+        // 无 PAC 时不得误报 PAC。
+        let (status, _, evidence, repair) = pac_proxy_status(false, "", false, false, "");
+        assert_eq!(status, None);
+        assert!(evidence.is_empty());
+        assert_eq!(repair, None);
+
+        // PAC + 固定代理：必须两者都点名，不能只报其一。
+        let (status, detail, evidence, _) = pac_proxy_status(
+            true,
+            "http://127.0.0.1:8080/proxy.pac",
+            false,
+            true,
+            "127.0.0.1:7890",
+        );
+        assert_eq!(status, Some("warn"));
+        assert!(detail.contains("固定代理"), "{detail}");
+        assert!(evidence.iter().any(|e| e.contains("用户代理已启用")), "{evidence:?}");
+
+        // 组策略 PAC：不得提供修复入口（会被策略写回）。
+        let (_, detail, _, repair) = pac_proxy_status(
+            true,
+            "http://pac.corp/proxy.pac",
+            true,
+            false,
+            "",
+        );
+        assert!(detail.contains("组策略"), "{detail}");
+        assert_eq!(repair, None, "组策略 PAC 不得提供重置入口");
+    }
+
+    /// R5b-L03：黑洞 DNS（解析永不返回）时，探测必须在总 deadline 内收口。
+    /// 判红自证：去掉 `recv_timeout`（直接 join 解析线程）⇒ 测试挂起超过 deadline 红。
+    #[test]
+    fn r5b_probe_respects_total_deadline() {
+        use std::time::{Duration, Instant};
+        // 黑洞 DNS：永远不返回。探测必须受 8s 总 deadline 约束。
+        let blackhole: std::sync::Arc<dyn Fn(&str, u16) -> Option<Vec<std::net::SocketAddr>> + Send + Sync> =
+            std::sync::Arc::new(|_: &str, _: u16| -> Option<Vec<std::net::SocketAddr>> {
+            std::thread::sleep(Duration::from_secs(60));
+            None
+        });
+        let never_connect: std::sync::Arc<dyn Fn(&std::net::SocketAddr, Duration) -> bool + Send + Sync> =
+            std::sync::Arc::new(|_: &std::net::SocketAddr, _: Duration| -> bool { false });
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let start = Instant::now();
+        let (ok, evidence) = probe_external_connectivity(&blackhole, &never_connect, deadline);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed <= Duration::from_secs(10),
+            "黑洞 DNS 必须在总 deadline 附近收口，实际耗时 {elapsed:?}"
+        );
+        assert!(!ok);
+        assert!(
+            evidence.iter().any(|e| e.contains("超时")),
+            "必须如实报告 DNS 超时：{evidence:?}"
+        );
+    }
+
+    /// R5b-L03 正向对照：快速失败与快速成功都必须尊重总 deadline。
+    #[test]
+    fn r5b_probe_positive_control() {
+        use std::time::{Duration, Instant};
+        // 解析立即成功、连接立即失败 → 走完全部端点后返回 false。
+        let fast_resolve: std::sync::Arc<dyn Fn(&str, u16) -> Option<Vec<std::net::SocketAddr>> + Send + Sync> =
+            std::sync::Arc::new(|h: &str, _p: u16| -> Option<Vec<std::net::SocketAddr>> {
+            if h == "223.5.5.5" {
+                Some(vec!["223.5.5.5:443".parse().unwrap()])
+            } else if h == "www.baidu.com" {
+                Some(vec!["127.0.0.1:443".parse().unwrap()])
+            } else {
+                None
+            }
+        });
+        let never_connect: std::sync::Arc<dyn Fn(&std::net::SocketAddr, Duration) -> bool + Send + Sync> =
+            std::sync::Arc::new(|_: &std::net::SocketAddr, _: Duration| -> bool { false });
+        let deadline = Instant::now() + Duration::from_secs(8);
+        // 快速失败场景：所有 TCP 连接失败 + 兜底 DNS 也失败 → ok=false，并报告不可达。
+        let fail_resolve: std::sync::Arc<dyn Fn(&str, u16) -> Option<Vec<std::net::SocketAddr>> + Send + Sync> =
+            std::sync::Arc::new(|_: &str, _: u16| -> Option<Vec<std::net::SocketAddr>> { None });
+        let (ok, evidence) = probe_external_connectivity(&fail_resolve, &never_connect, deadline);
+        assert!(!ok, "TCP 全失败且 DNS 全失败必须判不可达");
+        assert!(evidence.iter().any(|e| e.contains("不可达")), "{evidence:?}");
+
+        // 解析成功 + 连接成功 → 立即返回 true。
+        let always_connect: std::sync::Arc<dyn Fn(&std::net::SocketAddr, Duration) -> bool + Send + Sync> =
+            std::sync::Arc::new(|_: &std::net::SocketAddr, _: Duration| -> bool { true });
+        let (ok, _) = probe_external_connectivity(&fast_resolve, &always_connect, deadline);
+        assert!(ok);
     }
 }

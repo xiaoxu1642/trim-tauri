@@ -34,7 +34,6 @@ import { blankNonCode } from './lib/src-scan.mjs';
 import { ORIGIN, REPO_ROOT } from './ps-origin.mjs';
 
 const require = createRequire(import.meta.url);
-const g = gate(import.meta.url);
 const R = (rel) => readFileSync(join(REPO_ROOT, ...rel.split('/')), 'utf8');
 
 let fail = 0;
@@ -117,10 +116,14 @@ function judgeItem(o) {
 }
 
 /** 只剥注释、保留字符串；语言按扩展名选择，统一走 src-scan 状态机。 */
-function stripComments(text, file = '') {
+function fileLang(file = '') {
   const ext = String(file).slice(String(file).lastIndexOf('.')).toLowerCase();
-  const lang = ext === '.rs' ? 'rs' : ext === '.html' ? 'html' : ext === '.css' ? 'css' : 'js';
-  return blankNonCode(String(text), lang, { keepStrings: true });
+  return ext === '.rs' ? 'rs' : ext === '.html' ? 'html' : ext === '.css' ? 'css' : 'js';
+}
+
+/** 只剥注释、保留字符串；语言按扩展名选择，统一走 src-scan 状态机。 */
+function stripComments(text, file = '') {
+  return blankNonCode(String(text), fileLang(file), { keepStrings: true });
 }
 
 // ===========================================================================

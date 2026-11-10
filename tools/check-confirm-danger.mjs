@@ -42,9 +42,9 @@ const files = walkFiles(dir, (f) => f.endsWith('.js'))
   .map((p) => relative(dir, p).replace(/\\/g, '/')).sort();
 
 // 扫描面地板（P0-4）：目录塌陷/改名 ⇒ files=[]，末尾「✓ 0 个脚本无对象形态调用」是空集假绿。
-// 下限 10 是现算值（48 个 .js）的明显下界——只拦整目录消失/几近塌陷，不拦正常增删。
+// 下限 10 是明显下界——只拦整目录塌陷，不拦正常增删。
 if (files.length < 10) {
-  console.error(`✗ src/scripts 只剩 ${files.length} 个 .js ⇒ 扫描面塌陷（现算 48），拒绝判绿`);
+  console.error(`✗ src/scripts 只剩 ${files.length} 个 .js ⇒ 扫描面塌陷，拒绝判绿`);
   process.exit(1);
 }
 
@@ -269,6 +269,180 @@ if (grow.length) {
   }
 } else {
   console.log('✓ 确认件 await 的 try 归属不高于基线（B3-2/B3-3 范围内 cleanup.js / startup.js 均为 0）');
+}
+
+// F4b-L08：清空全部网速报告必须与 diskbench「清空历史」同档（confirmDanger）。
+{
+  const rt = readFileSync(join(dir, 'realtime.js'), 'utf8');
+  const at = rt.indexOf(".rt-clear-all");
+  const block = at >= 0 ? rt.slice(at, at + 2200) : '';
+  const judge = (text) => {
+    const i = text.indexOf('.rt-clear-all');
+    if (i < 0) return false;
+    const seg = text.slice(i, i + 2200);
+    return seg.includes('confirmDanger');
+  };
+  const good = "backdrop.querySelector('.rt-clear-all').addEventListener('click', async () => {\n  const ok = await window.app?.confirmDanger?.('清空', '不可恢复');\n});";
+  const bad = "backdrop.querySelector('.rt-clear-all').addEventListener('click', async () => {\n  const ok = await window.app?.confirm?.('清空', '不可恢复');\n});";
+  if (!judge(good) || judge(bad)) {
+    console.error('✗ 正向对照失败：网速报告清空确认档位判定器失真');
+    process.exit(1);
+  }
+  if (!block || !block.includes('confirmDanger')) {
+    console.error('✗ src/scripts/realtime.js — 「清空全部网速报告」仍走普通 confirm（应与测速历史清空同档 confirmDanger）');
+    process.exit(1);
+  }
+  console.log('✓ 清空全部网速报告走 confirmDanger（与测速历史清空同档）');
+}
+
+// F4a2-L47：外设「应用到注册表」与「恢复 Windows 默认」同档（总方案 §9 拍板记录 1）。
+{
+  const pt = readFileSync(join(dir, 'peripheral.js'), 'utf8');
+  const at = pt.indexOf('#btnPeriApply');
+  const block = at >= 0 ? pt.slice(at, at + 2200) : '';
+  const judge = (text) => {
+    const i = text.indexOf('#btnPeriApply');
+    if (i < 0) return false;
+    return text.slice(i, i + 2200).includes('confirmDanger');
+  };
+  const good = "backdrop.querySelector('#btnPeriApply')?.addEventListener('click', async () => {\n  const ok = await window.app?.confirmDanger?.('应用', '写入注册表');\n});";
+  const bad = "backdrop.querySelector('#btnPeriApply')?.addEventListener('click', async () => {\n  const resp = await window.api.peripheralWindow.apply({});\n});";
+  if (!judge(good) || judge(bad)) {
+    console.error('✗ 正向对照失败：外设应用确认档位判定器失真');
+    process.exit(1);
+  }
+  if (!block || !block.includes('confirmDanger')) {
+    console.error('✗ src/scripts/peripheral.js — 「应用到注册表」仍缺少 confirmDanger（应与恢复默认同档）');
+    process.exit(1);
+  }
+  console.log('✓ 外设「应用到注册表」走 confirmDanger（与恢复 Windows 默认同档）');
+}
+
+console.log('');
+
+// ---------- C-06（F4a1-L13）：红色高危确认的按钮文案必须统一 ----------
+// AGENTS §3：「高危确认对话框的默认焦点在主按钮（用户 2026-10-03 拍板）」，
+// 配套口径是**红色按钮 + 「仍然执行」措辞 + 结构化警示**。本组判据盯措辞：
+// 按钮上写「确认清理」「仍然清理」这类动作名，会让用户把红色按钮读成「清理按钮」，
+// 而不是「这一步不可逆，你确认要执行」——护栏的位置对了，牌子却挂错了。
+// 动作名（清理/登记/清空回收站…）应当放进**正文**。
+//
+// 显式例外：某些动作需要按钮直陈其名（「清空回收站」），登记在 EXCEPTIONS 里并写明理由。
+const DANGER_BUTTON_TEXT = '仍然执行';
+// 两类例外：
+// ① **刻意保留**：按钮直陈其名更少歧义（如「清空回收站」——用户要清的是那个具名容器）。
+// ② **存量未统一（已收口 2026-11-10）**：本方案只点名了少数几处，其余存量此前登记在此，
+//    现已全部统一为「仍然执行」并移出表（见回执 §4.5 / 收口遗留 C-06）。表收敛到仅 1 条
+//    刻意保留项；此后任何 confirmDanger 调用按钮文案非「仍然执行」即判红（只减不增）。
+const DANGER_BUTTON_EXCEPTIONS = [
+  {
+    file: 'cleanup.js',
+    text: '清空回收站',
+    reason: '该动作清空的是「回收站」这个具名容器，按钮直陈其名比「仍然执行」更少歧义（用户知道要清的是回收站）',
+  },
+];
+{
+  // 找 `confirmDanger(` 调用点，取其**第三个位置参数**（title, message, okText）。
+  // 解析按括号深度走：title/message 里的逗号、括号、字符串都不能提前截断。
+  function thirdArgOfDangerCall(text, callIdx) {
+    let i = callIdx;
+    let depth = 0;
+    let argStart = -1;
+    let argIndex = 0;
+    let q = null;
+    for (; i < text.length; i++) {
+      const c = text[i];
+      if (q) {
+        if (c === '\\') { i++; continue; }
+        if (c === q) q = null;
+        continue;
+      }
+      if (c === '"' || c === "'" || c === '`') { q = c; continue; }
+      if (c === '(' || c === '[' || c === '{') {
+        depth++;
+        if (depth === 1 && c === '(') { argStart = i + 1; argIndex = 0; }
+        continue;
+      }
+      if (c === ')' || c === ']' || c === '}') {
+        depth--;
+        if (depth === 0) return null; // 参数表没走完就闭合了 ⇒ 形态异常，不判
+        continue;
+      }
+      if (c === ',' && depth === 1) {
+        argIndex++;
+        if (argIndex === 2) {
+  // 第三个参数：从这个逗号后到下一个顶层逗号或闭括号。
+          const rest = text.slice(i + 1);
+          let d = 0;
+          let qq = null;
+          for (let k = 0; k < rest.length; k++) {
+            const cc = rest[k];
+            if (qq) {
+              if (cc === '\\') { k++; continue; }
+              if (cc === qq) qq = null;
+              continue;
+            }
+            if (cc === '"' || cc === "'" || cc === '`') { qq = cc; continue; }
+            if (cc === '(' || cc === '[' || cc === '{') { d++; continue; }
+            if (cc === ')' || cc === ']' || cc === '}') {
+              if (d === 0) return rest.slice(0, k).trim();
+              d--;
+              continue;
+            }
+            if (cc === ',' && d === 0) return rest.slice(0, k).trim();
+          }
+          return rest.trim();
+        }
+        continue;
+      }
+    }
+    return null;
+  }
+
+  const RE_DANGER_CALL = /\bconfirmDanger\s*(?:\?\.)?\s*\(/g;
+  const badButtons = [];
+  let dangerCalls = 0;
+  for (const f of files) {
+    const text = readFileSync(join(dir, f), 'utf8');
+    const clean = stripBlockComments(text);
+    for (const m of text.matchAll(RE_DANGER_CALL)) {
+      if (inLineComment(text, m.index)) continue;
+      const arg = thirdArgOfDangerCall(clean, m.index);
+      if (arg === null) continue; // 形态异常（不是位置参数形态）——不在本组判据面
+      dangerCalls++;
+      const literal = arg.match(/^(['"])([\s\S]*?)\1$/);
+      if (!literal) continue; // 非常量文案（变量传入）——不在本组判据面
+      const btn = literal[2];
+      if (btn === DANGER_BUTTON_TEXT) continue;
+      const excused = DANGER_BUTTON_EXCEPTIONS.some(
+        (e) => e.file === f && e.text === btn,
+      );
+      if (excused) continue;
+      badButtons.push(`${f}: 高危确认按钮文案「${btn}」应为「${DANGER_BUTTON_TEXT}」（动作名请放正文）`);
+    }
+  }
+  if (badButtons.length) {
+    for (const b of badButtons) console.error(`✗ ${b}`);
+    console.error(`✗ C-06 高危确认按钮文案回归：${badButtons.length} 处`);
+    process.exit(1);
+  }
+  // 判红自证：旧文案「确认清理」必须被判红，新文案放行。
+  {
+    const sampleBad = "await window.app?.confirmDanger('t', 'm', '确认清理', '取消');";
+    const sampleGood = "await window.app?.confirmDanger('t', 'm', '仍然执行', '取消');";
+    const judge = (src) => {
+      const arg = thirdArgOfDangerCall(stripBlockComments(src), src.indexOf('confirmDanger'));
+      if (arg === null) return false;
+      const literal = arg.match(/^(['"])([\s\S]*?)\1$/);
+      if (!literal) return false;
+      return literal[2] !== DANGER_BUTTON_TEXT;
+    };
+    if (!judge(sampleBad) || judge(sampleGood)) {
+      console.error('✗ C-06 正向对照失败：高危按钮文案判定器失真（旧文案必须判红、新文案必须放行）');
+      process.exit(1);
+    }
+  }
+  console.log(`✓ C-06 高危确认按钮文案统一为「${DANGER_BUTTON_TEXT}」（${dangerCalls} 处 confirmDanger 调用；例外 ${DANGER_BUTTON_EXCEPTIONS.length} 条）`);
 }
 
 console.log('');

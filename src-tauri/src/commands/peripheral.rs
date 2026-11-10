@@ -54,6 +54,22 @@ pub struct ApplyOptions {
     mouse: Option<Value>,
 }
 
+/// 解析调用方传入的 options：`None` 走默认（两组都不改），非法形状（非对象）必须 Err，
+/// 不得静默兜底成空对象——否则「解析失败」会被吞成一次空写入（R1b-L15）。
+fn parse_apply_options(options: Option<Value>) -> Result<ApplyOptions, String> {
+    match options {
+        None => Ok(ApplyOptions::default()),
+        Some(v) => {
+            // 显式要求对象形状：serde 对 `Option<Value>` 字段的宽松 struct 解析可能吞掉
+            // 非对象输入（数组/字符串），这里必须自己拦，否则「坏 options」不会 Err。
+            if !v.is_object() {
+                return Err("外设优化参数必须是对象".to_string());
+            }
+            serde_json::from_value(v).map_err(|e| format!("外设优化参数解析失败: {e}"))
+        }
+    }
+}
+
 /// peripheral:apply —— 白名单校验后写 HKLM（成功修剪备份）
 ///
 /// 档位（2026-10-07）：外设优化改应用内弹窗后，唯一调用方是主窗，故用 `guard::MAIN`。
@@ -61,7 +77,7 @@ pub struct ApplyOptions {
 #[tauri::command]
 pub async fn peripheral_apply<R: tauri::Runtime>(
     window: WebviewWindow<R>,
-    options: Option<ApplyOptions>,
+    options: Option<Value>,
 ) -> Result<Value, String> {
     guard::guard(&window, guard::MAIN)?;
     if !crate::engine::sysinfo::is_admin() {
@@ -70,7 +86,7 @@ pub async fn peripheral_apply<R: tauri::Runtime>(
             "message": "外设优化需要管理员权限，请先提权"
         }));
     }
-    let opts = options.unwrap_or_default();
+    let opts = parse_apply_options(options)?;
 
     // null/缺省 → -1（该组不改）；显式整数必须命中白名单，否则记下非法组
     let mut filtered = serde_json::Map::new();
@@ -100,10 +116,8 @@ pub async fn peripheral_apply<R: tauri::Runtime>(
         return Ok(json!({ "success": false, "message": "没有需要应用的设置" }));
     }
 
-    let payload = Value::Object(filtered).to_string();
-
     // S3：纯 Rust 原生
-    let opts_val: Value = serde_json::from_str(&payload).unwrap_or(json!({}));
+    let opts_val = Value::Object(filtered);
     // 性能优化 P1：注册表写入 + 备份目录裁剪（read_dir + 回收站）全是同步 I/O，整段进
     // 阻塞池。「应用完成」日志保持原顺序（先记完成、再裁备份），失败文案一字未改。
     let applied = tauri::async_runtime::spawn_blocking(move || {
@@ -376,6 +390,29 @@ mod tests {
         assert_eq!(normalize_option(Some(json!("x"))), Some(-9999));
     }
 
+    /// R1b-L15：外设 options 解析失败必须回 Err，不得静默兜底成空对象。
+    /// 判红自证：把 `parse_apply_options` 改回 `options.unwrap_or_default()` 或
+    /// `serde_json::from_str(...).unwrap_or(空对象)` ⇒ 本条红。
+    #[test]
+    fn r1b_peripheral_invalid_options_is_error() {
+        // 非对象形状（字符串 / 数组）解析必须 Err，不能兜底成默认
+        assert!(
+            parse_apply_options(Some(json!("bad"))).is_err(),
+            "字符串 options 必须 Err，不得静默兜底"
+        );
+        assert!(
+            parse_apply_options(Some(json!([1, 2]))).is_err(),
+            "数组 options 必须 Err，不得静默兜底"
+        );
+        // 缺省 / 空对象仍可正常解析
+        assert!(parse_apply_options(None).is_ok(), "缺省 options 应走默认");
+        assert!(parse_apply_options(Some(json!({}))).is_ok(), "空对象 options 应解析成功");
+        // 源码契约：不允许静默空对象兜底残留（期望串避开完整字面量，防扫到自己）
+        let src = include_str!("peripheral.rs");
+        let bad = ["unwrap_or(json!({", "}))"].concat();
+        assert!(!src.contains(bad.as_str()), "外设 options 解析不得有静默空对象兜底");
+    }
+
     /// v2-M12：备份名要能认出**批次**（同一次 apply 的多个分片共用时间戳），
     /// 且分片号只认纯数字——用户自己丢进备份目录的文件既不能被 prune 当备份删掉，
     /// 也不能在还原侧被归成一批。
@@ -416,5 +453,37 @@ mod tests {
         let ui = include_str!("../../../src/scripts/peripheral.js");
         let ui_needle = concat!("partial", "Unknown");
         assert!(ui.contains(ui_needle), "渲染层必须按「另有备份根读不动」字段分流提示");
+    }
+
+    /// R5e-L01：生成侧备份名与解析侧 `backup_batch_of` 必须同一格式。
+    /// 判红自证：把 `native::peripheral::backup_stamp` 恢复成 `now_ms().to_string()`
+    /// （13 位毫秒）⇒ `backup_batch_of` 返回 None，本条红。
+    #[test]
+    fn r5e_backup_name_roundtrip() {
+        // 生成侧必须使用 YYYYMMDD_HHMMSS 格式函数，而不是 13 位毫秒。
+        let native = include_str!("../engine/native/peripheral.rs");
+        assert!(
+            native.contains("fn backup_stamp()"),
+            "native 侧必须提供 backup_stamp() 统一时间格式"
+        );
+        assert!(
+            !native.contains("let stamp = crate::engine::now_ms().to_string();"),
+            "生成侧不得再用 13 位毫秒作为备份名时间戳"
+        );
+
+        // 与生成侧同格式的名字必须能被 backup_batch_of 识别（roundtrip 成立）。
+        let stamp = "20261109_123456";
+        let name = format!("backup_{stamp}_1.reg");
+        assert_eq!(
+            backup_batch_of(&name),
+            Some(stamp),
+            "生成名必须能被 backup_batch_of 识别：{name}"
+        );
+        // 旧 13 位毫秒格式不再被识别（生成侧若回退旧格式，备份将无法修剪/还原）。
+        assert_eq!(
+            backup_batch_of("backup_1731148496000.reg"),
+            None,
+            "13 位毫秒格式不得被 backup_batch_of 识别"
+        );
     }
 }

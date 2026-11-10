@@ -31,6 +31,8 @@
     el.setAttribute('tabindex', '0');
     if (!el.getAttribute('role')) el.setAttribute('role', 'button');
     el.addEventListener('keydown', (e) => {
+        // C-06（F4a1-L14）：长按会连发 keydown ⇒ 元素被反复点击。
+        if (e.repeat) return;
       if ((e.key === 'Enter' || e.key === ' ') && e.target === el) {
         e.preventDefault();
         el.click();
@@ -96,8 +98,10 @@
   // 同形 —— load 的补扫定时器窗口内（现算见 load() 里那两处 setTimeout）点「重新扫描」，
   // 于是每个扫到的键都被当「尚未绑定」逐键 paths.save，把真源重建成扫描所见。写回通道
   // 一旦跑在读到配置之前，degraded 那套保护（A1-M12）也一并失效，因为它也依赖同一状态位。
-  // 'unavailable' 是 load 抛错/失败的终态：此时 pathConfig 不可信，扫描与写回都必须拒，
-  // 但用户仍可打开弹窗手工填写（读无害、写有害）。
+    // 'unavailable' 是 load 抛错/失败的终态：此时 pathConfig 不可信，**自动扫描**必须拒。
+    // C-07（F4a2-L45）口径订正：写回不是「前端一律拒」——用户仍可打开弹窗手工填写，
+    // 那条路由后端 `update_json` 兜底（读-改-写收口，配置损坏时拒写，见 commands/paths.rs）。
+    // 前端只挡「按扫描猜测值自动写回」这一条会污染真源的路径。
   let pathConfigState = 'loading';
   let icons = {};        // groupId -> dataUrl
   let isInitialized = false;
@@ -268,6 +272,8 @@
       input.addEventListener('blur', commit);
       // 回车提交：与 change/blur 走同一入口，不另写保存链。
       input.addEventListener('keydown', (e) => {
+          // C-06（F4a1-L14）：长按回车会连发 keydown，每次都提交一次。
+          if (e.repeat) return;
         if (e.key === 'Enter') { e.preventDefault(); commit(); }
       });
     });
@@ -515,7 +521,7 @@
       }
     } catch (e) {
       pathConfigState = 'unavailable';
-      console.error('加载路径配置失败:', e);
+      window.pathbindingAppearance.log('error', `加载路径配置失败: ${(e && e.message) || e}`);
     }
     syncScanBtn();
 

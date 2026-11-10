@@ -8,6 +8,8 @@
 //! - `engine/` / `pwsh/` / `security/` 落点的 static：依赖方向规定这些层不得依赖 commands
 //!   （check-layering），搬过来会造反向依赖。
 //! - 函数体内 `static CACHE`（如 `optimizer/catalog.rs`）：只在函数内可见，没有跨模块锁序问题。
+//!   **豁免只给「函数体内」的 static**：文件级 `static`（模块作用域可见）同样要登记，
+//!   否则「命令层全局状态唯一清单」这句话当场失效（登记面见下方各段）。
 //! - 与所属域访问器/守卫强绑定的（域内登记，仅点名不再搬）：
 //!   `cleanup::state` 的 `CLEANUP_SNAPSHOTS` / `LOCK_WHITELIST`、
 //!   `cleanup::rules` 的 `RULES_CACHE` / `WATERMARK_HIGH`、
@@ -15,8 +17,9 @@
 //!   `optimizer::apply` 的 `OPT_RUN_INFLIGHT`、`optimizer::restore_point` 的 `RESTORE_INFLIGHT`
 //!   （`pub(super)` 守卫，语义强绑定）。
 //!
-//! 锁序纪律：除 overview 的 `METRICS_LOCK → METRICS_CACHE` 一对（串行化采集，不得反向）
-//! 外，其余条目一律按**叶子锁**使用——持锁期间不取本表其他锁。新增嵌套前先核调用链、
+//! 锁序纪律：除 overview 的 `METRICS_LOCK → METRICS_CACHE → CPU_PREV` 一串
+//! （串行化采集与 CPU 差分，**不得反向**）外，其余条目一律按**叶子锁**使用——
+//! 持锁期间不取本表其他锁。新增嵌套前先核调用链、
 //! 在这里登记一行再写代码。长期方向是迁 `tauri::State` 注入（v3 C-2 备注），届时本文件
 //! 即迁移清单。
 //!
@@ -75,7 +78,9 @@ impl PendingEditState {
 
 // ---- overview.rs ----
 
-/// metrics 结果缓存与串行锁。锁序：先 `METRICS_LOCK` 后 `METRICS_CACHE`（不得反向）。
+/// metrics 结果缓存与串行锁。锁序：`METRICS_LOCK → METRICS_CACHE → CPU_PREV`（不得反向）。
+/// 采集在 `METRICS_LOCK` 内串行，CPU 差分（[`CPU_PREV`]）在同一把锁的作用域内取用
+/// —— `METRICS_LOCK → CPU_PREV` 是**允许的嵌套方向**；反向（先差分后采集）不得出现。
 pub(crate) static METRICS_CACHE: Mutex<Option<(i64, Value)>> = Mutex::new(None);
 pub(crate) static METRICS_LOCK: Mutex<()> = Mutex::new(());
 /// CPU 差分用上一拍原始计数（`cpuRaw`）。
@@ -163,3 +168,55 @@ pub(crate) static DISKBENCH_RUNNING: AtomicBool = AtomicBool::new(false);
 /// 一个固定目录名（清理只针对自己那一代，不去动别人正在写的目录）。
 pub(crate) static DISKBENCH_GEN: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+
+// ---- settings.rs ----
+
+/// CDP 远程调试开关的「当前进程真开着没」（`settings.rs` 的文件级 static）。
+///
+/// 登记在这里是因为它是**文件级** static（模块作用域可见、可被同模块任何代码取用），
+/// 不适用「函数体内 static 才豁免」那条。取用面只有 `settings.rs` 内部（写：启动期
+/// 定端口；读：`settings:cdp-get` / `settings:cdp-set` 的回执），不跨模块共享，
+/// 因此按**叶子锁**纪律使用（无锁，只有 AtomicBool）。
+///
+/// 之所以搬进本文件（而不是留在 `settings.rs`）：本文件是命令层全局状态的**唯一清单**，
+/// 文件级 static 漏登记 = 这句话失效；端口常量 `CDP_PORT` 仍留在 `settings.rs`
+/// （它是常量不是状态），「端口 + 是否生效」两者的取用点都在 `settings.rs`。
+pub(crate) static CDP_ACTIVE_NOW: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+mod registry_tests {
+    /// B-04 ③：`settings.rs` 的**文件级** static 必须在本文件（命令层全局状态清单）登记。
+    ///
+    /// 豁免只给「函数体内」的 static（只在函数内可见，没有跨模块锁序问题）；
+    /// 文件级 static 可见面更大，漏登记 = 「唯一清单」这句话当场失效。
+    /// 判红自证：在 `settings.rs` 里加一条文件级 static 而不在本文件登记 ⇒ 本用例红。
+    #[test]
+    fn 文件级static必须在本清单登记() {
+        let settings_src = include_str!("settings.rs");
+        let state_src = include_str!("state.rs");
+        let mut unregistered: Vec<String> = Vec::new();
+        for line in settings_src.lines() {
+            // 只认**模块作用域**（行首无缩进）的 static 声明
+            let decl = if let Some(rest) = line.strip_prefix("pub(crate) static ") {
+                Some(rest)
+            } else {
+                line.strip_prefix("static ")
+            };
+            let Some(rest) = decl else { continue };
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            if !state_src.contains(&name) {
+                unregistered.push(name);
+            }
+        }
+        assert!(
+            unregistered.is_empty(),
+            "settings.rs 的文件级 static 未在 state.rs 登记: {unregistered:?}"
+        );
+    }
+}

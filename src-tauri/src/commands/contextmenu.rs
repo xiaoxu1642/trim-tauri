@@ -19,7 +19,7 @@ use tauri::{Runtime, WebviewWindow};
 
 use crate::engine::{guard, log, native, paths, shellicon, snapshot, sysinfo};
 // v3 C-1：宽字符串转换统一走 engine 唯一实现（原 to_wide16 已删）。
-use crate::engine::native::to_wide;
+use crate::engine::native::{to_wide, to_wide_checked};
 
 // open-in-regedit 纯原生实现所需（审计 F-05：原内联 PS 改 Win32 等价，见 open_regedit_native）
 use windows::core::{BOOL, PCWSTR};
@@ -62,8 +62,12 @@ fn load_cache() -> Option<(Vec<Value>, i64)> {
 /// R1b-L09：本域缓存的写入是「读快照 → 改 → 整表覆写缓存 + 快照」的读-改-写，
 /// `security::atomic_write_json` 里的锁只保护单次落盘、护不住这两步之间（AGENTS §5.28）。
 /// 同窗 scan（全量新数据）与 toggle 回写（旧快照 + 增量）交错时，后写的那份会覆盖前一份，
-/// 缓存与快照从此不同源。两处写入段共用这一把域内锁。
+/// 缓存与快照从此不同源。三处写（scan 全量、缓存命中臂、toggle 回写）共用这一把域内锁。
 static CM_CACHE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 测试钩子：统计缓存命中臂写快照的次数（R1b-L14 验收用）。
+#[cfg(test)]
+static CACHE_HIT_SET_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn cm_cache_guard() -> std::sync::MutexGuard<'static, ()> {
     CM_CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
@@ -77,6 +81,15 @@ fn save_cache(items: &[Value]) {
     if let Err(e) = crate::security::atomic_write_json(&cache_file(), &payload) {
         log::write_log("warn", &format!("右键菜单缓存写入失败: {e}"));
     }
+}
+
+/// R1b-L14：缓存命中臂的写快照。scan 缓存命中时全量替换快照，与 toggle 回写的
+/// 读-改-写必须串行（本域第三处写），否则 toggle 刚写入的增量会被命中臂覆盖。
+fn cm_cache_hit_set(label: &str, cached: Vec<Value>) {
+    #[cfg(test)]
+    CACHE_HIT_SET_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let _g = cm_cache_guard();
+    snapshot::set(&snapshot::domain_key(label, "contextmenu"), snapshot::by_id(&cached));
 }
 
 /// 归一化 id：缺 id 时用 regPath|target（R7：ShellNew 共享 regPath 需复合键）
@@ -223,8 +236,8 @@ pub async fn contextmenu_scan<R: Runtime>(
     if refresh != Some(true) {
         // 一次读盘到底（性能 v3 ⑤）：timestamp 随 load_cache 一并带回，不再为它整读第二遍缓存
         if let Some((cached, ts)) = load_cache() {
-            let map = snapshot::by_id(&cached);
-            snapshot::set(&snapshot::domain_key(&label, "contextmenu"), map);
+            // R1b-L14：命中臂的写快照也持 CM_CACHE_LOCK（三处写之一）。
+            cm_cache_hit_set(&label, cached.clone());
             return json!({ "success": true, "data": cached, "cached": true, "cachedAt": ts });
         }
     }
@@ -458,8 +471,11 @@ pub async fn contextmenu_icons<R: Runtime>(
                 .unwrap_or(false)
         })
         .collect();
+    // R1b-L17：单次提取上限 500（与同域 toggle/startup 的 validate_snapshot_items 一致）。
+    // 超出截断并如实报 truncated，不让前端以为「全部图标已返回」。
+    let (icon_items, truncated) = cap_icon_items(icon_items);
     if icon_items.is_empty() {
-        return json!({ "success": true, "data": {} });
+        return json!({ "success": true, "data": {}, "truncated": false });
     }
     // R1（2026-10-01）：此前走 cm_icons.ps1 + `[System.Drawing.Icon]::ExtractAssociatedIcon`，
     // 那是本域最后一个外部 PowerShell 入口。换成原生 `ExtractIconExW` 索引 0 ——
@@ -515,7 +531,21 @@ pub async fn contextmenu_icons<R: Runtime>(
         log::write_log("warn", &format!("右键菜单图标提取任务异常: {e}"));
         serde_json::Map::new()
     });
-    json!({ "success": true, "data": Value::Object(data) })
+    json!({ "success": true, "data": Value::Object(data), "truncated": truncated })
+}
+
+/// contextmenu:icons 的单次提取上限（与同域 toggle/startup 的 500 一致）。
+const ICON_ITEMS_CAP: usize = 500;
+
+/// 超过上限即截断到上限，并如实报 truncated（恰好等于上限不算截断）。
+fn cap_icon_items(items: Vec<Value>) -> (Vec<Value>, bool) {
+    let truncated = items.len() > ICON_ITEMS_CAP;
+    let items = if truncated {
+        items.into_iter().take(ICON_ITEMS_CAP).collect()
+    } else {
+        items
+    };
+    (items, truncated)
 }
 
 fn canon_reg_key(s: &str) -> String {
@@ -538,6 +568,15 @@ fn canon_reg_key(s: &str) -> String {
     s
 }
 
+/// R1b-L13：LastKey 写面与判定串必须同形（都剥 `Registry::`）。
+/// regedit 的 LastKey 只认 `HKEY_*` 根键形态，带 `Registry::` 前缀会定位失败。
+fn normalize_reg_path_for_lastkey(p: &str) -> String {
+    p.trim()
+        .trim_end_matches('\\')
+        .trim_start_matches("Registry::")
+        .to_string()
+}
+
 /// contextmenu:open-in-regedit —— LastKey 方案打开注册表编辑器（regPath 须在快照内）
 #[tauri::command]
 pub async fn contextmenu_open_in_regedit<R: Runtime>(
@@ -550,7 +589,8 @@ pub async fn contextmenu_open_in_regedit<R: Runtime>(
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
-    let mut p = reg_path.unwrap_or_default().trim().trim_end_matches('\\').to_string();
+    // R1b-L13：判定串与写进 LastKey 的串统一形态（都剥 Registry::）。
+    let mut p = normalize_reg_path_for_lastkey(&reg_path.unwrap_or_default());
     if p.is_empty() {
         return json!({ "success": false, "message": "无效的注册表路径" });
     }
@@ -746,24 +786,29 @@ fn open_regedit_native(last_key: &str) -> Result<RegEditOpenOutcome, String> {
         )
         .is_ok()
         {
-            let val = to_wide(last_key);
-            let bytes: Vec<u8> = val.iter().flat_map(|&w| w.to_le_bytes()).collect();
             // 审查 v2-F16：值名先落到局部变量再取裸指针。原先写
             // `PCWSTR(to_wide("LastKey").as_ptr())` —— 临时值当前能活到语句结束因而不算 UB，
             // 但只要有人把这条语句拆开、或在中间插入 `.await`/提前返回，指针立刻悬垂，
             // 而 FFI 路径上不会有任何编译错误。同函数里其余几处 FFI 取值都已用局部变量写法。
             let name = to_wide("LastKey");
-            let r = RegSetValueExW(
-                hk,
-                PCWSTR(name.as_ptr()),
-                Some(0),
-                REG_SZ,
-                Some(&bytes),
-            );
-            let _ = RegCloseKey(hk);
-            if r.is_err() {
-                log::write_log("warn", "写 Regedit LastKey 失败，仍尝试打开注册表编辑器");
+            // R1b-L13：写面吃 to_wide_checked（含 NUL/控制字符拒绝，红线⑨）。
+            // last_key 来自命令体已剥 Registry:: 并 trim；这里防御性拒绝，不阻断拉起。
+            if let Ok(val) = to_wide_checked(last_key) {
+                let bytes: Vec<u8> = val.iter().flat_map(|&w| w.to_le_bytes()).collect();
+                let r = RegSetValueExW(
+                    hk,
+                    PCWSTR(name.as_ptr()),
+                    Some(0),
+                    REG_SZ,
+                    Some(&bytes),
+                );
+                if r.is_err() {
+                    log::write_log("warn", "写 Regedit LastKey 失败，仍尝试打开注册表编辑器");
+                }
+            } else {
+                log::write_log("warn", "写 Regedit LastKey 含非法字符，已跳过定位，仍尝试打开注册表编辑器");
             }
+            let _ = RegCloseKey(hk);
         } else {
             log::write_log("warn", "打开 Regedit Applets 注册表键失败，仍尝试打开注册表编辑器");
         }
@@ -885,5 +930,78 @@ mod tests {
         }
         // 快照必须真收进 6 条（丢件的表现就是这里少一条）
         assert_eq!(snapshot::by_id(&out).len(), 6);
+    }
+
+    /// R1b-L13：判定串与写进 LastKey 的串必须同形（都剥 Registry::），写面拒 NUL。
+    /// 破坏自证：恢复「判定串剥前缀、LastKey 不剥」的两套串，本测试必红。
+    #[test]
+    fn r1b_regedit_last_key_matches_judged_string() {
+        let raw = "Registry::HKEY_CURRENT_USER\\Software\\X";
+        let p = normalize_reg_path_for_lastkey(raw);
+        // 判定串与 LastKey 串同形：剥前缀后判定一致
+        assert_eq!(canon_reg_key(&p), canon_reg_key(raw), "剥前缀后判定必须一致");
+        assert!(!p.contains("Registry::"), "LastKey 不得带 Registry:: 前缀");
+        assert_eq!(p, "HKEY_CURRENT_USER\\Software\\X");
+        // 写面 to_wide_checked：正常串放行，含 NUL 拒绝且不 panic
+        assert!(to_wide_checked(&p).is_ok(), "正常 LastKey 可通过写面闸");
+        assert!(to_wide_checked("HKCU\\a\0b").is_err(), "含 NUL 必须拒绝");
+    }
+
+    /// R1b-L14：缓存命中臂必须持 CM_CACHE_LOCK（三处写之一）。
+    /// 破坏自证：恢复命中臂不持锁（直接 snapshot::set），本测试必红。
+    #[test]
+    fn r1b_contextmenu_cache_hit_is_locked() {
+        use std::sync::mpsc;
+        snapshot::clear_all();
+        let label = "r1b-l14-test";
+        CACHE_HIT_SET_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+        // 主线程持锁：若命中臂不持锁，子线程会立即写入并返回
+        let _g = cm_cache_guard();
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            cm_cache_hit_set(label, vec![json!({ "id": "scan-1" })]);
+            let _ = tx.send(());
+        });
+        let completed_early = rx
+            .recv_timeout(std::time::Duration::from_millis(120))
+            .is_ok();
+        assert!(!completed_early, "缓存命中臂必须持锁，不能在锁被占用时写入快照");
+        drop(_g);
+        handle.join().unwrap();
+        rx.recv_timeout(std::time::Duration::from_millis(500))
+            .expect("子线程应完成");
+        assert_eq!(CACHE_HIT_SET_COUNT.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // 快照已写入，无丢更新
+        let snap = snapshot::get(&snapshot::domain_key(label, "contextmenu")).unwrap();
+        assert_eq!(
+            snap.get("scan-1").and_then(|v| v.get("id")).and_then(|v| v.as_str()),
+            Some("scan-1")
+        );
+        snapshot::clear_all();
+    }
+
+    /// R1b-L17：contextmenu:icons 单次提取上限 500，超出截断并如实报 truncated。
+    /// 判红自证：把 `cap_icon_items` 改回无上限（直接返回原 items, false）⇒ 本条红。
+    #[test]
+    fn r1b_contextmenu_icons_cap_500() {
+        // 超限项 → 截断到上限且 truncated:true
+        let many: Vec<Value> = (0..501).map(|i| json!({ "id": i })).collect();
+        let (items, truncated) = cap_icon_items(many);
+        assert_eq!(items.len(), 500, "501 项必须截断到 500");
+        assert!(truncated, "501 项必须报 truncated:true");
+
+        // 恰好等于上限 → 不截断
+        let exact: Vec<Value> = (0..500).map(|i| json!({ "id": i })).collect();
+        let (items, truncated) = cap_icon_items(exact);
+        assert_eq!(items.len(), 500, "恰好 500 项不应截断");
+        assert!(!truncated, "恰好 500 项不算截断");
+
+        // 空列表 → 不截断
+        let (items, truncated) = cap_icon_items(vec![]);
+        assert!(items.is_empty() && !truncated, "空列表不算截断");
+
+        // 源码契约：回执必须带 truncated 字段（前端才能区分「全部返回」与「被裁」）
+        let src = include_str!("contextmenu.rs");
+        assert!(src.contains("\"truncated\""), "contextmenu:icons 回执必须带 truncated 字段");
     }
 }

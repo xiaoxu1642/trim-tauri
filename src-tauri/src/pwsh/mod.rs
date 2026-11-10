@@ -197,30 +197,34 @@ fn await_reader(
 ///
 /// 不走回收站：这是本应用自己写进私有 tmp 目录、寿命以毫秒计的执行件，
 /// 恢复它没有任何意义。口径同 `security::prune_quarantined`（见那里的豁免说明）。
-pub struct TempScript(PathBuf);
+pub struct TempScript {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+}
 
 impl TempScript {
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.path
     }
 }
 
 impl std::ops::Deref for TempScript {
     type Target = Path;
     fn deref(&self) -> &Path {
-        &self.0
+        &self.path
     }
 }
 
 impl AsRef<Path> for TempScript {
     fn as_ref(&self) -> &Path {
-        &self.0
+        &self.path
     }
 }
 
 impl Drop for TempScript {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        self.file.take();
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -291,14 +295,20 @@ fn write_temp_script_in(
                 // `create_new` 落下的空壳；旧实现把守卫放在写入之后，半截脚本会留到
                 // 1h 清扫。守卫不能在 `create_new` 之前构造——`AlreadyExists` 分支会
                 // 误删别人的同名文件。
-                let guard = TempScript(candidate);
                 if let Err(e) = write(&mut f) {
                     // 先关句柄再删：删除不依赖句柄的共享位（File 与 guard 的默认析构顺序
                     // 是 guard 在前，单靠 Drop 删除会依赖 FILE_SHARE_DELETE 的默认值）。
                     drop(f);
+                    let guard = TempScript { path: candidate.clone(), file: None };
+                    drop(guard);
                     return Err(format!("写入临时脚本失败: {e}"));
                 }
-                return Ok(guard);
+                // 执行层用 `powershell.exe -File <path>` 打开脚本：Windows 上若这里继续
+                // 持有只写句柄，子进程会因共享模式报 CommandNotFoundException
+                // （The process cannot access the file ... being used by another process）。
+                // 写完立即释放句柄，守卫只负责路径与离开作用域时删除。
+                drop(f);
+                return Ok(TempScript { path: candidate, file: None });
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(format!("写入临时脚本失败: {e}")),
@@ -483,12 +493,19 @@ fn run_with_exe(
     // @@DIAG@@ 诊断行转日志并从 stdout 剔除（与 extractDiagLines 同口径）。
     // A6-M07：清洗无条件执行——未登记 op 的调用点也不能把 DIAG 原样交给协议判据。
     let stdout_clean = crate::diag::strip_diag_lines(&stdout, diag_op);
-    if code != 0 && !stderr.trim().is_empty() {
-        log::write_log("warn", &format!("PowerShell 退出码 {code}: {}", stderr.trim()));
+    // R7-L04：stderr **同样**要剥 DIAG 协议行 ——
+    // 脚本把诊断写进 stderr 是常见写法（`Write-Error` / `Write-Host 2>&1`），
+    // 旧实现只洗 stdout ⇒ 原始 `@@DIAG@@{...}` 行进了 stderr，
+    // 而 stderr 会被原样写进日志（「PowerShell 退出码 N: @@DIAG@@{...}」）——
+    // 协议行混进了用户可见的日志正文，且诊断 JSON 出现在两个出口各一份。
+    // 无论退出码是 0 还是非 0，都先剥协议行再决定要不要写日志。
+    let stderr_clean = crate::diag::strip_diag_lines(&stderr, diag_op);
+    if code != 0 && !stderr_clean.trim().is_empty() {
+        log::write_log("warn", &format!("PowerShell 退出码 {code}: {}", stderr_clean.trim()));
     }
     Ok(PsOutput {
         stdout: stdout_clean,
-        stderr,
+        stderr: stderr_clean,
         code,
         timed_out,
         tree_terminate_failed,
@@ -830,7 +847,7 @@ mod tests {
         let file = dir.join("script_probe.ps1");
         std::fs::write(&file, b"Write-Output 1").unwrap();
         {
-            let guard = TempScript(file.clone());
+            let guard = TempScript { path: file.clone(), file: None };
             assert!(guard.path().is_file(), "守卫持有期间脚本必须存在（执行层要读它）");
             assert_eq!(guard.to_string_lossy().as_ref(), file.to_string_lossy().as_ref());
         }
@@ -845,7 +862,7 @@ mod tests {
         let file = dir.join("script_probe.ps1");
         std::fs::write(&file, b"x").unwrap();
         {
-            let guard = TempScript(file.clone());
+            let guard = TempScript { path: file.clone(), file: None };
             std::fs::remove_file(&file).unwrap();
             drop(guard);
         }

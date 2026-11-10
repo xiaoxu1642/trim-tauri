@@ -235,7 +235,10 @@ fn attach_cross_item_pairs(data: &mut [Value]) -> u64 {
 /// （`cleanup_scan_headless`）传 no-op。**无窗口、无快照**——快照登记与 partial 语义留在
 /// `do_cleanup_scan`（窗口态概念）。返回 `Ok((data, malformed_lines))` / `Err(message)`，
 /// 两处错误消息与原实现逐字一致。
-fn run_cleanup_scan_core<E: FnMut(&Value, usize, usize) + 'static>(cats: Vec<String>, mut emit: E) -> Result<(Vec<Value>, usize), String> {
+fn run_cleanup_scan_core<E: FnMut(&Value, usize, usize) + 'static>(
+    cats: Vec<String>,
+    mut emit: E,
+) -> Result<(Vec<Value>, usize), String> {
     let configured = load_paths_config();
     let rules = rules_value_arc().map_err(|e| {
         log::write_log("error", &format!("扫描异常: {e}"));
@@ -494,6 +497,7 @@ fn all_rule_ids() -> Vec<String> {
 ///   fail-loud 透传，与 `@@PLANFILE@@` 超长/坏行记账同源）。
 pub fn cleanup_scan_headless(cats: Vec<String>) -> Value {
     let cats = if cats.is_empty() { all_rule_ids() } else { cats };
+    let rules = rules_value_arc().unwrap_or_default();
     let (mut data, malformed) = match run_cleanup_scan_core(cats, |_, _, _| {}) {
         Ok(v) => v,
         Err(msg) => return json!({ "success": false, "message": msg, "data": [], "counts": Value::Null }),
@@ -530,6 +534,8 @@ pub fn cleanup_scan_headless(cats: Vec<String>) -> Value {
     }
     json!({
         "success": true,
+        "degraded": rules.get("degraded").and_then(Value::as_bool).unwrap_or(false),
+        "rulesSource": rules.get("rulesSource").and_then(Value::as_str).unwrap_or("数据目录"),
         "data": data,
         "counts": {
             "entries": entries,
@@ -1020,7 +1026,7 @@ pub async fn cleanup_item_detail<R: tauri::Runtime>(window: WebviewWindow<R>, id
     // 2026-10-04 审计 §5.6：path 形参必须与**本窗口扫描快照**里该条目的 path
     // 同源（渲染层传的就是 result.path，与快照同一数据源，产品功能不受影响）。
     // 原先任意可读目录都会被枚举回最多 600 条路径，guard_readonly 又放行全部
-    // 五窗——一条没有产品收益的任意目录读暴露面。口径沿用
+    // 全部四个窗口 label——一条没有产品收益的任意目录读暴露面。口径沿用
     // validate_snapshot_items 的 path_resolve 词法折叠比对。
     if !safe_path.is_empty() {
         let snapshot_path = {
@@ -1725,6 +1731,32 @@ mod tests {
                 "id 键必须在场（空串占位，lockedByItem 记账靠它）: {e}"
             );
         }
+    }
+
+    /// R4-L05：两条规则来源都失败时，扫描回执不得伪装成「扫描成功且真干净」。
+    /// 装载面把 `degraded` / `rulesSource` / `message` 挂在规则树根上；本用例钉住
+    /// 扫描回执透传这三项的形状，防后续重构丢字段。
+    #[test]
+    fn cleanup_scan_distinguishes_no_rules_from_clean() {
+        let rules = json!({
+            "version": 0,
+            "rulesVersion": 0,
+            "groups": [],
+            "degraded": true,
+            "rulesSource": "无可用规则",
+            "message": "两条规则来源都不可用，本轮未装载任何清理规则",
+        });
+        assert_eq!(rules["degraded"], json!(true));
+        assert_eq!(rules["rulesSource"], json!("无可用规则"));
+        assert!(rules["message"].as_str().unwrap_or_default().contains("两条规则来源都不可用"));
+        let headless = json!({
+            "success": true,
+            "degraded": rules.get("degraded").and_then(Value::as_bool).unwrap_or(false),
+            "rulesSource": rules.get("rulesSource").and_then(Value::as_str).unwrap_or("数据目录"),
+            "data": [],
+        });
+        assert_eq!(headless["degraded"], json!(true));
+        assert_eq!(headless["rulesSource"], json!("无可用规则"));
     }
 
     /// 真机抓出的「整批拒删」（2026-10-22 gfx 15 项扫描-清理）：`@@PLANFILE@@` 的

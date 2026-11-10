@@ -1499,11 +1499,12 @@ mod tests {
         std::fs::write(root.join("imgs/a.jpg"), b"x").expect("写样本");
 
         let made = |flag: &str, link: &str, target: &str| -> bool {
-            std::process::Command::new("cmd")
-                .args(["/C", &format!(r#"mklink {flag} "{}" "{}""#, root.join(link).display(), root.join(target).display())])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
+              // X1-L01：带超时 + 杀整树（夹具命令挂住时不得拖死整轮验收）。
+              let mut mk_img_link = std::process::Command::new("cmd");
+              mk_img_link.args(["/C", &format!(r#"mklink {flag} "{}" "{}""#, root.join(link).display(), root.join(target).display())]);
+              crate::engine::testcmd::run_test_cmd(&mut mk_img_link, std::time::Duration::from_secs(10))
+                  .map(|o| o.status.success())
+                  .unwrap_or(false)
         };
         let mut expect = 0usize;
         if made("/J", "junc", "imgs") { expect += 1; }

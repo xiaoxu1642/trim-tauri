@@ -31,6 +31,7 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UNINSTALL_DIR = path.join(ROOT, 'src-tauri', 'src', 'commands', 'uninstall');
 import { leadingToken, makeTokenChecker } from './rule-tokens.mjs';
 import { list as schemaList, number as schemaNumber, tokens as schemaTokens, file as schemaFile } from './rule-schema.mjs';
+import { blankNonCode } from './lib/src-scan.mjs';
 const RULES = path.join(ROOT, schemaFile('residue'));
 const FIXTURE = path.join(ROOT, 'tools', 'fixtures', 'residue-contract.json');
 // 词汇与上限取自 `tools/rule-schema.json`（V2 P0-A2，2026-09-30）：同一份字节也被 Rust 装载侧
@@ -474,12 +475,13 @@ const rsText = fs
   .filter((f) => f.endsWith('.rs') && !f.includes('_tests'))
   .map((f) => fs.readFileSync(path.join(UNINSTALL_DIR, f), 'utf8'))
   .join('\n');
+const rsCode = blankNonCode(rsText, 'rs', { keepStrings: true });
 check(
-  /include_str!\("[^"]*uninstall-residue-rules\.json"\)/.test(rsText),
+  /include_str!\("[^"]*uninstall-residue-rules\.json"\)/.test(rsCode),
   'E1. 卸载域内置副本已接线（include_str!，路径相对 commands/uninstall/ 子目录）',
 );
 // 装载链两处都必须过校验：数据目录那份 + 内置那份（只校验其一等于留豁免通道）
-const loadFn = rsText.slice(rsText.indexOf('fn load_residue_rules()'));
+const loadFn = rsCode.slice(rsCode.indexOf('fn load_residue_rules()'));
 check(
   /validate_residue_package\(&v\)/.test(loadFn) && /validate_residue_package\(&builtin\)/.test(loadFn),
   'E2. load_residue_rules 对数据目录与内置库都调用语义校验',

@@ -57,15 +57,17 @@
 
   async function run() {
     if (running) return;
-    running = true;
-    TIER_WARN.length = 0;
     const button = $('btnDiskBench');
-    if (button) button.disabled = true;
-    if ($('diskBenchStatus')) $('diskBenchStatus').textContent = '准备测试...';
-    ensureProgressBar();
     // L06：参数组装与进度订阅并入 try——原实现 running=true 之后、try 之前有约
     // 20 行可抛代码，一旦抛出 running 永久为 true、按钮永久禁用；finally 统一复位。
+    // F4b-L10：运行标志再往后挪到 DOM/进度条准备完成之后 —— 前置步骤抛错时
+    // running 仍是 false，不会把闸门焊死。
     try {
+      TIER_WARN.length = 0;
+      if ($('diskBenchStatus')) $('diskBenchStatus').textContent = '准备测试...';
+      ensureProgressBar();
+      running = true;
+      if (button) button.disabled = true;
       // P1-6E 把时长收进 options 时,函数内的 duration 绑定一起消失了,而演示分支的
       // totalMs 还要读它 ⇒ 先取一次再进对象字面量（pickTier 带 TIER_WARN 副作用,不能取两次）
       const duration = pickTier($('diskDuration')?.value, [4, 8, 16], 8, '时长');
@@ -231,7 +233,7 @@
               <tbody>
                 ${records.map(r => `
                   <tr data-record-id="${window.ds.escAttr(String(r.id))}">
-                    <td class="bench-history-time">${formatTime(r.timestamp)}</td>
+                    <td class="bench-history-time">${escapeHtml(formatTime(r.timestamp))}</td>
                     <td class="bench-history-path" data-tip="${escapeHtml(r.path || '')}">${escapeHtml(r.path || '--')}</td>
                     <td>${formatBlock(r.blockSize)} / QD${r.queueDepth} / ${r.threads}T / ${r.duration}s${r.engine === 'rust' ? '（原生）' : r.engine === 'powershell' ? '（PS）' : ''}</td>
                     <td class="bench-history-val">${Number(r.sequentialRead).toFixed(1)} MB/s</td>
@@ -297,7 +299,7 @@
       const ok = await window.app?.confirmDanger?.(
         '清空测速历史',
         '确定要删除全部测试记录吗？此操作不可恢复。',
-        '清空',
+        '仍然执行',
         '取消',
         '删除后无法从应用内恢复，历史图表将一并清空。'
       );

@@ -292,15 +292,31 @@ pub fn has_lossy_marker(s: &str) -> bool {
 /// 只能用于展示与匹配键，不能反过来当删除目标 —— 需要保真时用 `has_lossy_path` 判一眼，
 /// 并把原生 `Path`/`OsString` 交给删除侧（`Sink::item` 因此带上了原始路径）。
 pub fn unix_path(p: &std::path::Path) -> String {
-    let mut s = p.to_string_lossy().to_string();
+    strip_verbatim_prefix(p.to_string_lossy().to_string()).replace('\\', "/")
+}
+
+/// 剥 `\\?\` / `\\?\UNC\` verbatim 前缀（不动分隔符）：
+/// `\\?\UNC\srv\share\x` 折回 `\\srv\share\x`（N1b-M02）——后者才是真实 UNC 形态。
+fn strip_verbatim_prefix(s: String) -> String {
     // N1b-M02：`\\?\UNC\server\share\x` 折回普通 UNC，而不是剥成
     // `UNC\server\share\x`（后者既不是绝对路径，也不再是删除目标）。
     if s.starts_with(r"\\?\UNC\") {
-        s = format!(r"\\{}", &s[8..]);
+        format!(r"\\{}", &s[8..])
     } else if s.starts_with(r"\\?\") {
-        s = s[4..].to_string();
+        s[4..].to_string()
+    } else {
+        s
     }
-    s.replace('\\', "/")
+}
+
+/// 路径的**回执/展示唯一口径**（R2a-L06 交接桩）：剥 verbatim 前缀、
+/// **保留原生分隔符**。删除回执必须与磁盘真实形态同形（`C:\x\y` 而不是 `C:/x/y`），
+/// 否则前端比对/用户复核都会被分隔符改写误导；需要 `/` 口径的旧协议线用 [`unix_path`]。
+///
+/// 同为展示口径：`to_string_lossy` 是有损的（孤立代理项 → U+FFFD），不能反过来当删除目标
+/// —— 保真判定用 [`has_lossy_path`]，删除侧拿 `Sink::item` 的原生 `Path`。
+pub fn display_path(p: &std::path::Path) -> String {
+    strip_verbatim_prefix(p.to_string_lossy().to_string())
 }
 
 /// 该路径的文本形态是否已经丢了信息（`to_string_lossy` 拿 U+FFFD 顶掉了非良构序列）。
@@ -314,12 +330,16 @@ pub fn has_lossy_path(p: &std::path::Path) -> bool {
 /// 审查v4-M6：是否重解析点（junction/挂载点）。Windows 目录联接点不是 symlink
 /// （file_type().is_symlink()==false），须按 FILE_ATTRIBUTE_REPARSE_POINT (0x400) 判定；
 /// 否则自引用联接点（如「Application Data」历史环）会逐层加深重复遍历，扫描卡到超时。
+///
+/// N1b-L01：属性读失败时**按重解析点处理**（fail-closed），不按「不是联接点」放行 ——
+/// 旧写法 `unwrap_or(false)` 把「读不到属性」判成普通条目，于是扫描继续下钻，
+/// 撞进一个不可判定的目标（不可判定的子树可能指向盘外）。
 #[cfg(windows)]
 pub fn is_reparse(ent: &fs::DirEntry) -> bool {
     use std::os::windows::fs::MetadataExt;
     ent.metadata()
         .map(|m| (m.file_attributes() & 0x400) != 0)
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 #[cfg(not(windows))]
@@ -524,11 +544,16 @@ impl Drop for Sandbox {
     }
 }
 
-/// 在 `%TEMP%\trim-<tag>` 建一个自删沙箱。`tag` 由调用方带上 pid（并行用例互不撞名）。
+  /// 在 `%TEMP%\trim-<tag>-<pid>` 建一个自删沙箱。
+  ///
+  /// A14（X1-L06）：pid 由**helper 强制**追加，不靠调用点自觉 ——
+  /// 此前漏拼 pid 的调用点会让同一测试进程里两次同名 tag 的沙箱互相删对方的目录，
+  /// 并行症状是「夹具目录莫名消失」，极难定位。调用点若已带 pid，这里再追加一次也无害
+  /// （名字更长，不影响任何按前缀匹配的断言）。
 /// 只给 `#[cfg(test)]` 用；集成测试链的是不含 test 配置的 lib，那里另立同款。
 #[cfg(test)]
 pub fn sandbox(tag: &str) -> Sandbox {
-    let dir = std::env::temp_dir().join(format!("trim-{tag}"));
+      let dir = std::env::temp_dir().join(format!("trim-{tag}-{}", std::process::id()));
     // 同一 pid 被复用、或上一次被强杀留下的同名目录：先清干净再建，保证用例从空盘开始
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("测试沙箱可创建");
@@ -567,6 +592,40 @@ mod tests {
         assert_eq!(unix_path(Path::new(r"\\?\C:\a\b")), "C:/a/b");
         assert_eq!(unix_path(Path::new(r"\\?\UNC\srv\share\a")), "//srv/share/a");
         assert_eq!(unix_path(Path::new(r"C:\x\y.txt")), "C:/x/y.txt");
+    }
+
+    /// `display_path` 是回执唯一口径（R2a-L06 桩）：剥前缀但**保留原生分隔符**。
+    /// 破坏自证：把实现换成 `unix_path`（或补一句 replace），三条断言全红。
+    #[test]
+    fn display_path_keeps_native_separators() {
+        assert_eq!(display_path(Path::new(r"\\?\C:\a\b")), r"C:\a\b");
+        assert_eq!(display_path(Path::new(r"\\?\UNC\srv\share\a")), r"\\srv\share\a");
+        assert_eq!(display_path(Path::new(r"C:\x\y.txt")), r"C:\x\y.txt");
+    }
+
+    /// N1b-L01：条目 `metadata()` 失败时按「不可判定」fail-closed 处理，
+    /// 不得当成普通条目继续下钻。
+    ///
+    ///
+    /// 为什么是**形态断言**而不是运行态样本：Windows 上 `DirEntry::metadata()`
+    /// 对符号链接不跟随（读链接自身属性），「枚举后删文件」也不成立
+    /// （已打开的枚举句柄仍能读到 pending-delete 条目的属性）——
+    /// 本机**造不出**「枚举成功、metadata 失败」的条目。
+    /// 按 AGENTS 的「样本缺失要显式 SKIP，不得让断言爆炸」口径，
+    /// 这里钉住判据形态（fail-closed 方向），运行态样本留作未验证缺口。
+    /// 破坏自证：把 `unwrap_or(true)` 改回 `unwrap_or(false)` ⇒ 本用例红。
+    #[test]
+    fn n1b_metadata_error_is_not_followed() {
+        let src = include_str!("util.rs");
+        let fail_closed = src.matches(".unwrap_or(true)").count();
+        assert!(
+            fail_closed >= 1,
+            "is_reparse 的属性读失败分支必须按 fail-closed 判真（unwrap_or(true)）"
+        );
+        assert!(
+            !src.contains(".unwrap_or(false)\n}\n"),
+            "不得存在「属性读失败即放行」的 unwrap_or(false) 形态"
+        );
     }
 
     /// 2026-10-23：短名展开的**必要形状**。真实短名的冲突后缀固定落在主干末尾且总长 ≤ 8；

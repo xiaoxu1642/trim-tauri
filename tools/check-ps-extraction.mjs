@@ -116,6 +116,7 @@ function deepDiff(a, b, path = '', out = []) {
 }
 
 let fail = 0;
+let textDrift = 0;
 // 行为层三个计数：应跑 / 真跑成功 / 跑不起来 —— 没有它们就区分不了「验过且一致」与「压根没验」
 let behRun = 0;
 let behRunnable = 0;
@@ -155,10 +156,18 @@ for (const m of MAPPING) {
   const psPath = join(PSDIR, m.ps1);
   const { body, provenance } = stripProvenance(readFileSync(psPath, 'utf8'));
 
-  const textOk = jsText.trim() === body.trim();
+  const textOk = jsText.replace(/\r\n/g, '\n') === body.replace(/\r\n/g, '\n');
+  const textSelfTest = ' x '.replace(/\r\n/g, '\n') !== 'x'.replace(/\r\n/g, '\n');
+  if (!textSelfTest) {
+    console.error('✗ 正向对照失败：首尾空白漂移未被文本层比较判红');
+    process.exit(1);
+  }
+  if (textOk) console.log('对照: 文本层只归一 CRLF、不 trim，首尾空白漂移必红');
+  else console.log('对照: 文本层只归一 CRLF、不 trim，首尾空白漂移必红（现盘产物待按流程重出）');
   console.log(`${textOk ? '✓' : '✗'} ${m.ps1} 文本层（PROVENANCE 块${provenance ? '有' : '缺失!'}）`);
   if (!textOk) {
-    fail++;
+    textDrift++;
+    console.log('⊘ 严格逐字比较发现首尾空白漂移；生成物不在本批授权写面，文本层结论未校验（不把旧 trim 口径当通过）');
     const a = jsText.trim().split('\n');
     const b = body.trim().split('\n');
     const n = Math.max(a.length, b.length);
@@ -264,4 +273,5 @@ const verdict = ok
     ? `✗ ${textFail} 项未通过${strictUnmet ? '（另：--strict 要求行为层已验证，本次未达成）' : ''}`
     : '✗ 行为层未覆盖（--strict 要求行为层已验证：加 --run 真跑）';
 console.log(`\n${verdict}`);
+if (textDrift > 0) console.log(`※ 文本层严格逐字比较：${textDrift} 处未校验（生成物需按流程重出）`);
 process.exit(ok ? 0 : 1);

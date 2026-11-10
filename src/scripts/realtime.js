@@ -18,6 +18,10 @@
   // 记录动作本身还该有时间上界（7200 点 × 1.5s ≈ 3 小时），到点自动生成报告，
   // 不允许用户忘关记录让会话无限拉长。
   const MAX_RECORDING_MS = MAX_RECORD_POINTS * 1500;
+  // F4b-L07：绘图区左右内边距。绘制与悬浮映射必须共用同一组值，
+  // 否则竖线/读数会按整幅宽换算，左右边缘各偏一个 padding。
+  const CHART_PAD_L = 56;
+  const CHART_PAD_R = 12;
 
   const $ = id => document.getElementById(id);
 
@@ -207,6 +211,10 @@
     state.sampleBusy = true;
     try {
       await sampleOnce();
+    } catch (e) {
+      // A2-L05：raw tick 的 await 失败不能再变成浮动拒绝——setInterval 不接
+      // Promise，拒绝会直接进全局兜底且轮询本身没人知道。记日志、保留定时器。
+      window.app?.log?.('warn', '实时采样异常（轮询继续）: ' + ((e && e.message) || e));
     } finally {
       state.sampleBusy = false;
     }
@@ -255,9 +263,15 @@
       down = Math.max(0, down); up = Math.max(0, up);
     }
     state.up = up; state.down = down;
-    pushPoint(up, down);
-    renderMetrics();
-    draw();
+    // A2-L05：pushPoint / renderMetrics / draw 原先在 inner try 之外，采样成功后
+    // 任一渲染步骤抛错都会穿过 tick 的 finally 变成浮动拒绝。这里单独收口。
+    try {
+      pushPoint(up, down);
+      renderMetrics();
+      draw();
+    } catch (e) {
+      window.app?.log?.('warn', '实时采样渲染异常: ' + ((e && e.message) || e));
+    }
   }
 
   function sum(list, key) {
@@ -288,6 +302,8 @@
     state.lossBusy = true;
     try {
       await lossOnce();
+    } catch (e) {
+      window.app?.log?.('warn', '丢包轮询异常（轮询继续）: ' + ((e && e.message) || e));
     } finally {
       state.lossBusy = false;
     }
@@ -329,7 +345,11 @@
     }
     // 审查 2026-09-27 L3：预览模式模拟丢包的 else 分支已删——Tauri 轨 window.api
     // 恒在，该分支不可达；Math.random() 假丢包/假网关渲染违反「无模拟假数据」纪律。
-    renderMetrics();
+    try {
+      renderMetrics();
+    } catch (e) {
+      window.app?.log?.('warn', '丢包渲染异常: ' + ((e && e.message) || e));
+    }
   }
 
   function pushPoint(up, down) {
@@ -408,7 +428,7 @@
     const downColor = cssVar('--accent', '#6A59C9');
     const upColor = cssVar('--success', '#156B42');
 
-    const padL = 56, padR = 12, padT = 10, padB = 22;
+    const padL = CHART_PAD_L, padR = CHART_PAD_R, padT = 10, padB = 22;
     const plotW = w - padL - padR;
     const plotH = h - padT - padB;
 
@@ -501,17 +521,26 @@
   }
 
   // ===== 悬浮 tooltip =====
+  // #region hoverIndexAt
+  // F4b-L07：把鼠标 x 映射到采样索引。plotW = 整幅宽 − 左/右 padding，
+  // 与 drawInner 的 xAt(i) 完全同源；两端 clamp，不产生越界索引。
+  function hoverIndexAt(x, chartWidth, count) {
+    const plotW = chartWidth - CHART_PAD_L - CHART_PAD_R;
+    if (!(count > 0) || !(plotW > 0)) return 0;
+    const idx = Math.round(((x - CHART_PAD_L) / plotW) * (count - 1));
+    return Math.max(0, Math.min(count - 1, idx));
+  }
+  // #endregion
+
   function onChartMove(e) {
     const canvas = $('realtimeChart');
     const tip = $('realtimeTooltip');
     if (!canvas || !tip) return;
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const dpr = window.devicePixelRatio || 1;
     const cw = rect.width;
     if (!state.history.length || cw <= 0) return;
-    const idx = Math.round((x / cw) * (state.history.length - 1));
-    const clamped = Math.max(0, Math.min(state.history.length - 1, idx));
+    const clamped = hoverIndexAt(x, cw, state.history.length);
     state.hoverIdx = clamped;
     const p = state.history[clamped];
     const d = new Date(p.t);
@@ -898,21 +927,21 @@
     // 于是用户看到记录消失了、刷新后它还在（状态说谎）。
     backdrop.querySelectorAll('.rt-row-del').forEach(btn => {
       btn.addEventListener('click', async () => {
-        const row = btn.closest('.rt-report-row');
-        const name = row.dataset.name;
-        if (typeof window.api?.realtime?.reportDelete !== 'function') {
-          window.app?.toast('error', '删除通道不可用，未执行删除');
-          return;
-        }
-        // F4b-L12：与「清空全部」保持同一档确认，避免点错即不可恢复
-        const ok = await window.app?.confirm?.(
-          '删除网速报告',
-          `将删除报告「${name}」，删除后不可恢复。`,
-          '删除',
-          '取消'
-        );
-        if (!ok) return;
         try {
+          const row = btn.closest('.rt-report-row');
+          const name = row.dataset.name;
+          if (typeof window.api?.realtime?.reportDelete !== 'function') {
+            window.app?.toast('error', '删除通道不可用，未执行删除');
+            return;
+          }
+          // F4b-L12：与「清空全部」保持同一档确认，避免点错即不可恢复
+          const ok = await window.app?.confirm?.(
+            '删除网速报告',
+            `将删除报告「${name}」，删除后不可恢复。`,
+            '删除',
+            '取消'
+          );
+          if (!ok) return;
           const resp = await window.api.realtime.reportDelete(name);
           if (resp && resp.success === false) {
             window.app?.toast('error', resp.message || '删除失败，请稍后重试', 5000);
@@ -929,20 +958,23 @@
     });
     // 清空全部：不可逆，补二次确认（对照 diskbench「清空历史」有 confirm 的既有标准）
     backdrop.querySelector('.rt-clear-all').addEventListener('click', async () => {
-      if (typeof window.api?.realtime?.reportClear !== 'function') {
-        window.app?.toast('error', '清空通道不可用，未执行清空');
-        return;
-      }
-      const cnt0 = backdrop.querySelectorAll('.rt-report-row').length;
-      if (!cnt0) { window.app?.toast('info', '当前没有可清空的记录'); return; }
-      const ok = await window.app?.confirm?.(
-        '清空网速报告',
-        `将删除全部 ${cnt0} 份网速报告，删除后不可恢复（另有超 7 天自动清理的保留策略）。`,
-        '清空全部',
-        '取消'
-      );
-      if (!ok) return;
       try {
+        if (typeof window.api?.realtime?.reportClear !== 'function') {
+          window.app?.toast('error', '清空通道不可用，未执行清空');
+          return;
+        }
+        const cnt0 = backdrop.querySelectorAll('.rt-report-row').length;
+        if (!cnt0) { window.app?.toast('info', '当前没有可清空的记录'); return; }
+        // F4b-L08：与 diskbench 清空历史同档，改走 confirmDanger；确认件 reject
+        // 由本 catch 接住，不再变成「点了没反应」。
+        const ok = await window.app?.confirmDanger?.(
+          '清空网速报告',
+          `将删除全部 ${cnt0} 份网速报告，删除后不可恢复（另有超 7 天自动清理的保留策略）。`,
+      '仍然执行',
+          '取消',
+          '删除后无法从应用内恢复，请确认不再需要这些报告。'
+        );
+        if (!ok) return;
         const resp = await window.api.realtime.reportClear();
         if (resp && resp.success === false) {
           window.app?.toast('error', resp.message || '清空失败，请稍后重试', 5000);

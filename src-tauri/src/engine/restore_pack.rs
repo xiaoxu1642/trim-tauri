@@ -548,11 +548,11 @@ pub fn list_with_state(limit: usize) -> (Vec<Value>, usize) {
 /// 还原一个批次。逐条自检：zip 里有没有、哈希对不对、路径准不准、目标是否已存在。
 /// 任何一条不成立都记成失败原因，不静默跳过。
 ///
-/// 返回体三档：`restored` / `conflicts` / `failed`（逐项对象带 path+reason）。
-/// 这里刻意**没有** skipped 档，也从未有过：此前本函数的自述写着「返回体带
-/// ok/failed/conflict/skipped 四档」，那是一条与实现不符的承诺（R6b-M06 复核），
-/// 而「有条目被跳过」这件事本身已经由 `parse_manifest` 的 kind 白名单堵死——
-/// 形态不对的 manifest 整包拒绝，不会挑一条丢掉。
+/// 返回体四档：`restored` / `skipped` / `conflicts` / `failed`（逐项对象带 path+reason）。
+/// `skipped` 只由**文件档**产出：目标已存在且内容不同，或落位瞬间被并发方占用
+///（A6-L06）。这两类都没有写入，必须从 `conflicts` 里单独分账给回执/渲染层；
+/// `conflicts` 保持旧行为并仍同时 `push` 进 `failed`，渲染层只读 `failed.length`
+/// 与 `restored` 不会被破坏。目录档「已存在」仍按幂等成功计（R6b-L13）。
 /// `conflicts` 只由**文件档**产出（目标已存在且内容不同），且同时 `push` 进 `failed`：
 /// 渲染层只读 `failed.length` 与 `restored`，冲突必须是用户看得见的东西，不能只藏在
 /// 一个没有消费者的计数里。目录档「已存在」按幂等成功计（见循环里的 R6b-L13），
@@ -567,13 +567,13 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
     // 根是 junction 时命中链接另一头的同名批次；manifest 本体是链接时 `is_file()` 也说「是」。
     // 跳过原因要带回 —— 只回「找不到该还原包」会把「安全拒绝」伪装成「已被裁剪策略清掉」
     // （方案 P1-6 的失败伪装族）。
-    let mut skipped: Vec<String> = Vec::new();
+    let mut skipped_roots: Vec<String> = Vec::new();
     let mut found: Option<std::path::PathBuf> = None;
     for root in paths::backup_read_dirs(SUB) {
         let verdict = protect::inspect_root(&root, paths::data_root_base(&root).as_deref());
         if !verdict.is_trusted() {
             if matches!(verdict, protect::RootVerdict::Rejected(_)) {
-                skipped.push(format!("{}（{}）", root.display(), verdict.reason()));
+                skipped_roots.push(format!("{}（{}）", root.display(), verdict.reason()));
             }
             continue;
         }
@@ -592,10 +592,10 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
         }
     }
     let root = found.ok_or_else(|| {
-        if skipped.is_empty() {
+        if skipped_roots.is_empty() {
             "找不到该还原包（可能已被保留策略清掉）".to_string()
         } else {
-            format!("找不到该还原包；另有 {} 个备份根未通过安全判定，已跳过：{}", skipped.len(), skipped.join("；"))
+            format!("找不到该还原包；另有 {} 个备份根未通过安全判定，已跳过：{}", skipped_roots.len(), skipped_roots.join("；"))
         }
     })?;
     let dir = root.join(batch_id);
@@ -609,6 +609,7 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
 
     let mut ok = 0usize;
     let mut conflicts = 0usize;
+    let mut conflict_skips = 0usize;
     let mut failed: Vec<Value> = Vec::new();
     // 已解出的字节数（整批累计，用于 R6b-M05 的 `MAX_BATCH_BYTES` 早退闸）
     let mut restored_bytes: u64 = 0;
@@ -652,6 +653,7 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
                     Some(h) if h == e.sha256 => ok += 1,
                     _ => {
                         conflicts += 1;
+                        conflict_skips += 1;
                         failed.push(json!({ "path": e.orig_path, "reason": "目标已存在且内容与备份不同，未覆盖" }));
                         continue;
                     }
@@ -707,7 +709,8 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
             }
             let mut hasher = Sha256::new();
             let mut buf = vec![0u8; 1 << 16];
-            let mut wr = match std::fs::File::create(&tmp) {
+            // A6-L06：临时件也用 create_new 抢占，避免被并发方预置后截断。
+            let mut wr = match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
                 Ok(w) => w,
                 Err(err) => {
                     failed.push(json!({ "path": e.orig_path, "reason": format!("创建文件失败: {err}") }));
@@ -762,8 +765,35 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
                     let _ = std::fs::remove_file(&tmp);
                     failed.push(json!({ "path": e.orig_path, "reason": r }));
                 }
-                None => match std::fs::rename(&tmp, target) {
-                    Ok(_) => ok += 1,
+                None => match std::fs::OpenOptions::new().write(true).create_new(true).open(target) {
+                    Ok(mut handle) => {
+                        let mut reader = match std::fs::File::open(&tmp) {
+                            Ok(r) => r,
+                            Err(err) => {
+                                let _ = std::fs::remove_file(&tmp);
+                                failed.push(json!({ "path": e.orig_path, "reason": format!("读回校验副本失败: {err}") }));
+                                continue;
+                            }
+                        };
+                        match std::io::copy(&mut reader, &mut handle)
+                            .and_then(|_| handle.sync_all())
+                        {
+                            Ok(_) => {
+                                let _ = std::fs::remove_file(&tmp);
+                                ok += 1;
+                            }
+                            Err(err) => {
+                                let _ = std::fs::remove_file(&tmp);
+                                failed.push(json!({ "path": e.orig_path, "reason": format!("不覆盖落位失败: {err}") }));
+                            }
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let _ = std::fs::remove_file(&tmp);
+                        conflicts += 1;
+                        conflict_skips += 1;
+                        failed.push(json!({ "path": e.orig_path, "reason": "目标已被并发写入，未覆盖" }));
+                    }
                     Err(err) => {
                         let _ = std::fs::remove_file(&tmp);
                         failed.push(json!({ "path": e.orig_path, "reason": format!("就位失败: {err}") }));
@@ -774,12 +804,13 @@ pub fn restore(batch_id: &str) -> Result<Value, String> {
     }
     log::write_log(
         "info",
-        &format!("还原包还原 {batch_id}: 成功 {ok} 冲突/失败 {} 项", failed.len()),
+        &format!("还原包还原 {batch_id}: 成功 {ok} 跳过 {conflict_skips} 冲突/失败 {} 项", failed.len()),
     );
     Ok(json!({
         "id": batch_id,
         "restored": ok,
         "conflicts": conflicts,
+        "skipped": conflict_skips,
         "failed": failed,
     }))
 }
@@ -808,7 +839,36 @@ fn prune(root: &Path) {
         .map(|e| e.file_name().to_string_lossy().to_string())
         .filter(|n| !n.starts_with('.'))
         .collect();
-    dirs.sort();
+    // R6b-L22：旧写法 `dirs.sort()` 按**文件名字典序**挑「最旧」——批次目录名形态
+    // 多样（`drop-empty-<ms>` / `drop-kept-<stamp>` / ISO 批次号），字典序 ≠ 时间序
+    // （前缀不同 ⇒ 大小比较直接决定谁被裁）。改用与删除清单**同一解析器**
+    // （`delete_manifest::batch_time_key`）解析出的批次时刻排序；解析不出的排最后
+    // （优先保留）并计数告警，不按名字猜。
+    let unknown = dirs
+        .iter()
+        .filter(|d| crate::engine::delete_manifest::batch_time_key(d).is_none())
+        .count();
+    if unknown > 0 {
+        crate::engine::log::write_log(
+            "warn",
+            &format!("还原包批次裁剪：{unknown} 个批次目录名不带可解析批次号，按「最新」位序保留、不计入时间序"),
+        );
+    }
+    dirs.sort_by(|a, b| {
+        match (
+            crate::engine::delete_manifest::batch_time_key(a),
+            crate::engine::delete_manifest::batch_time_key(b),
+        ) {
+            (Some(ta), Some(tb)) => ta.cmp(&tb).then_with(|| a.cmp(b)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.cmp(b),
+        }
+    });
+    // R6b-L23：回收站失败必须计数（旧写法 `let _ =` 静默丢弃，
+    // 于是「裁剪没裁掉」与「裁掉了」在回执上同形）。
+    let mut removed = 0usize;
+    let mut failed = 0usize;
     while dirs.len() > KEEP_BATCHES {
         let oldest = dirs.remove(0);
         let target = root.join(oldest);
@@ -819,8 +879,23 @@ fn prune(root: &Path) {
             .map(|m| crate::engine::protect::is_reparse(&m))
             .unwrap_or(true);
         if !reparse {
-            let _ = trim_finder::scan::recycle::send_to_trash_os(target.as_os_str());
+            match trim_finder::scan::recycle::send_to_trash_os(target.as_os_str()) {
+                Ok(()) => removed += 1,
+                Err(e) => {
+                    failed += 1;
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!("还原包批次裁剪失败 {}: {e}", target.display()),
+                    );
+                }
+            }
         }
+    }
+    if removed > 0 || failed > 0 {
+        crate::engine::log::write_log(
+            "info",
+            &format!("还原包批次裁剪：移入回收站 {removed} 批，失败 {failed} 批"),
+        );
     }
 }
 
@@ -1230,7 +1305,7 @@ mod tests {
     /// 只跑档位：`cargo test --lib -- --ignored`（发布前门禁）。整批累计那条
     /// （`MAX_BATCH_BYTES`）需要 2GB 级样本，本探针不覆盖，如实记未验证。
     #[test]
-    #[ignore = "真写盘 + 真打包（lib 单测隔离数据根下），发布前门禁跑"]
+    #[ignore = "真写盘 + 真打包（lib 测试隔离数据根下，发布前门禁跑）"]
     fn 解包字节上限在写盘前早退() {
         let stamp = crate::engine::now_ms();
         let batch = format!("cap-{stamp}");
@@ -1376,7 +1451,7 @@ mod tests {
     /// 真的建出来，字节落到链接另一头）。
     ///
     /// 只写本用例自己的隔离根子目录，不碰真实 `%APPDATA%` 与真实用户目录（C08 之后
-    /// `cfg(test)` 的数据根就是 `target/test-data-root/lib`）；受限环境建不出 junction 时
+    /// `cfg(test)` 的数据根是测试运行时注入的隔离根）；受限环境建不出 junction 时
     /// 显式 SKIP 并声明未校验，不假绿。
     #[test]
     #[ignore = "真写盘 + 需建 junction（lib 单测隔离数据根内），发布前门禁跑"]
@@ -1414,13 +1489,12 @@ mod tests {
         // 参数逐条传，不拼成单个 `/C "<整串>"`：拼串时 Rust 会把内嵌的双引号再转义一次，
         // cmd 拿到的是一条它解析不了的命令行 ⇒ mklink 静默失败 ⇒ 本探针退化成 SKIP，
         // 而「SKIP 的探针」等于这条断言从来没被执行过（与 paths.rs 的 P0-2A 探针同口径）。
-        let made = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(&link)
-            .arg(&real)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+          // X1-L01：带超时 + 杀整树（夹具命令挂住时不得拖死整轮验收）。
+          let mut mk_restore_link = std::process::Command::new("cmd");
+          mk_restore_link.args(["/C", "mklink", "/J"]).arg(&link).arg(&real);
+          let made = crate::engine::testcmd::run_test_cmd(&mut mk_restore_link, std::time::Duration::from_secs(10))
+              .map(|o| o.status.success())
+              .unwrap_or(false);
         if !made {
             eprintln!("SKIP：本机建不出 junction（受限环境），父链穿链分支未校验");
             return;
@@ -1457,6 +1531,38 @@ mod tests {
         assert!(
             out["restored"].as_u64().unwrap_or(0) >= 1,
             "坏条目之外的项仍应还原（逐项拒，不整批中止），实得 {out}"
+        );
+    }
+
+    /// R6b-L22：还原包批次裁剪必须按**批次时刻**排序，不按文件名字典序。
+    ///
+    /// 旧写法 `dirs.sort()` 挑「最旧」时，批次目录名前缀不同（`drop-empty-` vs
+    /// `drop-kept-`）⇒ 字典序直接决定谁被裁，与实际时间无关。
+    /// 判红自证：把排序改回 `dirs.sort()` ⇒ 本用例红。
+    #[test]
+    fn restore_pack_prunes_oldest_batch() {
+        use crate::engine::delete_manifest::batch_time_key;
+
+        // 三个批次：字典序上 `drop-kept-` < `drop-empty-`（k < e 不成立，实际 e < k），
+        // 但时间上 `drop-kept-<早>` 更旧 ⇒ 必须先被裁。
+        let older_ms = 1_700_000_000_000i64;
+        let newer_ms = older_ms + 60_000;
+        let a = format!("drop-kept-{older_ms}");
+        let b = format!("drop-empty-{newer_ms}");
+        let c = format!("drop-kept-{newer_ms}");
+        let mut names = vec![b.clone(), c.clone(), a.clone()];
+        names.sort_by(|x, y| crate::engine::delete_manifest::batch_time_cmp(x, y));
+        assert_eq!(
+            names.first().map(String::as_str),
+            Some(a.as_str()),
+            "最旧批次必须按解析出的时刻排到队首（不是字典序）"
+        );
+
+        // 解析不出的批次号排最后（优先保留）。
+        assert_eq!(
+            batch_time_key("不是批次号"),
+            None,
+            "解析不出的批次号不得瞎猜时刻"
         );
     }
 }

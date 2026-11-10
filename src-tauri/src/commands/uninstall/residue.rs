@@ -328,12 +328,17 @@ pub(super) unsafe fn reg_enum_sz_values(
         if !ok {
             continue;
         }
-        let words: Vec<u16> = buf[..got as usize]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .take_while(|&w| w != 0)
-            .collect();
-        out.push((name, String::from_utf16_lossy(&words)));
+        // A5-L01：走统一解码出口 —— 奇数字节（半个字符）必须显式判错，
+        // 旧写法 `chunks_exact(2)` 会把尾字节静默丢掉。
+        match crate::engine::native::decode_reg_utf16(&buf[..got as usize]) {
+            Ok(s) => out.push((name, s)),
+            Err(e) => {
+                crate::engine::log::write_log(
+                    "warn",
+                    &format!("注册表字符串解码失败（值 {name}）：{e}"),
+                );
+            }
+        }
         if out.len() >= cap {
             break;
         }
@@ -542,6 +547,43 @@ pub(super) fn fill_missing_buckets(findings: &mut [Value]) {
     }
 }
 
+/// 规则库装载失败 → 置 degraded 并留下可见 note（R2a-L01，测试可直接喂 `None`）。
+pub(super) fn residue_rules_degraded(loaded: Option<&Value>, notes: &mut Vec<String>) -> bool {
+    if loaded.is_some() {
+        return false;
+    }
+    notes.push("残留规则库未装载（数据目录与内置副本都不可用），本轮没有签名规则命中，不能把空结果当成「没有残留」".to_string());
+    true
+}
+
+/// 卸载键打不开 → 本组清单不完整，不能与「真干净」同形（R2a-L07）。
+pub(super) fn note_uninstall_key_open_failure(opened: bool, full_target: &str, notes: &mut Vec<String>) -> bool {
+    if opened {
+        return false;
+    }
+    notes.push(format!(
+        "卸载键 {full_target} 打不开（权限不足或键已被删除），DisplayName / InstallLocation / UninstallString 都读不到，本组只覆盖其余来源，清单不完整"
+    ));
+    true
+}
+
+/// 残留扫描回执的 data 段（唯一装配点，L01/L07 的可判红断言直接喂它）。
+pub(super) fn residue_scan_data(
+    app_name: &str,
+    findings: Vec<Value>,
+    notes: Vec<String>,
+    degraded: bool,
+    incomplete: bool,
+) -> Value {
+    json!({
+        "appName": app_name,
+        "findings": findings,
+        "notes": notes,
+        "degraded": degraded,
+        "incomplete": incomplete,
+    })
+}
+
 /// 卸载域·残留扫描（方案 M3 MVP + U-2 固定系统侧痕）。
 ///
 /// **v0.7.0 起只产出该应用的四类残留**：服务残留 / 驱动残留 / 注册表残留 / 文件·文件夹残留。
@@ -580,16 +622,17 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
     // P1-6D：阻塞池任务的 JoinError（内部 panic / 被取消）不是「这个程序没有残留」。
     let scan = tauri::async_runtime::spawn_blocking(move || unsafe {
         use windows::Win32::System::Registry::{RegOpenKeyExW, RegCloseKey, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
+        let mut notes: Vec<String> = Vec::new();
         // U-4（拍板 2026-09-28）：Appx 残留口径=Remove-AppxPackage 后
         // %LOCALAPPDATA%\Packages\<PFN> 的应用数据遗留应用数据。此前「不参与残留扫描」，
         // 小旭拍板并入：目录存在才入候选，进回收站（可还原），先过 is_path_protected。
         if hive_str.eq_ignore_ascii_case("APPX") {
             let Some(pfn) = package_family_name(&key_path) else {
-                return (Vec::new(), "Windows 应用".to_string(), Vec::new());
+                return (Vec::new(), "Windows 应用".to_string(), Vec::new(), false, false);
             };
             let base = std::env::var("LOCALAPPDATA").unwrap_or_default();
             if base.is_empty() {
-                return (Vec::new(), "Windows 应用".to_string(), Vec::new());
+                return (Vec::new(), "Windows 应用".to_string(), Vec::new(), false, false);
             }
             let dir = PathBuf::from(&base).join("Packages").join(&pfn);
             let mut findings: Vec<Value> = Vec::new();
@@ -605,30 +648,42 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
                     ]),
                 }));
             }
-            return (findings, pfn, Vec::new());
+            return (findings, pfn, Vec::new(), false, false);
         }
         let (hive, full_target) = if hive_str.eq_ignore_ascii_case("HKCU") {
             (HKEY_CURRENT_USER, format!("HKCU\\{key_path}"))
         } else if hive_str.eq_ignore_ascii_case("HKLM") {
             (HKEY_LOCAL_MACHINE, format!("HKLM\\{key_path}"))
         } else {
-            return (Vec::new(), String::new(), Vec::new());
+            return (Vec::new(), String::new(), Vec::new(), false, false);
         };
         let sk = to_wide(&key_path);
         let mut hk = windows::Win32::System::Registry::HKEY::default();
-        if RegOpenKeyExW(hive, windows::core::PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
-            return (Vec::new(), String::new(), Vec::new());
-        }
-        let display_name = reg_sz(hk, "DisplayName").unwrap_or_default();
-        let publisher = reg_sz(hk, "Publisher").unwrap_or_default();
-        let install_location = reg_sz(hk, "InstallLocation").unwrap_or_default();
-        let display_icon_src = reg_sz(hk, "DisplayIcon").unwrap_or_default();
-        let uninstall_string = reg_sz(hk, "UninstallString").unwrap_or_default();
-        let _ = RegCloseKey(hk);
+        let key_opened = RegOpenKeyExW(hive, windows::core::PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_ok();
+        // R2a-L07：卸载键打不开不再回 `success:true + 空 findings`。键可能刚被卸载器删掉，
+        // 也可能只是权限读不到；两者都必须让面板知道「本组清单不完整」，不能与真干净同形。
+        let incomplete = note_uninstall_key_open_failure(key_opened, &full_target, &mut notes);
+        let (display_name, publisher, install_location, display_icon_src, uninstall_string) = if key_opened {
+            let v = (
+                reg_sz(hk, "DisplayName").unwrap_or_default(),
+                reg_sz(hk, "Publisher").unwrap_or_default(),
+                reg_sz(hk, "InstallLocation").unwrap_or_default(),
+                reg_sz(hk, "DisplayIcon").unwrap_or_default(),
+                reg_sz(hk, "UninstallString").unwrap_or_default(),
+            );
+            let _ = RegCloseKey(hk);
+            v
+        } else {
+            (String::new(), String::new(), String::new(), String::new(), String::new())
+        };
 
         let mut findings: Vec<Value> = Vec::new();
-        // 高置信：卸载键仍在（原厂卸载未完成/已取消的直接证据）
-        if crate::engine::native::reg_key_exists(hive, &key_path) {
+        // 高置信：卸载键仍在（原厂卸载未完成/已取消的直接证据）。
+        // R5c-v8-L04：读不出来（权限/IO）按「仍在」报，不得把 Unknown 当 Missing 丢掉证据。
+        if !matches!(
+            crate::engine::native::reg_key_exists_state(hive, &key_path),
+            crate::engine::native::KeyState::Missing
+        ) {
             let why = contribs(&[
                 ("uninstallKeyAlive", format!("本次卸载后复查：{full_target} 仍能打开")),
             ]);
@@ -819,7 +874,10 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
         }
         // 高置信：签名残留规则库命中（U-1）——已知程序知识库，双条件命中 +
         // 目标存在性判定后才出现；reg_key 删除走执行侧同款「先备份后删」
-        if let Some(rules) = load_residue_rules() {
+        // R2a-L01：规则库装载失败必须是「库停用」这一可见事实，不是「没有命中」。
+        let rules = load_residue_rules();
+        let degraded = residue_rules_degraded(rules.as_ref(), &mut notes);
+        if let Some(rules) = rules {
             let (rule_hits, vetoed) = residue_rules_hits(&rules, &display_name, &publisher, &key_path, false);
             findings.extend(rule_hits);
             // 硬否决在命令边界留痕：真机跑到这一行就说明签名规则库里躺着一处系统容器
@@ -856,7 +914,6 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
         // 只报「落点已失踪」那一类：服务键还在、ImagePath 指向的二进制已不存在，且归属判据成立。
         // 落点仍存在的服务是「还在用」，一律不报。服务表读不到（readable=false）时不产候选、
         // 只留 note —— 拿空表去判「已卸载」等于把全部服务算成残留。
-        let mut notes: Vec<String> = Vec::new();
         let (svc_entries, svc_readable, _svc_integrity, svc_enum_notes) = services_orphan::collect_service_entries(2048);
         // R2b-L01：服务表枚举触顶的残缺注记必须随表一起可见——截断过的服务表会让下面
         // 「没有任何服务引用」那类判据偏宽（drivers_orphan 同一条 note 里已点名这个方向）。
@@ -919,7 +976,7 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
         // R2a-L10：补桶放在**全部产源之后**（含上面的服务/驱动块），否则「已有 bucket 不覆盖」
         // 这一支在生产里恒不命中，护栏只剩注释。
         fill_missing_buckets(&mut findings);
-        (findings, display_name, notes)
+        (findings, display_name, notes, degraded, incomplete)
     });
     let findings = match scan.await {
         Ok(v) => v,
@@ -937,21 +994,21 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
     };
 
     // 快照落槽：执行只认这份集合（四类都进同一个 "app" 桶）
-    let (finding_list, app_name, mut notes) = findings;
+    let (finding_list, app_name, mut notes, degraded, incomplete) = findings;
     let scanned = finding_list.len();
     let label = window.label().to_string();
     // R2a-L02：渲染层必须拿到**快照真正接受的那一份**，不是扫描产出的全量。
     // 旧写法回全量、槽里只留 `merged.truncate(SNAPSHOT_CAP)` 截完的前若干条（截掉的正是
     // 这一次刚扫出来的尾部）⇒「面板看得见、快照里没有」，用户按面板全选点删除，
     // 整批被快照闸判成「不在本次扫描快照中」。容量溢出从此是**可见事实**而不静默。
-    let accepted = residue_snapshot_put(&label, "app", finding_list);
+    let accepted = residue_snapshot_put_for(&label, &app_id, "app", finding_list);
     if accepted.len() < scanned {
         notes.push(format!(
             "本会话执行快照容量上限 {SNAPSHOT_CAP} 已用满，本次 {} 条候选未进入可执行集合（重新扫描可换入，或先处理已列出的候选）",
             scanned - accepted.len()
         ));
     }
-    json!({ "success": true, "data": { "appName": app_name, "findings": accepted, "notes": notes } })
+    json!({ "success": true, "data": residue_scan_data(&app_name, accepted, notes, degraded, incomplete) })
 }
 
 // ==================== uninstall:residue-execute ====================
@@ -959,6 +1016,71 @@ pub async fn uninstall_residue_scan<R: tauri::Runtime>(
 /// 残留执行结果明细行
 pub(super) fn detail(kind: &str, target: &str, status: &str, message: &str) -> Value {
     json!({ "kind": kind, "target": target, "status": status, "message": message })
+}
+
+/// 删键失败的回执文案（R2a-L02）：必须带出 Win32 原因，不能只说「失败」。
+///
+/// `5/拒绝访问` 在未提权删 HKLM 时是主形态；旧 `reg_key_remove` 返回 bool，
+/// 用户只能看到一句「注册表删除失败」，无法判断是权限、子键未清还是键已不存在。
+pub(super) fn reg_delete_failure_text(code: u32) -> String {
+    format!("注册表删除失败：{}", crate::engine::native::remove_cause_label(code))
+}
+
+/// finder 删除结果行（`@@ITEM@@{"type":"delresult",…}`）的解析结果。
+pub(super) enum DelRowParse {
+    /// 协议内的正常行（进度/目录项等），不是删除结果
+    Ignore,
+    /// 空体 / JSON 解析失败 / delresult 缺 path —— 必须计畸形
+    Malformed,
+    Row(Value),
+}
+
+/// 删除结果行 → 回执行（R2a-L06）。
+///
+/// - `kind` 必须保留 `shortcut`：旧 `_ => "file"` 会把快捷方式删除记成普通文件，
+///   面板/报告无法区分「删链接本身」与「删目标文件」。
+/// - `path` 原样透传（扫描器已改用 `display_path` 保留原生分隔符）；本层不得再把
+///   `\` 归一成 `/`，否则回执与磁盘真实形态不一致。
+pub(super) fn parse_delresult_row(line: &str) -> DelRowParse {
+    let Some(body) = line.strip_prefix("@@ITEM@@") else { return DelRowParse::Ignore };
+    // 空体行是 @@ITEM@@{ 之后的续行被拆行时的产物，与 JSON 解析失败同口径
+    if body.trim().is_empty() {
+        return DelRowParse::Malformed;
+    }
+    let Ok(v) = trim_finder::cleanup_scan::parse_json(body) else {
+        return DelRowParse::Malformed;
+    };
+    if v.get("type").and_then(|t| t.as_str()) != Some("delresult") {
+        return DelRowParse::Ignore;
+    }
+    let jnum = |j: Option<&trim_finder::cleanup_scan::Json>| -> u64 {
+        match j {
+            Some(trim_finder::cleanup_scan::Json::Num(n)) => *n as u64,
+            _ => 0,
+        }
+    };
+    let path = v.get("path").and_then(|p| p.as_str()).unwrap_or("");
+    if path.is_empty() {
+        // delresult 行却没有 path：回执里会挂一条空路径的 detail，
+        // 形状上无法与真实删除结果区分 —— 计畸形，不进 details
+        return DelRowParse::Malformed;
+    }
+    DelRowParse::Row(json!({
+        "kind": match v.get("kind").and_then(|k| k.as_str()) {
+            Some("dir") => "dir",
+            Some("shortcut") => "shortcut",
+            _ => "file",
+        },
+        "path": path,
+        "status": v.get("status").and_then(|s| s.as_str()).unwrap_or(""),
+        "freed": jnum(v.get("freed")),
+        // R2a-L03（2026-11-01 重审）：`mode` / `message` 是 finder 删除链
+        // 区分「占用失败」与「安全拒绝」的唯一载体，此前在这里被丢弃，
+        // 回执于是把 reparse-ancestor / rejected / unrecoverable-name
+        // 一律说成「可能被占用」——用户按提示关程序重试必然无效。
+        "mode": v.get("mode").and_then(|m| m.as_str()).unwrap_or(""),
+        "message": v.get("message").and_then(|m| m.as_str()).unwrap_or(""),
+    }))
 }
 
 /// 备份文件的展示名（R2a-L12：明细与报告里要能指认「这条删除对应哪一份 .reg」）。
@@ -985,6 +1107,17 @@ pub(super) fn snapshot_has(snap: &[Value], kind: &str, target: &str) -> bool {
         f["kind"].as_str() == Some(kind)
             && f["target"].as_str().map(|s| s.eq_ignore_ascii_case(target)).unwrap_or(false)
     })
+}
+
+/// 快照 app_id 与本次执行请求的一致性闸（R2a-L04）。
+///
+/// 空串只保留给「不绑定 app_id」的既有测试/兼容入口；生产扫描一律写真实 app_id，
+/// 因此 A 的快照投给 B 时必然不等。大小写按注册表路径口径不敏感（与 `snapshot_has` 同向）。
+pub(super) fn snapshot_app_matches(snapshot_app_id: &str, current: &str) -> Result<(), String> {
+    if snapshot_app_id.is_empty() || snapshot_app_id.eq_ignore_ascii_case(current) {
+        return Ok(());
+    }
+    Err("执行快照属于另一个应用（可能已在同一窗口重新扫描），请重新扫描后再试".to_string())
 }
 
 /// 取快照里**那一条**条目（口径与 `snapshot_has` 完全一致：`kind` 全等 + `target` 大小写不敏感）。
@@ -1180,8 +1313,13 @@ pub(super) fn classify_residue_op_in(kind: &str, target: &str, snap_finding: Opt
                 // 放行必须留痕：这条是本仓唯一一处「A1 让路」，事后要能在日志里数出来
                 log::write_log("warn", &format!("A1 服务键窄口子放行（八道判据现读全过 + 已提权）: {target}"));
             }
-            if !crate::engine::native::reg_key_exists(hive, &rest) {
-                return skip("注册表项已不存在");
+            // R5c-v8-L04：只有确认不存在才跳过；读不出来不得当成「已不存在」放行/跳过。
+            match crate::engine::native::reg_key_exists_state(hive, &rest) {
+                crate::engine::native::KeyState::Missing => return skip("注册表项已不存在"),
+                crate::engine::native::KeyState::Unknown(code) => {
+                    return skip(&format!("注册表项存在性读不出来（win32={code}），已拒绝删除"))
+                }
+                crate::engine::native::KeyState::Exists => {}
             }
             OpVerdict::Ready(ResidueOp::RegKey { target: target.to_string(), hive, rest })
         }
@@ -1346,10 +1484,18 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
     }
     let label = window.label().to_string();
     // 快照校验：kind+target 逐一命中（方案 M4 验收「任意单项不得绕过快照」）
-    let snap: Vec<Value> = {
+    let (snap, snapshot_app_id): (Vec<Value>, String) = {
         let store = residue_snapshots().lock().unwrap_or_else(|e| e.into_inner());
-        store.get(&label).map(|(_, f)| f.clone()).unwrap_or_default()
+        store
+            .get(&label)
+            .map(|(a, _, f)| (f.clone(), a.clone()))
+            .unwrap_or_default()
     };
+    // R2a-L04：快照必须属于当前 app_id。A 的扫描结果不能被投给 B 执行——
+    // 仅按 label 取会让「同一窗口先扫 A 再扫 B」的旧快照成为 B 的可执行集合。
+    if let Err(msg) = snapshot_app_matches(&snapshot_app_id, &app_id) {
+        return json!({ "success": false, "message": msg });
+    }
     let submitted: Vec<(String, String)> = targets
         .iter()
         .map(|t| {
@@ -1465,24 +1611,30 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
                 .and_then(|p| p.include_reg_backup(&file).err())
                 .map(|e| format!("；副本未进还原包：{e}（.reg 原件仍在，可用原还原入口）"))
                 .unwrap_or_default();
-            if crate::engine::native::reg_key_remove(hive, rest, true) {
-                // R2a-L12：回执必须把「备份记的是**删除之前那次 export** 的内容」这件事摊开。
-                // export 与删除之间键内容若被改动，还原是「合并加回」而不是回滚
-                // （`uninstall_reg_backup_restore` 自述），而且不会报错。这里不假装能查出内容
-                // 漂移（`RegDeleteTreeW` 的 Ok 已含「整树删除成功」语义，删后复查 `reg_key_exists`
-                // 不会给出第二个答案），改的是**可核对性**：把这份备份的文件名写进明细与报告，
-                // 用户/事后审查能把「删的这条」与「留的哪份 .reg」逐条对上。
-                let backup_file = reg_backup_file_name(&file);
-                let mut d = detail(
+            match crate::engine::native::reg_key_remove_checked(hive, rest, true) {
+                Ok(()) => {
+                    // R2a-L12：回执必须把「备份记的是**删除之前那次 export** 的内容」这件事摊开。
+                    // export 与删除之间键内容若被改动，还原是「合并加回」而不是回滚
+                    // （`uninstall_reg_backup_restore` 自述），而且不会报错。这里不假装能查出内容
+                    // 漂移（`RegDeleteTreeW` 的 Ok 已含「整树删除成功」语义，删后复查 `reg_key_exists`
+                    // 不会给出第二个答案），改的是**可核对性**：把这份备份的文件名写进明细与报告，
+                    // 用户/事后审查能把「删的这条」与「留的哪份 .reg」逐条对上。
+                    let backup_file = reg_backup_file_name(&file);
+                    let mut d = detail(
+                        kind,
+                        target,
+                        "ok",
+                        &format!("已删除（删除前已导出备份 {backup_file}，还原按该备份内容合并加回）{pack_note}"),
+                    );
+                    d["backupFile"] = json!(backup_file);
+                    details.push(d);
+                }
+                Err(code) => details.push(detail(
                     kind,
                     target,
-                    "ok",
-                    &format!("已删除（删除前已导出备份 {backup_file}，还原按该备份内容合并加回）{pack_note}"),
-                );
-                d["backupFile"] = json!(backup_file);
-                details.push(d);
-            } else {
-                details.push(detail(kind, target, "fail", &format!("注册表删除失败{pack_note}")));
+                    "fail",
+                    &format!("{}{pack_note}", reg_delete_failure_text(code)),
+                )),
             }
         }
 
@@ -1619,48 +1771,13 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             }
             impl trim_finder::scan::Sink for RowSink {
                 fn item(&self, _p: &Path, line: &str) {
-                    let Some(body) = line.strip_prefix("@@ITEM@@") else { return };
-                    // 空体行是 @@ITEM@@{ 之后的续行被拆行时的产物，与 JSON 解析失败同口径
-                    if body.trim().is_empty() {
-                        self.count_malformed();
-                        return;
-                    }
-                    let Ok(v) = trim_finder::cleanup_scan::parse_json(body) else {
-                        self.count_malformed();
-                        return;
-                    };
-                    if v.get("type").and_then(|t| t.as_str()) != Some("delresult") {
-                        // 非 delresult 行是协议内的正常行（进度/目录项等），不算畸形
-                        return;
-                    }
-                    let jnum = |j: Option<&trim_finder::cleanup_scan::Json>| -> u64 {
-                        match j {
-                            Some(trim_finder::cleanup_scan::Json::Num(n)) => *n as u64,
-                            _ => 0,
+                    match parse_delresult_row(line) {
+                        DelRowParse::Ignore => {}
+                        DelRowParse::Malformed => self.count_malformed(),
+                        DelRowParse::Row(row) => {
+                            self.rows.lock().unwrap_or_else(|e| e.into_inner()).push(row)
                         }
-                    };
-                    let path = v.get("path").and_then(|p| p.as_str()).unwrap_or("");
-                    if path.is_empty() {
-                        // delresult 行却没有 path：回执里会挂一条空路径的 detail，
-                        // 形状上无法与真实删除结果区分 —— 计畸形，不进 details
-                        self.count_malformed();
-                        return;
                     }
-                    self.rows.lock().unwrap_or_else(|e| e.into_inner()).push(json!({
-                        "kind": match v.get("kind").and_then(|k| k.as_str()) {
-                            Some("dir") => "dir",
-                            _ => "file",
-                        },
-                        "path": path,
-                        "status": v.get("status").and_then(|s| s.as_str()).unwrap_or(""),
-                        "freed": jnum(v.get("freed")),
-                        // R2a-L03（2026-11-01 重审）：`mode` / `message` 是 finder 删除链
-                        // 区分「占用失败」与「安全拒绝」的唯一载体，此前在这里被丢弃，
-                        // 回执于是把 reparse-ancestor / rejected / unrecoverable-name
-                        // 一律说成「可能被占用」——用户按提示关程序重试必然无效。
-                        "mode": v.get("mode").and_then(|m| m.as_str()).unwrap_or(""),
-                        "message": v.get("message").and_then(|m| m.as_str()).unwrap_or(""),
-                    }));
                 }
                 fn progress(&self, _n: u64) {}
                 fn scanned(&self, _n: u64) {}
@@ -1806,6 +1923,115 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
         }
         Ok(Err(e)) => json!({ "success": false, "message": e }),
         Err(e) => json!({ "success": false, "message": format!("残留清理异常: {e}") }),
+    }
+}
+
+#[cfg(test)]
+mod p2_residue_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// R2a-L01：规则库装载失败必须留下 notes + degraded，不得伪装成「没有命中」。
+    #[test]
+    fn r2a_rules_disabled_is_visible() {
+        let mut notes = Vec::new();
+        assert!(residue_rules_degraded(None, &mut notes), "None 必须置 degraded");
+        assert!(
+            notes.iter().any(|n| n.contains("残留规则库未装载")),
+            "必须留下可见 note: {notes:?}"
+        );
+        let data = residue_scan_data("Acme", Vec::new(), notes, true, false);
+        assert_eq!(data["degraded"], json!(true), "回执必须带 degraded:true");
+        assert!(data["notes"][0].as_str().unwrap_or("").contains("残留规则库未装载"));
+        let mut loaded_notes = Vec::new();
+        let loaded = json!({ "rulesVersion": 1.0 });
+        assert!(!residue_rules_degraded(Some(&loaded), &mut loaded_notes));
+        assert!(loaded_notes.is_empty(), "装载成功不得误报 degraded");
+    }
+
+    /// R2a-L02：删键失败回执必须带 Win32 原因；5 与 1018 不得折成同一句。
+    #[test]
+    fn r2a_reg_delete_reports_cause() {
+        let denied = reg_delete_failure_text(5);
+        assert!(denied.contains("拒绝访问"), "5 必须点名拒绝访问: {denied}");
+        assert!(denied.contains("父键不允许删除子键"), "5 必须说明父键约束: {denied}");
+        assert_ne!(denied, reg_delete_failure_text(1018), "5 与 1018 必须可区分");
+    }
+
+    /// R2a-L04：A 的快照投给 B 必须拒，并提示重新扫描。
+    #[test]
+    fn r2a_snapshot_rejects_app_id_mismatch() {
+        let label = "p2-snapshot-app-id";
+        let app_a = r"HKCU|Software\AcmeA";
+        let app_b = r"HKCU|Software\AcmeB";
+        let accepted = residue_snapshot_put_for(
+            label,
+            app_a,
+            "app",
+            vec![json!({ "kind": "reg_key", "target": r"HKCU\Software\AcmeA" })],
+        );
+        assert_eq!(accepted.len(), 1);
+        let stored_app = residue_snapshots()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(label)
+            .map(|(a, _, _)| a.clone())
+            .expect("快照必须落槽");
+        assert_eq!(stored_app, app_a, "快照必须绑定扫描时的 app_id");
+        assert!(snapshot_app_matches(&stored_app, app_a).is_ok());
+        let err = snapshot_app_matches(&stored_app, app_b).expect_err("A 的快照投给 B 必须拒");
+        assert!(err.contains("重新扫描"), "拒绝必须提示重新扫描: {err}");
+        let _ = residue_snapshots().lock().map(|mut g| g.remove(label));
+    }
+
+    /// R2a-L06：`shortcut` 不得落 `_ => "file"`；回执路径保留原生反斜杠。
+    #[test]
+    fn r2a_shortcut_kind_and_backslash_preserved() {
+        let line = concat!(
+            r#"@@ITEM@@{"type":"delresult","path":"C:\\Users\\x\\Desktop\\Acme.lnk","#,
+            r#""kind":"shortcut","status":"ok","freed":12,"mode":"recycled","message":"ok"}"#
+        );
+        match parse_delresult_row(line) {
+            DelRowParse::Row(v) => {
+                assert_eq!(v["kind"], "shortcut", "快捷方式必须保留 kind=shortcut");
+                assert_eq!(v["path"], r"C:\Users\x\Desktop\Acme.lnk", "路径不得被改成 /");
+            }
+            _ => panic!("delresult 行必须解析成 Row"),
+        }
+        let dir_line = r#"@@ITEM@@{"type":"delresult","path":"C:\\x","kind":"dir","status":"ok","freed":0,"mode":"recycled","message":""}"#;
+        match parse_delresult_row(dir_line) {
+            DelRowParse::Row(v) => assert_eq!(v["kind"], "dir"),
+            _ => panic!("目录行必须解析成 Row"),
+        }
+        assert!(matches!(parse_delresult_row("@@ITEM@@{bad"), DelRowParse::Malformed));
+        // 扫描器侧同一条判据：del_item 必须用 display_path（保留 `\`），不得退回 unix_path。
+        let scan_src = include_str!("../../../../native-scanner/src/scan.rs");
+        let del_fn = scan_src
+            .find("fn del_item")
+            .map(|i| &scan_src[i..])
+            .and_then(|s| s.find("\n}\n").map(|e| &s[..e]))
+            .expect("找不到 del_item");
+        assert!(del_fn.contains("display_path(path)"), "删除回执必须用 display_path 保留原生分隔符");
+        assert!(
+            !del_fn.contains("unix_path(path)"),
+            "删除回执不得退回 unix_path（会把 \\ 改成 /）"
+        );
+    }
+
+    /// R2a-L07：卸载键打不开必须判 incomplete 并留 note，与「真干净」分开。
+    #[test]
+    fn r2a_uninstall_key_open_failure_is_incomplete() {
+        let mut notes = Vec::new();
+        assert!(
+            note_uninstall_key_open_failure(false, r"HKCU\Software\Acme", &mut notes),
+            "开键失败必须判 incomplete"
+        );
+        assert!(notes[0].contains("清单不完整"), "{notes:?}");
+        let data = residue_scan_data("Acme", Vec::new(), notes, false, true);
+        assert_eq!(data["incomplete"], json!(true), "回执必须带 incomplete:true，不能与真干净同形");
+        let mut ok_notes = Vec::new();
+        assert!(!note_uninstall_key_open_failure(true, r"HKCU\Software\Acme", &mut ok_notes));
+        assert!(ok_notes.is_empty(), "开键成功不得误报不完整");
     }
 }
 

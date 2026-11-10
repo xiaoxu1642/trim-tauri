@@ -167,6 +167,40 @@ mod tests {
         assert!(split.diagnostics.is_empty());
     }
 
+    /// R7-L04：stderr 里的诊断协议行也必须被剥掉。
+    ///
+    /// 脚本把诊断写进 stderr 是常见写法（`Write-Error` / `2>&1`）。
+    /// 旧实现只洗 stdout ⇒ 原始 `@@DIAG@@{...}` 行进了 stderr，
+    /// 而 stderr 会被原样写进日志（「PowerShell 退出码 N: @@DIAG@@{...}」）——
+    /// 协议行混进用户可见的日志正文。
+    /// 判红自证：把 `pwsh/mod.rs` 里的 `stderr_clean` 改回直传 `stderr` ⇒ 本用例红。
+    #[test]
+    fn stderr_diag_lines_are_stripped() {
+        // stderr 含诊断行、退出码为 0 —— 旧实现只在 `code != 0` 时才写日志，
+        // 于是这条协议行连日志都进不去，直接留在 stderr 字段里。
+        let stderr = "@@DIAG@@{\"failure_stage\":\"ok\"}\n普通错误输出\n";
+        let cleaned = strip_diag_lines(stderr, Some("probe"));
+        assert!(
+            !cleaned.contains(DIAG_PREFIX),
+            "诊断协议行不得残留在 stderr：{cleaned:?}"
+        );
+        assert!(
+            cleaned.contains("普通错误输出"),
+            "普通错误输出必须保留：{cleaned:?}"
+        );
+
+        // 调用点接线：stderr 必须过 strip_diag_lines。
+        let pwsh_src = include_str!("../pwsh/mod.rs");
+        assert!(
+            pwsh_src.contains("let stderr_clean = crate::diag::strip_diag_lines(&stderr, diag_op);"),
+            "stderr 必须过 strip_diag_lines（R7-L04）"
+        );
+        assert!(
+            pwsh_src.contains("stderr: stderr_clean,"),
+            "回执里的 stderr 必须是清洗后的那份"
+        );
+    }
+
     /// A6-M07：op 未登记的调用点也必须把 DIAG 行剔掉（日志可以少写，协议行不能回流）。
     #[test]
     fn 未登记op时仍剔除诊断行() {

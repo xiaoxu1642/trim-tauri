@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { writeFileAtomic } from './lib/atomic-write.mjs';
 import { nextRulesVersion } from './lib/next-rules-version.mjs';
 import { allItems } from './lib/rule-shape.mjs';
+import { list as schemaList, number as schemaNumber, tokens as schemaTokens } from './rule-schema.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RULES_REL = path.join('src-tauri', 'data', 'cleanup-rules.json');
@@ -119,9 +120,10 @@ const TOKEN_MAP = new Map(Object.entries({
   '%LOCALLOWAPPDATA%': '%USERPROFILE%\\AppData\\LocalLow',
 }));
 
-const ALLOWED_TOKENS = ['LOCALAPPDATA', 'APPDATA', 'USERPROFILE', 'WINDIR', 'SystemRoot',
-  'SystemDrive', 'PROGRAMDATA', 'TEMP', 'TMP', 'PUBLIC', 'ProgramFiles', 'ProgramFiles(x86)',
-  'HOMEDRIVE', 'HOMEPATH'];
+const ALLOWED_TOKENS = schemaTokens('cleanup').allowed;
+const MAX_FILE_KEYS = schemaNumber('cleanup', 'maxFileKeysPerItem');
+const MAX_TARGET_LEN = schemaNumber('cleanup', 'maxTargetLen');
+const GROUP_KEY_LEN = schemaNumber('cleanup', 'maxGroupItems');
 
 function normalizePath(p) {
   let out = String(p ?? '').replace(/\//g, '\\');
@@ -210,7 +212,7 @@ function fileKeyProblem(fk) {
   if (!fk.path.trim()) return '空路径';
   const bad = unknownTokens(fk.path);
   if (bad.length) return `未登记 token ${bad.join(',')}`;
-  if (fk.path.length > 260) return '路径超长';
+  if (fk.path.length > MAX_TARGET_LEN) return '路径超长';
   if (fk.path.includes('?')) return '路径含 ? 通配';
   if (fk.path.startsWith('\\\\.\\') || fk.path.startsWith('\\\\?\\') || fk.path.startsWith('\\??\\')) return '设备/长路径前缀';
   if (!patternOk(fk.pattern)) return `pattern 不合单星口径: ${fk.pattern}`;
@@ -562,7 +564,7 @@ function buildItem(c, cls, rulesVersion, seen) {
   const name = zhName(c, nature);
   const detect = [];
   if (c.detectFile && !c.detectFile.includes('?') && !c.detectFile.includes('/')
-      && !unknownTokens(c.detectFile).length && c.detectFile.length <= 260) {
+      && !unknownTokens(c.detectFile).length && c.detectFile.length <= MAX_TARGET_LEN) {
     detect.push({ type: 'file', path: c.detectFile });
   } else {
     for (const dp of c.detects) {
@@ -631,7 +633,7 @@ function groupKeyOf(c) {
     const keep = cut > 0 ? segs.slice(0, cut) : segs.slice(0, Math.min(segs.length, 3));
     return keep.join('\\').toLowerCase();
   }
-  return norm(c.owner || c.section).slice(0, 40);
+  return norm(c.owner || c.section).slice(0, GROUP_KEY_LEN);
 }
 
 /// 组内优先级：性质（缓存 > 临时 > 日志 > 其它）→ 路径短 → 目标数少。
@@ -671,7 +673,7 @@ function build() {
     }
     if (!cls) { bumpR('映射不到现有类目（宁可不收，不硬塞）'); continue; }
     if (riskOf(c) === 'high') { bumpR('high 风险（会丢密码/凭据，不进默认库）'); continue; }
-    if (c.fileKeys.length > 32) { bumpR('fileKeys 超 32 条上限'); continue; }
+    if (c.fileKeys.length > MAX_FILE_KEYS) { bumpR(`fileKeys 超 ${MAX_FILE_KEYS} 条上限`); continue; }
     pool.push({ c, tier, cls, nature: natureOf(c), key: groupKeyOf(c) });
   }
 
@@ -699,7 +701,7 @@ function build() {
     groups.set(p.key, g);
   }
   // cap 计数要把**库里已有**的同组条目算进去：扩库是第二轮动作，第一轮已收的
-  // 软件（Chrome/Edge 各 4 条）若不计入，A=6 的上限会被再灌 6 条成 10+。
+  // 软件（Chrome/Edge 各 4 条）若不计入，A 档上限会被再灌成超量。
   // T1c-M03：同 existingFingerprints，必须走 allItems —— 只数 subGroups 会漏掉 special 域。
   const existingByGroup = new Map();
   for (const it of allItems(rules)) {
@@ -725,7 +727,7 @@ function build() {
       picked.push({ ...built.item, _tier: p.tier, _key: p.key });
     }
   }
-  if (overCap.n) rejected.set('超出每软件条数上限（A=10/B=3）', overCap.n);
+  if (overCap.n) rejected.set(`超出每软件条数上限（A=${PER_APP_CAP.A}/B=${PER_APP_CAP.B}）`, overCap.n);
   return { picked, rejected, total: out.length, rulesVersion, apps: groups.size };
 }
 

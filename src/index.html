@@ -44,7 +44,8 @@
       <button id="splash-enter" class="splash-enter" type="button" hidden>点击进入</button>
     </div>
   </div>
-  <!-- 首帧前同步主题（外部文件：内联写法被 CSP script-src 'self' 拦截，引导从未生效） -->
+  <!-- html 级主题引导（外部文件：内联写法被 CSP script-src 'self' 拦截，引导从未生效）。
+       body 已静态挂 theme-light，它不再影响首帧，只守 html 级级联与防未来回退。 -->
   <script src="scripts/theme-boot.js"></script>
   <!-- 标题栏（审查 v2-F8：原生装饰已由 lib.rs 的 decorations(false) 关闭，
        右上角窗口控制按钮由 tauri-api.js 注入的自绘 caption 提供，不是 titleBarOverlay） -->
@@ -283,11 +284,11 @@
         <!-- 磁盘清理分段式页面切换：四合一子视图（大标题下方；各子视图操作按钮与分段栏同行右对齐，窗口界面升级3） -->
         <div class="cleanup-toolbar">
         <div class="filter-tabs cleanup-tabs" id="cleanupTabs" role="tablist" aria-label="磁盘清理子功能">
-          <button class="filter-tab active" data-cleanup-view="cleanup" role="tab" aria-selected="true">主要</button>
-          <button class="filter-tab" data-cleanup-view="cleanup-dups" role="tab" aria-selected="false">重复文件查找</button>
-          <button class="filter-tab" data-cleanup-view="cleanup-empty" role="tab" aria-selected="false">空文件与空目录</button>
-          <button class="filter-tab" data-cleanup-view="cleanup-analyze" role="tab" aria-selected="false">磁盘分析</button>
-          <button class="filter-tab" data-cleanup-view="cleanup-locked" role="tab" aria-selected="false">占用查询</button>
+          <button class="filter-tab active" data-cleanup-view="cleanup" role="tab" aria-selected="true" aria-controls="cleanupMainPanel">主要</button>
+          <button class="filter-tab" data-cleanup-view="cleanup-dups" role="tab" aria-selected="false" aria-controls="cleanupDupsPanel">重复文件查找</button>
+          <button class="filter-tab" data-cleanup-view="cleanup-empty" role="tab" aria-selected="false" aria-controls="cleanupEmptyPanel">空文件与空目录</button>
+          <button class="filter-tab" data-cleanup-view="cleanup-analyze" role="tab" aria-selected="false" aria-controls="cleanupAnalyzePanel">磁盘分析</button>
+          <button class="filter-tab" data-cleanup-view="cleanup-locked" role="tab" aria-selected="false" aria-controls="cleanupLockedPanel">占用查询</button>
         </div>
 
         <!-- 各子视图操作行：随分段切换显示；「主要」视图的操作与分段栏同行、恒右对齐（2026-10-06 用户裁定：
@@ -362,7 +363,7 @@
         </div>
         </div><!-- /.cleanup-toolbar -->
 
-        <div class="cleanup-view active" data-cleanup-panel="cleanup">
+        <div class="cleanup-view active" id="cleanupMainPanel" role="tabpanel" data-cleanup-panel="cleanup">
         <!-- 总览卡片 -->
         <div class="summary-cards">
           <div class="summary-card">
@@ -411,7 +412,7 @@
       </div><!-- /.cleanup-view[main] -->
 
       <!-- ============================ 磁盘清理 · 重复文件查找（子视图） ============================ -->
-      <div class="cleanup-view" data-cleanup-panel="cleanup-dups">
+      <div class="cleanup-view" id="cleanupDupsPanel" role="tabpanel" data-cleanup-panel="cleanup-dups">
         <div class="finder-toolbar card">
           <!-- 2026-09-28 六轮拍板：重复文件页隐藏扫描目录输入，固定内置默认目录
                （Downloads/Desktop/Documents/Pictures），仅保留最小文件选择 -->
@@ -437,7 +438,7 @@
       </div>
 
       <!-- ============================ 磁盘清理 · 空文件与空目录（子视图） ============================ -->
-      <div class="cleanup-view" data-cleanup-panel="cleanup-empty">
+      <div class="cleanup-view" id="cleanupEmptyPanel" role="tabpanel" data-cleanup-panel="cleanup-empty">
         <div class="finder-toolbar card">
           <!-- 2026-09-28 六轮拍板：空扫描默认全盘（盘符点选），排除规则在扫描器内部生效 -->
           <span class="opt-inline">扫描磁盘
@@ -477,7 +478,7 @@
       </div>
 
       <!-- ============================ 磁盘清理 · 磁盘分析器（子视图，C-5） ============================ -->
-      <div class="cleanup-view" data-cleanup-panel="cleanup-analyze">
+      <div class="cleanup-view" id="cleanupAnalyzePanel" role="tabpanel" data-cleanup-panel="cleanup-analyze">
         <div class="finder-toolbar card">
           <!-- C-5 拍板：逐层按需下钻（每层一次扫描），删除复用 finder:delete 回收站链 -->
           <span class="opt-inline">分析磁盘
@@ -514,7 +515,7 @@
       </div>
 
       <!-- ============================ 磁盘清理 · 占用查询（子视图，C1-1） ============================ -->
-      <div class="cleanup-view" data-cleanup-panel="cleanup-locked">
+      <div class="cleanup-view" id="cleanupLockedPanel" role="tabpanel" data-cleanup-panel="cleanup-locked">
         <div class="finder-toolbar card">
           <!-- C1-1（2026-10-16 拍板）：主窗内嵌卡片；查询与结束进程两步式——
                查询只读，结束只认本次查询写下的白名单；系统关键进程只展示、不出现在白名单 -->
@@ -549,8 +550,8 @@
 
         <div class="cleanup-toolbar">
           <div class="filter-tabs" id="uninstallScopeTabs" role="tablist" aria-label="应用范围">
-            <button class="filter-tab active" data-un-scope="user" role="tab" aria-selected="true">用户应用</button>
-            <button class="filter-tab" data-un-scope="windows" role="tab" aria-selected="false">Windows应用</button>
+            <button class="filter-tab active" data-un-scope="user" role="tab" aria-selected="true" aria-controls="uninstallPanel">用户应用</button>
+            <button class="filter-tab" data-un-scope="windows" role="tab" aria-selected="false" aria-controls="uninstallPanel">Windows应用</button>
           </div>
           <div class="cleanup-toolbar-actions cleanup-toolbar-actions--inline active">
             <label class="toggle-switch" for="uninstallRestoreToggle" data-tip="卸载前先创建一个系统还原点（可能需要数十秒）；创建失败只提示、不拦截卸载。系统还原未启用时此开关无效。">
@@ -583,7 +584,7 @@
           <p class="uninstall-busy-detail" id="uninstallBusyDetail">耗时由外部程序自己掌握，应用读不到百分比，所以这里只显示已经等待的时间。</p>
         </div>
 
-        <div class="table-card" id="uninstallList"></div>
+        <div class="table-card xtable-host" id="uninstallPanel" role="tabpanel"><div class="table-card" id="uninstallList"></div></div>
 
         <!-- 残留面板整块在 src/residue-window.html：只有「卸载成功后自动弹出」这一条来路，
              主窗不再提供常驻入口（v0.7.0 用户拍板：同一件事不留第二个界面） -->
@@ -1548,8 +1549,8 @@
        硬约束不破；defer 脚本必在 DOMContentLoaded 之前执行完，黑闪握手
        （tauri-api.js 的 notifyFirstPaint 等的就是 DCL）不受影响。
        动态注入的 PAGE_SCRIPTS / IDLE_SCRIPTS 永远晚于 defer，方向安全。
-       theme-boot.js 在 body 内同步执行、无 defer（首屏门禁 F2 的豁免位）：它要在首次
-       绘制前把主题类挂上，加 defer 会让它晚于首帧，出现「先白后暗」闪。 -->
+       theme-boot.js 在 body 内同步执行、无 defer（首屏门禁 F2 的豁免位）：它守 html 级
+       主题类与「未来删掉 body 静态类」的回退（body 已静态挂 theme-light，首帧不再依赖它）。 -->
   <script src="scripts/tauri-api.js" defer></script>
   <!-- 启动页（v2.7.0）：独立无依赖，defer 序仅晚于 tauri-api.js，盖住整窗直到 FLIP 落位完成 -->
   <script src="scripts/splash.js" defer></script>

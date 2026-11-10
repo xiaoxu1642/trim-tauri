@@ -91,7 +91,28 @@ pub fn apply_material_outcome<R: Runtime>(
         "acrylic" | "thin-acrylic" => apply_acrylic(window, Some((245, 246, 248, 90))),
         // none：清除 DWM 背景（内部把 SystemBackdropType 复位 NONE），
         // 渲染层 data-material="none" 的不透明底色兜底不变
-        _ => clear_mica(window).and(clear_acrylic(window)),
+        // R8-L02：两次清除**各自独立**执行并分别收集错误 ——
+        // 旧写法 `clear_mica(..).and(clear_acrylic(..))` 是短路：mica 失败 ⇒
+        // acrylic 根本不跑，残留的亚克力背景留在窗口上（界面看着像「材质没清干净」，
+        // 而日志只报了 mica 的错）。两环材质可能只生效其一，两步都必须试。
+        _ => {
+            let mica = clear_mica(window);
+            let acrylic = clear_acrylic(window);
+            match (mica, acrylic) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(e), Ok(())) => Err(e),
+                (Ok(()), Err(e)) => Err(e),
+                // 两个都失败：报 mica 的原因（错误类型不是 String，
+                // 合成消息会丢类型信息）；acrylic 的失败另记一条日志。
+                (Err(mica_err), Err(acrylic_err)) => {
+                    log::write_log(
+                        "warn",
+                        &format!("清除亚克力背景失败（mica 亦失败）: {acrylic_err}"),
+                    );
+                    Err(mica_err)
+                }
+            }
+        }
     };
     if let Err(e) = &result {
         // R8-L05：发布构建 `windows_subsystem = "windows"` 没有 stderr，这里若只打 eprintln，
@@ -244,7 +265,7 @@ const WRY_DEFAULT_BROWSER_ARGS: &str =
 
 /// 把 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` 环境变量透传给 builder（审查 K4 复盘）。
 ///
-/// 实测陷阱：主窗在 `lib.rs` 里透传了这份参数（Phase 0 为了让 CDP 端口生效），而四个子窗
+/// 实测陷阱：主窗在 `lib.rs` 里透传了这份参数（Phase 0 为了让 CDP 端口生效），而三个子窗
 /// **没有**透传 —— 同一个 WebView2 user-data-folder 下浏览器参数不一致时，第二个 core 创建
 /// 不出来，`build()` 却照样返回成功、`get_webview_window` 也查得到，只是 `hwnd=0x0`。
 /// 结果就是「带着调试端口启动时，所有子窗静默失效」，做真机验收的人会据此误判产品坏了。
@@ -339,10 +360,14 @@ pub fn on_render_first_paint<R: Runtime>(app: &AppHandle<R>) {
             state.painted.store(true, Ordering::SeqCst);
         }
         None => {
+            // R8-L01：state 没建时**就此返回**，不再往下调依赖 state 的函数 ——
+            // `show_main_window_when_ready` 里的 `app.state::<ShowState>()` 会 panic，
+            // 于是「启动顺序异常」从一条 warn 变成整个首帧握手的 panic。
             log::write_log(
-                "warn",
-                "首帧握手到达但 ShowState 未建：painted 无法置位（启动顺序异常，看门狗会把白屏误报）",
+                "error",
+                "首帧握手到达但 ShowState 未建：painted 无法置位、显示握手无法进行（启动顺序异常，看门狗会把白屏误报）",
             );
+            return;
         }
     }
     show_main_window_when_ready(app, "渲染层首帧握手");
@@ -451,7 +476,44 @@ fn schedule_startup_housekeeping_once<R: Runtime>(app: &AppHandle<R>) {
     if !state.try_schedule() {
         return;
     }
-    std::thread::spawn(run_startup_housekeeping);
+    // R8-L03：句柄存进 `OnceLock`，退出钩子才能 join 它 ——
+    // 旧写法 `std::thread::spawn(..)` 直接丢弃句柄，于是进程退出时这个线程
+    // 可能正在删临时脚本 / 改保护清单，被强杀 ⇒ 半截状态留在盘上。
+    let _ = HOUSEKEEPING_HANDLE.lock().unwrap_or_else(|e| e.into_inner()).replace(
+        std::thread::spawn(run_startup_housekeeping),
+    );
+}
+
+/// R8-L03：housekeeping 线程句柄（进程内唯一）。
+static HOUSEKEEPING_HANDLE: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(None);
+
+/// R8-L03：退出前 join housekeeping 线程（有上界，不把退出卡成无限等待）。
+fn join_housekeeping_thread() {
+    let handle = HOUSEKEEPING_HANDLE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    let Some(handle) = handle else {
+        return;
+    };
+    // 线程体是纯磁盘 IO（删日志 / 清隔离件 / 剪报告 / 清临时脚本），
+    // 正常在几百毫秒内结束；join 有上界保护（超时只记 warn，不拖住退出）。
+    let (tx, rx) = std::sync::mpsc::channel();
+    let joiner = std::thread::spawn(move || {
+        let r = handle.join();
+        let _ = tx.send(r.is_ok());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(true) => {}
+        Ok(false) => {
+            log::write_log("warn", "启动 housekeeping 线程退出时 panic");
+        }
+        Err(_) => {
+            log::write_log("warn", "启动 housekeeping 线程 5s 内未结束，退出不再等待");
+        }
+    }
+    let _ = joiner.join();
 }
 
 /// 执行体：只调用无 UI 依赖的回收函数 —— 不碰窗口材质、不改保护清单、不重读并覆盖用户
@@ -811,7 +873,7 @@ pub fn run() {
                 .transparent(true)
                 .visible(false)
                 .shadow(true);
-            // 审查 v2-L4：主窗也过一次 `with_browser_args`。四个子窗早就统一走它，只有主窗内联
+            // 审查 v2-L4：主窗也过一次 `with_browser_args`。三个子窗早就统一走它，只有主窗内联
             // 同款 env 读取——「建窗必须透传浏览器参数」这条 K4 换来的约束靠人记住必然漏，
             // 收成一个函数后新增建窗点就只有一条路可走。
             let window = with_browser_args(builder)
@@ -864,14 +926,15 @@ pub fn run() {
             // 任何断言、日志也不记录实测版本 —— 这条承诺静态无法证伪。现在把实测 build
             // 与判定结果落进日志；低于下限只 warn 不阻断（在 21H2 上材质会降级、其余功能
             // 多数仍可用，替用户做「拒绝启动」的决定越权了）。
-            let build = sysinfo::windows_build();
+            let build = sysinfo::windows_build().unwrap_or(0);
+            let build_text = build.to_string();
             if sysinfo::supported() {
-                log::write_log("info", &format!("系统版本 10.0.{build}（达到最低支持 build {}）", sysinfo::MIN_SUPPORTED_BUILD));
+                log::write_log("info", &format!("系统版本 10.0.{build_text}（达到最低支持 build {}）", sysinfo::MIN_SUPPORTED_BUILD));
             } else {
                 log::write_log(
                     "warn",
                     &format!(
-                        "系统版本 10.0.{build} 低于承诺的最低支持 build {}（Windows 11 22H2）：窗口材质将不可用，部分功能未在该版本验证",
+                        "系统版本 10.0.{build_text} 低于承诺的最低支持 build {}（Windows 11 22H2）：窗口材质将不可用，部分功能未在该版本验证",
                         sysinfo::MIN_SUPPORTED_BUILD
                     ),
                 );
@@ -967,6 +1030,9 @@ pub fn run() {
 /// 不这样做会留下半截日志与残留脚本文件（渲染层异常退出路径同样会走到这里）。
 pub fn on_app_exit() {
     log::flush_sync();
+    // R8-L03：先 join 启动 housekeeping 线程 —— 它可能正在删临时脚本 / 改保护清单，
+    // 进程被强杀会留下半截状态（旧写法丢弃句柄，退出时这块 IO 随时被打断）。
+    join_housekeeping_thread();
     commands::realtime::shutdown_sampler();
     // 审查 M-05：静默检查线程的 3s sleep 阶段此前无从 join；这里 join 一次。
     // 有上界（最多 3s），不会把退出卡成无限等待。
@@ -1294,6 +1360,73 @@ mod tests {
         let tail = &src[at..];
         let end = tail.find("\n}\n").unwrap_or(tail.len());
         &tail[..end]
+    }
+
+    /// R8-L01：首帧握手在 `ShowState` 未建时必须**就此返回**，不得继续调依赖 state 的函数。
+    /// 旧实现只 warn 后继续 ⇒ `show_main_window_when_ready` 里的 `app.state::<ShowState>()` panic。
+    /// 判红自证：把 `return;` 去掉 ⇒ 本用例红。
+    #[test]
+    fn r8l01_first_paint_without_state_does_not_panic() {
+        let body = fn_body("fn on_render_first_paint");
+        assert!(
+            body.contains("try_state::<ShowState>()"),
+            "首帧握手必须用 try_state（state 取不到时会 panic）"
+        );
+        let else_at = body.find("None =>").expect("必须有 state 缺失分支");
+        let ret_at = body[else_at..].find("return;").expect("state 缺失分支必须 return");
+        let show_at = body.find("show_main_window_when_ready(app,").expect("显示握手不见了");
+        assert!(
+            else_at + ret_at < show_at,
+            "state 缺失分支必须在调用依赖 state 的函数之前 return"
+        );
+        assert!(
+            body.contains("\"error\""),
+            "state 缺失必须记 error 级日志（这是启动顺序异常，不是普通 warn）"
+        );
+    }
+
+    /// R8-L02：`clear_mica` 与 `clear_acrylic` 必须**各自独立**执行。
+    /// 旧写法 `.and(..)` 短路：mica 失败 ⇒ acrylic 根本不跑。
+    /// 判红自证：把独立两次调用改回 `.and(..)` ⇒ 本用例红。
+    #[test]
+    fn r8l02_clear_material_calls_both_apis() {
+        let body = fn_body("fn apply_material_outcome");
+        assert!(
+            !body.contains("clear_mica(window).and(clear_acrylic(window))"),
+            "两次材质清除不得短路（mica 失败会让 acrylic 根本不跑）"
+        );
+        let mica_at = body.find("clear_mica(window)").expect("clear_mica 调用不见了");
+        let acrylic_at = body.find("clear_acrylic(window)").expect("clear_acrylic 调用不见了");
+        assert!(
+            mica_at < acrylic_at,
+            "两次清除必须都在同一个 match 分支里顺序执行"
+        );
+    }
+
+    /// R8-L03：housekeeping 线程句柄必须被退出钩子 join。
+    /// 旧写法 `std::thread::spawn(..)` 直接丢弃句柄 ⇒ 退出时这段磁盘 IO 随时被打断。
+    /// 判红自证：把 `join_housekeeping_thread();` 从 `on_app_exit` 移除 ⇒ 本用例红。
+    #[test]
+    fn r8l03_housekeeping_thread_is_joined_on_exit() {
+        let src = prod();
+        assert!(
+            src.contains("HOUSEKEEPING_HANDLE"),
+            "housekeeping 线程句柄必须被登记（否则退出时无从 join）"
+        );
+        let body = fn_body("fn on_app_exit");
+        assert!(
+            body.contains("join_housekeeping_thread();"),
+            "退出钩子必须 join housekeeping 线程"
+        );
+        let spawn = fn_body("fn schedule_startup_housekeeping_once");
+        assert!(
+            spawn.contains("std::thread::spawn(run_startup_housekeeping)"),
+            "housekeeping 线程必须仍由 spawn 启动"
+        );
+        assert!(
+            !spawn.contains("std::thread::spawn(run_startup_housekeeping);"),
+            "housekeeping 线程句柄不得被直接丢弃（丢弃 ⇒ 退出时无法 join）"
+        );
     }
 
     /// R8-M05（合成单测）：兜底显示时首帧未到 ⇒ 待编辑意图不得被取走；

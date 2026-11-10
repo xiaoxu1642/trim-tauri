@@ -9,7 +9,7 @@
 //! 裸注册会使其能调用主窗口专属的高危通道。故此包装是 Phase 1 起的强制入口。
 //!
 //! 注：Phase 0/1 只有主窗口 main；B/C 批起子窗口（models / processManager /
-//! residue / actions）也要读自己的配置并写日志——Electron 侧只读通道本就对所有窗口开放
+//! residue）也要读自己的配置并写日志——Electron 侧只读通道本就对所有窗口开放
 //! （handleSafe 的只读白名单），故这里把子窗口 label 一并纳入。
 //! 原 `peripheral` 子窗已退役（外设优化改为主窗应用内弹窗，见 `commands/peripheral.rs`）。
 
@@ -59,7 +59,7 @@ pub fn guard<R: Runtime>(window: &WebviewWindow<R>, allowed: &[&str]) -> Result<
     }
 }
 
-/// 宽松档：放行**全部已知应用窗口**（含四个子窗），用于非主窗专属的通道。
+/// 宽松档：放行**全部已知应用窗口**（含三个子窗），用于非主窗专属的通道。
 ///
 /// ⚠️ 名字里的 readonly 是 Electron 侧 `handleSafe` 只读白名单的历史叫法，
 /// **它不校验副作用、也不排除子窗口**——判据只有「label 在 `APP_WINDOWS` 内」。
