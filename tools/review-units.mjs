@@ -53,6 +53,17 @@ export const AUDIT_ROOTS = [
   { dir: 'src-tauri/capabilities', ext: ['.json'], depth: 1 },
   { dir: 'src-tauri/tests' },
   { file: 'src-tauri/tauri.conf.json' },
+  // 2026-11-11 方案 v2.1 扩根：此前这些跟踪文件在认领根之外，U4 永远看不见它们
+  //（全仓 407 件跟踪 vs 根内 342 件的差额里，有活消费方的代码/数据面）。
+  { file: 'src-tauri/build.rs' },
+  { file: 'src-tauri/examples/scan.rs' },
+  { file: 'src-tauri/Cargo.toml' },
+  { file: 'src-tauri/Cargo.lock' },
+  { file: 'native-scanner/Cargo.toml' },
+  { file: 'native-scanner/Cargo.lock' },
+  { dir: 'src-tauri/ps', ext: ['.ps1'] },
+  { file: 'tools/reg-ownership.json' },
+  { file: 'latest-atomgit.json' },
 ];
 
 const E = 'src-tauri/src/engine';
@@ -317,7 +328,7 @@ export const UNITS = [
       `${S}/window-material.js`, `${S}/intro.js`, `${S}/logger.js`, `${S}/modal.js`, `${S}/sub-toast.js`],
     dirs: [{ dir: 'src', ext: ['.html'], depth: 1 }],
     contract: 'init() 幂等台账 / 黑闪握手 / CSP meta / 开屏走场',
-    boundary: '「窗口刻意设计」清单见方法论 §7.1，不许当缺陷报',
+    boundary: '「窗口刻意设计」清单见《本项目审查方案》第四部分白名单，不许当缺陷报',
     gates: ['check-csp-consistency', 'check-html-contract', 'check-idle-scripts'],
   },
   {
@@ -446,8 +457,12 @@ export const UNITS = [
   },
   {
     id: 'T1c', owner: 'sub', name: '生成器与发布工具',
-    dirs: [{ dir: 'tools', ext: ['.mjs'], depth: 1, notPrefix: 'check-' }, { dir: 'tools/lib', ext: ['.mjs'], depth: 1 }],
-    contract: 'sync-ps-from-js / sign-* / gen-* / publish-atomgit / rule-schema / ps-mapping',
+    dirs: [{ dir: 'tools', ext: ['.mjs'], depth: 1, notPrefix: 'check-' }, { dir: 'tools/lib', ext: ['.mjs'], depth: 1 },
+      { dir: 'src-tauri/ps', ext: ['.ps1'] }],
+    // optimizer_build.ps1 是 sync-ps-from-js 的生成物（PROVENANCE 头注登记，ps-mapping 点名），
+    // 编译期 include_str! 内嵌；改它必须改上游 JS 后重跑生成器。
+    generated: ['src-tauri/ps/optimizer_build.ps1'],
+    contract: 'sync-ps-from-js / sign-* / gen-* / publish-atomgit / rule-schema / ps-mapping / PS 生成物出处',
     boundary: '生成物禁手改；改源→重生成→重签的链是本单元红线',
     gates: ['check-ps-extraction', 'check-data-parity'],
   },
@@ -546,22 +561,27 @@ export const UNITS = [
   },
   {
     id: 'D1', owner: 'sub', name: '数据与配置',
-    files: ['src-tauri/tauri.conf.json'],
+    files: ['src-tauri/tauri.conf.json', 'src-tauri/Cargo.toml', 'native-scanner/Cargo.toml',
+      'tools/reg-ownership.json', 'src-tauri/Cargo.lock', 'native-scanner/Cargo.lock',
+      'latest-atomgit.json'],
     dirs: [{ dir: 'src-tauri/data', ext: ['.json'], depth: 1 },
       { dir: 'src-tauri/capabilities', ext: ['.json'], depth: 1 }],
     generated: ['src-tauri/data/cleanup-rules.json',
       'src-tauri/data/uninstall-residue-rules.json', 'src-tauri/data/optimizer-runtime.json',
-      'src-tauri/data/optimizer-runtime.json.sig.json'],
-    contract: '规则库 ⇄ 签名 sidecar / capabilities 能力面 / bundle 清单',
-    boundary: '生成物只进抽验清单（逐行读没意义），审的是签名链与源一致',
+      'src-tauri/data/optimizer-runtime.json.sig.json',
+      // Cargo.lock 由 cargo 生成、check-version-sync 点名（U5c 出处可追）；
+      // latest-atomgit.json 由 publish-atomgit 生成。逐行精读无意义，审的是对拍链。
+      'src-tauri/Cargo.lock', 'native-scanner/Cargo.lock', 'latest-atomgit.json'],
+    contract: '规则库 ⇄ 签名 sidecar / capabilities 能力面 / bundle 清单 / 依赖面（Cargo.toml ⇄ 依赖清单 ⇄ Cargo.lock，X0-11）/ reg-ownership 所有权的表 / AtomGit 更新清单',
+    boundary: '生成物只进抽验清单（逐行读没意义），审的是签名链与源一致；依赖新增未登记归 X0-11 判',
     gates: ['check-data-parity', 'check-cleanup-rule-contract', 'check-version-sync'],
   },
   {
     id: 'X1', owner: 'sub', name: '测试底座',
     dirs: [{ dir: 'src-tauri/tests' }],
-    files: ['src-tauri/src/testutil.rs'],
-    contract: 'common/mod.rs helper 单一真源 / ipc_smoke 回归网 / module_smoke / src 侧沙箱自删守卫（testutil::Sandbox，与 native-scanner util::sandbox、tests/common TempRoot 同一口径）',
-    boundary: '主仓 tests/ + src/testutil.rs（整文件 #![cfg(test)]）；域内 contract_tests.rs 归各域单元',
+    files: ['src-tauri/src/testutil.rs', 'src-tauri/build.rs', 'src-tauri/examples/scan.rs'],
+    contract: 'common/mod.rs helper 单一真源 / ipc_smoke 回归网 / module_smoke / src 侧沙箱自删守卫（testutil::Sandbox，与 native-scanner util::sandbox、tests/common TempRoot 同一口径）/ build.rs 测试清单链接参数 / examples/scan.rs 示例',
+    boundary: '主仓 tests/ + src/testutil.rs（整文件 #![cfg(test)]）+ build.rs + examples/scan.rs；域内 contract_tests.rs 归各域单元',
     gates: ['check-gate-roster', 'check-test-sandbox'],
   },
 ];
@@ -581,6 +601,7 @@ export const CROSS_UNITS = [
   { id: 'X0-8', name: '集合与基线的键稳定性', how: '键会不会被自己的写路径改动（重命名、加后缀、路径迁移、id 重算）（v4 真机：叶名重命名致计数清不掉）' },
   { id: 'X0-9', name: '形状与读器对拍', how: '每个 JSON 读写点 ⇄ 盘上真实形状（对象/裸数组/sidecar）；合法但形状不符 ≠ 损坏（v4 真机：数组文件被判 Corrupt）' },
   { id: 'X0-10', name: '并发写者图', how: '每个被读-改-写的文件列全部写点、是否共享同一把锁；原语内部的锁不保护域内自建台账' },
+  { id: 'X0-11', name: '依赖面 ⇄ 依赖清单', how: '两 crate 的 Cargo.toml 依赖/feature ⇄ vault 依赖清单登记 ⇄ Cargo.lock 钉住版本；新增未登记、feature 偷开、path/git 依赖未说明 = 红' },
 ];
 
 /**
@@ -602,5 +623,5 @@ export const MAIN_FACES = [
   { id: 'M1', name: 'R6 红线真源自审', when: '第一批开工前' },
   { id: 'M2', name: 'X0 横切项（含 X0-7…X0-10）', when: '收齐分报告之后，最后跑' },
   { id: 'M3', name: '修法判据复核', when: '写修复方案时；被改判据的全量样本必须先现算' },
-  { id: 'M4', name: '变更自审（X-REG）', when: '每批提交前，按 AGENTS §1.6 三问' },
+  { id: 'M4', name: '变更自审（X-REG）', when: '每批提交前，按 AGENTS §7 前置审查闸与变更自审三问' },
 ];

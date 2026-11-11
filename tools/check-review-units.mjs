@@ -76,7 +76,9 @@ export function detectOverlap(units, ownerOf) {
       for (const f of u[kind] ?? []) {
         const who = ownerOf.get(f);
         if (!who) { drifted.push(`${u.id} 的${kind === 'files' ? '点名' : '生成物剔除'} ${f} 无人认领（认领根没覆盖它）`); continue; }
-        if (seen.has(f)) dup.push(`${f}：${seen.get(f)} 与 ${u.id} 都点名`);
+        // 同单元 files+generated 双列 = 显式认领生成物的合法形态（2026-11-11 扩根），
+        // 只有跨单元重复点名才是冲突。
+        if (seen.has(f) && seen.get(f) !== u.id) dup.push(`${f}：${seen.get(f)} 与 ${u.id} 都点名`);
         else seen.set(f, u.id);
         if (who !== u.id) {
           drifted.push(`${f}：写在 ${u.id} 名下，实际归属 ${who}（${kind === 'generated' ? '剔除清单漂走 = 白剔一行' : '点名成了装饰'}）`);
@@ -141,7 +143,8 @@ function buildGeneratedReaderIndex(root) {
       const text = readFileSync(join(root, dir, e.name), 'utf8');
       // 交替分支必须**长形式在前**并带尾部锚：`(?:js|json)` 会把 `x.json` 截成 `x.js`
       // （正则引擎试到 `js` 就收，没有边界要求），于是 .json 生成物永远查不到出处 ⇒ 假红。
-      for (const m of text.matchAll(/([\w.-]+\.(?:json|mjs|js|ps1|rs))(?![\w.-])/g)) {
+      // lock 在列：Cargo.lock 是 cargo 生成物，出处是 check-version-sync（2026-11-11 扩根）。
+      for (const m of text.matchAll(/([\w.-]+\.(?:json|lock|mjs|ps1|js|rs))(?![\w.-])/g)) {
         if (!hits.has(m[1])) hits.set(m[1], []);
         hits.get(m[1]).push(`tools/${rel}`);
       }
@@ -166,21 +169,32 @@ export function detectFloor({ units, cross, anti }) {
   return { out, dupIds: units.map((u) => u.id).filter((id, i, a) => a.indexOf(id) !== i), ids };
 }
 
-/** U7：从文档正文抽仓库内路径与单元 ID（只认反引号里的仓库相对形状）。 */
+/** U7：从文档正文抽仓库内路径与单元 ID（反引号里的仓库相对形状 + 围栏代码块内的命令路径）。 */
 export function extractRepoPaths(text) {
   const out = new Set();
   // 历史叙述行整行豁免：陈述「曾经有过/已删」不是承诺现在存在（与注释腐烂门禁同一口径）
   const HIST = /(已删|已退役|此前|曾经|历史|旧|原)/;
+  const PATH_RE = /((?:src-tauri|native-scanner|tools|src)\/[A-Za-z0-9_.\-/]*[A-Za-z0-9_.])/g;
+  const add = (p) => {
+    // 通配/前缀形状（`tools/check-*.mjs` 会截成 `tools/check-`）不是坐标，跳过
+    if (/[-/]$/.test(p) || /\*|\{\}/.test(p)) return;
+    out.add(p);
+  };
+  let inFence = false;
   for (const line of text.split(/\r?\n/)) {
+    if (/^\s*(```|~~~)/.test(line)) { inFence = !inFence; continue; }
     if (HIST.test(line)) continue;
+    if (inFence) {
+      // 围栏里的命令（node tools/xxx.mjs）不带反引号，2026-11-11 前整段失明
+      PATH_RE.lastIndex = 0;
+      let m;
+      while ((m = PATH_RE.exec(line))) add(m[1]);
+      continue;
+    }
     // 必须以反引号收尾：`tools/check-*.mjs` 这类通配若不收口会被截成 `tools/check` 而误报
     const re = /`((?:src-tauri|native-scanner|tools|src)\/[A-Za-z0-9_.\-/]*[A-Za-z0-9_.])`/g;
     let m;
-    while ((m = re.exec(line))) {
-      // 通配/前缀形状（`tools/check-*.mjs` 会截成 `tools/check-`）不是坐标，跳过
-      if (/[-/]$/.test(m[1]) || /\*|\{\}/.test(m[1])) continue;
-      out.add(m[1]);
-    }
+    while ((m = re.exec(line))) add(m[1]);
   }
   return [...out];
 }
@@ -202,7 +216,17 @@ export function extractUnitIds(text) {
 export function isKnownUnitId(id, unitIds) {
   if (unitIds.has(id)) return true;
   if (/^(X0-\d+|A[1-6])$/.test(id)) return true;
+  // 编排词汇不是单元 ID：包号 P01–P30 / 模块 M-01、M01–M12 / 主审面 M1–M4 /
+  // 冷启动与九维 S0–S10 / 机检编号 U1–U7 / 批次 B0–B3 / 根外豁免分类 C 系 / 裸 X0。
+  // 2026-11-11 方案 v2.1：不加这条，U7 对方案本体恒红（编排词汇全被当未知单元，旧方案实测）。
+  if (/^(P\d{2}|M-\d{2}|M\d{2}|M[1-4]|S\d+|U\d+[a-z]?|B\d+|C\d{1,2}|X0)$/.test(id)) return true;
   return [...unitIds].some((u) => u.startsWith(id));
+}
+
+/** U6 台账的合法单元集 = 纵向（含 R6a 主审）+ 横向反模式 A1–A6。
+ *  2026-11-11 修复：此前只含纵向，PA 的 6 份 coverage 必被判「未知单元」（实测）。 */
+export function coverageKnownIds() {
+  return new Set([...UNITS.map((u) => u.id), ...ANTI_UNITS.map((a) => a.id)]);
 }
 
 // ── U6：coverage 台账判定器（纯函数，喂 POSITIVE_CONTROLS 同一实现）──────────────
@@ -253,12 +277,14 @@ const POSITIVE_CONTROLS = [
     expect: (v) => v === true,
   },
   {
-    label: 'U3 点名与归属漂移必判红 / 一致样本不假红',
+    label: 'U3 点名与归属漂移必判红 / 一致样本不假红 / 同单元 files+generated 双列不算冲突',
     run: () => {
       const bad = detectOverlap([{ id: 'P', files: ['x.rs'] }, { id: 'Q', files: ['x.rs'] }], new Map([['x.rs', 'P']]));
       const drift = detectOverlap([{ id: 'P', generated: ['g.json'] }], new Map([['g.json', 'Q']]));
       const none = detectOverlap([{ id: 'P', files: ['x.rs'] }], new Map([['x.rs', 'P']]));
-      return bad.dup.length === 1 && drift.drifted.length === 1 && none.dup.length === 0 && none.drifted.length === 0;
+      const sameUnit = detectOverlap([{ id: 'P', files: ['g.json'], generated: ['g.json'] }], new Map([['g.json', 'P']]));
+      return bad.dup.length === 1 && drift.drifted.length === 1 && none.dup.length === 0 && none.drifted.length === 0
+        && sameUnit.dup.length === 0 && sameUnit.drifted.length === 0;
     },
     expect: (v) => v === true,
   },
@@ -336,17 +362,27 @@ const POSITIVE_CONTROLS = [
         { T1a: { covered: ['a.mjs', 'b.mjs'], commandsRun: ['x'] } },
         known, unitsWithClaims,
       );
+      // 2026-11-11：横向 A1–A6 的 coverage 必须被接受（PA 交付形状），A9 仍判未知
+      const horizontal = judgeCoverageLedger(
+        { A1: { covered: ['src/scripts/cleanup.js'], commandsRun: ['rg'], counts } },
+        coverageKnownIds(), unitsWithClaims,
+      );
+      const fakeAnti = judgeCoverageLedger(
+        { A9: { covered: [], commandsRun: ['x'], counts } },
+        coverageKnownIds(), unitsWithClaims,
+      );
       return bad.unknown.length === 1 && bad.gaps.length === 1
         && over.overclaims.length === 1 && over.noCommands.length === 1
         && clean.unknown.length === 0 && clean.gaps.length === 0
         && clean.overclaims.length === 0 && clean.noCommands.length === 0
         && annotated.gaps.length === 0 && annotated.overclaims.length === 0
-        && noCountsRec.noCounts.length === 1;
+        && noCountsRec.noCounts.length === 1
+        && horizontal.unknown.length === 0 && fakeAnti.unknown.length === 1;
     },
     expect: (v) => v === true,
   },
   {
-    label: 'U7 路径与 ID 抽取：腐烂样本必命中 / 通配与历史叙述不误报',
+    label: 'U7 路径与 ID 抽取：腐烂样本必命中 / 通配与历史叙述不误报 / 编排词汇豁免 / 围栏命令路径可见',
     run: () => {
       const paths = extractRepoPaths(
         '见 `tools/ghost.mjs` 与 `src-tauri/src/engine/guard.rs`\n' +
@@ -357,12 +393,23 @@ const POSITIVE_CONTROLS = [
       const ids = extractUnitIds('单元 R2a / F4c / X0-7 / A5 / R9 / T1d / N1a / F4a1');
       const known = new Set(UNITS.map((u) => u.id));
       const missedIds = ['T1d', 'N1a', 'F4a1'].filter((i) => !ids.includes(i));
+      // 2026-11-11：编排词汇（包号/模块/主审面/冷启动/九维/机检编号/批次/豁免分类/裸 X0）
+      // 不是单元 ID，方案本体大量使用，必须豁免；R9 这类真笔误仍判红。
+      // 旧 A 系安全判据编号（已改名 S 系）不是反模式单元，不得豁免。
+      const orchVocab = ['P01', 'P30', 'M01', 'M12', 'M1', 'M4', 'S0', 'S6', 'S10', 'U2', 'U5c', 'B0', 'C2', 'C3', 'X0'];
+      const orchOk = orchVocab.every((i) => isKnownUnitId(i, known));
+      // 围栏代码块里的命令路径必须可见；围栏内的历史叙述仍豁免
+      const fencePaths = extractRepoPaths('```powershell\nnode tools/ghost.mjs --run\n```');
+      const fenceHist = extractRepoPaths('```\n# 原 tools/old.mjs 已删\n```');
       return paths.length === 2 && paths.includes('tools/ghost.mjs')
         && !paths.some((p) => p.includes('dual-run') || p.includes('*'))
         && isKnownUnitId('R2a', known) && isKnownUnitId('R6', known) === true
         && isKnownUnitId('F4', known) === true && !isKnownUnitId('R9', known)
         && missedIds.length === 0
-        && ids.filter((i) => !isKnownUnitId(i, known)).join() === 'R9';
+        && ids.filter((i) => !isKnownUnitId(i, known)).join() === 'R9'
+        && orchOk && !isKnownUnitId('R9', known) && !isKnownUnitId('A10', known)
+        && fencePaths.length === 1 && fencePaths[0] === 'tools/ghost.mjs'
+        && fenceHist.length === 0;
     },
     expect: (v) => v === true,
   },
@@ -512,12 +559,12 @@ info(`主 agent 四面：R6 红线真源 · X0 横切 ${CROSS_UNITS.length} 项 
 const covPath = argOf('--coverage');
 if (!covPath) {
   skip('U6 分报告 coverage 对账', '未给 --coverage 台账（主 agent 派单后落一份 JSON 才校验），本节未校验');
-} else if (!existsSync(covPath)) {
-  skip('U6 分报告 coverage 对账', `--coverage 指向的文件不存在：${covPath}，本节未校验`);
 } else {
   // T1a-M14：--coverage 支持逗号分隔多路径与目录 —— 按记录的 unit 字段归并；
   // 归并前 isFile() 检查，缺失/损坏逐件显式列出（不再 EISDIR 崩溃）。单单元交付
   // 形状（顶层 unit/covered/...）与 {ID: rec} 形状都收。
+  // 2026-11-11 修复：此前 existsSync 在 split 之前整串检查，多路径恒 SKIP（假绿）；
+  // 且 badParts 只进详情不进判据，损坏台账也绿。现在逐路径检查、损坏必红。
   const ledger = {};
   const badParts = [];
   const absorb = (obj) => {
@@ -553,9 +600,9 @@ if (!covPath) {
     catch (e) { badParts.push(`${cp} JSON 损坏（${e.message.slice(0, 60)}）`); }
   }
   const { unknown, gaps, overclaims, noCommands, noCounts } =
-    judgeCoverageLedger(ledger, floor.ids, unitsWithClaims);
+    judgeCoverageLedger(ledger, coverageKnownIds(), unitsWithClaims);
   check(
-    unknown.length === 0 && gaps.length === 0 && overclaims.length === 0 && noCommands.length === 0 && noCounts.length === 0,
+    badParts.length === 0 && unknown.length === 0 && gaps.length === 0 && overclaims.length === 0 && noCommands.length === 0 && noCounts.length === 0,
     `U6 coverage 台账对拍（${Object.keys(ledger).length} 份，来源 ${covPath.split(',').length} 路径）`,
     [
       ...badParts.map((b) => `台账读取失败：${b}`),
