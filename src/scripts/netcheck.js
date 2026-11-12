@@ -32,6 +32,10 @@
   let nicProps = null;    // v3.7.0：网卡高级属性只读快照（独立于 6 项诊断状态）
   let collecting = false;
   let initialized = false;
+  // 逐项滑入开关：进入页面 / 点「开始检测」时置位，renderAll 消费一次即复位。
+  // 检测过程中逐项揭示都会走 renderAll（间隔见 startCollect 里的 setTimeout），
+  // 不能每次都重播。
+  let slideRequested = false;
 
   function escapeHtml(s) { return window.ds.esc(s); }
 
@@ -42,6 +46,10 @@
   function renderAll() {
     const box = document.getElementById('netcheckList');
     if (!box) return;
+    // 逐项滑入（2026-11-12 用户点名）：只在进入页面与点「开始检测」后播放。
+    // 逐项揭示（每次揭示都调 renderAll）会反复重渲染，不能每次都重播整列。
+    const replay = slideRequested;
+    if (replay) slideRequested = false;
     const rows = Object.keys(ITEM_META).map(id => {
       const meta = ITEM_META[id];
       const st = states[id] || { status: 'pending' };
@@ -99,6 +107,7 @@
         '</div>';
     });
     box.innerHTML = rows.join('');
+    if (replay) window.ds?.slideInList?.(box, '.netcheck-item', { force: true });
     box.querySelectorAll('[data-netcheck-repair]').forEach(btn => {
       btn.addEventListener('click', () => runRepair(btn.getAttribute('data-netcheck-repair')));
     });
@@ -143,6 +152,7 @@
     try {
       setAll('scanning');
       nicProps = null;
+      slideRequested = true; // 新一轮检测：让整列重新滑入一次
       renderAll();
       renderNicProps();
       // F4b-L10：运行标志在 DOM/进度准备完成后才置位；前置步骤抛错时
@@ -277,6 +287,7 @@
 
   function onEnter() {
     // 重复进入页面不自动重跑，保留上次结果；首次进入渲染等待态
+    slideRequested = true;
     renderAll();
   }
 
@@ -284,6 +295,7 @@
     if (initialized) return;
     initialized = true;
     document.getElementById('btnNetcheckStart')?.addEventListener('click', startCollect);
+    slideRequested = true;
     renderAll();
   }
 

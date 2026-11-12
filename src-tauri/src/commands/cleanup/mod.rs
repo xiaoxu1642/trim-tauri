@@ -57,8 +57,8 @@
 //! `#[tauri::command]` 留在定义处，mod.rs 只做模块声明与 pub use 台账，
 //! 因此 lib.rs 的 generate_handler!、CHANNEL_MAP 与 guard 档位不因物理移动改变。
 
-mod backup;
-pub use backup::{cleanup_reg_backup_list, __cmd__cleanup_reg_backup_list, __tauri_command_name_cleanup_reg_backup_list, cleanup_reg_backup_restore, __cmd__cleanup_reg_backup_restore, __tauri_command_name_cleanup_reg_backup_restore, cleanup_file_backup_list, __cmd__cleanup_file_backup_list, __tauri_command_name_cleanup_file_backup_list, cleanup_file_backup_restore, __cmd__cleanup_file_backup_restore, __tauri_command_name_cleanup_file_backup_restore};
+pub(crate) mod backup;
+pub use backup::{cleanup_reg_backup_list, __cmd__cleanup_reg_backup_list, __tauri_command_name_cleanup_reg_backup_list, cleanup_reg_backup_restore, __cmd__cleanup_reg_backup_restore, __tauri_command_name_cleanup_reg_backup_restore, cleanup_file_backup_list, __cmd__cleanup_file_backup_list, __tauri_command_name_cleanup_file_backup_list, cleanup_file_backup_restore, __cmd__cleanup_file_backup_restore, __tauri_command_name_cleanup_file_backup_restore, cleanup_backup_purge, __cmd__cleanup_backup_purge, __tauri_command_name_cleanup_backup_purge};
 mod policy;
 pub use policy::{cleanup_age_policy, __cmd__cleanup_age_policy, __tauri_command_name_cleanup_age_policy, cleanup_set_age_policy, __cmd__cleanup_set_age_policy, __tauri_command_name_cleanup_set_age_policy};
 // 图片预览的 asset 按需放行（preview 子窗退役后主窗内嵌 LiteBox 的承接件，见模块注释）

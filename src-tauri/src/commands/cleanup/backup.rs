@@ -22,14 +22,10 @@ use tauri::WebviewWindow;
 pub(super) const REG_BACKUP_SUB: &str = "cleanup-reg-backup";
 
 /// 备份文件名准入：单段文件名、字符集 [A-Za-z0-9_- .]、.reg 结尾——防路径穿越与任意导入
-pub(super) fn valid_backup_file_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 200
-        && name.to_lowercase().ends_with(".reg")
-        && !name.contains("..")
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
+pub(crate) fn valid_backup_file_name(name: &str) -> bool {
+    // 判据真源在 engine::backup_purge：列表/还原/清除三处必须同一份，
+    // 否则会出现「列表能看见、清除点不动」的两套口径。
+    crate::engine::backup_purge::valid_reg_backup_name(name)
 }
 
 /// cleanup:reg-backup-list — 列出清理域注册表备份（只读；≤50 条按 mtime 倒序）
@@ -200,12 +196,66 @@ fn cleanup_reg_backup_restore_blocking(
 
 pub(super) const FILES_BACKUP_SUB: &str = "cleanup-files-backup";
 
+/// cleanup:backup-purge — 清除勾选的备份（主窗专属，备份还原页唯一入口）。
+///
+/// 删除动作收在 `engine::backup_purge`：四类备份（清理域注册表 / 文件批次 /
+/// 卸载域注册表 / 卸载还原包）共用同一套「回收站优先 + 根判定 + 连带件同生同死」。
+/// 这里只做来源校验与「一条失败不拖垮整批」的编排，不自己拼路径、不自己删文件。
+///
+/// 为什么是 MAIN 而不是 readonly：它删的是用户的还原依据，属不可逆动作，
+/// 按 AGENTS §3「谁真的需要调它」——消费方只有主窗备份还原页，四个子窗零调用点。
+#[tauri::command]
+pub async fn cleanup_backup_purge<R: tauri::Runtime>(
+    window: WebviewWindow<R>,
+    items: Vec<Value>,
+) -> Value {
+    if let Err(msg) = guard::guard(&window, guard::MAIN) {
+        return json!({ "success": false, "message": msg });
+    }
+    // 入参逐条过闸：kind 必须命中四种之一，name 必须非空且不含路径分隔符。
+    // 名字的字符级准入仍在引擎侧（每类各有一份形状判据），这里挡的是明显越界形态。
+    let mut targets: Vec<crate::engine::backup_purge::Target> = Vec::new();
+    let mut rejected: Vec<Value> = Vec::new();
+    for it in &items {
+        let kind = it.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        let name = it.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let Some(kind) = crate::engine::backup_purge::Kind::parse(kind) else {
+            rejected.push(json!({ "name": name, "reason": "未知的备份种类" }));
+            continue;
+        };
+        if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+            rejected.push(json!({ "name": name, "reason": "备份名非法" }));
+            continue;
+        }
+        targets.push(crate::engine::backup_purge::Target {
+            kind,
+            name: name.to_string(),
+        });
+    }
+    if targets.is_empty() {
+        return json!({
+            "success": false,
+            "message": "没有可删除的备份项",
+            "data": { "removed": 0, "failed": rejected, "items": [] }
+        });
+    }
+    let resp = tauri::async_runtime::spawn_blocking(move || {
+        crate::engine::backup_purge::purge(&targets)
+    })
+    .await
+    .unwrap_or_else(|e| json!({ "removed": 0, "failed": [], "items": [], "message": format!("备份清除任务异常: {e}") }));
+    let mut data = resp;
+    if !rejected.is_empty() {
+        if let Some(failed) = data.get_mut("failed").and_then(|v| v.as_array_mut()) {
+            failed.extend(rejected);
+        }
+    }
+    json!({ "success": true, "data": data })
+}
+
 /// manifest 文件名准入：`manifest-<纯数字>.json`——防路径穿越
-pub(super) fn valid_files_manifest_name(name: &str) -> bool {
-    let Some(stem) = name.strip_prefix("manifest-").and_then(|s| s.strip_suffix(".json")) else {
-        return false;
-    };
-    !stem.is_empty() && stem.len() <= 20 && stem.bytes().all(|b| b.is_ascii_digit())
+pub(crate) fn valid_files_manifest_name(name: &str) -> bool {
+    crate::engine::backup_purge::valid_file_manifest_name(name)
 }
 
 /// 还原目标（清单 `path` 字段）准入 —— C-2（审查 2026-10-07）。

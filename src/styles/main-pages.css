@@ -1633,6 +1633,38 @@
   word-break: break-all;
 }
 .detail-file-size { flex: none; color: var(--fg-tertiary); }
+
+/* 备份清除（2026-11-12）：勾选列 + 顶部工具条。
+   勾选框沿用 .maint-check 的原生 input 尺寸（16px），不自绘第二套 .checkbox —— 备份行是
+   密集列表，自绘件的焦点环与键盘行为在这里只会和行内「还原」按钮抢焦点。
+   尺寸刻意写在本文件：main.css 的 `.maint-check input` 同特异度（0-1-1），两边都声明
+   width/height 会被 S3 判成层叠翻转风险，所以这里改用各自独立的类，不去覆盖别人的规则。 */
+.backup-pick {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+}
+.backup-pick input[type="checkbox"] { width: 16px; height: 16px; margin: 0; cursor: pointer; }
+.backup-pick-na { color: var(--fg-tertiary); font-size: calc(11px * var(--font-size-scale, 1)); }
+.backup-purge-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-medium);
+  font-size: var(--fs-meta);
+  color: var(--fg-tertiary);
+}
+.backup-pick-all { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-secondary); cursor: pointer; }
+.backup-pick-all input[type="checkbox"] { width: 16px; height: 16px; margin: 0; cursor: pointer; }
+.backup-pick-count { color: var(--fg-secondary); }
+.backup-pick-hint { margin-left: auto; }
 .material-name { font-size: calc(12.5px*var(--font-size-scale,1)); font-weight: calc(600*var(--font-weight-scale,1)); color: var(--fg-primary); }
 .material-desc { font-size: calc(11px*var(--font-size-scale,1)); color: var(--fg-tertiary); }
 .skin-row-label {

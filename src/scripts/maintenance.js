@@ -215,6 +215,7 @@
     el.querySelectorAll('.filter-tab').forEach(btn => {
       btn.addEventListener('click', () => {
         activeCat = btn.dataset.cat;
+        slideOnNextRender = true; // 换分类 = 换一整批卡片，重播一次
         renderTabs();
         renderList();
         updateBatchbar();
@@ -223,6 +224,9 @@
   }
 
   // ==================== 任务卡片列表 ====================
+  // 逐项滑入只在「首次进入 / 切换分类」时播放；执行中、勾选、进度回填都会重渲染，
+  // 那些路径必须保持静止，否则每点一次就整页重播一遍。
+  let slideOnNextRender = true;
   function renderList() {
     const el = document.getElementById('maintList');
     if (!el) return;
@@ -289,6 +293,10 @@
         if (task) openMaintDetail(task);
       });
     });
+    if (slideOnNextRender) {
+      window.ds?.slideInList?.(el, '.maint-card', { force: true });
+      slideOnNextRender = false;
+    }
   }
 
   // C3 迁移横幅已按 2026-10-22 用户裁定撤下，其按钮绑定器一并删除（`data-nara-goto` 不再产出）。
@@ -608,6 +616,7 @@
         }
         tasks = data;
         categories = Array.isArray(resp.categories) ? resp.categories : [];
+        slideOnNextRender = true; // 任务清单首次到位，播一次
         renderTabs();
         renderList();
         updateBatchbar();

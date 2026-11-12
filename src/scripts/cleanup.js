@@ -2646,15 +2646,21 @@
       const size = bytes > 0 ? ` · 合计 ${formatSize(bytes)}` : '';
       return `${unit} · ${total} 份${more}${size}`;
     };
+    // 清除备份（2026-11-12 用户点名）：每行一个勾选框，单个 / 多项都能删。
+    // 老根（升级前的旧数据目录）那份**不给勾选**：删除只作用于新根（与保留期裁剪同口径），
+    // 让用户勾一个必然失败的行等于用界面承诺一件做不到的事。行内注明原因。
+    const pick = (kind, name, label, legacy) => (legacy
+      ? '<span class="backup-pick backup-pick-na" data-tip="来自升级前的旧数据目录，只提供还原，不在此处清除">—</span>'
+      : `<label class="backup-pick" data-tip="勾选后可批量清除"><input type="checkbox" data-purge-kind="${kind}" data-purge-name="${window.ds.escAttr(name)}" aria-label="选择${window.ds.escAttr(label)}" /></label>`);
     const regSection = !backups.length ? '' :
       `<div class="finder-group-header"><span>${backupHead(backups, resp && resp.data, '注册表备份')}</span></div>
        <div class="detail-file-list">${backups.map((b, i) =>
-        `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(b.file)}">${fmtBackupTime(b.mtimeMs)} · ${escapeHtml(b.ruleId || '?')}${b.seq ? ` #${escapeHtml(b.seq)}` : ''} · ${formatSize(b.sizeBytes)} ${legacyBadge(b)}</span><button class="fileclean-preview-btn" data-reg-restore="${i}" type="button">还原</button></div>`
+        `<div class="detail-file-row">${pick('reg', b.file, '注册表备份', b.fromLegacy)}<span class="detail-file-path" data-tip="${escapeHtml(b.file)}">${fmtBackupTime(b.mtimeMs)} · ${escapeHtml(b.ruleId || '?')}${b.seq ? ` #${escapeHtml(b.seq)}` : ''} · ${formatSize(b.sizeBytes)} ${legacyBadge(b)}</span><button class="fileclean-preview-btn" data-reg-restore="${i}" type="button">还原</button></div>`
       ).join('')}</div>`;
     const fileSection = !manifests.length ? '' :
       `<div class="finder-group-header"><span>文件备份（永久删批次） · ${Number((respF && respF.data && respF.data.totalCount)) || manifests.length} 批${manifests.length < Number((respF && respF.data && respF.data.totalCount)) ? `，显示最近 ${manifests.length} 批` : ''}</span></div>
        <div class="detail-file-list">${manifests.map((m, i) =>
-        `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(m.file)}">${fmtBackupTime(m.mtimeMs)} · ${m.count} 个文件 · ${formatSize(m.totalSize)} ${legacyBadge(m)}</span><button class="fileclean-preview-btn" data-file-backup-view="${i}" type="button" data-tip="查看本批次条目并逐个还原">查看</button></div>`
+        `<div class="detail-file-row">${pick('file', m.file, '文件备份批次', m.fromLegacy)}<span class="detail-file-path" data-tip="${escapeHtml(m.file)}">${fmtBackupTime(m.mtimeMs)} · ${m.count} 个文件 · ${formatSize(m.totalSize)} ${legacyBadge(m)}</span><button class="fileclean-preview-btn" data-file-backup-view="${i}" type="button" data-tip="查看本批次条目并逐个还原">查看</button></div>`
       ).join('')}</div>`;
     // 卸载域备份：每行标出封条核对结果。restorable 是后端合成判据
     //（边车封条 + HKLM 管理员摘要 + 目标根），与还原闸口径一致——
@@ -2673,7 +2679,7 @@
          const restoreBtn = canRestore
            ? `<button class="fileclean-preview-btn" data-uninst-restore="${i}" type="button">还原</button>`
            : `<span class="finder-name-text" style="opacity:.6" data-tip="${escapeHtml(why)}，不提供还原入口">不可还原</span>`;
-         return `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(b.target || b.file)}">${fmtBackupTime(b.mtimeMs)} · ${escapeHtml(b.keyLeaf || b.file)} · ${formatSize(b.sizeBytes)} · ${escapeHtml(SEAL_TEXT[b.seal] || b.seal)} ${legacyBadge(b)}</span>${restoreBtn}</div>`;
+         return `<div class="detail-file-row">${pick('uninst-reg', b.file, '卸载注册表备份', b.fromLegacy)}<span class="detail-file-path" data-tip="${escapeHtml(b.target || b.file)}">${fmtBackupTime(b.mtimeMs)} · ${escapeHtml(b.keyLeaf || b.file)} · ${formatSize(b.sizeBytes)} · ${escapeHtml(SEAL_TEXT[b.seal] || b.seal)} ${legacyBadge(b)}</span>${restoreBtn}</div>`;
        }).join('')}</div>`;
     // 还原包：zip 不在了就**不给还原按钮**（内容缺失时点下去只会逐条失败，不如这里说清）
     // R6b-L14：行内大小读 `zipBytes`（payload.zip 落盘体积），与表头 `totalBytes` 同一口径；
@@ -2686,9 +2692,17 @@
          const btn = canRestore
            ? `<button class="fileclean-preview-btn" data-pack-restore="${i}" type="button">整批还原</button>`
            : `<span class="finder-name-text" style="opacity:.6" data-tip="${escapeHtml(p.broken || 'payload.zip 缺失')}">不可还原</span>`;
-         return `<div class="detail-file-row"><span class="detail-file-path" data-tip="${escapeHtml(p.dir || '')}">${label}</span>${btn}</div>`;
+         return `<div class="detail-file-row">${pick('pack', p.id, '卸载还原包', p.fromLegacy)}<span class="detail-file-path" data-tip="${escapeHtml(p.dir || '')}">${label} ${legacyBadge(p)}</span>${btn}</div>`;
        }).join('')}</div>`;
-    body.innerHTML = regSection + uninstSection + packSection + fileSection;
+    // 顶部工具条：全选 / 已选计数。勾选状态完全由 DOM 承载，不引入第二份状态，
+    // 重渲染（还原后）自然归零。
+    const pickBar = `<div class="backup-purge-bar">
+        <label class="backup-pick-all"><input type="checkbox" id="backupPickAll" /><span>全选</span></label>
+        <span class="backup-pick-count" id="backupPickCount" role="status" aria-live="polite">已选 0 项</span>
+        <span class="backup-pick-hint">清除的备份会移入系统回收站，可在回收站找回。</span>
+      </div>`;
+    body.innerHTML = pickBar + regSection + uninstSection + packSection + fileSection;
+    bindBackupPickers(body);
 
     body.querySelectorAll('[data-pack-restore]').forEach((btn) => {
       btn.addEventListener('click', async () => {
@@ -2822,6 +2836,87 @@
     });
   }
 
+  // 清除备份（2026-11-12 用户点名）：勾选后的单个 / 多项删除。
+  //
+  // 三个刻意的口径：
+  // 1. **只删新根**：老根（升级前的旧数据目录）行不给勾选框，后端也只作用于
+  //    `backup_write_dir`；老根那份是用户升级前的最后退路。
+  // 2. **先确认再删**：走 confirmDanger（红色 + 「仍然执行」），文案带勾选条数与
+  //    「移入回收站、可在系统回收站找回」，不写成「永久删除」。
+  // 3. **逐条回报**：后端一条失败不拖垮其余；失败的条目留在列表里并给出原因，
+  //    不能只弹一句「部分失败」让用户不知道是哪一条。
+  function bindBackupPickers(body) {
+    const boxes = () => Array.from(body.querySelectorAll('input[data-purge-name]'));
+    const all = body.querySelector('#backupPickAll');
+    const count = body.querySelector('#backupPickCount');
+    const sync = () => {
+      const list = boxes();
+      const checked = list.filter((b) => b.checked);
+      if (count) count.textContent = `已选 ${checked.length} 项`;
+      if (all) {
+        all.checked = list.length > 0 && checked.length === list.length;
+        all.indeterminate = checked.length > 0 && checked.length < list.length;
+      }
+    };
+    body.querySelectorAll('input[data-purge-name]').forEach((b) => b.addEventListener('change', sync));
+    all?.addEventListener('change', () => {
+      boxes().forEach((b) => { b.checked = all.checked; });
+      sync();
+    });
+    sync();
+  }
+
+  async function purgeSelectedBackups() {
+    const body = document.getElementById('backupsPageBody');
+    if (!body) return;
+    const checked = Array.from(body.querySelectorAll('input[data-purge-name]:checked'));
+    if (!checked.length) {
+      window.app?.toast?.('info', '请先勾选要清除的备份项');
+      return;
+    }
+    const items = checked.map((b) => ({
+      kind: b.getAttribute('data-purge-kind'),
+      name: b.getAttribute('data-purge-name'),
+    }));
+    const ok = await window.app?.confirmDanger?.(
+      '清除备份',
+      `将把勾选的 ${items.length} 项备份移入系统回收站。清除后这些备份不能再用于还原。`,
+      '仍然执行',
+      '取消',
+      '只处理当前数据目录里的备份；升级前旧数据目录里的备份不在此处清除。需要找回时可在系统回收站还原。'
+    ).catch((e) => {
+      // 确认框自身失败（组件未加载等）不能变成一条静默的 unhandled rejection：
+      // 这里按「未确认」处理并给出可见原因，删除动作一律不执行。
+      window.app?.toast?.('error', '确认框打开失败，未执行清除: ' + ((e && e.message) || e));
+      return false;
+    });
+    if (!ok) return;
+    if (typeof window.api?.cleanup?.backupPurge !== 'function') {
+      window.app?.toast?.('error', '备份清除通道不可用，未执行任何删除');
+      return;
+    }
+    const btn = document.getElementById('btnPurgeBackups');
+    if (btn) btn.disabled = true;
+    try {
+      const resp = await window.api.cleanup.backupPurge(items);
+      const data = (resp && resp.data) || {};
+      const failed = Array.isArray(data.failed) ? data.failed : [];
+      if (!resp || resp.success === false) {
+        window.app?.toast?.('error', (resp && resp.message) || '清除备份失败');
+      } else if (failed.length) {
+        window.app?.toast?.('warning', `已清除 ${data.removed || 0} 项，${failed.length} 项未清除（详见日志）`);
+        window.app?.log?.('warn', `备份清除未成功项：${failed.slice(0, 5).map((f) => `${f.name}（${f.reason}）`).join('；')}`);
+      } else {
+        window.app?.toast?.('success', `已清除 ${data.removed || 0} 项备份`);
+      }
+    } catch (e) {
+      window.app?.toast?.('error', '清除备份异常: ' + ((e && e.message) || e));
+    } finally {
+      if (btn) btn.disabled = false;
+      renderBackupsPage();
+    }
+  }
+
   // U1-d（2026-10-01）：备份还原从磁盘清理工具栏的二级按钮提到一级页面。
   // 原来藏在清理页最右侧，等于把「还原」这条退路摆在用户最不容易看见的位置；
   // 渲染逻辑（renderRegBackupList）只依赖 ctrl.body，所以搬页面不用改它。
@@ -2927,6 +3022,7 @@
     document.getElementById('btnClean')?.addEventListener('click', clean);
     document.getElementById('btnSelectAll')?.addEventListener('click', toggleSelectAll);
     document.getElementById('btnRefreshBackups')?.addEventListener('click', renderBackupsPage);
+    document.getElementById('btnPurgeBackups')?.addEventListener('click', purgeSelectedBackups);
     // C1-1 占用查询：查询 / 回车提交 / 结束进程（结束为不可逆操作，内部走 confirmDanger）
     document.getElementById('lockQueryBtn')?.addEventListener('click', () => runLockQuery());
     document.getElementById('lockQueryPath')?.addEventListener('keydown', (e) => {

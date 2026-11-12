@@ -9,6 +9,9 @@
 
 mod cleanup;
 pub use cleanup::{cleanup_detail, CleanupExecuteResult, cleanup_execute, find_rule_by_id};
+/// 备份清除要复用文件批次的清单解析与根内包含判定（`manifest_rels` /
+/// `backup_victim_within_root`），不另写第二套判据（§5.16）。
+pub(crate) use cleanup::{backup_victim_within_root, manifest_rels};
 mod common;
 pub(crate) use common::to_wide;
 pub(crate) use common::to_wide_checked;

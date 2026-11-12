@@ -34,34 +34,19 @@ pub(super) fn uninstall_reg_backup_dir() -> PathBuf {
     crate::engine::paths::backup_write_dir(UNINSTALL_REG_BACKUP_SUB)
 }
 
-/// 备份名总长上限。生成侧（`BACKUP_LEAF_MAX`）与准入侧共用这一份，别在两处各写一个数。
-const BACKUP_NAME_MAX: usize = 120;
-
 /// 键末段（**净化后**）长度上限：给「毫秒戳 + 分隔符 + `.reg` + 撞名序号」留足余量，
-/// 使任何合法末段生成的名字都必然 ≤ `BACKUP_NAME_MAX`。
+/// 使任何合法末段生成的名字都必然 ≤ 准入侧的总长上限（判据在 `engine::backup_purge`）。
 /// 余量是否够由 `b2_3_厂库末段全部生成合法备份名` 用例逐条兜（末段声明与生成器两边一起漂才红）。
 const BACKUP_LEAF_MAX: usize = 88;
-
-/// 备份名合法字节：ASCII 字母数字与 `-` `_` `.`。
-///
-/// B2-3：生成侧净化与准入侧校验**必须**同读这一份 —— 两边各写一套字符判据的后果不是
-/// 「名字难看」，而是生成侧写下一个名字、准入侧当场拒收，于是「备份留了、还原入口点不动」，
-/// 而对应的注册表删除**已经发生**（这份 `.reg` 是唯一还原依据）。
-fn backup_name_byte_ok(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')
-}
 
 /// 备份文件名准入：只认生成器产出的形状（`<毫秒>_<净化后的键末段>.reg`，撞名时末段后带 `_序号`），
 /// 路径穿越（`..` / `\` / `/`）、空格与非 .reg 一律拒绝——还原是**写注册表**的通道。
 ///
 /// 字符集**刻意不收空格**：`a reg.reg` 这类输入在准入侧就是可疑形态（真实生成器不会产出），
 /// 拒收它比放行它安全。所以空格只能在**生成侧**被净化掉，见 `sanitize_backup_leaf`。
-pub(super) fn valid_uninstall_backup_name(name: &str) -> bool {
-    let n = name.trim();
-    n.len() > 4
-        && n.len() <= BACKUP_NAME_MAX
-        && n.ends_with(".reg")
-        && n.bytes().all(backup_name_byte_ok)
+pub(crate) fn valid_uninstall_backup_name(name: &str) -> bool {
+    // 判据真源在 engine::backup_purge（列表 / 还原 / 清除同一份）。
+    crate::engine::backup_purge::valid_uninstall_reg_name(name)
 }
 
 /// 键末段的稳定短哈希（FNV-1a 低 24 位）：只在原串里**丢了非 ASCII 字符**时才用得上。
@@ -97,7 +82,7 @@ fn sanitize_backup_leaf(leaf: &str) -> String {
     let mut dropped_non_ascii = false;
     let mut pending_sep = false;
     for c in src.chars() {
-        if c.is_ascii() && backup_name_byte_ok(c as u8) {
+        if c.is_ascii() && crate::engine::backup_purge::backup_name_byte_ok(c as u8) {
             // 连续非法字符只在中间补一个 `-`（首尾不补，否则名字会带无意义的边）
             if pending_sep && !kept.is_empty() {
                 kept.push('-');

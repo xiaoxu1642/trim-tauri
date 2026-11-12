@@ -572,6 +572,60 @@
   ds.reducedMotionQuery = reducedMotionQuery;
   ds.reducedMotionFallback = reducedMotionFallback;
 
+  // ---------- ⑫ 列表逐项滑入（2026-11-12 用户点名）----------
+  // 「软件卸载 / 系统维护 / 启动项管理 / 网络检测」四张列表统一走这一件：从右向左
+  // 逐项滑入（动画本体取用户给的参考代码 —— 时长/曲线/fill 与起点位移，见 main.css
+  // 的 `ds-slide-in` 关键帧；这里只负责按渲染顺序排延迟）。
+  //
+  // 为什么是 JS 而不是纯 CSS 的 :nth-child：列表由 innerHTML 整块重建，条目数从 6 到
+  // 200 不等，写死 nth-child 既会漏项，也会在「只改一项状态」的局部重绘里重播整套动画。
+  // 这里用内联 animation-delay 按**渲染顺序**排延迟，并给容器打一次记号 —— 同一个容器
+  // 的后续重渲染（勾选、执行中、进度回填）不再重播，只有进入页面或用户主动重扫时
+  // 才由调用方清掉记号重新播放。
+  //
+  // 降级：RM 下不挂任何动画（不靠「时长 0」糊过去——冻结帧会让条目停在 from 态的位移上）。
+  const SLIDE_STEP_MS = 50;
+  // 尾部封顶：再往后延迟会排到十几秒，用户会以为页面卡死（实际值见本行下方的常量声明）。
+  const SLIDE_CAP = 24;
+
+  // 动画结束后摘类：参考代码用 `both`，末帧 `transform: translateX(0)` 会一直挂住，
+  // 把 .row-card:hover 的 translateY(-4px) 压死（列表项悬停不再上浮）。摘类后元素回到
+  // 自己的默认/hover 态，视觉上等价，但动画本体与用户给的参考代码逐字一致。
+  function clearSlideOnEnd(n) {
+    if (n.dataset.dsSlideBound === '1') return;
+    n.dataset.dsSlideBound = '1';
+    n.addEventListener('animationend', (e) => {
+      if (e.animationName !== 'ds-slide-in') return;
+      n.classList.remove('ds-slide-in');
+      n.style.animationDelay = '';
+    });
+  }
+  function slideInList(host, selector, { force = false } = {}) {
+    if (!host) return;
+    if (host.dataset.dsSlid === '1' && !force) return;
+    const nodes = Array.from(host.querySelectorAll(selector));
+    if (!nodes.length) return;
+    if (reducedMotion()) {
+      // RM：清掉可能残留的内联延迟与类名，条目保持默认可见态
+      for (const n of nodes) {
+        n.classList.remove('ds-slide-in');
+        n.style.animationDelay = '';
+      }
+      host.dataset.dsSlid = '1';
+      return;
+    }
+    nodes.forEach((n, i) => {
+      clearSlideOnEnd(n);
+      n.classList.remove('ds-slide-in');
+      // 强制回流：同一节点在 force 重播时，先摘类再挂类才真正重启关键帧
+      void n.offsetWidth;
+      n.style.animationDelay = (i < SLIDE_CAP ? i * SLIDE_STEP_MS : SLIDE_CAP * SLIDE_STEP_MS) + 'ms';
+      n.classList.add('ds-slide-in');
+    });
+    host.dataset.dsSlid = '1';
+  }
+  ds.slideInList = slideInList;
+
   /**
    * C-W3 / A3-L02：分段栏键盘与 ARIA 桩。
    * 调用形态：ds.bindTablist(nav, { panelSelector: '[data-tab-panel]' })。

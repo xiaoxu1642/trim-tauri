@@ -426,6 +426,9 @@
     const listEl = document.getElementById('uninstallList');
     if (!listEl) return;
     listEl.innerHTML = currentScope === 'windows' ? renderWindowsApps() : renderWin32Apps();
+    // 逐项滑入（2026-11-12 用户点名）：只在换页 / 换范围 / 重新枚举后播放一次。
+    // 勾选与状态回填走的是局部更新，不会重进这里，因此不会反复重播。
+    window.ds?.slideInList?.(listEl, '.un-app-card', { force: true });
     indexRenderedCells();
     hydrateIcons();
     if (currentScope !== 'windows') fillMissingSizes();

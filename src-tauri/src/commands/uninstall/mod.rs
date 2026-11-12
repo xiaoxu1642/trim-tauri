@@ -51,7 +51,7 @@ mod capability_orphan;
 // R-1 后续阶段（2026-10-07）：COM/CLSID 与 File Types / Applications 只读可见面
 #[allow(dead_code)]
 mod com_orphan;
-mod backup_report;
+pub(crate) mod backup_report;
 pub use backup_report::{uninstall_reg_backup_list, __cmd__uninstall_reg_backup_list, __tauri_command_name_uninstall_reg_backup_list, uninstall_reg_backup_restore, __cmd__uninstall_reg_backup_restore, __tauri_command_name_uninstall_reg_backup_restore, uninstall_batch_list, __cmd__uninstall_batch_list, __tauri_command_name_uninstall_batch_list, uninstall_batch_restore, __cmd__uninstall_batch_restore, __tauri_command_name_uninstall_batch_restore, uninstall_report_list, __cmd__uninstall_report_list, __tauri_command_name_uninstall_report_list, uninstall_report_get, __cmd__uninstall_report_get, __tauri_command_name_uninstall_report_get};
 mod dead;
 #[allow(dead_code)]

@@ -15,8 +15,8 @@
     "M-12"
   ],
   "srcHash": {
-    "check-channel-map": "d4550f5ac8344224",
-    "check-guard-tiers": "3b29773e7a705d5c",
+    "check-channel-map": "12ad75110a74a70c",
+    "check-guard-tiers": "9abb63247b9862cf",
     "check-layering": "2eafd617abcf47b6",
     "check-delete-exits": "c7c3b79a79f4928d",
     "check-delete-callsites": "79d427976edd7625",
@@ -541,5 +541,5 @@
       "M-12"
     ]
   },
-  "bodyHash": "1b69bdd9b47ed8bc"
+  "bodyHash": "d06775d3abffd696"
 }

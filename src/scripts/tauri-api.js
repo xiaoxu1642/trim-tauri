@@ -57,6 +57,7 @@
     'cleanup:reg-backup-restore': 'cleanup_reg_backup_restore',
     'cleanup:file-backup-list': 'cleanup_file_backup_list',
     'cleanup:file-backup-restore': 'cleanup_file_backup_restore',
+    'cleanup:backup-purge': 'cleanup_backup_purge',
     'cleanup:scan': 'cleanup_scan',
     'cleanup:scan-cancel': 'cleanup_scan_cancel',
     'cleanup:execute': 'cleanup_execute',
@@ -441,6 +442,8 @@
       regBackupRestore: function (file) { return invokeChannel('cleanup:reg-backup-restore', { file: file }); },
       fileBackupList: function () { return invokeChannel('cleanup:file-backup-list'); },
       fileBackupRestore: function (file, index) { return invokeChannel('cleanup:file-backup-restore', { file: file, index: index }); },
+      // 备份清除（2026-11-12）：单个或多项，走回收站；items = [{ kind, name }]
+      backupPurge: function (items) { return invokeChannel('cleanup:backup-purge', { items: items }); },
       // partial：扫描范围是勾选项的子集（后端保快照桶并合并；全量扫描传 false）
       scan: function (categories, partial) { return invokeChannel('cleanup:scan', { categories: categories, partial: partial === true }); },
       // 停止扫描：协作式取消，引擎在条目边界提前返回；回执带 cancelled:true

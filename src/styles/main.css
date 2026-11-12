@@ -2279,7 +2279,9 @@ body.electron-mica.win-maximized .main-content {
    之下;上面的不透明护栏底色(bg-base)把壁纸整个盖死 —— 非最大化时 body 是半透明
    veil 才透得出壁纸。壁纸激活时恢复同一份 veil,黑帧防线转由壁纸伪元素承担:
    ::before 提到完全不透明(inset:0 铺满客户区),WebView 无透明像素,
-   「不依赖 DWM 材质自绘整窗」的护栏目的不受影响,壁纸观感与非最大化一致。 */
+   「不依赖 DWM 材质自绘整窗」的护栏目的不受影响,壁纸观感与非最大化一致。
+   2026-11-13 用户实测订正：极光琉璃下最大化不允许丢壁纸/丢侧栏玻璃 ——
+   非最大化观感就是产品基准，最大化不另开一套。 */
 body.electron-mica.win-maximized[data-preset-bg] {
   background: var(--mat-veil) !important;
   background-image: none !important;
@@ -2293,7 +2295,18 @@ body.win-maximized[data-preset-bg] .app-wallpaper::before {
 }
 
 body.electron-mica.win-maximized .layout {
-  background: var(--bg-base);
+  /* 最大化与还原同一层序：壁纸垫底、内容透明、极光场继续可见。
+     不再给 layout 单独垫 bg-base —— 那会把壁纸压掉，也就是用户截图里的症状。 */
+  background: transparent;
+}
+
+/* 最大化期间侧栏保持“还原态”玻璃参数：--bg-card 透壁纸/极光，
+   描边/岛浮影由既有规则承担；不透明护栏由 body 的 --mat-veil + 壁纸层保证，
+   与非最大化同一口径（--surface-alpha-card 真源不变）。
+   末位同名规则（材质 2.0 段）已一并改回 --bg-card，层序对齐非最大化。 */
+body.electron-mica.win-maximized .sidebar {
+  background: var(--bg-card);
+  border-color: var(--border-default);
 }
 
 /* 批次：悬浮岛侧边栏 —— 最大化时取消岛形，回归贴边导航（Win11 语义 + 不透明护栏）。
@@ -4629,6 +4642,31 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.10);
 }
 /* 检查项行顶部对齐特例（.row-card.row-card-top）已随首页「体检结论」区块退役（2026-10-12） */
+
+/* 列表逐项滑入（2026-11-12 用户点名：从右向左依次滑入）。
+   二次点名（同日）：时长/曲线/fill 取用户给的参考代码（`ease-out` + `both`，时长同 token）；
+   位移方向按用户口头订正为**从右向左**（起点取正值，参考代码里的负值方向是笔误）。
+   延迟仍由 ds.slideInList() 按渲染顺序内联写入。
+   both 的代价是末帧 transform 会一直挂住（hover 的 translateY(-4px) 被压死），
+   所以 ds.slideInList 在 animationend 时摘类：动画本体与参考代码逐字一致，
+   结束后条目回到自己的默认/hover 态。只对「条目」生效，容器不位移。 */
+@keyframes ds-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.ds-slide-in {
+  animation: ds-slide-in 400ms ease-out 0ms both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ds-slide-in { animation: none; }
+}
+
 /* v3.2.0：系统维护卡片主体可点击（弹出本项详解弹窗），指针暗示 */
 .maint-card { cursor: pointer; }
 .maint-detail-title {
@@ -5330,9 +5368,11 @@ body.electron-mica:not(.win-maximized) .main-content { background: transparent !
    浅色 72% 白）统一定义在上方「原生 Mica」段，此处按四种材质微调岛底浓度制造区分
    （浅色统一 72% 白保证可读），百分比对齐文档建议：mica 78 / mica-alt 82 /
    acrylic 68 / thin-acrylic 58，不要恢复纯透明。 */
-/* 最大化：不透明实体（护栏），压过上方全部半透明岛色 */
+/* 最大化：沿用还原态玻璃面（2026-11-13 用户实测订正，不透明护栏由 body 的
+   --mat-veil + 壁纸层承担，不在岛本体上翻成实色）。 */
 body.electron-mica.win-maximized .sidebar {
-  background: var(--surface-solid);
+  background: var(--bg-card);
+  border-color: var(--border-default);
 }
 
 /* 口径 v2·M2：材质态原先在这里把二级按钮底再顶回一次 --bg-card（第三份常态底）。
@@ -5713,7 +5753,7 @@ body.aurora-ready .nav-section:nth-of-type(3) .nav-item { animation-delay: 90ms;
   to { opacity: 1; transform: none; }
 }
 
-/* 页面标题（「系统概览」「磁盘清理」等 12 个模块的标题）刻意不做入场动画：
+/* 页面标题（「系统概览」「磁盘清理」等模块的标题）刻意不做入场动画：
    2026-11-12 用户点名——标题向上弹出会干扰阅读起点，标题应当立即到位。
    切页时的既有 .page fadeIn 保留（那是整页淡入，不是标题位移）。 */
 
@@ -5900,6 +5940,13 @@ body.aurora-ready .page.active .device-info-row:nth-child(n+8) { animation-delay
 /* v3.0：预设壁纸激活时布局层不再垫色——壁纸之下不允许有任何遮罩，
    （材质总开关关闭/无壁纸时 body 基色仍由既有规则承担） */
 body[data-preset-bg] .layout {
+  background: transparent;
+}
+/* 2026-11-13 用户实测：最大化不允许“背景自己变了”。壁纸/导入图激活时，
+   最大化态与非最大化态同一条 transparent —— 若这里再垫 bg-base，壁纸会被
+   layout 层压掉（仅出现在最大化，因为非最大化的同段规则源序在其后）。 */
+body.electron-mica.win-maximized[data-preset-bg] .layout,
+body.electron-mica.win-maximized.bg-image-on .layout {
   background: transparent;
 }
 /* 更新日志（v3.5.1）：releaseNotes 经渲染器转为块级版式。

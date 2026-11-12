@@ -90,7 +90,7 @@ pub fn zip_key_of(path: &str) -> String {
 /// 删除清单那条入口（`deleted-{batch_id}.json`）是同族风险，一并吃这条判据。
 ///
 /// 长度闸按**字符数**（`paths::exceeds_char_len` 是唯一口径，不用 UTF-8 字节数）。
-pub(crate) fn batch_id_reject_reason(id: &str) -> Option<&'static str> {
+pub fn batch_id_reject_reason(id: &str) -> Option<&'static str> {
     if id.is_empty() {
         return Some("批次号为空");
     }
@@ -481,7 +481,11 @@ pub fn list(limit: usize) -> Vec<Value> {
 pub fn list_with_state(limit: usize) -> (Vec<Value>, usize) {
     let mut rows: Vec<Value> = Vec::new();
     let mut unreadable = 0usize;
+    // 老根标记：清除只作用于新根（与 `backup_write_dir` 同口径），列表必须把
+    // 「来自升级前旧数据目录」标出来，否则界面会给一个点了必然失败的勾选框。
+    let write_root = write_root();
     for root in paths::backup_read_dirs(SUB) {
+        let from_legacy = root != write_root;
         // P0-2B：展示侧同样先判根。junction 根会让链接另一头的目录被列成「本机还原包」，
         // 用户点还原就把字节写到受保护面之外。
         let verdict = protect::inspect_root(&root, paths::data_root_base(&root).as_deref());
@@ -518,7 +522,7 @@ pub fn list_with_state(limit: usize) -> (Vec<Value>, usize) {
                     // 坏包的落盘体积照样上报：它在磁盘上确实占地方，表头合计也含它。
                     let zip_path = de.path().join(ZIP_NAME);
                     let zip_bytes = std::fs::metadata(&zip_path).map(|m| m.len()).unwrap_or(0);
-                    rows.push(json!({ "id": name, "broken": msg, "zipBytes": zip_bytes }));
+                    rows.push(json!({ "id": name, "broken": msg, "zipBytes": zip_bytes, "fromLegacy": from_legacy }));
                     continue;
                 }
             };
@@ -537,6 +541,7 @@ pub fn list_with_state(limit: usize) -> (Vec<Value>, usize) {
                 "bytes": bytes,
                 "zipBytes": zip_bytes,
                 "hasZip": zip_path.is_file(),
+                "fromLegacy": from_legacy,
             }));
         }
     }

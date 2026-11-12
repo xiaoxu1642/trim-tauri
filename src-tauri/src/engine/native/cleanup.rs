@@ -350,7 +350,7 @@ const ORPHAN_GC_MIN_AGE_MS: i64 = 24 * 3600 * 1000;
 /// 这里用 canonicalize 拿 victim 的真实落点：解析不出（不存在/悬空）或解析到
 /// 备份根之外一律 fail-closed 拒删——裁剪是多删一份坏处有限的操作，删错根外
 /// 文件的代价不对称。
-fn backup_victim_within_root(root_canon: &std::path::Path, victim: &std::path::Path) -> bool {
+pub(crate) fn backup_victim_within_root(root_canon: &std::path::Path, victim: &std::path::Path) -> bool {
     let Ok(real) = std::fs::canonicalize(victim) else {
         return false;
     };
@@ -623,7 +623,7 @@ fn prune_file_backups_with(
 /// 读一份文件备份清单里所有 `entries[].file`（相对名）。
 /// 读/解析失败返回 `None`（A1-M03：不得把「读不动」当成「没有条目」）；合法但无条目
 /// 返回 `Some(空)`。
-fn manifest_rels(manifest: &std::path::Path) -> Option<Vec<String>> {
+pub(crate) fn manifest_rels(manifest: &std::path::Path) -> Option<Vec<String>> {
     let text = std::fs::read_to_string(manifest).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     Some(

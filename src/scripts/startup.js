@@ -18,6 +18,9 @@
   // 批准位（AGENTS §5.30），只能「备份原值后删值」；普通项写的是系统批准位。只报「成功 N 项」
   // 会把两种**可逆性完全不同**的结果说成同一件事，所以按 id 暂存、由 render() 一次性消费。
   const receiptNotes = new Map();
+  // 逐项滑入开关（2026-11-12 用户点名）：扫描完成与切换筛选时置位，
+  // render() 消费一次即复位——单项启停的局部重渲染不该整页重播。
+  let slideOnNextRender = false;
 
   // 审查 v2-L5：这里原先给每项挂了 `color: '#16A34A' / '#D97706'` 两个离表 hex，而
   // **全仓没有任何一处读取这个字段** —— 图标配色实际由 main.css 的
@@ -444,6 +447,7 @@
       }
       // 防恢复机制：黑名单拦截 + 顽固恢复计数（可能自动删除并刷新列表）
       await enforceStartupDefend();
+      slideOnNextRender = true; // 扫描/重扫完成：这一屏是新结果，播一次
       render();
       if (!silent) {
         if (degraded) window.app?.toast('warning', '本次扫描失败，已回落到上次的缓存结果，可能与系统现状不一致');
@@ -697,6 +701,12 @@
 
     // B2：有路径的项提取真实程序图标，失败或无路径时统一兜底为 Trim.ico
     applyStartupIcons(listEl);
+    // 逐项滑入（2026-11-12 用户点名）：仅在「扫描完成 / 切换筛选」后播放。
+    // 单项启停走的是 receipt 局部更新，不进这里，因此不会反复重播。
+    if (slideOnNextRender) {
+      window.ds?.slideInList?.(listEl, '.startup-item', { force: true });
+      slideOnNextRender = false;
+    }
     } finally {
       unlockListHeight();
     }
@@ -1145,6 +1155,7 @@ ${enable ? '（启用后该项将随系统启动运行）' : '（禁用后可随
       el('startupFilter').querySelectorAll('.filter-tab').forEach(t => t.classList.toggle('active', t === tab));
       filter = tab.dataset.filter;
       el('startupSelectAll').checked = false;
+      slideOnNextRender = true; // 换筛选 = 换一整批卡片
       render();
     });
   }
