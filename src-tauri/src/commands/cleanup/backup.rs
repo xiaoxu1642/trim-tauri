@@ -6,7 +6,7 @@
 
 use crate::engine::{guard, log};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::WebviewWindow;
 // ==================== cleanup:reg-backup-*（C-4 注册表备份还原入口） ====================
 // cleanup_execute 的 regKeys 分支在删除前 export 整键到 <数据根>\cleanup-reg-backup
@@ -357,45 +357,101 @@ fn collect_file_backup_list() -> Value {
     } })
 }
 
-/// cleanup:file-backup-restore — 把单个备份条目拷回原路径（主窗专属）。
-/// 目标已存在时跳过（合并语义：只还原缺失文件，不覆盖现有数据）。
+/// 文件备份清单的共享解析段：定位清单 → 读盘 → 解析。批量还原整批只走这里一次——
+/// 逐文件命令每条都重读重解析整份清单是 O(批次×清单)，大批次实测分钟级纯开销。
+/// B1-批（2026-11-13）：单条 `cleanup:file-backup-restore` 整链摘除（D4 零调用方棘轮），
+/// 前端整批还原改走 `cleanup:file-backup-restore-batch`（indexes=[i] 等价单条）。
+fn parse_files_manifest(file: &str) -> Result<(PathBuf, Value), String> {
+    let fname = file.trim();
+    if !valid_files_manifest_name(fname) {
+        return Err("备份清单名非法".into());
+    }
+    // 清单按跨根解析（N1）；后续取副本时必须用**同一根**，否则老根清单会去新根找文件
+    let Some(mpath) = crate::engine::paths::resolve_backup_file(FILES_BACKUP_SUB, fname) else {
+        return Err("备份清单不存在".into());
+    };
+    let Ok(text) = std::fs::read_to_string(&mpath) else {
+        return Err("备份清单不存在".into());
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&text) else {
+        return Err("备份清单解析失败".into());
+    };
+    if v.get("entries").and_then(|e| e.as_array()).is_none() {
+        return Err("备份清单结构异常".into());
+    }
+    Ok((mpath, v))
+}
+
+/// 批量条目数上限：防 IPC 侧一次塞入超大 indexes 数组把反序列化内存打爆；
+/// 正常批次 = 单份清单条目数（备份创建侧自有批次大小上限），远低于此值。
+const FILE_RESTORE_BATCH_MAX: usize = 50_000;
+
+/// cleanup:file-backup-restore-batch — 整批把备份条目拷回原路径（主窗专属）。
+/// 逐文件命令每条都重读并重解析整份清单（O(批次×清单)），大批次（上限内可达
+/// 数千小文件）实测分钟级纯开销；批量版整批解析一次，逐条结果与单条命令
+/// 同构回传，隔离语义不变（F4a1-L15）。
 #[tauri::command]
-pub async fn cleanup_file_backup_restore<R: tauri::Runtime>(
+pub async fn cleanup_file_backup_restore_batch<R: tauri::Runtime>(
     window: WebviewWindow<R>,
     file: String,
-    index: usize,
+    indexes: Vec<usize>,
 ) -> Value {
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
-    tauri::async_runtime::spawn_blocking(move || cleanup_file_backup_restore_blocking(file, index))
-        .await
-        .unwrap_or_else(|e| {
-            json!({ "success": false, "message": format!("文件备份还原任务异常: {e}") })
-        })
+    tauri::async_runtime::spawn_blocking(move || {
+        cleanup_file_backup_restore_batch_blocking(file, indexes)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        json!({ "success": false, "message": format!("文件备份批量还原任务异常: {e}") })
+    })
 }
 
-fn cleanup_file_backup_restore_blocking(file: String, index: usize) -> Value {
-    let fname = file.trim();
-    if !valid_files_manifest_name(fname) {
-        return json!({ "success": false, "message": "备份清单名非法" });
+fn cleanup_file_backup_restore_batch_blocking(file: String, indexes: Vec<usize>) -> Value {
+    if indexes.len() > FILE_RESTORE_BATCH_MAX {
+        return json!({
+            "success": false,
+            "message": format!("批量条目数超上限（{FILE_RESTORE_BATCH_MAX}），请分批还原")
+        });
     }
-    // 清单按跨根解析（N1）；后续取副本时必须用**同一根**，否则老根清单会去新根找文件
-    let Some(mpath) = crate::engine::paths::resolve_backup_file(FILES_BACKUP_SUB, fname) else {
-        return json!({ "success": false, "message": "备份清单不存在" });
+    let (mpath, v) = match parse_files_manifest(&file) {
+        Ok(pair) => pair,
+        Err(msg) => return json!({ "success": false, "message": msg }),
     };
-    let Ok(text) = std::fs::read_to_string(&mpath) else {
-        return json!({ "success": false, "message": "备份清单不存在" });
+    // 副本必须与清单同根（老根清单的副本躺在老根），不能固定用新根拼（N1）
+    let Some(root) = mpath.parent() else {
+        return json!({ "success": false, "message": "备份清单路径异常" });
     };
-    let Ok(v) = serde_json::from_str::<Value>(&text) else {
-        return json!({ "success": false, "message": "备份清单解析失败" });
-    };
-    let Some(entries) = v.get("entries").and_then(|e| e.as_array()) else {
-        return json!({ "success": false, "message": "备份清单结构异常" });
-    };
-    let Some(entry) = entries.get(index) else {
-        return json!({ "success": false, "message": "条目序号越界" });
-    };
+    let entries = v.get("entries").and_then(|e| e.as_array());
+    let mut results = Vec::with_capacity(indexes.len());
+    let mut restored = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+    for index in indexes {
+        // 逐条隔离：单条越界/拒绝只记账进 results，不中断整批（与逐条版语义一致）
+        let result = match entries.and_then(|a| a.get(index)) {
+            Some(entry) => restore_entry(root, entry),
+            None => json!({ "success": false, "message": "条目序号越界" }),
+        };
+        if result.get("success").and_then(|s| s.as_bool()) != Some(true) {
+            failed += 1;
+        } else if result.pointer("/data/restored").and_then(|s| s.as_bool()) == Some(true) {
+            restored += 1;
+        } else {
+            skipped += 1;
+        }
+        results.push(result);
+    }
+    json!({
+        "success": true,
+        "data": { "results": results, "restored": restored, "skipped": skipped, "failed": failed }
+    })
+}
+
+/// 单条目还原体：从清单根目录把副本拷回原路径。批量还原逐条调用它，
+/// 逐条错误隔离（一条拒绝不影响其余）由此天然成立（F4a1-L15）。
+fn restore_entry(root: &Path, entry: &Value) -> Value {
     // 备份相对名准入：不含 .. / 绝对路径形态 / 盘符——防穿越到备份根之外
     let Some(rel) = entry.get("file").and_then(|s| s.as_str()) else {
         return json!({ "success": false, "message": "条目缺少备份文件名" });
@@ -418,10 +474,6 @@ fn cleanup_file_backup_restore_blocking(file: String, index: usize) -> Value {
     if let Err(why) = crate::engine::protect::validate_mutation_target(original) {
         return json!({ "success": false, "message": why });
     }
-    // 副本必须与清单同根（老根清单的副本躺在老根），不能固定用新根拼（N1）
-    let Some(root) = mpath.parent() else {
-        return json!({ "success": false, "message": "备份清单路径异常" });
-    };
     let src = root.join(rel);
     if !src.is_file() {
         return json!({ "success": false, "message": "备份文件已不存在" });
@@ -482,7 +534,7 @@ fn cleanup_file_backup_restore_blocking(file: String, index: usize) -> Value {
 #[cfg(test)]
 mod tests {
     use super::valid_restore_target as ok;
-    use super::{cleanup_file_backup_restore_blocking, FILES_BACKUP_SUB};
+    use super::{cleanup_file_backup_restore_batch_blocking, FILES_BACKUP_SUB};
     use serde_json::json;
     use std::fs;
 
@@ -510,6 +562,55 @@ mod tests {
         assert!(ok(r"D:/data/file.log"), "正斜杠同为绝对形态");
         assert!(ok(r"\\server\share\dir\file.txt"), "UNC 至少要 server\\share 两段");
         assert!(!ok(r"\\server"), "UNC 只有一段不是合法共享路径");
+    }
+
+    /// B1-批（2026-11-13）：批量还原必须 async + spawn_blocking + 主窗档，
+    /// 且整批只解析一次清单、逐条走共享 restore_entry（隔离语义与逐条版一致）。
+    /// 判红自证：改回 `pub fn` / 去掉 spawn_blocking / 在循环里重复解析 ⇒ 本用例红。
+    #[test]
+    fn 批量还原命令异步进阻塞池且整批单次解析() {
+        let src = include_str!("backup.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let cmd = src
+            .split("pub async fn cleanup_file_backup_restore_batch")
+            .nth(1)
+            .and_then(|s| s.split("fn cleanup_file_backup_restore_batch_blocking").next())
+            .expect("找不到批量还原命令");
+        assert!(cmd.contains("spawn_blocking(move ||"), "批量还原没有进阻塞池");
+        assert!(cmd.contains("guard::guard(&window, guard::MAIN)"), "批量还原必须是主窗档");
+        let body = src
+            .split("fn cleanup_file_backup_restore_batch_blocking")
+            .nth(1)
+            .expect("找不到批量还原 blocking 体");
+        assert_eq!(body.matches("parse_files_manifest").count(), 1, "整批只允许解析一次清单");
+        assert!(
+            body.contains("restore_entry(root, entry)"),
+            "逐条必须走共享 restore_entry，隔离语义与逐条版一致"
+        );
+    }
+
+    /// restore_entry 回环（沙盒）：还原成功 → 再还原跳过既有目标（存在即不覆盖）。
+    /// 判红自证：去掉 create_new 占位或 dst.exists() 早退 ⇒ 第二段断言红。
+    #[test]
+    fn restore_entry_tempdir_roundtrip() {
+        let _sb = crate::testutil::Sandbox::new(&format!("restore-entry-{}", std::process::id()));
+        let root = crate::engine::paths::backup_write_dir(FILES_BACKUP_SUB);
+        fs::create_dir_all(&root).expect("备份根可创建");
+        let dst = root.join("restore-entry-dst").join("a.txt");
+        fs::write(root.join("a.txt"), b"hello").expect("备份副本可写");
+        let entry = json!({ "file": "a.txt", "path": dst.to_string_lossy() });
+
+        let r1 = super::restore_entry(&root, &entry);
+        assert_eq!(r1.get("success").and_then(|s| s.as_bool()), Some(true), "首次还原应成功: {r1}");
+        assert_eq!(r1.pointer("/data/restored").and_then(|s| s.as_bool()), Some(true));
+        assert_eq!(fs::read(&dst).expect("还原产物可读"), b"hello");
+
+        fs::write(&dst, b"CHANGED").unwrap();
+        let r2 = super::restore_entry(&root, &entry);
+        assert_eq!(r2.pointer("/data/skipped").and_then(|s| s.as_bool()), Some(true), "既有目标必须跳过: {r2}");
+        assert_eq!(fs::read(&dst).expect("目标不得被覆盖"), b"CHANGED");
     }
 
     /// R4-M11：命令必须是 async + spawn_blocking，entries 不再深克隆。
@@ -547,15 +648,17 @@ mod tests {
             "命令体没有把真实注册表还原执行臂传给 blocking helper"
         );
 
+        // B1-批（2026-11-13）：单条文件还原整链摘除（D4 零调用方棘轮），文件侧
+        // 改为批量命令承载阻塞池与逐条隔离，本段随接口面同步改指批量命令。
         let file = src
-            .split("pub async fn cleanup_file_backup_restore")
+            .split("pub async fn cleanup_file_backup_restore_batch")
             .nth(1)
-            .and_then(|s| s.split("fn cleanup_file_backup_restore_blocking").next())
-            .expect("找不到清理域文件还原命令");
-        assert!(file.contains("spawn_blocking(move ||"), "文件还原没有进阻塞池");
+            .and_then(|s| s.split("fn cleanup_file_backup_restore_batch_blocking").next())
+            .expect("找不到清理域文件批量还原命令");
+        assert!(file.contains("spawn_blocking(move ||"), "文件批量还原没有进阻塞池");
         assert!(
-            file.contains("cleanup_file_backup_restore_blocking(file, index)"),
-            "文件还原没有调用 blocking helper"
+            file.contains("cleanup_file_backup_restore_batch_blocking(file, indexes)"),
+            "文件批量还原没有调用 blocking helper"
         );
     }
 
@@ -577,16 +680,22 @@ mod tests {
         });
         fs::write(root.join(&name), manifest.to_string()).expect("清单可写");
 
-        let out = cleanup_file_backup_restore_blocking(name.clone(), 0);
-        assert_eq!(out["success"], json!(true), "跳过是幂等成功: {out}");
-        assert_eq!(out["data"]["restored"], json!(false));
-        assert_eq!(out["data"]["skipped"], json!(true), "修前回执无 skipped: {out}");
-        assert_eq!(out["data"]["path"], json!(original.to_string_lossy()), "回执须带路径: {out}");
+        // B1-批（2026-11-13）：单条 blocking 体随整链摘除改走批量 blocking；批内单条
+        // 回执结构（results[i]）与旧单条回执同构，断言口径不变。
+        let out = cleanup_file_backup_restore_batch_blocking(name.clone(), vec![0]);
+        let out0 = out["data"]["results"][0].clone();
+        assert_eq!(out["success"], json!(true), "整批成功: {out}");
+        assert_eq!(out["data"]["skipped"], json!(1), "跳过计数: {out}");
+        assert_eq!(out0["success"], json!(true), "跳过是幂等成功: {out0}");
+        assert_eq!(out0["data"]["restored"], json!(false));
+        assert_eq!(out0["data"]["skipped"], json!(true), "修前回执无 skipped: {out0}");
+        assert_eq!(out0["data"]["path"], json!(original.to_string_lossy()), "回执须带路径: {out0}");
         assert_eq!(fs::read(&original).expect("目标仍可读"), b"KEEP-ME", "原字节不得被覆盖");
 
         fs::remove_file(&original).expect("清理既有目标");
-        let restored = cleanup_file_backup_restore_blocking(name, 0);
-        assert_eq!(restored["data"]["restored"], json!(true), "目标消失后应能还原: {restored}");
+        let restored = cleanup_file_backup_restore_batch_blocking(name, vec![0]);
+        let r0 = restored["data"]["results"][0].clone();
+        assert_eq!(r0["data"]["restored"], json!(true), "目标消失后应能还原: {r0}");
         assert_eq!(fs::read(&original).expect("目标应已还原"), b"BACKUP");
     }
 }

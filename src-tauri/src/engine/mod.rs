@@ -47,13 +47,18 @@ use serde_json::Value;
 pub fn load_scan_cache(name: &str) -> Option<(i64, Value)> {
     let file = paths::scan_cache_file(name);
     let text = std::fs::read_to_string(&file).ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
+    let mut v: Value = serde_json::from_str(&text).ok()?;
     let ts = v.get("timestamp")?.as_i64()?;
-    let data = v.get("data")?;
+    // R6a-M01-02（2026-11-13）：拿所有权替代整份深克隆——缓存大时（MB 级扫描结果）
+    // 旧写法瞬时双倍内存；timestamp 此刻已消费完，`data` 从 Map 移出，v 其余部分丢弃。
+    let data = match v.as_object_mut().and_then(|m| m.remove("data")) {
+        Some(d) => d,
+        None => return None,
+    };
     if data.is_null() {
         return None;
     }
-    Some((ts, data.clone()))
+    Some((ts, data))
 }
 
 /// 写扫描缓存（原子写，失败只记日志）

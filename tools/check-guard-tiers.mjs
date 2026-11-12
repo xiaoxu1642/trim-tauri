@@ -110,7 +110,7 @@ const MUST_MAIN = [
   // 三个子窗零调用点 ⇒ 按 AGENTS §3「谁真的需要调它」收回主窗独占，不给 readonly。
   'cleanup_rules',
   'cleanup_reg_backup_restore', // C-4：reg import 写注册表，只放主窗
-  'cleanup_file_backup_restore', // C-4：文件备份拷回原路径（写面），只放主窗
+  'cleanup_file_backup_restore_batch', // B1-批（2026-11-13）：整批文件备份还原（写面），只放主窗；旧单条命令随 D4 零调用方棘轮整链摘除
   // 2026-11-12：备份清除（删除四类备份，回收站优先）。消费方只有主窗备份还原页，
   // 四个子窗零调用点 ⇒ 按 AGENTS §3「谁真的需要调它」判 MAIN，不给 readonly。
   'cleanup_backup_purge',

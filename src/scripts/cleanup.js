@@ -2793,11 +2793,11 @@
         if (!m) return;
         try {
           // 明细直接读 manifest 不可行（渲染层无文件读取面），逐批列出由后端扩展——
-          // 这里用最简实现：还原动作按「整批还原」逐条调 restore(index)，后端逐条判
-          // 存在性跳过已存在的目标。先给用户确认，再顺序还原。
+          // 还原动作按「整批还原」一次调批量接口：后端整批只解析一次清单，逐条判
+          // 存在性跳过已存在的目标，逐条结果同构回传。先给用户确认，再执行。
           const ok = await window.app?.confirmDanger?.(
             '还原文件备份',
-            `将把「${fmtBackupTime(m.mtimeMs)}」批次的 ${m.count} 个文件逐个拷回原路径。目标位置已存在的文件会自动跳过，不会覆盖。`,
+            `将把「${fmtBackupTime(m.mtimeMs)}」批次的 ${m.count} 个文件拷回原路径。目标位置已存在的文件会自动跳过，不会覆盖。`,
             '仍然执行',
             '取消',
             '还原只加回文件，不删除任何现有数据。'
@@ -2807,28 +2807,29 @@
           let skipped = 0;
           let failed = 0;
           const failedItems = [];
-          for (let i = 0; i < m.count; i++) {
-            // F4a1-L15：逐条收口。旧实现整批一个 try，第二条 reject 会让后面的
-            // 文件全部不执行且只报一句「还原失败」；现在单条失败只记账，继续下一条。
-            let r = null;
-            try {
-              r = await window.api.cleanup.fileBackupRestore(m.file, i);
-            } catch (e) {
-              failed++;
-              failedItems.push(`#${i}：${(e && e.message) || e}`);
-              continue;
-            }
-            if (r && r.success && r.data && r.data.restored) restored++;
-            else if (r && r.success === false) {
-              failed++;
-              failedItems.push(`#${i}：${r.message || '后端拒绝还原'}`);
-            } else skipped++;
-          }
-          window.app?.toast(
-            failed ? 'warning' : (restored ? 'success' : 'info'),
-            `还原完成：恢复 ${restored} 个文件，跳过 ${skipped} 个${failed ? `，失败 ${failed} 个` : ''}`
+          // B1-批（2026-11-13）：旧实现逐条 invoke，后端每条都重读重解析整份清单
+          // （O(批次×清单)），大批次纯开销分钟级。批量接口整批解析一次；
+          // 逐条隔离语义不变——单条拒绝不影响其余（F4a1-L15）。
+          const resp = await window.api.cleanup.fileBackupRestoreBatch(
+            m.file,
+            Array.from({ length: m.count }, (_, i) => i)
           );
-          if (failed) window.app?.log?.('warn', `文件备份还原失败项：${failedItems.slice(0, 5).join('；')}`);
+          if (resp && resp.success && resp.data) {
+            restored = resp.data.restored || 0;
+            skipped = resp.data.skipped || 0;
+            failed = resp.data.failed || 0;
+            (resp.data.results || []).forEach((r, i) => {
+              if (r && r.success === false) failedItems.push(`#${i}：${r.message || '后端拒绝还原'}`);
+            });
+            window.app?.toast(
+              failed ? 'warning' : (restored ? 'success' : 'info'),
+              `还原完成：恢复 ${restored} 个文件，跳过 ${skipped} 个${failed ? `，失败 ${failed} 个` : ''}`
+            );
+            if (failed) window.app?.log?.('warn', `文件备份还原失败项：${failedItems.slice(0, 5).join('；')}`);
+          } else {
+            // 整批前置失败（清单缺失/非法/超上限）：一次说清原因，不再逐条刷屏
+            window.app?.toast('error', '还原失败: ' + ((resp && resp.message) || '后端拒绝还原'));
+          }
         } catch (e) {
           window.app?.toast('error', '还原失败: ' + (e.message || e));
         }

@@ -160,7 +160,9 @@ const TAURI_ADDED = {
   'uninstall:batch-list': 'H1（2026-09-29）：卸载还原包列表（上游只有 .reg 备份，无内容级还原包）',
   'uninstall:batch-restore': 'H1（2026-09-29）：整批还原文件内容（往磁盘写，主窗档）',
   'cleanup:file-backup-list': 'C-4（2026-09-28）：永久删批次文件备份清单（2026-09-28 拍板补删前备份）',
-  'cleanup:file-backup-restore': 'C-4（2026-09-28）：文件备份拷回原路径（主窗档）',
+  // B1-批（2026-11-13）：旧单条 cleanup:file-backup-restore 整链摘除（D4 零调用方棘轮），
+  // 批量版整批只解析一次清单（O(批次×清单) → O(清单)），逐条隔离语义不变（F4a1-L15）。
+  'cleanup:file-backup-restore-batch': 'B1-批（2026-11-13）：文件备份整批还原（主窗档；替代旧单条 restore）',
   'uninstall:reg-backup-list': 'D1/M5（2026-09-28）：卸载域注册表备份列表（此前备份只写不读）',
   'uninstall:reg-backup-restore': 'D1/M5（2026-09-28）：单个备份 reg import 还原（主窗档 + 危险确认）',
   'syspanel:power-plan-get': 'P2 §3.6（2026-10-03）：电源方案读侧（RAINZ 对标系统面板）',

@@ -644,20 +644,27 @@ const MIN_CASES = 24;
     addCase('A2-L05', ok);
   }
 
-  // F4a1-L15：逐条还原必须单条 try/catch 且累计 restored/skipped/failed
+  // F4a1-L15：还原必须回填 restored/skipped/failed 三态并保留逐条失败清单。
+  // B1-批（2026-11-13）随接口面同步：前端旧「for + 逐条 try」已整链摘除，改走批量接口；
+  // 单条隔离语义移到后端 restore_entry 逐条执行（由 backup.rs 的批量棘轮测试钉住），
+  // 本判据改钉「前端必须回填三态计数，不得只看整批布尔」。
   {
     const clean = blankNonCode(cleanSrc, 'js', { keepStrings: true });
-    const win = windowAfter(clean, 'for (let i = 0; i < m.count; i++)', 50) || '';
-    const judge = (text) => /try\s*\{[\s\S]*fileBackupRestore[\s\S]*\}\s*catch[\s\S]*failed\+\+[\s\S]*continue;/.test(text)
-      && /restored\+\+/.test(text) && /skipped\+\+/.test(text) && /失败 \$\{failed\}/.test(text);
-    const good = 'for (let i = 0; i < m.count; i++) {\n  try { r = await api.fileBackupRestore(m.file, i); } catch (e) { failed++; failedItems.push(e); continue; }\n  if (r.restored) restored++; else skipped++;\n}\ntoast(`恢复 ${restored}，跳过 ${skipped}，失败 ${failed}`);';
-    const bad = 'for (let i = 0; i < m.count; i++) {\n  const r = await api.restore(i);\n  if (r.restored) restored++; else skipped++;\n}';
+    const win = windowAfter(clean, 'fileBackupRestoreBatch', 60) || '';
+    const judge = (text) => /fileBackupRestoreBatch\(/.test(text)
+      && /restored\s*=\s*resp\.data\.restored\s*\|\|\s*0/.test(text)
+      && /skipped\s*=\s*resp\.data\.skipped\s*\|\|\s*0/.test(text)
+      && /failed\s*=\s*resp\.data\.failed\s*\|\|\s*0/.test(text)
+      && /success === false\) failedItems\.push/.test(text)
+      && /失败 \$\{failed\}/.test(text);
+    const good = 'const resp = await api.fileBackupRestoreBatch(m.file, idx);\nrestored = resp.data.restored || 0;\nskipped = resp.data.skipped || 0;\nfailed = resp.data.failed || 0;\n(resp.data.results || []).forEach((r) => { if (r && r.success === false) failedItems.push(r); });\ntoast(`恢复 ${restored}，跳过 ${skipped}，失败 ${failed}`);';
+    const bad = 'const resp = await api.fileBackupRestoreBatch(m.file, idx);\nif (resp.success) toast("还原完成");';
     if (!judge(good) || judge(bad)) {
-      g.fail('F4a1-L15 正向对照失败：逐条还原判定器失真（必须能把「单条 catch + 三计数」与「整批单 try」分开）');
+      g.fail('F4a1-L15 正向对照失败：批量还原三态判定器失真（必须能把「回填三态计数」与「只看整批布尔」分开）');
     }
     const ok = judge(win);
-    if (!ok) g.fail('F4a1-L15：文件备份还原循环仍是整批单 try 或未累计 failed ⇒ 单条 reject 会中断整批');
-    else g.ok('F4a1-L15：文件备份逐条还原，单条失败不中断并累计 restored/skipped/failed');
+    if (!ok) g.fail('F4a1-L15：文件批量还原必须回填 restored/skipped/failed 三态并保留逐条失败清单（隔离语义在后端 restore_entry，backup.rs 棘轮钉住）');
+    else g.ok('F4a1-L15：文件批量还原回填三态计数；单条隔离在后端 restore_entry 逐条执行（backup.rs 棘轮钉住）');
     addCase('F4a1-L15', ok);
   }
 

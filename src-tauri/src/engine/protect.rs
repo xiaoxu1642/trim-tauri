@@ -20,7 +20,7 @@
 //! 此前实际为空 —— 卸载残留规则库的 `reg_key` 走 `RegDeleteTreeW` 递归删树，一条
 //! `HKLM\SOFTWARE` 就能端掉系统配置，故必须在结构上封死（方案 §4.1 实锤）。
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 
 #[derive(Default, Clone)]
@@ -103,7 +103,9 @@ pub struct Norm {
     pub short_name: bool,
 }
 
-static ROOTS: Mutex<Option<ProtectRoots>> = Mutex::new(None);
+// R6a-M01-01（2026-11-13）：锁内存 `Arc`，`roots()` 克隆指针而非整份清单——
+// `is_path_protected` 是逐文件删除链热路径，整清单深拷每文件一次纯属浪费。
+static ROOTS: Mutex<Option<Arc<ProtectRoots>>> = Mutex::new(None);
 
 /// reparse point 判定：符号链接、junction、云占位符、NFS/LX 卷、WIM 归档**全部命中**。
 ///
@@ -522,7 +524,7 @@ pub fn build_default_roots() -> ProtectRoots {
 /// 启动期补全：Electron 的 known folder 会被注册表/OneDrive 重定向，纯 env 推导覆盖不到。
 pub fn configure(extra_subtree: &[String], extra_exact: &[String], extra_any_drive: &[String]) -> ProtectRoots {
     let roots = build_roots(extra_subtree, extra_exact, extra_any_drive);
-    *ROOTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(roots.clone());
+    *ROOTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(roots.clone()));
     roots
 }
 
@@ -568,10 +570,11 @@ pub fn configure_from_app<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     configure(&subtree, &exact, &[]);
 }
 
-/// 当前清单（未配置时用环境变量推导的默认清单）
-pub fn roots() -> ProtectRoots {
+/// 当前清单（未配置时用环境变量推导的默认清单）。返回 `Arc`：调用方按借用消费
+/// （`&roots()` 经 Deref 到 `&ProtectRoots`），需要持有也只是引用计数 +1。
+pub fn roots() -> Arc<ProtectRoots> {
     let mut g = ROOTS.lock().unwrap_or_else(|e| e.into_inner());
-    g.get_or_insert_with(build_default_roots).clone()
+    g.get_or_insert_with(|| Arc::new(build_default_roots())).clone()
 }
 
 /// 对照 JS `isPathProtected`：返回 true = 受保护（必须拒绝删除）

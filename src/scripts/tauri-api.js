@@ -56,7 +56,7 @@
     'cleanup:reg-backup-list': 'cleanup_reg_backup_list',
     'cleanup:reg-backup-restore': 'cleanup_reg_backup_restore',
     'cleanup:file-backup-list': 'cleanup_file_backup_list',
-    'cleanup:file-backup-restore': 'cleanup_file_backup_restore',
+    'cleanup:file-backup-restore-batch': 'cleanup_file_backup_restore_batch',
     'cleanup:backup-purge': 'cleanup_backup_purge',
     'cleanup:scan': 'cleanup_scan',
     'cleanup:scan-cancel': 'cleanup_scan_cancel',
@@ -441,7 +441,9 @@
       regBackupList: function () { return invokeChannel('cleanup:reg-backup-list'); },
       regBackupRestore: function (file) { return invokeChannel('cleanup:reg-backup-restore', { file: file }); },
       fileBackupList: function () { return invokeChannel('cleanup:file-backup-list'); },
-      fileBackupRestore: function (file, index) { return invokeChannel('cleanup:file-backup-restore', { file: file, index: index }); },
+      // B1-批（2026-11-13）：整批还原一次 IPC，后端只解析一次清单；indexes = [0..count)。
+      // 旧单条 cleanup:file-backup-restore 整链摘除（D4 零调用方棘轮），单文件语义 = 批量接口 indexes:[i]。
+      fileBackupRestoreBatch: function (file, indexes) { return invokeChannel('cleanup:file-backup-restore-batch', { file: file, indexes: indexes }); },
       // 备份清除（2026-11-12）：单个或多项，走回收站；items = [{ kind, name }]
       backupPurge: function (items) { return invokeChannel('cleanup:backup-purge', { items: items }); },
       // partial：扫描范围是勾选项的子集（后端保快照桶并合并；全量扫描传 false）

@@ -650,7 +650,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::cleanup::cleanup_reg_backup_list,
         commands::cleanup::cleanup_reg_backup_restore,
         commands::cleanup::cleanup_file_backup_list,
-        commands::cleanup::cleanup_file_backup_restore,
+        commands::cleanup::cleanup_file_backup_restore_batch,
         commands::cleanup::cleanup_backup_purge,
         commands::cleanup::cleanup_scan,
         commands::cleanup::cleanup_scan_cancel,

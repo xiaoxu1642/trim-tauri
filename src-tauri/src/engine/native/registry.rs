@@ -154,8 +154,13 @@ pub(super) unsafe fn reg_enum_values_scan_tagged(hk: HKEY) -> (Vec<(String, bool
     let mut names: Vec<(String, bool)> = Vec::new();
     let mut index = 0u32;
     let mut cap = 260usize;
+    // R5c-M04-02（2026-11-13）：缓冲提到循环外按需放大——旧写法每个值名一次堆分配，
+    // 通配展开对多值键枚举时分配次数 = 值数；`resize` 只在 cap 增长后补零，其余迭代零分配。
+    let mut name_buf: Vec<u16> = Vec::with_capacity(260);
     loop {
-        let mut name_buf = vec![0u16; cap];
+        if name_buf.len() < cap {
+            name_buf.resize(cap, 0);
+        }
         let mut name_len = name_buf.len() as u32;
         let r = RegEnumValueW(
             hk, index,
