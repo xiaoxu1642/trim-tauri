@@ -63,12 +63,18 @@
   // 工作区 1920x1032、客户区 1920x1009，差 23 = 标题栏）。宽度卡死、高度留标题栏余量 ⇒
   // 只有「铺满工作区宽 + 接近满高」的窗口才判最大化；这种窗口本来也没有壁纸可透，按不透明处理无损失。
   // 若将来补回上述命令权限，应收敛回主窗的 is_maximized 判据。
-  // 两个常量：WIDTH_TOLERANCE 是 DPI 取整容差；CAPTION_ALLOWANCE 是标题栏高度余量（CSS px，随 DPI 缩放后仍在 64 内）
+  // WIDTH_TOLERANCE 是 DPI 取整容差；标题栏余量按 devicePixelRatio 换算（F3-M01-01：
+  // 固定 64 在 278% 以上会小于实际标题栏，判据落空 ⇒ 最大化不挂 win-maximized）。
+  // 23 是 100% 缩放下的标题栏实测高度，+8 留取整余量；64 下限保持标准缩放行为不变，
+  // 96 上限覆盖 350%。每次判据现算：窗口跨显示器搬家时 devicePixelRatio 会变化。
   var WIDTH_TOLERANCE = 2;
-  var CAPTION_ALLOWANCE = 64;
+  function captionAllowance() {
+    var dpr = window.devicePixelRatio || 1;
+    return Math.min(96, Math.max(64, Math.round(23 * dpr) + 8));
+  }
   function syncMaximized() {
     var max = window.innerWidth >= window.screen.availWidth - WIDTH_TOLERANCE &&
-              window.innerHeight >= window.screen.availHeight - CAPTION_ALLOWANCE;
+              window.innerHeight >= window.screen.availHeight - captionAllowance();
     if (document.body.classList.contains('win-maximized') === max) return;
     document.body.classList.toggle('win-maximized', max);
     // 与主窗 app.js 的 onResized 同口径：强制一次回流，让合成器立即提交不透明帧，消除最大化/还原残帧

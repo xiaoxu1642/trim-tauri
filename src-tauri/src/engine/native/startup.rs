@@ -1629,9 +1629,18 @@ unsafe fn toggle_registry_item(item: &Value, enable: bool, records: &mut Vec<Val
                 let (v_data, v_b64, v_arr) = if kind == REG_BINARY {
                     (String::new(), base64_encode(&data), Value::Array(vec![]))
                 } else if kind == REG_MULTI_SZ {
-                    let wide: Vec<u16> = data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-                    let parts: Vec<String> = wide.split(|&c| c == 0).filter(|s| !s.is_empty())
-                        .map(|s| String::from_utf16_lossy(s)).collect();
+                    // R5d-M04-04：保留空元素（与 registry.rs R5c-M02 同形保真口径）。
+                    // 旧写法 `.filter(|s| !s.is_empty())` 会把含空元素的值解成另一个值，
+                    // 写回即被改写成不同值而回执「已还原」。直接消费 registry.rs 的保真
+                    // 解码（flatten=false），按 NUL 逐元素拆分，空元素逐项保留；
+                    // 严格解码失败（畸形 UTF-16）时退回 lossy 但不丢空元素，避免备份丢值。
+                    let parts: Vec<String> = match decode_reg_value_bytes(REG_MULTI_SZ, &data, false) {
+                        Some((_, joined)) => joined.split('\0').map(|s| s.to_string()).collect(),
+                        None => {
+                            let wide: Vec<u16> = data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                            wide.split(|&c| c == 0).map(|s| String::from_utf16_lossy(s)).collect()
+                        }
+                    };
                     (String::new(), String::new(), Value::Array(parts.into_iter().map(|s| json!(s)).collect()))
                 } else if kind == REG_DWORD || kind == REG_QWORD {
                     // R5a-M08：畸形短值（REG_DWORD < 4 字节 / REG_QWORD < 8 字节）在旧
@@ -2276,17 +2285,37 @@ pub fn startup_delete(items: &[Value]) -> Result<Value, String> {
                             crate::engine::systembin::SCHTASKS_TIMEOUT,
                         )
                     });
-                if let Ok(out) = query_out {
-                    if out.status.success() {
-                        // R5a-L05：任务 XML 是删除后唯一还原依据——裸 std::fs::write 半截
-                        // 落盘也被 exists() 判「备份成功」，随后 schtasks /Delete 照删。
-                        // 原子写 + 判 Result（与 manifest 同口径），失败走「备份失败，未执行删除」。
-                        if let Err(e) = crate::security::atomic_write_file(&xml_file, &out.stdout) {
-                            crate::engine::log::write_log("warn", &format!("任务 XML 备份写入失败（{tn}）: {e}"));
+                // R5d-M04-01 / R5d-M04-02：任务 XML 是删除后唯一还原凭据。三判口径与
+                // registry 臂（U-A5-M03）同形：退出码成功 + 落盘成功 + 内容非空且可解析，
+                // 任一不满足 ⇒ 备份残缺 ⇒ fail-closed 不删任务（宁可这次不删，也不留不可还原凭据）。
+                let backup_ok = if let Ok(out) = &query_out {
+                    if !out.status.success() {
+                        false
+                    } else {
+                        // R5d-M04-02：schtasks /Query /XML 的产物是单字节流、声明却写 UTF-16，
+                        // 直接按原始字节落盘会被标准读取器拒收。复用 process.rs 同一修法——
+                        // 先 decode_native_output 解成字符串，再转 UTF-16LE+BOM + 声明归一，
+                        // 最后回读自检（BOM/字节/声明/根元素自洽）才落盘。
+                        let text = crate::engine::systembin::decode_native_output(&out.stdout);
+                        let bytes = crate::engine::native::task_xml_backup_bytes(&text);
+                        match crate::engine::native::verify_task_xml_backup(&bytes) {
+                            Ok(()) => match crate::security::atomic_write_file(&xml_file, &bytes) {
+                                Ok(()) => xml_file.metadata().map(|m| m.len() > 0).unwrap_or(false),
+                                Err(e) => {
+                                    crate::engine::log::write_log("warn", &format!("任务 XML 备份写入失败（{tn}）: {e}"));
+                                    false
+                                }
+                            },
+                            Err(e) => {
+                                crate::engine::log::write_log("warn", &format!("任务 XML 备份校验失败（{tn}）: {e}"));
+                                false
+                            }
                         }
                     }
-                }
-                if !xml_file.exists() {
+                } else {
+                    false
+                };
+                if !backup_ok {
                     failed += 1;
                     results.push(json!({"id": id, "name": name, "status": "error", "message": "计划任务备份失败，未执行删除"}));
                     continue;
@@ -2351,7 +2380,10 @@ pub fn startup_add(path: &str, name: &str) -> Result<Option<String>, String> {
             return Err("无法打开 Run 键".into());
         }
         // 冲突检查
-        let nm = to_wide(name);
+        // R5d-M04-03：写/建面一律过名字形态闸（与 set_approved_bit 同口径）。当前接线
+        // 经 file_name + contains('\0') 拒，无可达注入面，但跨文件写面须统一吃 checked。
+        let nm = to_wide_checked(name)
+            .map_err(|_| "启动项值名非法（含 NUL 或控制字符）".to_string())?;
         if let Some(existing) = reg_read_string(hk, name) {
             if !existing.is_empty() {
                 let _ = RegCloseKey(hk);

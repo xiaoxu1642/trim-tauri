@@ -854,6 +854,12 @@ pub fn read_reg_value_state(hive: HKEY, subkey: &str, name: &str, flatten: bool)
                 // 值在两次查询之间长大了：按回报的实际尺寸重建缓冲再读，有限重试
                 reread += 1;
                 size = got.max(size);
+                // R5c-M04-01：重试路径同样要复检 1 MiB 闸。入口闸只覆盖首次查询的尺寸，
+                // 并发写方可在两次查询之间把值涨到任意大，按增长后的 size 分配会 OOM。
+                if !value_size_ok(size) {
+                    let _ = RegCloseKey(hk);
+                    return RegReadState::Unknown("value_too_large".to_string());
+                }
                 continue;
             }
             if q2.is_err() {

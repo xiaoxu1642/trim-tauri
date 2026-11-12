@@ -169,7 +169,9 @@
     // 查找器子视图（重复文件/空文件/磁盘分析）才需要 finder.js
     'cleanup-finder': ['scripts/finder.js'],
     // 软件卸载（卸载域 MVP 2026-09-28）：进页加载，脚本自初始化（readyState 守卫）
-    uninstall: ['scripts/uninstall.js'],
+    // 2026-11-12：应用详情二级页要读本地简介库（window.intro），故前置 modelpicker + intro
+    // ——顺序即依赖序，与 contextmenu/startup 同口径（intro 依赖 modelpicker 的 SCOPE_META）。
+    uninstall: ['scripts/modelpicker.js', 'scripts/intro.js', 'scripts/uninstall.js'],
     // sysrestore.js 的入口按钮（btnSysRestore）挂在「系统优化」页内，故随 optimizer 一并加载；peripheral.js 提供
     // 「更多调优项」的应用内弹窗（window.peripheral.open），也随本页注入。
     // 性能批次①(a) 的漏项补票（2026-10-14 用户报「看板列叠在一起」）：xtable.js 摘出首屏时只按「读不到会抛
@@ -214,6 +216,9 @@
     'scripts/a11y-live.js',
     'scripts/mouse-trail.js',
     'scripts/tilt.js',
+    // 极光琉璃 B-P3：氛围场与首屏入场编排。放空闲清单而不是首屏 —— 它只做装饰，
+    // 晚一拍挂上正好接在开屏退场之后，也避免给首屏关键路径加字节（check-first-paint）。
+    'scripts/aurora.js',
     // P1（2026-11-02）：液态玻璃从首屏移入空闲清单（视觉增强、全部 `?.` 调用）；
     // 仍排在 spotlight.js 之前 —— 首屏 tag 顺序的既有约束在这里继续成立。
     'scripts/liquid-glass.js',

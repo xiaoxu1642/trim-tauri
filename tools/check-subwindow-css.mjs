@@ -282,13 +282,17 @@ if (mainRules.length < 500 || pagesRules.length < 100 || dsRules.length < 20) {
 // T1d-M06 → v7.2 P1 · U-F1b-L02：ds.css 是**后置覆盖层**（S1b 已钉加载序），存量同特异度覆盖是
 // 设计而非冲突；但「靠加载序压住的双份实现」正是 U-F1b-L02 的成因形态，只计数不判红就等于
 // 允许它再长。这里升级成**棘轮**：键集合 `{归一化选择器|属性}` 与冻结基线对拍，新增即红、
-// 消失只打印（棘轮只收紧不放宽）。判据与 S3 共用同一份 selInfo / declProps（§5.16 不另写一套）。
+// 消失亦判红（棘轮双向收紧：合法删除需在同提交里同步删基线，--emit-ds-pairs 仍是现算工具）。
+// 判据与 S3 共用同一份 selInfo / declProps（§5.16 不另写一套）。
 // 基线不手抄：`node tools/check-subwindow-css.mjs --emit-ds-pairs` 现算输出后回填本常量。
 const normSelKey = (prelude, prop) => `${prelude.replace(/\s+/g, ' ').trim()}|${prop}`;
 // 基线是**代码里的冻结清单**，不走环境变量：能从外部注入的基线等于没有基线（一注入就永久绿）。
 // 回填姿势：`node tools/check-subwindow-css.mjs --emit-ds-pairs` 现算输出，粘进下面数组。
 // 2026-10-22 现算回填（U-F1b-L02 删掉 main.css 那半之后）：键表全量，其中 .badge.off /
 // .startup-badge.on|off / .ds-badge.warn|ok 四族正是该条目的成因形态，已随条目收敛。
+// 2026-11-12 P2-13 修复：删掉 12 条已消失键（input[type="range"].ds-slider* 八条 +
+// .ds-menu-item:hover,.ds-menu-item:focus-visible 三条 + ds-slider:focus-visible 外的四条），
+// 基线由 40 收至 28，消失键改判红，棘轮不再允许历史债静默回灌。
 const DS_PAIR_BASELINE_RAW = [
   '.badge.off|background', '.badge.off|color',
   '.ds-badge.ok|background', '.ds-badge.ok|color',
@@ -302,25 +306,13 @@ const DS_PAIR_BASELINE_RAW = [
   '.ds-menu-item:focus-visible|outline-offset',
   '.ds-menu-item:hover|background',
   '.ds-menu-item:hover|color',
-  '.ds-menu-item:hover, .ds-menu-item:focus-visible|background',
-  '.ds-menu-item:hover, .ds-menu-item:focus-visible|color',
-  '.ds-menu-item:hover, .ds-menu-item:focus-visible|outline',
   '.ds-menu-item[aria-disabled="true"]:hover|background',
   '.ds-menu-item[aria-disabled="true"]:hover|color',
   '.startup-badge.off|background', '.startup-badge.off|color',
   '.startup-badge.on|background', '.startup-badge.on|color',
   '.toggle-switch input:checked + .toggle-track .toggle-thumb|background',
-  'input[type="range"].ds-slider::-webkit-slider-thumb|background',
-  'input[type="range"].ds-slider::-webkit-slider-thumb|border',
-  'input[type="range"].ds-slider::-webkit-slider-thumb|border-radius',
-  'input[type="range"].ds-slider::-webkit-slider-thumb|height',
-  'input[type="range"].ds-slider::-webkit-slider-thumb|width',
   'input[type="range"].ds-slider:focus-visible|outline',
   'input[type="range"].ds-slider:focus-visible|outline-offset',
-  'input[type="range"].ds-slider|background',
-  'input[type="range"].ds-slider|border-radius',
-  'input[type="range"].ds-slider|cursor',
-  'input[type="range"].ds-slider|height',
 ];
 const DS_PAIR_BASELINE = new Set(DS_PAIR_BASELINE_RAW);
 
@@ -356,8 +348,10 @@ function judgeDsPairs(got, baseline) {
   const [grew, vanished] = judgeDsPairs(got, DS_PAIR_BASELINE);
   if (grew.length) {
     g.fail(`S3b. ds.css 新增「与 main.css 同特异度且属性相交」的双份实现 ${grew.length} 处：${grew.slice(0, 5).join(' ; ')}（要么删 main.css 那半、让 ds.css 成真源，要么把特异性写清，别靠加载序压）`);
+  } else if (vanished.length) {
+    g.fail(`S3b. ds.css ⇄ main.css 同特异度对消失了 ${vanished.length} 处：${vanished.slice(0, 5).join(' ; ')}（合法删除必须同提交删基线，而非让棘轮静默放宽）`);
   } else {
-    g.ok(`S3b. ds.css ⇄ main.css 同特异度对 ${got.size} 处，无新增（基线 ${DS_PAIR_BASELINE.size}，已消失 ${vanished.length} 只打印不判红——棘轮只收紧不放宽）`);
+    g.ok(`S3b. ds.css ⇄ main.css 同特异度对 ${got.size} 处，无新增亦无消失（基线 ${DS_PAIR_BASELINE.size}，棘轮双向收紧）`);
   }
 }
 

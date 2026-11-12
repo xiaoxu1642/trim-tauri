@@ -9,11 +9,18 @@
 //
 // 用法：node tools/check-gate-roster.mjs          # 只做三方对拍
 //       node tools/check-gate-roster.mjs --run    # 对拍后按 MUST_RUN 顺序跑完全部必跑门禁
-import { readdirSync, readFileSync, existsSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+//       node tools/check-gate-roster.mjs --run --module M-07   # 只跑「改 optimizer 会踩到」的门禁
+//       node tools/check-gate-roster.mjs --run --changed       # 按 git 改动面自动挑模块
+//       node tools/check-gate-roster.mjs --list-modules        # 打印 12 模块与各自的模块门禁
+//       node tools/check-gate-roster.mjs --emit-reads          # 重算门禁读取面基线（改过门禁源码后跑）
+import { readdirSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { join, dirname, relative, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { blankNonCode } from './lib/src-scan.mjs';
+import { buildModuleGates } from './lib/module-gates.mjs';
+import { MODULES } from './review-units.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const TOOLS = join(ROOT, 'tools');
@@ -167,6 +174,27 @@ if (TIER_ARG && TIER_ARG !== 'readonly') {
   process.exit(1);
 }
 const READONLY_TIER = TIER_ARG === 'readonly';
+
+// ── 按模块跑（2026-11-12 用户裁定「A + 只做门禁」）──────────────────────────────
+//
+// 动机：改一个模块跑全部必跑门禁是纯等待。但**不能**按单元表 `gates` 字段挑 ——
+// 对拍命令 `node tools/check-gate-roster.mjs --list-modules`：那字段登记的条数远少于
+// 实测读取面（optimizer 与数据底座两模块差距尤其大），照它跑等于把守卫关掉（假绿）。
+//
+// 所以门禁 ⇄ 模块的映射**来自行为**：`--emit-reads` 在隔离进程里把每条门禁真跑一遍，
+// 记录它 stat/read 过的仓内文件，再按 lib/claims.mjs 的认领结果折算成模块集合，
+// 落盘为 tools/fixtures/gate-reads-baseline.json。
+//
+// 三条硬约束（缺一条就会静默漏跑）：
+//   ① 读取面 >= READ_GLOBAL_MIN 个模块，或读取面为空（读的是认领根之外：build-release /
+//      docs / 桌面链接 / createRequire 生成物）=> 一律算**全局门禁**，任何模块都跑；
+//   ② 门禁源码指纹（srcHash）对不上 => 该条映射作废，直接判红要求重算，不许拿旧账跑；
+//   ③ 每个模块至少命中一条门禁，且模块门禁集合必须包含全部全局门禁（地板防「挑空」）。
+const READ_GLOBAL_MIN = 6;
+const READS_BASELINE = join(TOOLS, 'fixtures', 'gate-reads-baseline.json');
+const MODULE_ARG = (process.argv.find((a) => a.startsWith('--module=')) || '').split('=')[1] || '';
+const JOBS_ARG = (process.argv.find((a) => a.startsWith('--jobs=')) || '').split('=')[1] || '';
+const JOBS = Math.max(1, Number(JOBS_ARG) || 8);
 
 // 刻意不在必跑清单的门禁注册表。新增可选/退役门禁必须在这里登记（带理由），
 // 否则磁盘多出一个 check 文件而两处注册表都没有 → 红。
@@ -342,27 +370,242 @@ for (const { name, reason } of OPTIONAL) console.log(`  OPTIONAL: ${name} — ${
 for (const { name, reason } of RETIRED) console.log(`  RETIRED: ${name} — ${reason}`);
 for (const [name, why] of SIDE_EFFECT) console.log(`  SIDE_EFFECT: ${name} — ${why}`);
 
-if (!RUN) {
+const srcHashOf = (name) => {
+  // 指纹只覆盖门禁本体：lib/ 的共享实现被多条目引用，改它会让几乎所有条目同时失效，
+  // 那样「源码改了要重算」就退化成「天天重算」。共享实现的读取面变化由 --emit-reads
+  // 在真跑时自然反映出来，下一次有人重算时就会更新（见文件头的重算纪律）。
+  const p = join(TOOLS, `${name}.mjs`);
+  if (!existsSync(p)) return null;
+  return createHash('sha256').update(readFileSync(p)).digest('hex').slice(0, 16);
+};
+
+/**
+ * 读取面基线的自校验指纹（覆盖 modules / srcHash / reads）。
+ * 为什么需要：手改基线（把某条门禁的读取面改小、或删掉一条）不会让任何断言变红，
+ * 只会让 --module 悄悄少跑门禁 —— 静默漏跑正是本机制最危险的失效形态。
+ * 判据只认「内容指纹」，不认文件 mtime：重算后指纹自动更新，不需要人维护。
+ */
+function hashReadsBody(body) {
+  const canon = JSON.stringify({ modules: body.modules, srcHash: body.srcHash, reads: body.reads });
+  return createHash('sha256').update(canon).digest('hex').slice(0, 16);
+}
+
+// ── 4a. --emit-reads：重算「每条门禁读哪些模块」基线 ─────────────────────────────
+//
+// 为什么必须真跑：静态 grep 会漏 —— 实测 check-desktop-entry 走 lstat/readlink 读桌面
+// 链接、check-desc-vs-writes 经 createRequire 读 PS 生成物，源码里都看不出路径形态。
+// 真跑一遍、记录每次 stat/read，再用认领表折算模块，结论才来自行为。
+// 代价：一轮 ≈ 全量串行时长（现算 `node tools/check-gate-roster.mjs --run --jobs=1`）。
+// 改门禁源码后跑一次即可。
+if (process.argv.includes('--emit-reads')) {
+  const { collectAuditFiles, claimUnits } = await import('./lib/claims.mjs');
+  const { AUDIT_ROOTS, UNITS } = await import('./review-units.mjs');
+  const { files: auditFiles } = collectAuditFiles(ROOT, AUDIT_ROOTS);
+  const { ownerOf } = claimUnits({ root: ROOT, units: UNITS, auditFiles });
+  const unitToMod = new Map();
+  for (const m of MODULES) for (const u of m.units) unitToMod.set(u, m.id);
+  const ROOTRE = ROOT.replace(/\\/g, '/') + '/';
+  const reads = {};
+  const srcHash = {};
+  // --experimental-loader 只收 URL / 相对说明符：Windows 绝对路径（C:\…）会被当成
+  // 不支持的 scheme 直接 ERR_UNSUPPORTED_ESM_URL_SCHEME。
+  const HARNESS = pathToFileURL(join(TOOLS, 'lib', 'gate-reads-hooks.mjs')).href;
+  console.log(`--emit-reads：在隔离进程里真跑 ${MUST_RUN.length} 条门禁，记录读取面…`);
+  for (const name of MUST_RUN) {
+    const res = spawnSync(
+      process.execPath,
+      ['--experimental-loader', HARNESS, join(TOOLS, `${name}.mjs`), ...(GATE_ARGS[name] || [])],
+      {
+        cwd: ROOT, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024, timeout: 5 * 60 * 1000,
+        // 重算期间基线必然「过期」：让 check-positive-controls 把新鲜度一节显式 SKIP，
+        // 否则「重算需要它绿、它绿需要基线新」会互相锁死。
+        env: { ...process.env, TRIM_EMIT_READS: '1' },
+      },
+    );
+    const mods = new Set();
+    // 追踪行走 stderr（见 lib/gate-reads-shim.mjs 注释）：stdout 留给门禁自己的判定输出。
+    for (const line of `${res.stderr || ''}`.split(/\r?\n/)) {
+      if (!line.startsWith('@@TRIM_READ@@ ')) continue;
+      const abs = line.slice('@@TRIM_READ@@ '.length).trim();
+      if (!abs.startsWith(ROOTRE)) continue;
+      const m = unitToMod.get(ownerOf.get(abs.slice(ROOTRE.length)));
+      if (m) mods.add(m);
+    }
+    reads[name] = [...mods].sort();
+    srcHash[name] = srcHashOf(name);
+    if (res.status !== 0) {
+      console.error(`✗ ${name} 在 --emit-reads 里 exit ${res.status ?? 'null'}：读取面可能不全，先把它修绿再重算`);
+      process.exit(1);
+    }
+  }
+  const body = {
+    _说明:
+      '门禁实测读取面基线（按 12 模块）。由 `node tools/check-gate-roster.mjs --emit-reads` 生成：' +
+      '每条门禁在隔离进程里真跑一遍，记录它 stat/read 过的仓内文件，再按 review-units 的认领结果折算成模块集合。' +
+      'srcHash 是生成时的门禁源码指纹：门禁源码一改，对应条目即失效，必须重跑 --emit-reads（防止「映射写死、门禁改了读取面却没人知道」）。',
+    modules: MODULES.map((m) => m.id),
+    srcHash,
+    reads,
+  };
+  // 自校验：reads 与 srcHash 的指纹一起封进 bodyHash。手改基线（把某条门禁的读取面
+  // 改小、或直接删掉一条）会让集合悄悄少跑门禁 —— 那正是本机制要防的静默漏跑。
+  body.bodyHash = hashReadsBody(body);
+  writeFileSync(READS_BASELINE, JSON.stringify(body, null, 2) + '\n', 'utf8');
+  const globals = Object.values(reads).filter((v) => v.length === 0 || v.length >= READ_GLOBAL_MIN).length;
+  console.log(`✓ 已重算 ${relative(ROOT, READS_BASELINE)}：${MUST_RUN.length} 条（全局 ${globals} / 模块专属 ${MUST_RUN.length - globals}）`);
+  process.exit(0);
+}
+
+if (!RUN && !process.argv.includes('--list-modules')) {
   console.log(`check-gate-roster: 全部通过（可加 --run 跑完 ${MUST_RUN.length} 条必跑门禁）`);
   process.exit(0);
 }
 
-// ── 5. --run：按 MUST_RUN 顺序跑完全部必跑门禁 ──
+// ── 4b. 模块门禁挑选（--module / --changed / --list-modules）─────────────────────
+//
+// 判定口径全部来自「实测读取面」：gate-reads-baseline.json 的 reads[gate] 是这条门禁
+// 真跑时读过的仓内文件折算出的模块集合。宁可多跑不可漏跑 —— 读取面为空或 >= 阈值
+// 一律算全局。
+function loadReadsBaseline() {
+  if (!existsSync(READS_BASELINE)) return null;
+  try {
+    return JSON.parse(readFileSync(READS_BASELINE, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+const gateSet = (baseline) => buildModuleGates({
+  mustRun: MUST_RUN,
+  modules: MODULES,
+  reads: baseline.reads,
+  srcHash: baseline.srcHash,
+  hashOf: srcHashOf,
+  globalMin: READ_GLOBAL_MIN,
+});
+
+/** 改动面 → 涉及模块（按认领表判定；认领不到的文件算「全模块」）。 */
+async function changedModules() {
+  const { collectAuditFiles, claimUnits } = await import('./lib/claims.mjs');
+  const { AUDIT_ROOTS, UNITS } = await import('./review-units.mjs');
+  const { files } = collectAuditFiles(ROOT, AUDIT_ROOTS);
+  const { ownerOf } = claimUnits({ root: ROOT, units: UNITS, auditFiles: files });
+  const unitToMod = new Map();
+  for (const m of MODULES) for (const u of m.units) unitToMod.set(u, m.id);
+  const r = spawnSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], {
+    cwd: ROOT, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
+  });
+  if (r.status !== 0) {
+    console.error('✗ --changed 需要 git 工作区（git status 失败）；改用 --module=<M-NN>');
+    process.exit(1);
+  }
+  const touched = [];
+  const unknown = [];
+  for (const line of (r.stdout || '').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let p = line.slice(3).trim();
+    if (p.includes(' -> ')) p = p.split(' -> ').pop().trim();
+    p = p.replace(/^"|"$/g, '').replace(/\\/g, '/');
+    const owner = ownerOf.get(p);
+    const m = owner ? unitToMod.get(owner) : null;
+    if (m) touched.push(m);
+    else unknown.push(p);
+  }
+  return { mods: [...new Set(touched)], unknown };
+}
+
+const READS = loadReadsBaseline();
+const GATE_SET = READS ? gateSet(READS) : null;
+if (MODULE_ARG || process.argv.includes('--list-modules') || process.argv.includes('--changed')) {
+  if (!GATE_SET) {
+    console.error(`✗ 缺少 ${relative(ROOT, READS_BASELINE)}：按模块跑必须先有实测读取面基线（node tools/check-gate-roster.mjs --emit-reads）`);
+    process.exit(1);
+  }
+  if (GATE_SET.stale.length) {
+    console.error(`✗ 读取面基线已过期 ${GATE_SET.stale.length} 条：${GATE_SET.stale.slice(0, 6).join('、')}`);
+    console.error('  门禁源码改过 ⇒ 它读哪些文件可能也变了。先跑 node tools/check-gate-roster.mjs --emit-reads 重算，再按模块跑。');
+    process.exit(1);
+  }
+  if (READS.bodyHash !== hashReadsBody(READS)) {
+    console.error('✗ 读取面基线内容指纹不符：文件被手改过（或半截写入）。');
+    console.error('  手改基线 = 悄悄少跑门禁。跑 node tools/check-gate-roster.mjs --emit-reads 重算。');
+    process.exit(1);
+  }
+}
+if (process.argv.includes('--list-modules')) {
+  for (const m of MODULES) {
+    const list = GATE_SET.byModule.get(m.id);
+    console.log(`${m.id} ${m.name}（${list.length} 条：${list.length - GATE_SET.global.length} 模块专属 + ${GATE_SET.global.length} 全局）`);
+    console.log(`  ${list.join(',')}`);
+  }
+  console.log(`\n全局门禁 ${GATE_SET.global.length} 条（任何模块都跑）：${GATE_SET.global.join(',')}`);
+  process.exit(0);
+}
+
+let selected = MUST_RUN;
+let selectionLabel = `全量 ${MUST_RUN.length} 条`;
+if (process.argv.includes('--changed')) {
+  const { mods, unknown } = await changedModules();
+  if (unknown.length) {
+    console.log(`⚠ 改动面里有 ${unknown.length} 个文件不在认领根内，按「可能影响任意模块」处理：`);
+    for (const p of unknown.slice(0, 10)) console.log(`    ${p}`);
+  }
+  const useMods = unknown.length || mods.length === 0 ? MODULES.map((m) => m.id) : mods;
+  selected = [...new Set(useMods.flatMap((m) => GATE_SET.byModule.get(m) ?? []))];
+  selectionLabel = `--changed → ${useMods.join('+')}（${selected.length} 条）`;
+} else if (MODULE_ARG) {
+  const ids = MODULE_ARG.split(',').map((s) => s.trim()).filter(Boolean);
+  const bad = ids.filter((id) => !GATE_SET.byModule.has(id));
+  if (bad.length) {
+    console.error(`✗ 未知模块 ${bad.join(',')}（可用：${MODULES.map((m) => m.id).join(' ')}）`);
+    process.exit(1);
+  }
+  selected = [...new Set(ids.flatMap((m) => GATE_SET.byModule.get(m)))];
+  selectionLabel = `--module ${ids.join('+')}（${selected.length} 条）`;
+}
+// 顺序仍按 MUST_RUN（台账顺序 = 既有验收顺序，输出可对拍）
+selected = MUST_RUN.filter((n) => selected.includes(n));
+
+// ── 5. --run：跑选中的门禁（默认并行；--jobs=1 退回串行）──
 let runFailed = 0;
 let runSkipped = 0;
 const selfReported = [];
-for (const name of MUST_RUN) {
+const runOne = (name) => {
   if (READONLY_TIER && SIDE_EFFECT.has(name)) {
-    console.log(`– SKIP ${name}（--tier=readonly 跳过副作用：${SIDE_EFFECT.get(name)}）`);
-    runSkipped++;
-    continue;
+    return Promise.resolve({ name, skipped: true });
   }
   const args = [join(TOOLS, `${name}.mjs`), ...(GATE_ARGS[name] || [])];
   // T1a-L09：spawn 无 timeout ⇒ 任一子门禁挂住（等子进程/网络）会让整个 --run 无限挂起。
   // 5 分钟是单条门禁的宽限上界（最慢的 check-tests-helper-parity 也在分钟级）；超时按失败记。
-  const res = spawnSync(process.execPath, args, {
-    cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 5 * 60 * 1000,
+  //
+  // 2026-11-12：从 spawnSync 改为异步 spawn —— spawnSync 会阻塞事件循环，多个 worker
+  // 写在同一线程里等于串行（对拍命令：`node tools/check-gate-roster.mjs --run --jobs=1`
+  // 与 `--jobs=8` 耗时几乎相同即说明并行是假的）。spawn + 累积 stdout/stderr 才能真并发；
+  // 单条 5 分钟超时仍按失败记。
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, args, { cwd: ROOT });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, 5 * 60 * 1000);
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      resolve({ name, res: { status: null, stdout, stderr, error: e } });
+    });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      resolve({
+        name,
+        res: { status: timedOut ? null : code, signal, stdout, stderr, error: timedOut ? { code: 'ETIMEDOUT' } : undefined },
+      });
+    });
   });
+};
+const judge = ({ name, res }) => {
   if (res.status === 0) {
     ok(`run ${name}`);
     // T1-M06（v4-K07）：exit 0 ≠ 无失败断言 —— 子门禁可能自报 ✗（短路 bug / 未修完的断言），
@@ -396,9 +639,42 @@ for (const name of MUST_RUN) {
     if (res.stderr) process.stderr.write(res.stderr);
     if (res.error) process.stderr.write(`${res.error}\n`);
   }
+};
+// 并行执行：门禁之间没有共享写（写盘都只在 --write/--emit-* 显式开关下发生，
+// 且这些开关不在 --run 的传参里），并发与串行的判定结果一致（对拍命令
+// `node tools/check-gate-roster.mjs --run --jobs=1` 与 `--run --jobs=8` 各跑一遍）。
+// 顺序上仍**按 MUST_RUN 逐条判读**：并发只影响启动时机，不影响判定与输出次序。
+if (JOBS === 1) {
+  for (const name of selected) judge(await runOne(name));
+} else {
+  const results = new Map();
+  let next = 0;
+  const worker = async () => {
+    while (next < selected.length) {
+      const i = next++;
+      results.set(i, await runOne(selected[i]));
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(JOBS, selected.length) }, worker));
+  for (let i = 0; i < selected.length; i++) {
+    const r = results.get(i);
+    if (r.skipped) {
+      console.log(`– SKIP ${r.name}（--tier=readonly 跳过副作用：${SIDE_EFFECT.get(r.name)}）`);
+      runSkipped++;
+      continue;
+    }
+    judge(r);
+  }
+}
+for (const name of selected) {
+  if (!(READONLY_TIER && SIDE_EFFECT.has(name))) continue;
+  if (JOBS === 1) {
+    console.log(`– SKIP ${name}（--tier=readonly 跳过副作用：${SIDE_EFFECT.get(name)}）`);
+    runSkipped++;
+  }
 }
 if (runFailed > 0) {
-  console.error(`check-gate-roster --run: ${runFailed}/${MUST_RUN.length} 条门禁失败`);
+  console.error(`check-gate-roster --run: ${runFailed}/${selected.length} 条门禁失败（${selectionLabel}）`);
   process.exit(1);
 }
 if (selfReported.length > 0) {
@@ -411,4 +687,6 @@ if (selfReported.length > 0) {
   }
 }
 // T1a-M10：终态行并入 selfReported（原只在上文单列，只看最后一行会把「没测」读成「全绿」）。
-console.log(`check-gate-roster --run: ${MUST_RUN.length} 条必跑门禁全部通过${runSkipped ? `（SKIP ${runSkipped} 条副作用门禁，未校验）` : ''}${selfReported.length ? `（另有 ${selfReported.length} 个子门禁自报未校验/0 对象，逐条见上行单列——这些不是通过）` : ''}`);
+// 2026-11-12：终态行必须写清**这次跑了哪些**（--module / --changed 下「全部通过」只覆盖被选中的子集，
+// 不能让人误读成全量都过了）。
+console.log(`check-gate-roster --run: ${selected.length} 条门禁全部通过（${selectionLabel}${selected.length < MUST_RUN.length ? `；未跑的 ${MUST_RUN.length - selected.length} 条本次**未校验**` : ''}）${runSkipped ? `（SKIP ${runSkipped} 条副作用门禁，未校验）` : ''}${selfReported.length ? `（另有 ${selfReported.length} 个子门禁自报未校验/0 对象，逐条见上行单列——这些不是通过）` : ''}`);

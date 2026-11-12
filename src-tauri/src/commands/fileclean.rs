@@ -807,30 +807,34 @@ pub async fn fileclean_execute<R: Runtime>(
         });
     }
 
-    // 全部命中本槽才放行
-    for f in &files {
-        let p = f.get("path").and_then(|v| v.as_str()).unwrap_or("");
-        if !in_scope(&scope, p) {
-            return json!({ "success": false, "message": "包含不在扫描范围内的路径，已拒绝整批" });
-        }
-        // 审查 v2-L2：与 delete-file 同一口径，批量删除同样要过保护纵深。
-        // C01（v7.2 R1d-K01🔴）：四道组合闸（含 %WINDIR% 子孙的系统面与 reparse）。
-        if let Err(why) = protect::validate_mutation_target(p) {
-            log::write_log("warn", &format!("批量删除拒绝整批: {why}"));
-            return json!({ "success": false, "message": format!("包含不可删除的目标，已拒绝整批：{why}") });
-        }
-        if std::fs::metadata(p).map(|m| !m.is_file()).unwrap_or(true) {
-            return json!({ "success": false, "message": "包含非普通文件，已拒绝整批" });
-        }
-    }
-
-    // 全仓-2026-11-01-重审 `R1d-M02`：逐项回收站删除整体进阻塞池（与扫描侧的
-    // `fileclean_scan`、同仓 `finder_delete` 同形）。旧写法把最多 1 万次
-    // `SHFileOperationW`（`recycle_one` → `send_to_trash_os`）串行跑在 async 命令体里，
-    // 一个 tokio worker 被连续占住数十秒到数分钟，期间该 worker 上的其它命令排队。
-    // 循环体内没有 `.await`、只碰 `files` 与上述累加量，搬进闭包不改变执行顺序；
+    // 全仓-2026-11-01-重审 `R1d-M02` + 全仓-2026-11-11 `R1d-M05-01`：逐项验证与逐项回收站
+    // 删除整体进阻塞池（与扫描侧的 `fileclean_scan`、同仓 `finder_delete` 同形）。旧写法把
+    // 整批最多一万项、每项 `validate_mutation_target` 数轮 syscall（最坏数万次系统调用），
+    // 以及同规模的 `SHFileOperationW`（`recycle_one` → `send_to_trash_os`）串行跑在 async
+    // 命令体里，一个 tokio worker 被连续占住数百 ms 到数分钟，期间该 worker 上的其它命令排队。
+    // 验证闸序「in_scope → validate_mutation_target → is_file」与整批拒语义不变，失败以
+    // `Err(Value)` 早退带出闭包；循环体内没有 `.await`，搬进闭包不改变执行顺序；
     // 回执仍在命令体里拼装（形状与文案一字未动）。
-    let outcome = match tauri::async_runtime::spawn_blocking(move || {
+    let outcome = match tauri::async_runtime::spawn_blocking(move || -> Result<DeleteOutcome, Value> {
+        // 全部命中本槽才放行
+        for f in &files {
+            let p = f.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            if !in_scope(&scope, p) {
+                return Err(
+                    json!({ "success": false, "message": "包含不在扫描范围内的路径，已拒绝整批" }),
+                );
+            }
+            // 审查 v2-L2：与 delete-file 同一口径，批量删除同样要过保护纵深。
+            // C01（v7.2 R1d-K01🔴）：四道组合闸（含 %WINDIR% 子孙的系统面与 reparse）。
+            if let Err(why) = protect::validate_mutation_target(p) {
+                log::write_log("warn", &format!("批量删除拒绝整批: {why}"));
+                return Err(json!({ "success": false, "message": format!("包含不可删除的目标，已拒绝整批：{why}") }));
+            }
+            if std::fs::metadata(p).map(|m| !m.is_file()).unwrap_or(true) {
+                return Err(json!({ "success": false, "message": "包含非普通文件，已拒绝整批" }));
+            }
+        }
+
         // 危险操作前刷盘：挪进闭包后仍排在第一次 recycle 之前（AGENTS §3）。
         crate::engine::log::flush_sync();
         let mut freed = 0u64;
@@ -874,7 +878,7 @@ pub async fn fileclean_execute<R: Runtime>(
             }));
         }
 
-        DeleteOutcome {
+        Ok(DeleteOutcome {
             freed,
             success_n,
             failed,
@@ -882,11 +886,12 @@ pub async fn fileclean_execute<R: Runtime>(
             details,
             manifest_entries,
             removed_keys,
-        }
+        })
     })
     .await
     {
-        Ok(v) => v,
+        Ok(Ok(v)) => v,
+        Ok(Err(rejection)) => return rejection,
         Err(e) => {
             // join 失败（闭包 panic / 运行时关停）时**可能已有条目被送进回收站**，
             // 不能当「零删除」回 success:true —— 与扫描侧 join 失败同一口径，如实报失败。
@@ -1608,8 +1613,10 @@ mod tests {
     ///
     /// 判据是**位置**而不是「文件里出现过 spawn_blocking」——本文件扫描侧早有同类调用
     /// （`fileclean_scan`），只查存在会被它蹭绿。做法：截出命令体，再截出
-    /// `spawn_blocking(move || {` 到本次 `.await` 之间的闭包区间，要求 `recycle_one(` 的
+    /// `spawn_blocking(move ||` 到本次 `.await` 之间的闭包区间，要求 `recycle_one(` 的
     /// **全部**出现都落在闭包内，且至少一条（空集不算通过）。
+    /// 锚点只到 `move ||`：闭包可能带返回类型标注（`-> Result<DeleteOutcome, Value>`），
+    /// 把 `{` 一起钉进去会让「换个返回类型」被误报成「循环搬出了闭包」。
     /// 破坏自证：把 `for f in &files { … }` 搬回 async 体 ⇒ 区间外出现 `recycle_one(`
     /// ⇒ 第一条断言红；连循环一起删掉 ⇒ 第二条「至少一条」红。
     /// 字面量用 `concat!` 拆词：`include_str!` 会把本测试自身也算成语料。
@@ -1617,7 +1624,7 @@ mod tests {
     fn 批量删除循环必须整体进阻塞池() {
         let body = execute_body(include_str!("fileclean.rs"));
 
-        let open = concat!("spawn_blocking(move ||", " {");
+        let open = concat!("spawn_blocking(", "move ||");
         let open_at = body.find(open).expect("回收站删除循环必须进 spawn_blocking 闭包");
         // 闭包体里不可能出现 `.await`（非 async 闭包编译不过）⇒ 命令体内它之后的第一个
         // `.await` 就是这次 join 的收口点。

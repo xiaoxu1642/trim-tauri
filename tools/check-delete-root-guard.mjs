@@ -22,7 +22,9 @@
 //     （C7 中间层放行；some/any 式「有一条判过」会漏掉同层另一条未判删除路径）；
 //     共享执行体不再被「某一个 caller 判过」代表，**每个带参调用方各算一条**；
 //   · 调用方直接删的采集器（R7-K01 形状）同样按 caller 拆点，不再「任一 caller 判过即可」。
-// 「判过」仍是 T1e-L05 口径：同一函数体内 `inspect_root(` 与 `is_trusted()` 都出现。
+// 「判过」口径（T1e-L05 / T1e-M01）：三条腿都必须「结果进控制表达式」——
+// `inspect_root(…).is_trusted()`、`if … is_protected_path(…)`、`if … direct_child && bench_name_ok`；
+// 只出现调用不算判过（`let _ = …` 把守卫摘成「调一下不读」仍要判红）。
 // 粒度声明：「调用点所在分支」按**函数体**判定（text-level，不做控制流/语句序分析）——
 // 与既有 T1e-L05 同粒度；守卫写在 call 之后同函数体也算过，这是本门禁已知的精度上限。
 //
@@ -47,6 +49,12 @@ const SRC = join(ROOT, 'src-tauri', 'src');
 const NATIVE = join(ROOT, 'native-scanner', 'src');
 const GUARD = 'inspect_root(';
 const READ = 'read_dir(';
+// T1e-M01：native-scanner 的两条根闸腿（`is_protected_path` 与 N1c-Y01 的
+// 「直接子目录 + Trim-DiskBench 名字」双判据）也要与 L05 同口径：结果必须进
+// 控制表达式（`if` 条件，含 `let … = if …`），否则 `let _ = …` 这种「调用一下
+// 不读结果」会被洗白。文本级判据与 L05 同粒度，不做控制流/语句序分析。
+const GUARD_PROTECTED = /\bif\b[^;]*\bis_protected_path\s*\(/;
+const GUARD_BENCH = /\bif\b[^;]*\bdirect_child\s*&&\s*bench_name_ok\b/;
 // T1e-L04：增 `remove_dir(` / `recycle_one(` 两类删除原语；`delete_file_with_panic(` 在仓内零命中（已退役），
 // 删掉以免掩耳盗铃。任何「read_dir + 2 跳内出现下列原语」的站点未判根即红。
 const DESTRUCTIVE = ['remove_file(', 'remove_dir_all(', 'remove_dir(', 'send_to_trash_os(', 'recycle_one('];
@@ -165,9 +173,10 @@ function build(code) {
       // 否则「调了一下、没看结果」也能把根入口洗白。
       // T1e-M04：native-scanner 没有 inspect_root，根/目标闸是
       // `is_protected_path` 与 N1c-Y01 的「直接子目录 + Trim-DiskBench 名字」双判据。
+      // T1e-M01：这两条腿同样只认「结果进控制表达式」，不认纯出现。
       guards: (body.includes(GUARD) && body.includes('is_trusted()'))
-        || body.includes('is_protected_path(')
-        || (body.includes('direct_child') && body.includes('bench_name_ok')),
+        || GUARD_PROTECTED.test(body)
+        || GUARD_BENCH.test(body),
       calls: null,
       argCalls: null,
     };
@@ -310,6 +319,18 @@ const CONTROLS = [
     // T1e-L04：recycle_one( 作为回收站封装同样算删除原语，未判根必红。
     label: 'C12 read_dir + recycle_one( 未判根 ⇒ 必须判红（新增原语对照）',
     code: 'fn top(p: &Path) { let _ = std::fs::read_dir(p); let _ = recycle_one(p); }',
+    expectViolation: true,
+  },
+  {
+    // T1e-M01：调用一下把返回值扔掉，等于没判 —— 旧判据（纯 includes）在这里会假绿。
+    label: 'C13 调了 is_protected_path 却没读结果（let _ =）⇒ 仍判红（T1e-M01）',
+    code: 'fn top(p: &Path) { let _ = std::fs::read_dir(p); let _ = crate::scan::is_protected_path(p, None); let _ = std::fs::remove_file(p); }',
+    expectViolation: true,
+  },
+  {
+    // T1e-M01：双判据只算出来、没进 if 条件，同样等于没判。
+    label: 'C14 direct_child/bench_name_ok 只算出来没进条件（let _ =）⇒ 仍判红（T1e-M01）',
+    code: 'fn top(p: &Path) { let _ = std::fs::read_dir(p); let direct_child = true; let bench_name_ok = true; let _ = direct_child && bench_name_ok; let _ = std::fs::remove_file(p); }',
     expectViolation: true,
   },
 ];

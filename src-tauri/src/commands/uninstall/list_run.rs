@@ -112,6 +112,7 @@ pub(super) fn uninstall_entry_admissible(
 pub(super) struct UninstallReadStats {
     pub(super) unreadable_keys: usize,
     pub(super) missing_display_name: usize,
+    pub(super) invalid_fullname: usize,
 }
 
 pub(super) unsafe fn enum_uninstall_root(
@@ -427,7 +428,7 @@ pub async fn uninstall_list<R: tauri::Runtime>(
     let apps = tauri::async_runtime::spawn_blocking(move || -> Result<(Vec<Value>, UninstallReadStats), String> {
         use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
         if scope == "windows" {
-            let mut rows = enum_appx_packages()?;
+            let (mut rows, invalid_from_packages) = enum_appx_packages_counted()?;
             // 未注册到当前用户的两类（staged / 全用户预配）补在同一列表里，
             // 但 removable=false ⇒ 前端不给卸载按钮（HiBit §H6：覆盖面不顺手放大执行面）
             let seen: std::collections::HashSet<String> = rows
@@ -436,8 +437,15 @@ pub async fn uninstall_list<R: tauri::Runtime>(
                     r["id"].as_str().and_then(|s| s.strip_prefix("APPX|")).map(String::from)
                 })
                 .collect();
-            rows.extend(enum_appx_store_extras(&seen));
-            return Ok((rows, UninstallReadStats::default()));
+            let (extras, invalid_from_store) = enum_appx_store_extras(&seen);
+            rows.extend(extras);
+            return Ok((
+                rows,
+                UninstallReadStats {
+                    invalid_fullname: invalid_from_packages + invalid_from_store,
+                    ..UninstallReadStats::default()
+                },
+            ));
         }
         let mut apps: Vec<Value> = Vec::new();
         let mut read_stats = UninstallReadStats::default();
@@ -510,7 +518,7 @@ mod p2_list_receipt_tests {
     fn r2b_uninstall_list_reports_skipped_subkey() {
         let receipt = uninstall_list_receipt(
             Vec::new(),
-            UninstallReadStats { unreadable_keys: 2, missing_display_name: 1 },
+            UninstallReadStats { unreadable_keys: 2, missing_display_name: 1, invalid_fullname: 0 },
         );
         assert_eq!(receipt["success"], json!(true));
         assert_eq!(receipt["data"]["skipped"], json!(2), "skipped 必须等于打不开的子键数");
@@ -521,6 +529,20 @@ mod p2_list_receipt_tests {
         assert_eq!(clean["data"]["partial"], json!(false));
         assert_eq!(clean["data"]["skipped"], json!(0));
         assert!(clean["data"]["notes"].as_array().unwrap().is_empty());
+    }
+
+    /// P3-07：畸形包全名被跳过时回执必须留下条数，不能静默少报。
+    #[test]
+    fn p3_appx_invalid_fullname_is_reported() {
+        let receipt = uninstall_list_receipt(
+            Vec::new(),
+            UninstallReadStats { invalid_fullname: 3, ..UninstallReadStats::default() },
+        );
+        let notes = receipt["data"]["notes"].as_array().expect("notes 必须是数组");
+        assert!(
+            notes.iter().any(|n| n.as_str().unwrap_or("") == "3 条包全名未过字符集闸，已跳过"),
+            "{notes:?}"
+        );
     }
 
     /// R2b-L06：`msiexec` 判定必须按首 token 的 basename 边界，不得整串 contains。
@@ -562,6 +584,12 @@ pub(super) fn uninstall_list_receipt(list: Vec<Value>, stats: UninstallReadStats
         notes.push(format!(
             "{} 个卸载键读不到 DisplayName，已按非程序条目跳过",
             stats.missing_display_name
+        ));
+    }
+    if stats.invalid_fullname > 0 {
+        notes.push(format!(
+            "{} 条包全名未过字符集闸，已跳过",
+            stats.invalid_fullname
         ));
     }
     json!({

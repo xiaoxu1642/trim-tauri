@@ -109,6 +109,7 @@ fn init_scan_threads() {
 
 /// 更新已枚举计数；跨越 `every` 整数倍时输出一行心跳，供前端实时反馈。
 /// 注意：`n == 0` 早退是既有行为（收尾调用因此不产出任何行），此处原样保留。
+/// `every == 0` 表示**不接心跳**（计数照常累加，供上限/留痕读取），不是「逐条发一行」。
 ///
 /// 阈值判据只此一份（§5.16）：`ScanCtx` 与 [`ScanBeat`] 都走这个函数，
 /// 「多少条发一行」不许在两边各写一遍。
@@ -116,8 +117,11 @@ fn bump_scanned(counter: &AtomicU64, n: u64, every: u64, sink: &dyn Sink) {
     if n == 0 {
         return;
     }
-    let every = every.max(1); // 阈值 0 会让下面的整点除法直接 panic
     let prev = counter.fetch_add(n, Ordering::Relaxed);
+    // 0 = 不接心跳（`delete` 的 freed 统计走这条）；先累加计数再早退，保证 `total()` 仍可对账。
+    if every == 0 {
+        return;
+    }
     let next = prev + n;
     // 只在「越过了 every 的整数倍」时输出，避免每个目录都刷屏
     if prev / every != next / every {
@@ -134,8 +138,9 @@ fn bump_scanned(counter: &AtomicU64, n: u64, every: u64, sink: &dyn Sink) {
 /// 「计数 + 输出通道」收成一个可跨并行任务共享的对象（`AtomicU64` + `&dyn Sink`，
 /// `Sink: Send + Sync` 已在 trait 上声明）。
 ///
-/// `every` 是阈值注入位，**生产构造默认 [`HEARTBEAT_EVERY`]**。`sizes`/`delete` 的
-/// 诊断出口用 0 关闭心跳但保留 warn。测试注入小阈值是为了让
+/// `every` 是阈值注入位，**生产构造默认 [`HEARTBEAT_EVERY`]**。`delete` 的
+/// freed 统计用 0 关闭心跳但保留 warn（`sizes` 仍按 [`HEARTBEAT_EVERY`] 出心跳）。
+/// 测试注入小阈值是为了让
 /// 「心跳真的发出去了」这条断言能判红：真实阈值下要发出 ≥2 行得先枚举 1.6 万条真实
 /// 文件，用例跑不动；用例把阈值调成几条一事，就能点名「第 N 次心跳确实到达 sink」。
 pub(crate) struct ScanBeat<'a> {
@@ -149,7 +154,7 @@ impl<'a> ScanBeat<'a> {
         Self { counter: AtomicU64::new(0), sink, every: HEARTBEAT_EVERY }
     }
 
-    /// 构造时可指定心跳阈值；测试用它取样本，sizes/delete 用 0 表示「不接心跳」。
+    /// 构造时可指定心跳阈值；测试用它取样本，`delete` 用 0 表示「不接心跳」（计数照常累加）。
     fn with_every(sink: &'a dyn Sink, every: u64) -> Self {
         Self { counter: AtomicU64::new(0), sink, every }
     }
@@ -601,7 +606,7 @@ fn dir_size(dir: &Path, beat: Option<&ScanBeat>) -> u64 {
 
 /// [`dir_size`] 的诊断出口可注入版（N1b-L04）。
 ///
-/// 为什么要分两半：`None` 形态的调用点（sizes / delete）刻意不接心跳，
+/// 为什么要分两半：不接心跳的调用点（`delete`）刻意关掉心跳，
 /// 但「读目录失败」这类诊断**不该**因此直写 stderr —— stderr 不进任何回执，
 /// 用户看到的就是「目录读不到」这件事凭空消失。`sink` 独立于 `beat`，
 /// 于是不接心跳的路径照样能把诊断交回渲染层。
@@ -673,8 +678,8 @@ fn dir_size_with_sink(
         // P2-J：`appdata` 的 du 全程零中间进度（旧形态只在末尾 `progress(100)`），
         // 逐层 du 能跑几分钟而界面一动不动。按目录结算 = 计数照旧跨阈值才发一行
         // （[`bump_scanned`] 同一判据），既不刷屏（2e5 条 ≈ 25 事件）又让进度真的在走。
-        // `None` 的两个调用点（`sizes` / `delete`）一个不在本轮射程、一个在删除阶段
-        // ——删除时发「已枚举 N 个文件」是把心跳语义用在错误的时刻，刻意不接。
+        // `delete` 传 `every=0` 关闭心跳（`sizes` 仍按阈值出心跳）——删除时发
+        // 「已枚举 N 个文件」是把心跳语义用在错误的时刻，刻意不接。
         if let Some(b) = beat {
             b.beat(files);
         }
@@ -2381,11 +2386,10 @@ pub fn sizes(paths: &[String], sink: &dyn Sink) {
             let sz = fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
             item(sink, "size", &p, sz, &[("exists", "true".to_string())]);
         } else if p.is_dir() {
-            // `None`：v3 §5.6 的零反馈清单只有 analyze/appdata/bigfiles 三条，sizes 不在
-            // 其中；接心跳等于给它新增一类输出行（CLI 侧 stdout 会变），属另行拍板的改动面。
+            // sizes 的 du 可能跑很久，按目录结算心跳让进度真的在走（与 analyze/appdata 同口径）。
             // N1b-M02：本路径区间的基线，读增量而非清零。
             let reparse_base = REPARSE_SKIPS.mark();
-            // N1b-L04：sizes 的 `None` 只是不接心跳，诊断仍要进 Sink，不许直写 stderr。
+            // N1b-L04：sizes 的心跳与诊断都走 Sink，读目录失败不许直写 stderr。
             let sz = dir_size_with_sink(
                 &p,
                 Some(&ScanBeat::with_every(sink, HEARTBEAT_EVERY)),
@@ -3093,7 +3097,7 @@ pub fn delete(items: &[(String, OsString)], protect_json: Option<&str>, sink: &d
         // N1b-L01：条目体积 = 逻辑大小（口径声明见 [`dir_size`]）——`freed` 汇总与
         // `sizes` / `appdata` 同源同口径，硬链接/稀疏文件的差异在这里同样成立。
         let sz = if kind == "dir" {
-            // `None`：这里是**删除阶段**在算释放空间，发「已枚举 N 个文件」的心跳是把
+            // `every=0`：这里是**删除阶段**在算释放空间，发「已枚举 N 个文件」的心跳是把
             // 扫描语义用在错误的时刻（渲染层会把它当成新一轮扫描的进度），刻意不接。
             // N1b-L04：删除阶段不接心跳（`every=0`），但读目录失败必须进 Sink。
             dir_size_with_sink(p, Some(&beat), Some(sink))
@@ -3910,7 +3914,7 @@ mod tests {
         assert_eq!(got.iter().max().copied(), Some(made), "总数必须结清: {got:?}");
         assert_eq!(out.len(), 3, "三个一级子目录都要有体积结果: {out:?}");
 
-        // `dir_size(.., None)` 的两个调用点（sizes / delete）必须一字不发：
+        // `dir_size(.., None)` 形态必须一字不发（与 `delete` 的 `every=0` 关闭同一语义）：
         // 删除阶段发「已枚举 N 个文件」是把扫描语义用在错误的时刻。
         let sink2 = BeatSink::default();
         let beat2 = ScanBeat::with_every(&sink2, 1);

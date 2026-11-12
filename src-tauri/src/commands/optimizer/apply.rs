@@ -283,14 +283,16 @@ pub(super) fn unrecognized_step_reason(index: usize, label: &str) -> String {
     step_reason(index, label, "步骤形态未识别（reg/cmd/service/pwsh 四个引擎字段均缺失）")
 }
 
-/// 一条合法的 `@@RECYCLE@@` 协议体：路径 + 数据层自报的归因（`id` / `isDir`）。
+/// 一条合法的回收站协议体：路径 + 数据层自报的归因（`id` / `isDir`）。
 ///
 /// R3-L06：协议行此前只留 `path`，失败时用户与审计者不知道是哪个附带项、哪类目标
 /// 没进回收站（`subitems.rs` 的 OneDrive 步已自报 `id` / `isDir`，被丢弃）。
 /// 归因缺失时照常工作，只少一段尾巴 —— 老脚本的协议行仍全部有效。
+/// R3-M07-01：`path` 改为 `OsString` —— `@@RECYCLE2@@` 的 UTF-16LE 载荷必须原样
+/// 进回收站原语，不能先经 `&str` 往返（孤立代理项会被改写）。
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct RecycleTarget {
-    pub(super) path: String,
+    pub(super) path: std::ffi::OsString,
     pub(super) id: Option<String>,
     pub(super) is_dir: Option<bool>,
 }
@@ -324,37 +326,90 @@ pub(super) enum RecycleLine {
     Path(RecycleTarget),
 }
 
-/// 协议体形状判定。抽成纯函数是给 R3-L07 留判据面：`"path": ""` 与「缺 path」
-/// 必须同口径进畸形计数，而整条 `@@RECYCLE@@` 循环要真起回收站操作，测不动。
-pub(super) fn classify_recycle_line(rest: &str, seen: &mut std::collections::HashSet<String>) -> RecycleLine {
-    let Ok(entry) = serde_json::from_str::<Value>(rest) else {
-        return RecycleLine::Malformed("解析失败");
+/// 协议版本由行首前缀承载：`@@RECYCLE@@` = v1（裸 JSON），`@@RECYCLE2@@` = v2
+/// （`base64(UTF-16LE)|归因 JSON`）。两版共用本函数，禁止调用方各写一套判据。
+///
+/// R3-M07-01：生产端（subitems.rs 的 OneDrive 步）从 v2 起发的是
+/// `<base64>|<json>`；旧消费端先按 JSON 解析整段、再按 base64 解整段，两段判据
+/// 对同一载荷互斥，导致每行必判畸形、OneDrive 目录一个都进不了回收站。
+pub(super) fn parse_recycle_line(
+    rest: &str,
+    recycle2: bool,
+    seen: &mut std::collections::HashSet<std::ffi::OsString>,
+) -> RecycleLine {
+    let (path, attribution) = if recycle2 {
+        let Some((payload, meta)) = rest.split_once('|') else {
+            return RecycleLine::Malformed("RECYCLE2 缺少 base64 与归因的分隔符");
+        };
+        let path = match decode_recycle2_path(payload) {
+            Ok(path) => path,
+            Err(reason) => return RecycleLine::Malformed(reason),
+        };
+        let Ok(entry) = serde_json::from_str::<Value>(meta) else {
+            return RecycleLine::Malformed("RECYCLE2 归因不是合法 JSON");
+        };
+        if !entry.is_object() {
+            return RecycleLine::Malformed("RECYCLE2 归因不是 JSON 对象");
+        }
+        (path, entry)
+    } else {
+        let Ok(entry) = serde_json::from_str::<Value>(rest) else {
+            return RecycleLine::Malformed("解析失败");
+        };
+        let Some(p) = entry.get("path").and_then(Value::as_str) else {
+            return RecycleLine::Malformed("缺少 path 字段");
+        };
+        (std::ffi::OsString::from(p), entry)
     };
-    let Some(p) = entry.get("path").and_then(Value::as_str) else {
-        return RecycleLine::Malformed("缺少 path 字段");
-    };
-    if p.is_empty() {
+    if path.is_empty() {
         return RecycleLine::Malformed("path 为空字符串");
     }
-    if !seen.insert(p.to_string()) {
+    let (id, is_dir) = match attribution_fields(&attribution) {
+        Ok(fields) => fields,
+        Err(reason) => return RecycleLine::Malformed(reason),
+    };
+    // 去重键用解码后的路径（跨 v1/v2 同一路径也只投一次），不是协议载荷原文。
+    if !seen.insert(path.clone()) {
         return RecycleLine::Duplicate;
     }
-    RecycleLine::Path(RecycleTarget {
-        path: p.to_string(),
-        id: entry.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string),
-        is_dir: entry.get("isDir").and_then(Value::as_bool),
-    })
+    RecycleLine::Path(RecycleTarget { path, id, is_dir })
 }
 
-/// `@@RECYCLE2@@` 的载荷只收 base64(UTF-16LE)，不再接受 lossy 路径串。
-fn decode_recycle2_path(payload: &str) -> Result<std::ffi::OsString, String> {
+/// 归因字段校验：`id` 只收非空字符串，`isDir` 只收布尔；显式 null 视作未提供。
+/// 类型错误判畸形而不是静默丢弃 —— 否则生产端字段拼错时用户只会看到「没有归因」。
+fn attribution_fields(entry: &Value) -> Result<(Option<String>, Option<bool>), &'static str> {
+    let id = match entry.get("id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if s.is_empty() => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => return Err("id 字段类型错误"),
+    };
+    let is_dir = match entry.get("isDir") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(_) => return Err("isDir 字段类型错误"),
+    };
+    Ok((id, is_dir))
+}
+
+/// v1（`@@RECYCLE@@` 裸 JSON）的测试面入口；生产循环统一走 [`parse_recycle_line`]。
+#[cfg(test)]
+pub(super) fn classify_recycle_line(
+    rest: &str,
+    seen: &mut std::collections::HashSet<std::ffi::OsString>,
+) -> RecycleLine {
+    parse_recycle_line(rest, false, seen)
+}
+
+/// `@@RECYCLE2@@` 的路径段只收 base64(UTF-16LE)，不再接受 lossy 路径串。
+fn decode_recycle2_path(payload: &str) -> Result<std::ffi::OsString, &'static str> {
     use std::os::windows::ffi::OsStringExt;
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(payload)
-        .map_err(|_| "RECYCLE2 载荷不是合法 base64".to_string())?;
+        .map_err(|_| "RECYCLE2 载荷不是合法 base64")?;
     if bytes.len() % 2 != 0 {
-        return Err("RECYCLE2 载荷字节数不是 wide 单元宽度".into());
+        return Err("RECYCLE2 载荷字节数不是 wide 单元宽度");
     }
     let wide: Vec<u16> = bytes
         .chunks_exact(2)
@@ -365,7 +420,9 @@ fn decode_recycle2_path(payload: &str) -> Result<std::ffi::OsString, String> {
 
 #[cfg(test)]
 mod recycle2_tests {
-    use super::decode_recycle2_path;
+    use super::{decode_recycle2_path, parse_recycle_line, RecycleLine, RecycleTarget};
+    use std::collections::HashSet;
+    use std::ffi::OsString;
 
     #[test]
     fn recycle_protocol_roundtrip_unpaired_surrogate() {
@@ -378,6 +435,64 @@ mod recycle2_tests {
         let decoded = decode_recycle2_path(&payload).expect("合法 RECYCLE2 载荷必须可还原");
         assert_eq!(decoded.encode_wide().collect::<Vec<u16>>(), wide, "wide 单元必须逐字相等");
         assert!(decode_recycle2_path("not-base64").is_err(), "旧 lossy 路径/非法载荷必须拒");
+    }
+
+    /// R3-M07-01：生产端真实线格式（2026-11-12 用
+    /// `commands::optimizer::subitems::extra_steps` 的 `onedrive_full_uninstall` 分支
+    /// 同款 PS 表达式现场生成）必须被消费端接受；旧测试只测纯 base64，漏掉了这条契约面。
+    #[test]
+    fn r3_m07_01_生产端真实样本必须被消费端接受() {
+        let wire = "QwA6AFwAVQBzAGUAcgBzAFwAeABcAE8AbgBlAEQAcgBpAHYAZQA=|{\"id\":\"tf_appx\",\"isDir\":true}";
+        let mut seen = HashSet::new();
+        assert_eq!(
+            parse_recycle_line(wire, true, &mut seen),
+            RecycleLine::Path(RecycleTarget {
+                path: OsString::from(r"C:\Users\x\OneDrive"),
+                id: Some("tf_appx".into()),
+                is_dir: Some(true),
+            })
+        );
+    }
+
+    #[test]
+    fn r3_m07_01_协议反例仍判畸形() {
+        let good = "QwA6AFwAVQBzAGUAcgBzAFwAeABcAE8AbgBlAEQAcgBpAHYAZQA=";
+        let mut seen = HashSet::new();
+        assert!(
+            matches!(parse_recycle_line(good, true, &mut seen), RecycleLine::Malformed(_)),
+            "纯 base64 缺归因分隔符必须判畸形"
+        );
+        assert!(matches!(parse_recycle_line("not-base64|{}", true, &mut seen), RecycleLine::Malformed(_)));
+        assert!(matches!(
+            parse_recycle_line(&format!("{good}|not-json"), true, &mut seen),
+            RecycleLine::Malformed(_)
+        ));
+        assert!(matches!(
+            parse_recycle_line(&format!("{good}|{{\"id\":1}}"), true, &mut seen),
+            RecycleLine::Malformed(_)
+        ));
+        assert!(matches!(
+            parse_recycle_line(&format!("{good}|{{\"isDir\":\"true\"}}"), true, &mut seen),
+            RecycleLine::Malformed(_)
+        ));
+        assert!(
+            matches!(parse_recycle_line("|{\"id\":\"tf_appx\"}", true, &mut seen), RecycleLine::Malformed("path 为空字符串")),
+            "空路径必须判畸形"
+        );
+    }
+
+    #[test]
+    fn r3_m07_01_去重键是解码后路径() {
+        let a = "QwA6AFwAVQBzAGUAcgBzAFwAeABcAE8AbgBlAEQAcgBpAHYAZQA=|{\"id\":\"tf_appx\",\"isDir\":true}";
+        let b = "QwA6AFwAVQBzAGUAcgBzAFwAeABcAE8AbgBlAEQAcgBpAHYAZQA=|{\"isDir\":true,\"id\":\"tf_appx\"}";
+        let mut seen = HashSet::new();
+        assert!(matches!(parse_recycle_line(a, true, &mut seen), RecycleLine::Path(_)));
+        assert_eq!(parse_recycle_line(b, true, &mut seen), RecycleLine::Duplicate, "同一路径不同 JSON 键序必须去重");
+        assert_eq!(
+            parse_recycle_line(r#"{"path":"C:\\Users\\x\\OneDrive"}"#, false, &mut seen),
+            RecycleLine::Duplicate,
+            "v1/v2 同一路径必须共用一个去重键"
+        );
     }
 }
 
@@ -1327,10 +1442,10 @@ pub async fn optimizer_run<R: Runtime>(
             // 审查 M-1（2026-10-03 L3）：畸形行**必须计数并告警**，不能静默丢。
             // 与 cleanup/scan_execute.rs 的 count_malformed 同口径：否则 PS 输出被
             // 截断/掺噪声时，用户与审计者都无从知道有目录漏进回收站。
-            // R3-L07（v7.2 C04）：形状判定收进 `classify_recycle_line` 一处 ——
+            // R3-L07（v7.2 C04）：形状判定收进 `parse_recycle_line` 一处 ——
             // `"path": ""` 过去与「重复行」共用一个 `continue`，既不计数也不告警，
             // 与本条自述相反；现在它和「缺 path」「解析失败」同归畸形。
-            let target = match classify_recycle_line(rest, &mut seen) {
+            let target = match parse_recycle_line(rest, recycle2, &mut seen) {
                 RecycleLine::Malformed(why) => {
                     rec_malformed += 1;
                     log::write_log("warn", &format!("优化回收站协议畸形行（{why}）: {rest}"));
@@ -1340,21 +1455,11 @@ pub async fn optimizer_run<R: Runtime>(
                 RecycleLine::Duplicate => continue,
                 RecycleLine::Path(t) => t,
             };
-            let target_path = if recycle2 {
-                match decode_recycle2_path(rest) {
-                    Ok(path) => path,
-                    Err(reason) => {
-                        rec_malformed += 1;
-                        log::write_log("warn", &format!("优化回收站协议 RECYCLE2 解码失败（{reason}）: {rest}"));
-                        continue;
-                    }
-                }
-            } else {
-                std::ffi::OsString::from(&target.path)
-            };
+            // R3-M07-01：v1/v2 的路径都已收进 `target.path`（v2 走 UTF-16LE 解码），
+            // 这里不再有第二套 base64 判据。
             // R3-L06：失败文案带上协议行的归因（id / isDir）与具体路径 —— 只报数字
             // 时用户不知道是哪个附带项没清干净。
-            let p = target.path.as_str();
+            let p = target.path.to_string_lossy();
             let who = target.attribution();
             // R3-M03（v7.2 C01）：单批上限——PS 输出被截断/掺噪声/失控时，回收站出口
             // 不能无界吞路径。口径对齐 finder 的 FINDER_DELETE_MAX(500)。
@@ -1367,14 +1472,15 @@ pub async fn optimizer_run<R: Runtime>(
             // C01（v7.2 R3-M03）：此前只过 `is_path_protected` 第一道闸——
             // %WINDIR% 子孙（exact 语义管不到）与 reparse 件都会进回收站。
             // 四道组合闸收口到 validate_mutation_target（拒因唯一真源）。
-            if let Err(why) = protect::validate_mutation_target(p) {
+            if let Err(why) = protect::validate_mutation_target(&p) {
                 rec_fail += 1;
                 log::write_log("warn", &format!("优化回收站协议拒绝: {why}（{p}{who}）"));
                 continue;
             }
-            // 审查 v2-F1：走 `_os` 版。路径来自 PS stdout 的 @@RECYCLE@@ 协议，
-            // 含孤立代理项的名字经 `&str` 往返会被改写，导致删错或删不到。
-            match trim_finder::scan::recycle::send_to_trash_os(&target_path) {
+            // 审查 v2-F1：走 `_os` 版。路径来自 PS stdout 的回收站协议
+            // （v1 裸 JSON / v2 UTF-16LE），含孤立代理项的名字经 `&str` 往返
+            // 会被改写，导致删错或删不到。
+            match trim_finder::scan::recycle::send_to_trash_os(target.path.as_os_str()) {
                 Ok(()) => rec_ok += 1,
                 Err(e) => {
                     rec_fail += 1;

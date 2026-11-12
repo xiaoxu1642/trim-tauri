@@ -145,27 +145,82 @@ const SCAN_FLOOR = { 'main.css': 208, 'main-pages.css': 52, 'ds.css': 24, 'liteb
 }
 
 // ---------- 1. 两个主题变量块 ----------
-function blockVars(startIdx, source = LINES) {
-  const vars = new Map();
-  let depth = 1;
-  for (let i = startIdx; i < source.length; i++) {
-    const line = source[i];
-    const m = line.match(/^\s*(--[\w-]+)\s*:\s*([^;]+);/);
-    if (m) vars.set(m[1], m[2].trim());
-    for (const ch of line) {
-      if (ch === '{') depth++;
-      else if (ch === '}') depth--;
+// 规则级解析：`ruleRe` 的 [^{}]+ 选择器天然支持任意缩进/同行，body 的 [^{}]* 把读取
+// 范围钉在块尾。行锚定版本（旧 blockVars）有两个已实测的失明：① `  :root {` 这类
+// @media 内缩进块匹配不到；② `:root { --x: ...; }` 单行块从下一行起算，depth 回不到 0，
+// 一路扫到 EOF 把 .splash-overlay 的局部调色板吸进两套主题表（T1d-M06）。
+const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
+
+// 规则匹配位置之前有哪些未闭合的条件 at-rule。只认 @media/@supports/@container；
+// 扫描量只有个位数主题块，O(n²) 可以接受。
+function conditionalContext(text, index) {
+  const stack = [];
+  for (let i = 0; i < index; i++) {
+    if (text[i] === '{') {
+      let j = i - 1;
+      while (j >= 0 && text[j] !== '{' && text[j] !== '}') j--;
+      const prelude = text.slice(j + 1, i).trim();
+      stack.push(/^@(?:media|supports|container)\b/.test(prelude) ? prelude : null);
+    } else if (text[i] === '}') {
+      stack.pop();
     }
-    if (depth === 0) break;
   }
-  return vars;
+  const cond = stack.filter(Boolean);
+  return cond.length ? cond.join(' && ') : null;
 }
-let blockVarsSelfTest = (() => {
-  const sample = ['  :root {', '    --p3-probe: #123456;', '  }'];
-  return blockVars(0, sample).get('--p3-probe') === '#123456';
+
+// 返回 { name, vars, condition }；condition 为 null 表示默认级联，否则是条件 at-rule。
+// 条件块**不并入默认主题表**：prefers-contrast: more 的 floor 0.62 若当默认值，H 组
+// 的最坏底会从 0.45 抬到 0.62，等于把「我改坏了」转嫁给更亮的底（假绿）。条件块单独
+// 收集，D2 校验它们仍被识别、且只覆盖已建模的非文本 token。
+function themeBlocks(text) {
+  const out = [];
+  const re = new RegExp(ruleRe.source, 'g');
+  let m;
+  while ((m = re.exec(text))) {
+    const names = m[1]
+      .split(',')
+      .map((s) => s.trim().replace(/\s+/g, ' '))
+      .filter((s) => s === ':root' || s === '.theme-light');
+    if (!names.length) continue;
+    const vars = new Map();
+    // 不消费前导分号：matchAll 的 lastIndex 跳过 `;` 后，`(?:^|;)` 会让下一条声明
+    // 只能靠再下一个 `;` 命中（隔条漏读，--fg-primary/--accent 正好被跳过）。
+    for (const dm of m[2].matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) vars.set(dm[1], dm[2].trim());
+    const condition = conditionalContext(text, m.index);
+    for (const sel of names) {
+      out.push({ name: sel === ':root' ? '暗色(:root)' : '亮色(.theme-light)', vars, condition });
+    }
+  }
+  return out;
+}
+
+const themeParseSelfTest = (() => {
+  const indented = themeBlocks('  :root {\n    --p3-probe: #123456;\n  }');
+  const singleLine = themeBlocks(
+    ':root { --p3-probe: #123456; }\n.splash-overlay {\n  --splash-leak: #654321;\n}',
+  );
+  const media = themeBlocks(
+    '@media (prefers-contrast: more) {\n  .theme-light { --border-default: #123456; }\n}',
+  );
+  const multiLine = themeBlocks('.theme-light {\n  --p3-probe: #123456;\n}');
+  return (
+    indented.length === 1 &&
+    indented[0].vars.get('--p3-probe') === '#123456' &&
+    !indented[0].condition &&
+    singleLine.length === 1 &&
+    singleLine[0].vars.get('--p3-probe') === '#123456' &&
+    !singleLine[0].vars.has('--splash-leak') &&
+    media.length === 1 &&
+    media[0].condition === '@media (prefers-contrast: more)' &&
+    media[0].vars.get('--border-default') === '#123456' &&
+    multiLine.length === 1 &&
+    multiLine[0].vars.get('--p3-probe') === '#123456'
+  );
 })();
+let themeBlocksSelfTest = themeParseSelfTest;
 if (process.env.P3_A3_NEGATIVE === 'blockvars') {
-  blockVarsSelfTest = false;
+  themeBlocksSelfTest = false;
 }
 // K1 失明源三（2026-10-03 L3 审查）：本仓 main.css 里有 **6 个** `:root` / `.theme-light`
 // 块（:root 三处、.theme-light 三处）。CSS 语义是**同选择器的多个块按源码顺序层叠合并**，
@@ -176,15 +231,15 @@ if (process.env.P3_A3_NEGATIVE === 'blockvars') {
 //      （修复前 SKIPPED 现算 443 条的真实来源）。
 // 现在按选择器合并；`.theme-light` 在 HTML 上与 `:root` 同时挂在 <html>，故以 :root 铺底
 // 再叠加亮色自身的覆写（与浏览器级联一致）。核心 token 缺失直接判红，不允许继续跑。
+const parsedThemeBlocks = themeBlocks(MAIN.text);
+const DEFAULT_THEME_BLOCKS = parsedThemeBlocks.filter((b) => !b.condition);
+const CONDITIONAL_THEME_BLOCKS = parsedThemeBlocks.filter((b) => b.condition);
 const themeMap = new Map();
-LINES.forEach((l, i) => {
-  const m = l.match(/^(:root|\.theme-light)\s*\{/);
-  if (!m) return;
-  const name = m[1] === ':root' ? '暗色(:root)' : '亮色(.theme-light)';
-  if (!themeMap.has(name)) themeMap.set(name, new Map());
-  const target = themeMap.get(name);
-  for (const [k, v] of blockVars(i + 1)) target.set(k, v);
-});
+for (const b of DEFAULT_THEME_BLOCKS) {
+  if (!themeMap.has(b.name)) themeMap.set(b.name, new Map());
+  const target = themeMap.get(b.name);
+  for (const [k, v] of b.vars) target.set(k, v);
+}
 const darkVars = themeMap.get('暗色(:root)') || new Map();
 const THEMES = [...themeMap.entries()].map(([name, own]) => {
   if (name === '暗色(:root)') return { name, vars: new Map(own) };
@@ -434,7 +489,6 @@ function readValues(body, prop) {
   }
   return out;
 }
-const ruleRe = /([^{}]+)\{([^{}]*)\}/g;
 // 审查 L-28：两份 CSS 各解析一遍，`file` 字段带上来源，行号是**文件内行号**
 // （各自 parse 自己的 text，所以不需要任何跨文件偏移量）。
 // 重审 2026-11-01 假绿 #8：解析结果保留**全部**规则（含无底无字的纯状态块），
@@ -502,6 +556,24 @@ function inheritedFg(sel, file) {
   }
   return null;
 }
+
+// .splash-overlay 是 AGENTS §2 刻意设计的独立局部调色板：--splash-* 只在该子树内继承，
+// 不属于主题表。主题块修复后它们不会再被吸进 THEMES，但 .splash-* 规则仍要按真实
+// 继承关系解析，否则 .splash-badge 会从「已算」退化成 SKIPPED（格式化触发假红）。
+const SPLASH_LOCAL_VARS = new Map();
+for (const r of ALL_RULES) {
+  if (r.file !== 'main.css' || r.selector !== '.splash-overlay') continue;
+  for (const m of r.body.matchAll(/(--splash-[\w-]+)\s*:\s*([^;]+);/g)) {
+    SPLASH_LOCAL_VARS.set(m[1], m[2].trim());
+  }
+}
+const isSplashSelector = (sel) => /(^|[\s>+~])\.splash(?:-|(?![-\w]))/.test(` ${sel}`);
+function varsForSelector(sel, vars) {
+  if (!SPLASH_LOCAL_VARS.size || !isSplashSelector(baseOf(sel))) return vars;
+  const merged = new Map(vars);
+  for (const [k, v] of SPLASH_LOCAL_VARS) merged.set(k, v);
+  return merged;
+}
 function parseBg(raw, vars) {
   // K1 修复点（2026-10-03 L3）：第二分量必须取到**括号平衡**的整段，
   // 原先写 ([^)]+) 会在第一个右括号处截断 —— `color-mix(in srgb, var(--a) 5%, var(--b))`
@@ -567,12 +639,14 @@ for (const r of rules) {
     if (varOnly && SOLID_SKIP.test(varOnly[1])) continue;
     for (const fg of fgs) {
       for (const t of THEMES) {
-        const b = flattenBg(parseBg(raw, t.vars), t.vars, r.selector);
+        // .splash-* 用局部调色板解析（独立覆盖层，不随主题联动）；其余规则用主题表。
+        const vars = varsForSelector(r.selector, t.vars);
+        const b = flattenBg(parseBg(raw, vars), vars, r.selector);
         // K2：fg 现在是**原始表达式**（var(--x) 或 #000000），parseColor 两种都吃
-        const f = parseColor(fg, t.vars);
+        const f = parseColor(fg, vars);
         // 半透明前景（rgba(255,255,255,.85) 这类）按 WCAG 惯例合成到底色再算：
         // 合成方向与背景一致（都压到同一个底），否则白字 0.85 直接判低会误报。
-        const fFlat = f && f.a < 1 ? flattenBg(f, t.vars, r.selector) : f;
+        const fFlat = f && f.a < 1 ? flattenBg(f, vars, r.selector) : f;
         if (!b || !fFlat || fFlat.a < 1) {
           // 已登记的「合成底不可知」不计棘轮；未登记的必须让 E 组判红
           skippedBySelector.add(r.selector);
@@ -586,8 +660,8 @@ for (const r of rules) {
         let bEff = b;
         let fEff = fFlat;
         if ((r.opacity ?? 1) < 1) {
-          bEff = flattenBg({ ...b, a: r.opacity }, t.vars, r.selector);
-          fEff = flattenBg({ ...fFlat, a: r.opacity }, t.vars, r.selector);
+          bEff = flattenBg({ ...b, a: r.opacity }, vars, r.selector);
+          fEff = flattenBg({ ...fFlat, a: r.opacity }, vars, r.selector);
           if (!bEff || !fEff) {
             skippedBySelector.add(r.selector);
             if (!UNKNOWN_BASE_ALLOW.includes(r.selector)) SKIPPED.push(`${r.selector} :: opacity=${r.opacity} / ${raw} / ${fg}`);
@@ -602,7 +676,7 @@ for (const r of rules) {
           // 审查 L-28：判据从「写法是不是 color-mix(」扩成「**合成前有没有透明度**」——
           // 前者只认字面写法，于是 `var(--accent-soft)`（rgba(...,0.08)）这种更常见的
           // 染底形态被归进「实底」走 A1 硬判；后者按语义判，染底一律走 A2 边界棘轮。
-          tint: /^color-mix\(/.test(raw.trim()) || (parseBg(raw, t.vars) || { a: 1 }).a < 1,
+          tint: /^color-mix\(/.test(raw.trim()) || (parseBg(raw, vars) || { a: 1 }).a < 1,
         });
       }
     }
@@ -655,10 +729,30 @@ check(
   `D. 主题 token 表完整（${THEMES.length} 个主题：${THEMES.map((t) => `${t.name} ${t.vars.size} token`).join(" / ")}）`,
   THEME_INCOMPLETE.join("；"),
 );
+// D2 的「正确集合」：默认主题表不得出现 --splash-*（旧 blockVars 扫到 EOF 的直接反例）；
+// 条件 @media 主题块必须被识别，且只允许覆盖已建模的非文本 token（border/floor）。
+// 若将来条件块开始覆盖 fg/bg，默认态计算会取错值 —— 这里先红，逼着补状态模型。
+const THEME_SPLASH_LEAK = THEMES.flatMap((t) =>
+  [...t.vars.keys()].filter((k) => k.startsWith('--splash-')).map((k) => `${t.name} ${k}`),
+);
+const CONDITIONAL_THEME_BAD_TOKENS = CONDITIONAL_THEME_BLOCKS.flatMap((b) =>
+  [...b.vars.keys()]
+    .filter((k) => !/^--(?:border-|lg-glass-floor$)/.test(k))
+    .map((k) => `${b.condition} ${b.name} ${k}`),
+);
+const themeD2Issues = [
+  !themeBlocksSelfTest ? '缩进/单行/@media/多行样本自检失败（主题块解析退化）' : '',
+  DEFAULT_THEME_BLOCKS.length < 4 ? `默认主题块 ${DEFAULT_THEME_BLOCKS.length} < 4（解析面缩小）` : '',
+  CONDITIONAL_THEME_BLOCKS.length < 2 ? `条件主题块 ${CONDITIONAL_THEME_BLOCKS.length} < 2（@media 覆盖失明）` : '',
+  THEME_SPLASH_LEAK.length ? `--splash-* 泄漏进主题表：${THEME_SPLASH_LEAK.slice(0, 6).join('、')}` : '',
+  CONDITIONAL_THEME_BAD_TOKENS.length
+    ? `条件主题块覆盖未建模 token：${CONDITIONAL_THEME_BAD_TOKENS.join('、')}`
+    : '',
+].filter(Boolean);
 check(
-  blockVarsSelfTest,
-  'D2. 缩进主题块的花括号平衡读取自检（@media 内 token 覆盖必须进主题表）',
-  blockVarsSelfTest ? '' : '缩进 :root / .theme-light 内的变量未被读取，主题表会漏掉 @media 覆盖',
+  themeD2Issues.length === 0,
+  `D2. 主题块规则级解析自检（默认块 ${DEFAULT_THEME_BLOCKS.length} / 条件块 ${CONDITIONAL_THEME_BLOCKS.length}；缩进、单行、@media、多行样本均能读，单行块不跨节）`,
+  themeD2Issues.join('；'),
 );
 const unknownStale = UNKNOWN_BASE_ALLOW.filter((s) => !rules.some((r) => r.selector === s));
 // T1d-L01：登记项必须仍然「解析失明」。已被解析出来（含 F1c-L05 那种把前景换成 token 的
@@ -1575,40 +1669,295 @@ check(
       : '',
 );
 
-// G2（T1d-M04）：gradient + color 规则的枚举棘轮。
-// 旧 A 组只解析 parseBg 能吃的实底；`background: linear-gradient(...)` + `color`
-// 的规则整批落在解析面外，既不算违规也不算覆盖。这里用 H 组同一套逐 stop 取最坏
-// 的合成器补算，并把「规则数 / 已覆盖数」双地板钉住——新增一条渐变文字面必须被算到。
-const GRADIENT_COLOR_FLOOR = 14;
+// G2（T1d-M04/M05）：gradient 规则的枚举棘轮。
+// 旧版只收「同规则 color」且用亮色页面底 + 3.0 阈值，三重射程不足：
+//   ① 3.0 是大字号阈值，13px 的 .maint-tab 也按 3.0 放行；
+//   ② 底取 --bg-app，同一条 .maint-tab 在 H 组近黑底上是 3.09:1、G2 却算到 ≥4.95；
+//   ③ 渐变底 + 继承 color 的规则零断言：本文件现算无同规则 color 的渐变规则 26 条
+//      （报告 p7 的 28 条里 2 条是 body[data-skin="glass"] 的 --glass-sheen 变量，
+//      不是 background 渐变；其余 26 条含 13 条非文本面，已逐条登记）。
+// 现在：字号 4.5/3.0 分档；底取实际页面底 + 规则自身的完整渐变栈（H 工位从 G2 计算面
+// 移出，避免同一条规则用两套底打印两个结论；黑底压力由 H/F6 负责）；同规则 color 缺失时
+// 按祖先 → 末段复合体 → body 的顺序取继承前景；非文本面逐条登记（双向棘轮）。
+
+// WCAG 1.4.3 大字号：≥24px 常规，或 ≥18.66px 且字重 ≥700。字号/字重均可能走
+// var(--fs-*)/calc(...)，这里按本仓 token 形态解析；解析不出按普通字号（4.5）保守判。
+function pxOf(raw, vars) {
+  if (!raw) return null;
+  const s = raw.trim();
+  const varHit = s.match(/^var\(\s*(--[\w-]+)(?:\s*,\s*([\s\S]+))?\)$/);
+  if (varHit) {
+    const v = vars.get(varHit[1]) ?? varHit[2];
+    return v ? pxOf(v, vars) : null;
+  }
+  const calc = s.match(/^calc\(\s*([\d.]+)px\s*\*\s*var\(\s*--font-size-scale\s*(?:,\s*([\d.]+))?\s*\)\s*\)$/i);
+  if (calc) {
+    const scale = calc[2] ?? vars.get('--font-size-scale') ?? '1';
+    return parseFloat(calc[1]) * parseFloat(scale);
+  }
+  const px = s.match(/^([\d.]+)px$/i);
+  if (px) return parseFloat(px[1]);
+  const rem = s.match(/^([\d.]+)rem$/i);
+  if (rem) return parseFloat(rem[1]) * 16;
+  const pt = s.match(/^([\d.]+)pt$/i);
+  if (pt) return (parseFloat(pt[1]) * 4) / 3;
+  return null;
+}
+
+// 属性继承：同文件内按选择器前缀回溯，再试末段复合体（`body.lg-mode-* .btn-primary:hover`
+// 这类带前置上下文的选择器，前缀回溯拿不到后缀规则），最后落到 body 的初始继承值。
+function inheritedDeclOf(rule, prop) {
+  const parts = baseOf(rule.selector).split(' ').filter(Boolean);
+  for (let i = parts.length; i > 0; i--) {
+    const want = parts.slice(0, i).join(' ');
+    for (let j = ALL_RULES.length - 1; j >= 0; j--) {
+      const r = ALL_RULES[j];
+      if (r.file !== rule.file || !selParts(r.selector).includes(want)) continue;
+      const v = declOf(r.body, prop);
+      if (v) return v;
+    }
+  }
+  const last = parts[parts.length - 1];
+  if (last) {
+    for (let j = ALL_RULES.length - 1; j >= 0; j--) {
+      const r = ALL_RULES[j];
+      if (r.file !== rule.file || baseOf(r.selector) !== last) continue;
+      const v = declOf(r.body, prop);
+      if (v) return v;
+    }
+  }
+  for (let j = ALL_RULES.length - 1; j >= 0; j--) {
+    const r = ALL_RULES[j];
+    if (r.file !== rule.file || r.selector !== 'body') continue;
+    const v = declOf(r.body, prop);
+    if (v) return v;
+  }
+  return null;
+}
+function fontWeightOf(rule) {
+  const raw = declOf(rule.body, 'font-weight') || inheritedDeclOf(rule, 'font-weight');
+  if (!raw) return 400;
+  const calc = raw.match(/^calc\(\s*([\d.]+)\s*\*\s*var\(\s*--font-weight-scale\s*(?:,\s*([\d.]+))?\s*\)\s*\)$/i);
+  if (calc) return parseFloat(calc[1]) * parseFloat(calc[2] ?? '1');
+  const n = parseFloat(raw);
+  if (Number.isFinite(n)) return n;
+  if (/^bold$/i.test(raw)) return 700;
+  return 400;
+}
+function minRatioOf(rule, vars) {
+  const px = pxOf(declOf(rule.body, 'font-size') || inheritedDeclOf(rule, 'font-size'), vars);
+  if (px === null) return AA_NORMAL;
+  return px >= 24 || (px >= 18.66 && fontWeightOf(rule) >= 700) ? AA_LARGE : AA_NORMAL;
+}
+function gradientFgOf(rule) {
+  const own = declOf(rule.body, 'color');
+  if (own) return { expr: own, inherited: false };
+  const inherited = inheritedFg(rule.selector, rule.file);
+  if (inherited && inherited.length) return { expr: inherited[0], inherited: true };
+  const fallback = inheritedDeclOf(rule, 'color');
+  return fallback ? { expr: fallback, inherited: true } : null;
+}
+
+// 非文本面登记：这些渐变规则没有可承载文本的内容（进度条/滑块/色块/骨架屏/背景层）。
+// 双向棘轮：登记项必须仍然存在且仍然无同规则 color；未登记的新渐变文字面一律进计算。
+const GRADIENT_NONTEXT = new Map([
+  ['main.css#.progress-fill', '进度条填充层，无文本'],
+  ['main.css#.progress-fill[data-level="warning"]', '进度条填充层（警示档），无文本'],
+  ['main.css#.progress-fill[data-level="danger"]', '进度条填充层（危险档），无文本'],
+  ['main.css#.lg-thumb', '玻璃滑块拇指，无文本'],
+  ['main.css#.material-card[data-material="mica"] .material-swatch', '材质色块预览，无文本'],
+  ['main.css#.material-card[data-material="mica-alt"] .material-swatch', '材质色块预览，无文本'],
+  ['main.css#.material-card[data-material="acrylic"] .material-swatch', '材质色块预览，无文本'],
+  ['main.css#.material-card[data-material="thin-acrylic"] .material-swatch', '材质色块预览，无文本'],
+  ['main.css#.intro-ai-skeleton span', '骨架屏占位条，无文本'],
+  ['main.css#.splash-overlay .splash-bg', '开屏背景层，无文本'],
+  ['main-pages.css#.bench-progress-fill', '基准进度条填充层，无文本'],
+  ['ds.css#input[type="range"].ds-slider', '滑块轨道/填充，无文本'],
+  ['ds.css#.ds-skeleton-block', '骨架屏占位块，无文本'],
+]);
+// 渐变文字（background-clip: text + color: transparent）：前景就是那条渐变本身，
+// 不能按「继承 body 的 --fg-primary」算（会得出假绿），也不能算解析失败（假红）。
+// 判据：取渐变最暗一端的色值对页面底算对比度，两端都要过 AA 才放行。
+// 双向棘轮：登记项必须仍然存在且仍然 color: transparent。
+const GRADIENT_TEXT_CLIP = new Map([
+  ['main.css#.splash-stage .splash-intro', '开屏副标题渐变字（深墨 → 品牌紫，两端均过 AA）'],
+]);
+// 已裁定的语义染层族（F6 射程说明）：浓度按现盘保留，低于 3:1 仍红，修到 4.5 以上
+// 则登记失效、必须移出。这里只放「产品明确保留的既有浓度」，不放新组合。
+const GRADIENT_TINT_ACCEPTED = new Map();
+
+const HOST_SELECTOR_SET = new Set(HOST_STACK_SITES.map((s) => s.host));
+const isHHost = (selector) => selParts(selector).some((p) => HOST_SELECTOR_SET.has(p));
+
+const GRADIENT_COLOR_FLOOR = 40;
+const GRADIENT_INHERITED_MIN = 8;
 const gradientColorRules = ALL_RULES.filter((r) => {
   if (/::(before|after)\b/.test(r.selector)) return false;
   if (r.opacity === 0) return false;
-  const decls = readBgDecls(r.body);
-  return decls.some((d) => /linear-gradient\s*\(/i.test(d)) && !!declOf(r.body, 'color');
+  return readBgDecls(r.body).some((d) => /linear-gradient\s*\(/i.test(d));
 });
+
+// G2 的底 = 实际页面底 + 规则自身的完整渐变栈（evalStack 会按 CSS 层序 source-over）。
+// 纯黑壁纸压力由 H/F6 负责；G2 再用黑底会把卡片内按钮重复压暗成假红（如 .peri-explain-btn
+// 在 #000 上仅 1.19:1，而它实际压在浅色页面/卡片上）。同一条规则不会再用两套底打印两个结论：
+// H 工位已从 G2 计算面移出，低值由 T 过渡表登记。
+function judgeGradientRule(rule, vars, pageExpr = 'var(--bg-app)') {
+  const layers = bgLayersOf(rule);
+  if (!layers) return { error: '渐变底解析失败' };
+  const fg = gradientFgOf(rule);
+  if (!fg) return { error: '前景解析失败（无同规则 color，也无祖先/body color）' };
+  const minRatio = minRatioOf(rule, vars);
+  const res = evalStack(vars, pageExpr, layers, fg.expr, minRatio);
+  return { ...res, fg, layers, minRatio };
+}
+
 const gradientColorRows = [];
 const gradientColorIssues = [];
+const gradientNonText = [];
+const gradientNonTextStale = [];
+const gradientHCovered = [];
+const gradientTextRows = [];
+let gradientInheritedCount = 0;
 for (const r of gradientColorRules) {
-  const layers = bgLayersOf(r);
-  const fgExpr = declOf(r.body, 'color');
-  if (!layers || !fgExpr) {
-    gradientColorIssues.push(`${r.file}#${r.selector} 渐变/前景解析失败`);
+  const key = `${r.file}#${r.selector}`;
+  // 渐变文字：前景是渐变自身，按渐变两端分别对页面底判 AA（见 GRADIENT_TEXT_CLIP）
+  if (GRADIENT_TEXT_CLIP.has(key)) {
+    const own = declOf(r.body, 'color');
+    if (!own || !/^transparent$/i.test(own.trim())) {
+      gradientColorIssues.push(`${key} 已不是 color: transparent，应移出渐变文字登记并纳入计算`);
+      continue;
+    }
+    const stops = [...r.body.matchAll(/var\(\s*(--[\w-]+)/g)].map((m) => m[1]);
+    const vars = varsForSelector(r.selector, lightVars);
+    const page = parseColor('var(--bg-app)', vars);
+    let worst = Infinity;
+    for (const name of stops) {
+      const c = parseColor(`var(${name})`, vars);
+      if (!c || !page) continue;
+      worst = Math.min(worst, contrast(page, flattenBg(c, vars, r.selector)));
+    }
+    if (!isFinite(worst)) {
+      gradientColorIssues.push(`${key} 渐变文字两端色值解析失败`);
+      continue;
+    }
+    gradientTextRows.push({ key, ratio: worst, minRatio: AA_NORMAL });
     continue;
   }
-  const res = evalStack(lightVars, 'var(--bg-app)', layers, fgExpr, AA_LARGE);
-  if (res.error) gradientColorIssues.push(`${r.file}#${r.selector} ${res.error}`);
-  else gradientColorRows.push({ key: `${r.file}#${r.selector}`, file: r.file, selector: r.selector, ratio: res.ratio });
+  if (GRADIENT_NONTEXT.has(key)) {
+    gradientNonText.push(key);
+    if (declOf(r.body, 'color') || inheritedFg(r.selector, r.file)) {
+      gradientNonTextStale.push(`${key}（已可解析前景，应移出非文本登记并纳入计算）`);
+    }
+    continue;
+  }
+  if (isHHost(r.selector)) {
+    // H/T 已按最坏底逐条判定；G2 只保留枚举计数，避免同一条规则用两套底打印两个结论。
+    gradientHCovered.push(key);
+    continue;
+  }
+  const vars = varsForSelector(r.selector, lightVars);
+  const verdict = judgeGradientRule(r, vars);
+  if (verdict.error) {
+    gradientColorIssues.push(`${key} ${verdict.error}`);
+    continue;
+  }
+  if (verdict.fg.inherited) gradientInheritedCount++;
+  gradientColorRows.push({
+    key,
+    file: r.file,
+    selector: r.selector,
+    ratio: verdict.ratio,
+    minRatio: verdict.minRatio,
+    fg: verdict.fg.expr,
+    inherited: verdict.fg.inherited,
+    bgHex: verdict.bgHex,
+  });
 }
+for (const key of GRADIENT_NONTEXT.keys()) {
+  if (!gradientColorRules.some((r) => `${r.file}#${r.selector}` === key)) {
+    gradientNonTextStale.push(`${key}（规则已消失/改名）`);
+  }
+}
+
+const gradientLow = gradientColorRows.filter((r) => r.ratio < r.minRatio && !GRADIENT_TINT_ACCEPTED.has(r.key));
+const gradientTintBelow3 = gradientColorRows.filter((r) => GRADIENT_TINT_ACCEPTED.has(r.key) && r.ratio < AA_LARGE);
+const gradientTintStale = [...GRADIENT_TINT_ACCEPTED.keys()].filter((k) => {
+  const row = gradientColorRows.find((r) => r.key === k);
+  return !row || row.ratio >= AA_NORMAL;
+});
+const gradientOwnCount = gradientColorRows.filter((r) => !r.inherited).length;
+const gradientLowest = gradientColorRows.length
+  ? Math.min(...gradientColorRows.map((r) => r.ratio))
+  : null;
+const gradientG2Issues = [
+  ...gradientColorIssues,
+  ...gradientLow.map(
+    (r) =>
+      `${r.key} ${r.ratio.toFixed(2)}:1 < ${r.minRatio}（${r.inherited ? '继承色' : '同规则 color'}，底 ${r.bgHex}）`,
+  ),
+  ...gradientTintBelow3.map((r) => `${r.key} ${r.ratio.toFixed(2)}:1 < ${AA_LARGE}（已登记的语义染层也跌破 3:1）`),
+  ...gradientTintStale.map((k) => `${k} 已不低于 ${AA_NORMAL}:1，请移出语义染层登记`),
+  ...gradientNonTextStale,
+  gradientInheritedCount < GRADIENT_INHERITED_MIN
+    ? `继承色可算 ${gradientInheritedCount} 条 < ${GRADIENT_INHERITED_MIN}（继承解析退化）`
+    : '',
+].filter(Boolean);
 check(
   gradientColorRules.length >= GRADIENT_COLOR_FLOOR &&
-    gradientColorRows.length === gradientColorRules.length &&
-    gradientColorIssues.length === 0 &&
-    gradientColorRows.every((r) => r.ratio >= AA_LARGE),
-  `G2. gradient + color 规则全部纳入对比度计算（现算 ${gradientColorRules.length} 条 ≥ ${GRADIENT_COLOR_FLOOR}，已算 ${gradientColorRows.length} 条` +
-    (gradientColorRows.length ? `，最低 ${Math.min(...gradientColorRows.map((r) => r.ratio)).toFixed(2)}:1 ≥ ${AA_LARGE}:1` : '') + '）',
-  gradientColorIssues.join('；') ||
-    gradientColorRows.filter((r) => r.ratio < AA_LARGE).map((r) => `${r.key} ${r.ratio.toFixed(2)}:1 < ${AA_LARGE}`).join('；'),
+    gradientColorRows.length + gradientHCovered.length + gradientNonText.length + gradientTextRows.length === gradientColorRules.length &&
+    gradientG2Issues.length === 0,
+  `G2. gradient 规则全部入账（现算 ${gradientColorRules.length} 条 ≥ ${GRADIENT_COLOR_FLOOR}：可算 ${gradientColorRows.length}（同规则 color ${gradientOwnCount} / 继承色 ${gradientInheritedCount}）+ H 已覆盖 ${gradientHCovered.length} + 非文本登记 ${gradientNonText.length} + 渐变文字 ${gradientTextRows.length}；实际底 var(--bg-app) + 自身渐变栈` +
+    (gradientLowest !== null ? `，最低 ${gradientLowest.toFixed(2)}:1` : '') +
+    '）',
+  gradientG2Issues.join('；'),
 );
+{
+  // G2 正向对照：阈值分支 + 最坏底都要能自己变红。
+  const sample = (body) => ({ selector: '.g2-probe', file: 'main.css', body });
+  const normal = judgeGradientRule(
+    sample('background: linear-gradient(#ffffff, #ffffff); color: #777777; font-size: 13px;'),
+    lightVars,
+  );
+  const large = judgeGradientRule(
+    sample('background: linear-gradient(#ffffff, #ffffff); color: #777777; font-size: 24px;'),
+    lightVars,
+  );
+  const bold = judgeGradientRule(
+    sample('background: linear-gradient(#ffffff, #ffffff); color: #777777; font-size: 19px; font-weight: 700;'),
+    lightVars,
+  );
+  const tooLow = judgeGradientRule(
+    sample('background: linear-gradient(#ffffff, #ffffff); color: #9a9a9a; font-size: 24px;'),
+    lightVars,
+  );
+  const glass = sample(
+    'background: linear-gradient(rgba(255,255,255,.45), rgba(255,255,255,.45)); color: #292536; font-size: 13px;',
+  );
+  const darkBase = judgeGradientRule(glass, lightVars, WORST_BASE);
+  const lightBase = judgeGradientRule(glass, lightVars, '#ffffff');
+  const g2ControlIssues = [
+    normal.error || normal.ok !== false || !(normal.ratio >= AA_LARGE && normal.ratio < AA_NORMAL)
+      ? `13px 的 3.0~4.5 样本未判红：${normal.error || normal.ratio}`
+      : '',
+    large.error || large.ok !== true || large.minRatio !== AA_LARGE
+      ? `24px 样本未走 3:1：${large.error || `${large.ratio}/${large.minRatio}`}`
+      : '',
+    bold.error || bold.ok !== true || bold.minRatio !== AA_LARGE
+      ? `19px 粗体样本未走 3:1：${bold.error || `${bold.ratio}/${bold.minRatio}`}`
+      : '',
+    tooLow.error || tooLow.ok !== false
+      ? `24px 但比值 <3:1 的样本未判红：${tooLow.error || tooLow.ratio}`
+      : '',
+    darkBase.error || lightBase.error || !(darkBase.ratio < lightBase.ratio)
+      ? `最坏底未低于白底：${darkBase.error || darkBase.ratio} / ${lightBase.error || lightBase.ratio}`
+      : '',
+  ].filter(Boolean);
+  check(
+    g2ControlIssues.length === 0,
+    'G2b. 正向对照：13px 的 3.0~4.5 样本必红；24px / 19px 粗体走 3:1；24px 跌破 3:1 仍红；同一玻璃栈在最坏底上比值必须低于白底',
+    g2ControlIssues.join('；'),
+  );
+}
 {
   // 正向对照五件（§4.1：每条断言都要能自己变红）：
   // ① 正文字号 4.5 红线：旧宿主栈（floor + --bg-elevated）对 --fg-secondary 必须判红；
@@ -1894,6 +2243,13 @@ const OPACITY_UNMODELED = [
   { sel: '.appearance-card.material-off .material-grid', reason: '总开关关闭时的非活动态（pointer-events:none，整块不可操作）' },
   { sel: '.rt-sweep', reason: '扫描扫光（装饰动画）' },
   { sel: '.mouse-trail-dot', reason: '鼠标拖尾（装饰）' },
+  // 极光琉璃 B-P3 氛围场：四层都是 pointer-events:none 的纯装饰件，不承载任何文本，
+  // 其不透明度是「观感强度」而非「文字压暗」。它们对正文可读性的真实影响已由
+  // --aurora-veil 回压 + 现算守住（见 main.css :root 令牌注释；现算：node tools/check-contrast.mjs）。
+  { sel: 'body.aurora-ready .aurora-field', reason: '极光层入场淡入终态（装饰层，无文本；同 .aurora-field）' },
+  { sel: '.aurora-field .aurora-ribbon', reason: 'conic 光带（装饰层，无文本）' },
+  { sel: '.aurora-field .aurora-veil', reason: '极光回压层（本身即对比度护栏，无文本）' },
+  { sel: '.aurora-field .aurora-grain', reason: '噪点纹理（装饰层，无文本）' },
   { sel: '.an-tm-cell-size', reason: '树图尺寸元信息；宿主 .an-tm-cell 属语义染层族，按 v2 R3/F6 射程边界不在近黑底硬判（登记待办）' },
   { sel: '.ds-menu-item[aria-disabled="true"]', reason: '非活动菜单项' },
 ];

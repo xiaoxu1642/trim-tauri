@@ -418,6 +418,7 @@ pub fn prune_old_logs() {
     };
     let cutoff = SystemTime::now() - Duration::from_secs(LOG_RETENTION_DAYS * 86_400);
     let mut removed = 0usize;
+    let mut failed = 0usize;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if !is_log_file_name(&name) {
@@ -432,15 +433,25 @@ pub fn prune_old_logs() {
             let safe = fs::symlink_metadata(entry.path())
                 .map(|m| m.is_file() && !crate::engine::protect::is_reparse(&m))
                 .unwrap_or(false);
-            if safe && trim_finder::scan::recycle::send_to_trash_os(entry.path().as_os_str()).is_ok() {
-                removed += 1;
+            if safe {
+                // R6b-M03-02：回收站失败必须计数并留痕（旧写法 `is_ok()` 静默丢弃，
+                // 于是「裁剪没裁掉」与「裁掉了」在回执上同形）。
+                match trim_finder::scan::recycle::send_to_trash_os(entry.path().as_os_str()) {
+                    Ok(()) => removed += 1,
+                    Err(e) => {
+                        failed += 1;
+                        write_log("warn", &format!("日志清理失败 {}: {e}", entry.path().display()));
+                    }
+                }
             }
         }
     }
-    if removed > 0 {
+    if removed > 0 || failed > 0 {
         write_log(
             "info",
-            &format!("日志清理: 已删除 {removed} 个超过 {LOG_RETENTION_DAYS} 天的旧日志文件"),
+            &format!(
+                "日志清理: 已删除 {removed} 个超过 {LOG_RETENTION_DAYS} 天的旧日志文件，失败 {failed} 个"
+            ),
         );
     }
 }

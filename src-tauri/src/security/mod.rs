@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::safestorage;
 
 /// 密钥掩码。渲染层不再持有同名常量，掩码只由后端产出。
-/// 汇总出口 [`mask_settings`]：`src-tauri/src/commands/settings.rs:1126`。
+/// 汇总出口 [`mask_settings`]：`src-tauri/src/commands/settings.rs:1141`。
 pub const SECRET_MASK: &str = "••••••••";
 
 /// 需加密/脱敏的字段名（加密与掩码共用这一份表）。
@@ -250,12 +250,10 @@ fn read_json_state_shape(path: &Path, want_array: bool) -> JsonState {
                 if shape_ok {
                     JsonState::Ok(v)
                 } else {
-                    // R7-M04：结构不符按损坏处理但**留现场**（不隔离），必须留痕；
-                    // update_json 的回执措辞依赖这条日志可查。
-                    //
-                    // R7-L01：留现场的代价是「下一次写入口仍看到同一个坏形状」——
-                    // 隔离后写入口读到 `Absent` ⇒ 可自愈（重新写一份新配置）；
-                    // 不隔离则每次写都被同一个坏形状挡死，用户只能手删文件。
+                // R7-M04：结构不符按损坏处理，隔离并写入口自愈。
+                // quarantine_file 把坏件移走，下一次写入口读到 `Absent`
+                // ⇒ 重新写一份新配置（R7-L01 设计），用户无需手删文件；
+                // update_json 的回执措辞依赖下面这条「已隔离」日志可查。
                     let reason = format!(
                         "配置结构不符（期望{}）",
                         if want_array { "数组" } else { "对象" }
@@ -530,8 +528,21 @@ fn prune_quarantined_depth(dir: &Path, now: SystemTime, depth: usize) -> usize {
         let name = entry.file_name().to_string_lossy().to_string();
         // 先递归子目录（隔离产出点是数据根下的 .json 本体，子目录里不会再有
         // 本模块的产出，但规则库的层级将来可能加深——限深 6 层足够且防失控）
-        if entry.path().is_dir() {
-            removed += prune_quarantined_depth(&entry.path(), now, depth + 1);
+        // 真实目录才递归；reparse（junction/符号链接）目录一律拒在门外，
+        // 否则会下探进链接目标扫到形状匹配件并永久删（与同模块
+        // `prune_stale_temps_depth` 及 `pwsh::collect_temp_files` 口径拉平）。
+        let Ok(md) = fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if md.is_dir() {
+            if !crate::engine::protect::is_reparse(&md) {
+                removed += prune_quarantined_depth(&entry.path(), now, depth + 1);
+            } else {
+                crate::engine::log::write_log(
+                    "info",
+                    &format!("隔离件裁剪跳过 reparse 子目录: {}", entry.path().display()),
+                );
+            }
             continue;
         }
         let Some(ts) = quarantine_stamp(&name) else { continue };

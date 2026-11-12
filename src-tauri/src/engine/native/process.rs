@@ -570,7 +570,9 @@ fn force_utf16_declaration(xml: &str) -> String {
 /// `String`），声明却写着 `encoding="UTF-16"`。旧实现按 UTF-8 落盘 ⇒ 声明与实际编码
 /// 不一致：实测 `System.Xml.XmlDocument.Load` 直接拒（`There is no Unicode byte order
 /// mark`），转成 UTF-16LE+BOM 才 `Load OK` —— 这份「删除前唯一还原凭据」因此不可解析。
-fn task_xml_backup_bytes(xml: &str) -> Vec<u8> {
+/// 任务 XML 备份落盘字节（R5b-M01 / R5d-M04-02）：UTF-16LE+BOM + 声明归一 `UTF-16`，
+/// 与 `verify_task_xml_backup` 配对使用。`startup.rs` 的任务臂备份复用同一修法。
+pub(crate) fn task_xml_backup_bytes(xml: &str) -> Vec<u8> {
     let body = force_utf16_declaration(xml);
     let mut bytes = Vec::with_capacity(2 + body.len() * 2);
     bytes.extend_from_slice(&[0xFF, 0xFE]);
@@ -584,7 +586,9 @@ fn task_xml_backup_bytes(xml: &str) -> Vec<u8> {
 /// ——BOM 在不在、字节是不是 UTF-16LE、声明写的是不是 UTF-16——再叠一道「任务根元素
 /// `<Task` 在不在」的通形状判据，挡掉「转码把正文弄丢」。
 /// 任一项不过 ⇒ 调用方必须放弃删除任务：宁可这次不删，也不留一份不可还原的凭据。
-fn verify_task_xml_backup(bytes: &[u8]) -> Result<(), String> {
+/// 落盘件回读自检（R5b-M01 / R5d-M04-02）：BOM、字节编码与 XML 声明三者自洽且根元素在。
+/// 任一不过 ⇒ 调用方放弃删除任务（宁可这次不删，也不留不可还原凭据）。
+pub(crate) fn verify_task_xml_backup(bytes: &[u8]) -> Result<(), String> {
     if !bytes.starts_with(&[0xFF, 0xFE]) {
         return Err("缺少 UTF-16LE BOM（按声明解析的读取器会拒）".to_string());
     }
@@ -854,7 +858,7 @@ pub fn stubborn_block() -> Result<Value, String> {
                 crate::engine::systembin::quiet_cmd_timeout(
                     exe,
                     &["/Query", "/TN", task, "/NH"],
-                    crate::engine::systembin::REG_EXPORT_TIMEOUT,
+                    crate::engine::systembin::SCHTASKS_TIMEOUT,
                 )
             });
         let exists = match task_exists_verdict(query) {
@@ -888,7 +892,7 @@ pub fn stubborn_block() -> Result<Value, String> {
                 crate::engine::systembin::quiet_cmd_timeout(
                     exe,
                     &["/Query", "/TN", task, "/XML"],
-                    crate::engine::systembin::REG_EXPORT_TIMEOUT,
+                    crate::engine::systembin::SCHTASKS_TIMEOUT,
                 )
             }) {
             Ok(o) if o.status.success() => crate::engine::systembin::decode_native_output(&o.stdout).trim().to_string(),
@@ -953,7 +957,7 @@ pub fn stubborn_block() -> Result<Value, String> {
                 crate::engine::systembin::quiet_cmd_timeout(
                     exe,
                     &["/Delete", "/TN", task, "/F"],
-                    crate::engine::systembin::REG_EXPORT_TIMEOUT,
+                    crate::engine::systembin::SCHTASKS_TIMEOUT,
                 )
             })
             .map(|o| o.status.success())

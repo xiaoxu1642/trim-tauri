@@ -108,27 +108,24 @@ fn quickcmds_run_rejects_unknown_id() {
 /// X1-M03（v7.2 C08）补拒因点名：此前只断 `success:false`，白名单闸被摘掉时
 /// `C:\Windows` 会真去落盘测速、失败也回 `success:false` ⇒ 用例照绿——
 /// 正是它自己注释声明要防的事。needle 取自 diskbench.rs 白名单分支的文案。
+///
+/// v2 P1-01b（X1-N01 同族）：样本从「`PUBLIC` 下自建可写目录」换成
+/// **必然不可写的系统目录**（`WinSxS` / `servicing` / `Boot` / `WindowsApps`）。
+/// 旧样本的问题与用例目的相反：闸一旦失效，测速会真的在可写目录里跑起来，
+/// 负例本身制造系统变更。新样本即使闸失效也只会落到「测速临时目录不可用」，
+/// 不跑测速、不留残——负例的失败模式从「真落盘」降级为「被拒」。
 #[test]
 fn diskbench_run_rejects_outside_whitelist() {
     let w = main_window();
-    // X1-M01：不要拿真实系统目录做「白名单外」样本——万一下游白名单被摘掉，
-    // 这条会真的往 C:\Windows 落盘测速。用 Public 下自建目录（不在 USERPROFILE/
-    // TEMP/APPDATA 白名单内），测完即删；建不出来就显式 SKIP，不许硬红。
-    let Some(public) = std::env::var_os("PUBLIC") else {
-        skip_and_record("diskbench_run 白名单外样本：本机没有 PUBLIC 目录，本节未验证");
+    let Some(outside) = common::unwritable_outside_whitelist_dir("ipc") else {
+        skip_and_record("diskbench_run 白名单外样本：本机没有必然不可写的系统目录，本节未验证");
         return;
     };
-    let outside = std::path::PathBuf::from(public).join(format!("TrimSmoke-diskbench-{}", std::process::id()));
-    if std::fs::create_dir_all(&outside).is_err() {
-        skip_and_record("diskbench_run 白名单外样本：Public 下自建目录失败，本节未验证");
-        return;
-    }
     let res = invoke(
         &w,
         "diskbench_run",
         json!({ "options": { "path": outside.to_string_lossy() } }),
     );
-    let _ = std::fs::remove_dir_all(&outside);
     assert_eq!(res["success"], json!(false), "白名单外路径必须被拒: {res}");
     assert!(
         message_of(&res).contains("测速路径受限"),

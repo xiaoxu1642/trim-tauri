@@ -34,6 +34,7 @@ mod peripheral;
 pub use peripheral::{peripheral_query, peripheral_apply, peripheral_restore};
 mod process;
 pub use process::{kill_process, stubborn_kill, stubborn_block};
+pub(crate) use process::{task_xml_backup_bytes, verify_task_xml_backup};
 mod realtime;
 pub use realtime::{realtime_adapters, realtime_loss};
 mod registry;

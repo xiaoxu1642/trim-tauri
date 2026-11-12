@@ -41,11 +41,12 @@ pub async fn optimizer_genadvice<R: Runtime>(
 
     // [首选] + 其余已启用模型，保序去重
     let keys = crate::commands::settings::AI_MODEL_KEYS;
-    let mut order: Vec<&str> = Vec::new();
-    order.push(preferred.as_str());
+    // spawn_blocking 的闭包要求 'static：用自持 String 承载候选顺序，不借外部生命周期。
+    let mut order: Vec<String> = Vec::new();
+    order.push(preferred.clone());
     for k in keys {
-        if *k != preferred.as_str() {
-            order.push(k);
+        if *k != preferred {
+            order.push((*k).to_string());
         }
     }
     order.retain(|k| {
@@ -69,19 +70,30 @@ pub async fn optimizer_genadvice<R: Runtime>(
     );
     let message = format!("{ADVICE_SYSTEM}\n{query}");
 
-    let mut text: Option<String> = None;
-    let mut used_engine = "";
-    for eng in order {
-        if let Some(cfg) = models.get(eng) {
-            if let Some(t) = crate::commands::aidesc::call_model_text(eng, cfg, &message) {
-                if !t.trim().is_empty() {
-                    text = Some(t);
-                    used_engine = eng;
-                    break;
+    // 外呼是同步实现（单模型超时上限 30s、失败逐个续试），必须整体搬进阻塞池：
+    // 留在 async 体里会在模型不可达时串行占用 runtime worker（R3b-M07-01）。
+    let models_for_call = models.clone();
+    let (text, used_engine) = tauri::async_runtime::spawn_blocking(move || {
+        let mut text: Option<String> = None;
+        let mut used_engine = String::new();
+        for eng in &order {
+            if let Some(cfg) = models_for_call.get(eng) {
+                if let Some(t) = crate::commands::aidesc::call_model_text(eng, cfg, &message) {
+                    if !t.trim().is_empty() {
+                        text = Some(t);
+                        used_engine = eng.clone();
+                        break;
+                    }
                 }
             }
         }
-    }
+        (text, used_engine)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        log::write_log("error", &format!("优化项优缺点阻塞池任务异常: {e}"));
+        (None, String::new())
+    });
     let Some(text) = text else {
         log::write_log("warn", &format!("优化项优缺点生成失败: {title}"));
         return json!({
@@ -91,8 +103,8 @@ pub async fn optimizer_genadvice<R: Runtime>(
     };
 
     let (pros, cons) = parse_pros_cons(&text);
-    let cfg = models.get(used_engine);
-    let source = crate::commands::settings::model_display_name(used_engine, cfg);
+    let cfg = models.get(&used_engine);
+    let source = crate::commands::settings::model_display_name(&used_engine, cfg);
     log::write_log("info", &format!("优化项优缺点生成成功 ({source}): {title}"));
     json!({ "success": true, "data": { "pros": pros, "cons": cons, "raw": text, "source": source } })
 }

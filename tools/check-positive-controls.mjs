@@ -15,6 +15,7 @@ import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { blankNonCode } from './lib/src-scan.mjs';
+import { buildModuleGates } from './lib/module-gates.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -280,6 +281,78 @@ check(
   '5d. REGISTRY ∪ PENDING == MUST_RUN（双向差集；孤儿登记必须摘牌）',
   registryOrphans.length ? `REGISTRY 里不在 MUST_RUN 的孤儿：${registryOrphans.join('；')}` : '无孤儿',
 );
+
+// ── 6. 按模块跑门禁的挑选判据（2026-11-12）──
+// 失效形态是**静默少跑**（挑了少数几条却以为挑全），不像普通断言会当场红，所以必须
+// 用合成样本证明四种坏形态都判红；真仓基线再喂一遍，证明它不是「永远红」。
+{
+  const modules = ['M-01', 'M-02', 'M-03'].map((id) => ({ id }));
+  const mustRun3 = ['g-all', 'g-one', 'g-two', 'g-stale', 'g-new'];
+  const reads = {
+    'g-all': ['M-01', 'M-02', 'M-03'],
+    'g-one': ['M-01'],
+    'g-two': ['M-02'],
+    'g-stale': ['M-01'],
+    // g-new 故意不登记：新门禁必须按全局跑
+  };
+  const srcHash = { 'g-all': 'a', 'g-one': 'b', 'g-two': 'c', 'g-stale': 'OLD' };
+  const hashOf = (n) => ({ 'g-all': 'a', 'g-one': 'b', 'g-two': 'c', 'g-stale': 'NEW', 'g-new': 'd' })[n] ?? null;
+  const built = buildModuleGates({ mustRun: mustRun3, modules, reads, srcHash, hashOf, globalMin: 3 });
+  const m1 = built.byModule.get('M-01');
+  const m2 = built.byModule.get('M-02');
+  const m3 = built.byModule.get('M-03');
+  const bad = [];
+  if (!built.stale.includes('g-stale')) bad.push('源码指纹过期未判 stale（映射可能已失效却照跑）');
+  if (!built.global.includes('g-new')) bad.push('基线未登记的新门禁没按全局跑（会静默漏跑）');
+  if (!built.global.includes('g-all')) bad.push('读取面覆盖全部模块的门禁没按全局跑');
+  if (!m1.includes('g-one') || !m1.includes('g-all') || !m1.includes('g-new')) bad.push('M-01 未挂齐专属 + 全局');
+  if (!m2.includes('g-two') || !m2.includes('g-all')) bad.push('M-02 未挂齐专属 + 全局');
+  if (m1.includes('g-two')) bad.push('M-01 被挂了别的模块的专属门禁（挑得过宽）');
+  if (!m3.includes('g-all') || m3.includes('g-one')) bad.push('M-03 只该拿到全局门禁');
+  // 读取面里出现模块表之外的 ID ⇒ 基线比模块表旧，必须判 stale 而不是静默丢弃。
+  const drift = buildModuleGates({
+    mustRun: ['g-x'], modules, reads: { 'g-x': ['M-99'] }, srcHash: { 'g-x': 'h' },
+    hashOf: () => 'h', globalMin: 3,
+  });
+  if (!drift.stale.length) bad.push('基线里的模块 ID 不在模块表时未判 stale（会静默少跑）');
+  check(bad.length === 0, '6. 模块门禁挑选判据：指纹过期 / 新门禁 / 全局挂载 / 跨模块越界 四向可判红',
+    bad.join('；'));
+
+  // 真仓基线：不得 stale、每个模块都必须挂上全部全局门禁、且至少有一条专属。
+  const realBase = JSON.parse(readFileSync(join(ROOT, 'tools', 'fixtures', 'gate-reads-baseline.json'), 'utf8'));
+  const { MODULES } = await import('./review-units.mjs');
+  const { createHash } = await import('node:crypto');
+  const realHash = (n) => {
+    const p = join(ROOT, 'tools', `${n}.mjs`);
+    return existsSync(p) ? createHash('sha256').update(readFileSync(p)).digest('hex').slice(0, 16) : null;
+  };
+  const real = buildModuleGates({
+    mustRun, modules: MODULES, reads: realBase.reads, srcHash: realBase.srcHash,
+    hashOf: realHash, globalMin: 6,
+  });
+  const realBad = [];
+  // 基线自校验指纹：手改基线（改小某条读取面 / 删一条）不会让任何断言变红，只会让
+  // --module 悄悄少跑门禁。这里用同一份规范化重算指纹，钉住「文件没被手改」。
+  const canon = JSON.stringify({ modules: realBase.modules, srcHash: realBase.srcHash, reads: realBase.reads });
+  const bodyHash = createHash('sha256').update(canon).digest('hex').slice(0, 16);
+  if (realBase.bodyHash !== bodyHash) realBad.push('读取面基线内容指纹不符（被手改或半截写入）');
+  // --emit-reads 正在重算基线：此刻「基线过期」是重算的前置状态，不是缺陷。
+  // 这里显式声明本节未校验（而不是静默放行），覆盖类断言照常判。
+  if (process.env.TRIM_EMIT_READS) {
+    console.log('– SKIP 读取面基线新鲜度（--emit-reads 重算中，本节未校验）');
+  } else if (real.stale.length) {
+    realBad.push(`基线过期：${real.stale.slice(0, 4).join('、')}`);
+  }
+  if (real.global.length === 0) realBad.push('全局门禁集合为空（挑空即等于关掉守卫）');
+  for (const m of MODULES) {
+    const list = real.byModule.get(m.id) ?? [];
+    if (list.length <= real.global.length) realBad.push(`${m.id} 没有任何专属门禁（只挂了全局，等于没按模块分）`);
+    if (real.global.some((g) => !list.includes(g))) realBad.push(`${m.id} 漏挂全局门禁`);
+  }
+  check(realBad.length === 0,
+    `6b. 真仓读取面基线：${MODULES.length} 模块全部挂齐全局 + 专属，且无过期条目`,
+    realBad.slice(0, 4).join('；'));
+}
 
 if (fail > 0) {
   console.error('check-positive-controls: 存在缺口');

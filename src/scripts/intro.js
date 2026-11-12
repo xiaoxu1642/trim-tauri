@@ -15,7 +15,8 @@
     contextmenu: '右键管理',
     memoryclean: '内存清理',
     maintenance: '系统维护',
-    residue: '应用卸载残留'
+    residue: '应用卸载残留',
+    uninstallapp: '软件卸载·应用详情'
   };
 
   function escapeHtml(text) { return window.ds.esc(text); }
@@ -189,6 +190,27 @@
 
   const KIND_TEXT = { reg_key: '注册表项', reg_value: '注册表值', folder: '目录', file: '文件', shortcut: '快捷方式' };
 
+  // 软件卸载页「应用详情」：按显示名关键字匹配（长关键字优先），与 startup.byName 同一套
+  // 命中口径。为什么按关键字而不是精确名：卸载列表里的显示名带版本号与语言后缀
+  // （`7-Zip 26.04 (x64)`、`WPS Office (12.1.0.29670)`），精确名匹配几乎必然落空。
+  let uninstallKeys = null;
+  function getUninstallApp(item) {
+    const cfg = scopeConfig('uninstallapp');
+    const byName = cfg.byName || {};
+    const name = String((item && item.name) || '').toLowerCase();
+    if (name) {
+      if (!uninstallKeys) {
+        uninstallKeys = Object.keys(byName).sort((a, b) => b.length - a.length);
+      }
+      for (const key of uninstallKeys) {
+        if (name.includes(String(key).toLowerCase())) {
+          return { text: byName[key], level: 'name', label: '本应用简介' };
+        }
+      }
+    }
+    return { text: cfg.default || '', level: 'default', label: '通用说明' };
+  }
+
   function getLocal(scope, item) {
     if (scope === 'optimizer') return getOptimizer(item);
     if (scope === 'startup') return getStartup(item);
@@ -196,6 +218,8 @@
     // 必须显式列出 residue：这里原本只有三条分支 + 落到 getContextmenu 的兜底，
     // 新 scope 不加分支的话不会报错，而是**静默拿右键管理的简介**去解释一个服务键。
     if (scope === 'residue') return getResidue(item);
+    // 同理显式列出 uninstallapp：漏了会静默拿「右键管理」的简介去解释一个已安装应用。
+    if (scope === 'uninstallapp') return getUninstallApp(item);
     return getContextmenu(item);
   }
 
@@ -393,5 +417,5 @@
     manageBtn.addEventListener('click', () => openModelsWindow());
   }
 
-  window.intro = { load, getLocal, getOptimizer, getOptimizerTips, getStartup, getContextmenu, getMemoryclean, mountIntroPanel, currentModelName, SCOPE_LABEL };
+  window.intro = { load, getLocal, getOptimizer, getOptimizerTips, getStartup, getContextmenu, getMemoryclean, getUninstallApp, mountIntroPanel, currentModelName, SCOPE_LABEL };
 })();

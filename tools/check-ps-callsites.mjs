@@ -66,8 +66,8 @@ const PS_CALL_SITES = [
   },
   {
     file: 'src-tauri/src/commands/uninstall/appx.rs',
-    anchor: 'fn enum_appx_packages | let out = crate::pwsh::run_inbox_script(script, APPX_ENUM_TIMEOUT, None)',
-    reason: 'Appx 枚举（Get-AppxPackage）。R0 前是无超时的 quiet_cmd(...).output()',
+    anchor: 'fn enum_appx_packages_counted | let out = crate::pwsh::run_inbox_script(script, APPX_ENUM_TIMEOUT, None)',
+    reason: 'Appx 枚举（Get-AppxPackage）。R0 前是无超时的 quiet_cmd(...).output()；P3-07 拆分后入口改名为 enum_appx_packages_counted，超时口径不变',
     owner: 'commands/uninstall/appx.rs',
     timeout: 120,
   },
@@ -374,11 +374,11 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/commands/uninstall/residue.rs', anchor: '&["export", &export_path, &file_str, "/y"]', reason: '残留 reg_key 删除前整键备份（B2-3：file_str 由 backup_export_path 自检后返回，故取引用）' },
   { file: 'src-tauri/src/commands/uninstall/residue.rs', anchor: '&["export", key_part, &file_str, "/y"]', reason: '残留 reg_value 删值前父键备份（B2-3：同上，导出前自检）' },
   // 顽固软件治理的 schtasks 三点（v5 M-1）：备份不判成败就无条件 /Delete 是"删了且没凭据"，
-  // 裸 .output() 又会让挂死的 schtasks 永久锁住这条 IPC。超时复用 REG_EXPORT_TIMEOUT（同为
-  // 备份类短命令：平时毫秒级，15s 已是宽限上界）。
-  { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Query", "/TN", task, "/NH"],', reason: '顽固软件治理：判任务是否存在' },
-  { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Query", "/TN", task, "/XML"],', reason: '顽固软件治理：删任务前导出 XML（唯一还原凭据）' },
-  { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Delete", "/TN", task, "/F"],', reason: '顽固软件治理：删除计划任务' },
+  // 裸 .output() 又会让挂死的 schtasks 永久锁住这条 IPC。超时对齐启动项域同类 schtasks 调用，
+  // 统一用 SCHTASKS_TIMEOUT（P3-04：此前误用 REG_EXPORT_TIMEOUT 的 15s 宽限）。
+  { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Query", "/TN", task, "/NH"],', reason: '顽固软件治理：判任务是否存在', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
+  { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Query", "/TN", task, "/XML"],', reason: '顽固软件治理：删任务前导出 XML（唯一还原凭据）', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
+  { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Delete", "/TN", task, "/F"],', reason: '顽固软件治理：删除计划任务', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
   { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["export", &run_reg_path, stage_str, "/y"]', reason: '顽固软件治理：删抖音托盘 Run 值前整键备份（2026-10-06 扩链；B2-2 改导出到私有中转件）' },
   // 维护任务（v2-L4P-37/F-6）：sfc/DISM/sc，30 分钟上限
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'exe, args, MAINT_CMD_TIMEOUT', reason: '维护任务 run_cmd：sfc/DISM/sc 长耗时子进程', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },

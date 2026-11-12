@@ -197,6 +197,9 @@ check(
 //      「家族内五项的先后就是依赖序」——那条约束从未被强制，外观层晚完成一步，
 //      pathbinding 的 init 就读 window.pathbindingAppearance.load() 当场抛
 //      （真机 console：`模块 pathbinding 初始化失败`，且台账已占用、整场半初始化）。
+//   ⑤ scheduleIdleLoads 的 init 必须发生在 `await p` 之后、loads 不得被 reverse()/sort()
+//      重排（P2-17：旧判据只认 token 出现，「init 提前到 await 前 / reverse / sort」
+//      三种单行变异全绿）。
 function loadScriptViolations(jsText) {
   const out = [];
   const onerr = jsText.match(/s\.onerror\s*=\s*\(\)\s*=>\s*\{([\s\S]*?)\};/);
@@ -221,6 +224,17 @@ function loadScriptViolations(jsText) {
       out.push('scheduleIdleLoads 的 init 未走数组序（逐条挂 .then = 跟完成序，家族依赖序形同虚设）');
     } else if (!/await\s+p\b/.test(idle[1]) || /\.then\s*\([^)]*initModuleOf/.test(idle[1])) {
       out.push('scheduleIdleLoads 仍是 for + .then(init) 的完成序（T1h-M02：必须 await 串行）');
+    } else {
+      // P2-17（T1h-M01）：只认 token 出现会被三种单行变异绕过——init 提到 await 之前
+      // 会在加载结果未就绪时占台账；reverse()/sort() 会改写数组序，家族依赖序失效。
+      const awaitAt = idle[1].search(/await\s+p\b/);
+      const initCalls = [...idle[1].matchAll(/initModuleOf\s*\(\s*src\s*\)/g)].map((m) => m.index);
+      if (initCalls.length === 0 || initCalls.some((i) => i < awaitAt)) {
+        out.push('scheduleIdleLoads 的 init 出现在 await p 之前（加载结果未就绪就占台账）');
+      }
+      if (/\.\s*(reverse|sort)\s*\(/.test(idle[1])) {
+        out.push('scheduleIdleLoads 出现 reverse()/sort()（IDLE_SCRIPTS 数组序被重排，家族依赖序失效）');
+      }
     }
   }
   return out;
@@ -246,6 +260,26 @@ function loadScriptViolations(jsText) {
         ? `合规样本被判红：${goodHits.join('；')}`
         : '',
   );
+  // P2-17：三条单行变异必须判红——只认 token 的旧判据对它们全绿。
+  // 样本只改 scheduleIdleLoads，其余段落保持合规，命中数 > 0 即证明新断言能红。
+  const IDLE_MUTATIONS = {
+    'init 提前到 await 之前': POSITIVE_CONTROLS.good.replace(
+      '      const ok = await p;\n      if (ok) initModuleOf(src);',
+      '      let ok = true;\n      if (ok) initModuleOf(src);\n      ok = await p;',
+    ),
+    'loads.reverse()': POSITIVE_CONTROLS.good.replace(
+      '    for (const { src, p } of loads) {',
+      '    loads.reverse();\n    for (const { src, p } of loads) {',
+    ),
+    'loads.sort()': POSITIVE_CONTROLS.good.replace(
+      '    for (const { src, p } of loads) {',
+      '    loads.sort();\n    for (const { src, p } of loads) {',
+    ),
+  };
+  for (const [label, sample] of Object.entries(IDLE_MUTATIONS)) {
+    const hits = loadScriptViolations(sample);
+    check(hits.length > 0, `loadScript 数组序变异自检（${label} ⇒ 判红）`, hits.join('；'));
+  }
   const real = loadScriptViolations(appJs);
   check(
     real.length === 0,

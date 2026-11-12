@@ -11,6 +11,7 @@
 //   ② 两份清单（latest.json / latest-atomgit.json）的 version = conf version；
 //   ③ 两份清单的 signature 与 .sig 内容和 platforms.signature 三方一致；
 //   ④ 两份清单的 sha256 与 setup 实际 sha256 一致。
+//   ⑤ .sig 不能是零字节/纯空白（等同漏签）；两份清单必须带 platforms["windows-x86_64"]。
 //
 // 用法：node tools/check-release-artifacts.mjs
 
@@ -31,6 +32,10 @@ const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 /** 纯判据：真仓与合成样本共用同一实现。 */
 export function judgeReleaseArtifacts({ exeSha, sigText, version, manifests }) {
   const problems = [];
+  // 空 .sig 不能当成「没有对比基准」放行：零字节签名与漏签同效，
+  // requireSignedVersion=true 的客户端会直接拒更，必须在这里判红。
+  const hasSig = typeof sigText === 'string' && sigText.trim() !== '';
+  if (!hasSig) problems.push('.sig 内容为空（零字节或纯空白）——等同于漏签');
   for (const [name, m] of Object.entries(manifests)) {
     if (!m || typeof m !== 'object' || Array.isArray(m)) {
       problems.push(`${name}: 不是 JSON 对象`);
@@ -39,7 +44,7 @@ export function judgeReleaseArtifacts({ exeSha, sigText, version, manifests }) {
     if (m.version !== version) problems.push(`${name}: version=${JSON.stringify(m.version)} ≠ conf ${version}`);
     if (typeof m.signature !== 'string' || !m.signature) {
       problems.push(`${name}: 缺 signature`);
-    } else if (sigText && m.signature !== sigText) {
+    } else if (hasSig && m.signature !== sigText) {
       const trimmed = m.signature.trim();
       if (trimmed === sigText.trim()) {
         problems.push(`${name}: 签名含空白漂移（清单 signature 与 .sig 的原文不一致）`);
@@ -53,7 +58,10 @@ export function judgeReleaseArtifacts({ exeSha, sigText, version, manifests }) {
       problems.push(`${name}: sha256 与 setup 实际哈希不一致`);
     }
     const p = m.platforms?.['windows-x86_64'];
-    if (p) {
+    if (!p) {
+      // 平台位缺席时客户端按 platforms 取签名会失败；「没写」不等于「一致」
+      problems.push(`${name}: 缺 platforms["windows-x86_64"]`);
+    } else {
       if (p.signature !== m.signature) problems.push(`${name}: platforms.signature 与顶层不一致`);
       if (p.sha256 !== m.sha256) problems.push(`${name}: platforms.sha256 与顶层不一致`);
     }
@@ -61,7 +69,7 @@ export function judgeReleaseArtifacts({ exeSha, sigText, version, manifests }) {
   return problems;
 }
 
-// ---- 判定器自检：正确样本放行；签名字节不符 / 哈希不符 / 版本漂移各自判红 ----
+// ---- 判定器自检：正确样本放行；空签名 / 缺平台位 / 签名字节不符 / 哈希不符 / 版本漂移各自判红 ----
 {
   const exeSha = 'a'.repeat(64);
   const sig = 'SIG';
@@ -71,11 +79,13 @@ export function judgeReleaseArtifacts({ exeSha, sigText, version, manifests }) {
     version: '1.2.3',
     manifests: {
       'latest.json': { version: '1.2.3', signature: sig, sha256: exeSha, platforms: { 'windows-x86_64': { signature: sig, sha256: exeSha } } },
-      'latest-atomgit.json': { version: '1.2.3', signature: sig, sha256: exeSha },
+      'latest-atomgit.json': { version: '1.2.3', signature: sig, sha256: exeSha, platforms: { 'windows-x86_64': { signature: sig, sha256: exeSha } } },
     },
   };
   const cases = [
     ['正确样本放行', good, 0],
+    ['空 .sig 判红', { ...good, sigText: '' }, 1],
+    ['缺 platforms 判红', { ...good, manifests: { 'latest.json': { ...good.manifests['latest.json'], platforms: undefined } } }, 1],
     ['签名字节空白漂移', {
       ...good,
       manifests: {

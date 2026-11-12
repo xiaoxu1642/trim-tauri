@@ -199,6 +199,12 @@ fn prune_manifests(dir: &Path) {
         (None, Some(_)) => Ordering::Greater,
         (None, None) => a.cmp(b),
     });
+    // R6b-M03-01：回收站失败必须计数并留痕。旧写法 `let _ =` 把失败整个丢掉，
+    // 于是「裁剪没裁掉」与「裁掉了」在回执上同形；删除清单是误删追溯的唯一凭据，
+    // 超上限后还静默失败会让凭据无界增长且无人知晓。口径同 `restore_pack::prune`
+    // 与 `log::prune_old_logs`（P2-30）。
+    let mut removed = 0usize;
+    let mut failed = 0usize;
     while files.len() > MANIFEST_KEEP {
         let oldest = files.remove(0);
         let target = dir.join(oldest);
@@ -208,8 +214,23 @@ fn prune_manifests(dir: &Path) {
             .map(|m| crate::engine::protect::is_reparse(&m))
             .unwrap_or(true);
         if !reparse {
-            let _ = trim_finder::scan::recycle::send_to_trash_os(target.as_os_str());
+            match trim_finder::scan::recycle::send_to_trash_os(target.as_os_str()) {
+                Ok(()) => removed += 1,
+                Err(e) => {
+                    failed += 1;
+                    log::write_log(
+                        "warn",
+                        &format!("删除清单裁剪失败 {}: {e}", target.display()),
+                    );
+                }
+            }
         }
+    }
+    if removed > 0 || failed > 0 {
+        log::write_log(
+            "info",
+            &format!("删除清单裁剪：移入回收站 {removed} 个批次，失败 {failed} 个批次"),
+        );
     }
 }
 

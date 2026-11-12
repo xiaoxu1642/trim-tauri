@@ -929,6 +929,9 @@
     (NARA_PANEL.sections || []).forEach(s => (s.tasks || []).forEach(id => tasksChecked.add(id)));
     naraPanelState = {
       sections, checked, tasksChecked, taskMap: new Map(),
+      // 维护任务清单三态：'loading' 读取中；'failed' 读取失败（原因见 tasksMsg）；'ready' 已就位
+      tasksState: 'loading',
+      tasksMsg: '',
       // BCD 体检：null=未出结果；'failed'=读不到（原因见 bcdMsg，权限只是其中一种）；
       // Map<rowId,状态行>。失败文案不得写死成「需要管理员」——中文 Windows 上曾把
       // bcdedit 的 GBK 输出误判成解码失败，却报成权限不足。
@@ -1027,9 +1030,14 @@
     const st = naraPanelState;
     const t = st.taskMap.get(id);
     const on = st.tasksChecked.has(id);
+    // 失败不能继续装「加载中」，否则永远等不到结果；就绪但缺项也如实说明，别让空清单冒充加载
     const side = t
       ? `${t.admin ? naraBadge('accent', '需管理员') : ''}${naraBadge('neutral', '维护任务')}`
-      : `<span class="nara-muted" style="padding:0">任务清单加载中…</span>`;
+      : st.tasksState === 'failed'
+        ? naraBadge('warn', '清单加载失败', st.tasksMsg || '未取到维护任务清单')
+        : st.tasksState === 'ready'
+          ? `<span class="nara-muted" style="padding:0">${st.taskMap.size ? '任务清单中无此项' : '任务清单为空'}</span>`
+          : `<span class="nara-muted" style="padding:0">任务清单加载中…</span>`;
     return `<div class="nara-checkrow" data-nara-task="${escapeHtml(id)}">
       <span class="checkbox${on ? ' checked' : ''}" role="checkbox" tabindex="0"
             aria-label="选择 ${window.ds.escAttr(t?.title || id)}"
@@ -1129,12 +1137,26 @@
 
   // 维护任务清单（只取面板里引用的 id）
   async function loadNaraTasks() {
+    const st = naraPanelState;
+    if (!st) return;
+    let resp = null;
     try {
-      const resp = await window.api?.maintenance?.tasks?.();
-      if (!resp?.success || !Array.isArray(resp.data)) return;
-      resp.data.forEach(t => naraPanelState.taskMap.set(t.id, t));
+      resp = await window.api?.maintenance?.tasks?.();
+    } catch (e) {
+      resp = null;
+    }
+    // 等待期间面板可能已关闭并重开：结果只回填发起请求的那一份状态
+    if (naraPanelState !== st) return;
+    if (!resp?.success || !Array.isArray(resp.data)) {
+      st.tasksState = 'failed';
+      st.tasksMsg = (resp && resp.message) || '未取到维护任务清单';
       refreshNaraPanel();
-    } catch (e) { /* 加载失败保留占位文案 */ }
+      return;
+    }
+    resp.data.forEach(t => st.taskMap.set(t.id, t));
+    st.tasksState = 'ready';
+    st.tasksMsg = '';
+    refreshNaraPanel();
   }
 
   // BCD 体检 → 回填每行徽章；只有 executable 行可勾选并默认预选。
@@ -1199,7 +1221,12 @@
     const tasksMissing = (NARA_PANEL.sections || []).flatMap(s => s.tasks || [])
       .filter(id => st.tasksChecked.has(id) && !st.taskMap.has(id));
     if (tasksMissing.length) {
-      window.app?.toast('warning', '维护任务清单还在加载，请稍后再执行');
+      const why = st.tasksState === 'failed'
+        ? '维护任务清单加载失败，请关闭面板重开后重试'
+        : st.tasksState === 'ready'
+          ? '维护任务清单缺少部分条目，暂不能执行'
+          : '维护任务清单还在加载，请稍后再执行';
+      window.app?.toast('warning', why);
       return;
     }
     if (!optEntries.length && !taskEntries.length) {

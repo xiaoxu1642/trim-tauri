@@ -842,7 +842,7 @@
 
   function bridgeResized(callback) {
     resizeSubscribers.add(callback);
-    return onTauriWindowEvent('tauri://resize', function (size) {
+    var off = onTauriWindowEvent('tauri://resize', function (size) {
       // Tauri 给物理像素，Electron 发的是 getContentBounds 逻辑像素
       var scale = window.devicePixelRatio || 1;
       var bounds = {
@@ -855,6 +855,11 @@
         Promise.resolve().then(flushResized);
       }
     });
+    // 退订必须同时摘除 Set 成员：只解绑 tauri://resize 时，flushResized 仍会向已退订回调派发，闭包也无法回收
+    return function () {
+      resizeSubscribers.delete(callback);
+      off();
+    };
   }
 
   // 与 onEvent 相同，但语义上标记为 tauri:// 核心窗口事件

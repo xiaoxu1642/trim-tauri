@@ -216,9 +216,22 @@ export function withProvenance(entry, body) {  // 源坐标一律走 relSource()
   return `${header}\n${body}`;
 }
 
-/** 剥离来源标记块，返回正文（供门禁比对） */
+/**
+ * 剥离来源标记块，返回正文（供门禁比对）。
+ *
+ * 必须一并吃掉 `withProvenance` 在头与正文之间插入的那**一个**换行，否则正文永远
+ * 比 JS 运行时值多一个前导 `\n`：`check-ps-extraction` 的文本层对拍恒判红，而
+ * `sync-ps-from-js` 因两侧同多一个换行而报「已同步」——重生成也救不回来（P2-01
+ * 修好判据后暴露的存量漂移即此形态）。只吃一个 `\r?\n`，正文自身的首尾空白原样保留，
+ * 漂移仍然判红。
+ */
 export function stripProvenance(text) {
   const idx = text.indexOf(PROVENANCE_END);
   if (idx < 0) return { body: text, provenance: null };
-  return { body: text.slice(idx + PROVENANCE_END.length), provenance: text.slice(0, idx + PROVENANCE_END.length) };
+  const end = idx + PROVENANCE_END.length;
+  const sep = /^\r?\n/.exec(text.slice(end));
+  return {
+    body: sep ? text.slice(end + sep[0].length) : text.slice(end),
+    provenance: text.slice(0, end),
+  };
 }

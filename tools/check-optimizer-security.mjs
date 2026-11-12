@@ -97,13 +97,30 @@ function securityServiceDisableHit(step, text) {
     || /^disabled$/i.test(String(step.startType ?? ''));
   if (!disable) return false;
   const names = new Set();
+  // T1f-M01：只从「写入型构造」采集服务名，三种等价写法都要覆盖 ——
+  // `-Name`、位置参数、`Get-Service X | Set-Service` 管道。
+  // 不能再把文本里所有引号串当服务名：`Get-Service "WinDefend"` 只是查询条件，
+  // 与另一个普通服务的 `-StartupType Disabled` 同处一段文本时会拼出误报。
   for (const m of text.matchAll(/\bsc(?:\.exe)?\s+config\s+(?:"([^"]+)"|([^\s]+))/gi)) {
     names.add((m[1] || m[2] || '').replace(/^["']|["']$/g, ''));
   }
-  for (const m of text.matchAll(/Set-Service[^\n]*?-Name\s+["']?([\w.$-]+)/gi)) names.add(m[1]);
+  for (const m of text.matchAll(/\bSet-Service[^\n]*?-Name\s+(?:"([^"]+)"|'([^']+)'|([\w.$-]+))/gi)) {
+    names.add(m[1] || m[2] || m[3]);
+  }
+  // 位置参数：`Set-Service WinDefend -StartupType Disabled`（首参不能是另一个开关）。
+  for (const m of text.matchAll(/\bSet-Service\s+(?!-)(?:"([^"]+)"|'([^']+)'|([\w.$-]+))/gi)) {
+    names.add(m[1] || m[2] || m[3]);
+  }
+  // 管道：只认「取服务 → 交给 Set-Service」这一种形态。
+  for (const m of text.matchAll(/\bGet-Service\s+(?:-Name\s+)?(?:"([^"]+)"|'([^']+)'|([\w.$-]+))[^\n|]*\|\s*Set-Service\b/gi)) {
+    names.add(m[1] || m[2] || m[3]);
+  }
   for (const m of text.matchAll(/\\Services\\([^\\\]"'\s]+)/gi)) names.add(m[1]);
-  // 变量形态：`$services = @("DiagTrack","Sense")` + 循环里统一禁
-  for (const m of text.matchAll(/["']([^"']+)["']/g)) names.add(m[1]);
+  // 变量形态：`$services = @("DiagTrack","Sense")` + 循环里统一禁；只解析显式数组载体，
+  // 元素必须是引号串（真实服务名形态）。
+  for (const m of text.matchAll(/\$\w+\s*=\s*@\(([^)]*)\)/g)) {
+    for (const s of m[1].matchAll(/["']([^"']+)["']/g)) names.add(s[1]);
+  }
   if (typeof step.service === 'string') names.add(step.service);
   return [...names].some((n) => SECURITY_SERVICES.test(String(n).replace(/^["']|["']$/g, '')));
 }
@@ -235,6 +252,12 @@ function whyOffTopic(meta) {
     { id: 'sec-svc-disable', hit: () => fake('HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\WinDefend', '"Start"=dword:00000004'), miss: () => fake('HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\WinDefend', '"Start"=dword:00000002') },
     { id: 'sec-svc-disable', hit: () => fakeCmd('sc.exe config $s start= disabled\n$svc = @("DiagTrack","Sense")'), miss: () => fakeCmd('sc.exe config $s start= disabled\n$svc = @("DiagTrack","WpnService")') },
     { id: 'sec-svc-disable', hit: () => fakeCmd('Set-Service -Name Sense -StartupType Disabled'), miss: () => fakeCmd('Set-Service -Name Sense -StartupType Manual') },
+    // T1f-M01：位置参数与管道是 `Set-Service -Name` 的等价写法，必须同判。
+    { id: 'sec-svc-disable', hit: () => fakeCmd('Set-Service WinDefend -StartupType Disabled'), miss: () => fakeCmd('Set-Service WinDefend -StartupType Manual') },
+    { id: 'sec-svc-disable', hit: () => fakeCmd('Get-Service Sense | Set-Service -StartupType Disabled'), miss: () => fakeCmd('Get-Service Sense | Set-Service -StartupType Manual') },
+    // T1f-M01：查询条件里的安全服务名不是写入目标 —— 禁用普通服务时不得误报。
+    { id: 'sec-svc-disable', hit: () => fakeCmd('Set-Service -Name Sense -StartupType Disabled'), miss: () => fakeCmd('Set-Service -Name DiagTrack -StartupType Disabled\nGet-Service "WinDefend"') },
+    { id: 'sec-svc-disable', hit: () => fakeCmd('Set-Service WinDefend -StartupType Disabled'), miss: () => fakeCmd('Get-Service -Name "Sense" -ErrorAction SilentlyContinue\nSet-Service -Name DiagTrack -StartupType Disabled') },
     { id: 'sec-svc-disable', hit: () => fakeCmd('New-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\WinDefend" -Name Start -Value 4'), miss: () => fakeCmd('Stop-Service -Name WinDefend') },
     { id: 'sec-svc-disable', hit: () => fakeCmd('Set-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Sense" -Name Start -Value 4'), miss: () => fakeCmd('Set-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Sense" -Name Start -Value 2') },
     { id: 'sec-svc-disable', hit: () => fakeCmd('reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\wscsvc" /v Start /d 4 /f'), miss: () => fakeCmd('reg add "HKLM\\SYSTEM\\CurrentControlSet\\Services\\wscsvc" /v Start /d 2 /f') },

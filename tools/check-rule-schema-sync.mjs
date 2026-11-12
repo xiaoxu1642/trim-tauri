@@ -24,6 +24,7 @@ const SCHEMA_FILE = join(ROOT, 'tools', 'rule-schema.json');
 const RUST_SCHEMA = join(ROOT, 'src-tauri', 'src', 'engine', 'rule_schema.rs');
 const RULES_RS = join(ROOT, 'src-tauri', 'src', 'commands', 'cleanup', 'rules.rs');
 const RESIDUE_RS = join(ROOT, 'src-tauri', 'src', 'commands', 'uninstall', 'residue_update.rs');
+const NATIVE_SCAN_RS = join(ROOT, 'native-scanner', 'src', 'cleanup_scan.rs');
 
 const INCLUDE_PIN = 'include_str!("../../../tools/rule-schema.json")';
 
@@ -106,6 +107,74 @@ function tokenSeparationViolations(schema) {
     bad.push('两域 allowed 出现包含关系（一域被另一域吞并）——「刻意两份」的红线被合并');
   }
   return { bad, perDomain, inter: inter.length };
+}
+
+// N1a-M12：原生扫描侧（native-scanner）直接读 `itemFields` 的键，没有东西守着——字段改名
+// 后 `rule_age_guard_of` 静默拿到 `None` ⇒ 时效护栏整条消失（方向多删）。本段把「原生消费键
+// ⇄ `itemFields`」对拍起来：① 原生生产段必须出现字面量（改名即从 `itemFields` 抽出的常量值
+// 也要落字面量）；② 反向断言原生实际读的键都在 `itemFields` 内（第二真源回潮即红）。
+// 仅核对「扫描侧确实消费的字段」（避免把组级 keys 误判红）：`items`/`subGroups` 是组级、不在
+// 本清单内，也不在 `itemFields`，属正常差异。
+const NATIVE_CONSUMED_FIELDS = [
+  'id', 'name', 'risk', 'pathPs', 'fileKeys', 'regKeys', 'excludePaths',
+  'globCandidatesPs', 'candidatesPs', 'detect', 'special', 'ageAxis',
+  'minAgeDays', 'minAgeHours', 'requiredStoppedProcesses', 'restartProcesses',
+];
+// 经变量间接读的字段（当前仅 minAge 两个）：其字面量**不**出现在 `.get("...")` 里，
+// 而是由 `KEY_MIN_AGE_*` 常量值提供。本集合用于把「变量读字段」从 ② 的字面量扫描豁免
+// 掉，并改为 ① 中对「常量声明值」做对拍（见 `nativeVsItemFieldsProblems`）。
+const NATIVE_VARIABLE_READ = new Set(['minAgeHours', 'minAgeDays']);
+// 变量读字段 → 其模块级常量名（N1a-M12 落地后的真名），门禁从这里反查常量声明值。
+const NATIVE_VARIABLE_CONST = { minAgeHours: 'KEY_MIN_AGE_HOURS', minAgeDays: 'KEY_MIN_AGE_DAYS' };
+// 原生侧确实读取、但属「组级 / 子对象」键（不在 `itemFields` 顶层，正常差异）：
+// 组树 `groups`/`subGroups`/`items`、`fileKeys` 子字段 `path`/`pattern`/`recurse`、
+// `regKeys` 子字段 `path`/`value`、容器键 `files`/`protect`、特殊项 `type`。
+// 反向断言只查「规则条目字段」，这些结构键放行。
+const NATIVE_STRUCTURAL_KEYS = new Set([
+  'groups', 'subGroups', 'items', 'files', 'protect', 'type',
+  'path', 'pattern', 'recurse', 'value',
+]);
+function nativeVsItemFieldsProblems(nativeText, schema) {
+  const bad = [];
+  const itemFields = schema.cleanup?.itemFields;
+  if (!Array.isArray(itemFields) || itemFields.length === 0) {
+    bad.push('cleanup.itemFields 缺失或为空（原生消费键对拍失去基准）');
+    return { bad, consumed: 0, missing: 0 };
+  }
+  // ① 直接字面量消费的字段：生产段必须出现带引号字面量（改名即失护栏，门禁应红）。
+  for (const f of NATIVE_CONSUMED_FIELDS) {
+    if (NATIVE_VARIABLE_READ.has(f)) continue;
+    if (!nativeText.includes(`"${f}"`)) {
+      bad.push(`native-scanner 生产段未出现 itemFields 消费键「${f}」字面量（改名会静默失护栏，门禁应红）`);
+    }
+  }
+  // ①' 经变量读的字段（minAge 两键）：从 `KEY_MIN_AGE_* = "值"` 常量声明提取值，值必须在
+  //    `itemFields` 内，且常量声明必须存在——这正是 N1a-M12 把字段名提成常量要守的口：
+  //    改了 schema 的字段名却没同步常量值，门禁红；常量被删，门禁红。
+  for (const f of NATIVE_VARIABLE_READ) {
+    const constName = NATIVE_VARIABLE_CONST[f];
+    const m = nativeText.match(new RegExp(`pub const ${constName}: &str = "([^"]*)"`));
+    if (!m) {
+      bad.push(`native-scanner 缺少变量读字段「${f}」的常量声明 ${constName}（N1a-M12 落地项，门禁应红）`);
+      continue;
+    }
+    if (!itemFields.includes(m[1])) {
+      bad.push(`变量读字段「${f}」的常量值「${m[1]}」不在 cleanup.itemFields（schema 改名未同步常量，门禁应红）`);
+    }
+  }
+  // ② 反向：原生以字面量读取的「规则字段键」必须都在 itemFields（第二真源回潮即红）。
+  //    只扫 `.get("...")` 与 `num("...")` 的实参，覆盖大多数读取点；变量读字段与结构键豁免。
+  const readKeys = new Set([
+    ...[...nativeText.matchAll(/\.get\(\s*"([^"]+)"\s*\)/g)].map((m) => m[1]),
+    ...[...nativeText.matchAll(/num\(\s*"([^"]+)"\s*\)/g)].map((m) => m[1]),
+  ]);
+  for (const k of readKeys) {
+    if (NATIVE_STRUCTURAL_KEYS.has(k) || NATIVE_VARIABLE_READ.has(k)) continue;
+    if (!itemFields.includes(k)) {
+      bad.push(`native-scanner 读取的字段「${k}」不在 cleanup.itemFields（第二真源回潮，应红）`);
+    }
+  }
+  return { bad, consumed: NATIVE_CONSUMED_FIELDS.length, missing: 0 };
 }
 
 // T1g-M01：schema 里的 `matchGroupsMinNonEmpty` 是门禁专用键，运行期真源仍是
@@ -248,6 +317,50 @@ const POSITIVE_CONTROLS = [
   }],
 ];
 
+// 正向对照：原生消费键对拍器（N1a-M12）——改动前必须能判红，才允许扫真仓。
+// 正常样本覆盖全部 16 个被原生消费的 itemFields 键字面量（含经变量读的 minAge 两键），
+// 这样 ①「消费键字面量出现」全绿；②「读取键都在 itemFields」全绿；只有破坏样本才红。
+const NATIVE_CONSUMED_LITERALS = [
+  'id', 'name', 'risk', 'pathPs', 'fileKeys', 'regKeys', 'excludePaths',
+  'globCandidatesPs', 'candidatesPs', 'detect', 'special', 'ageAxis',
+  'minAgeHours', 'minAgeDays', 'requiredStoppedProcesses', 'restartProcesses',
+];
+const NATIVE_CLEAN = (() => {
+  const head = 'fn rule_age_guard_of(rule: &Json, _g: Option<u64>) -> AgeGuard {\n';
+  // 直接字面量消费的字段
+  const direct = NATIVE_CONSUMED_LITERALS.filter((k) => k !== 'minAgeHours' && k !== 'minAgeDays')
+    .map((k) => `    let _ = rule.get("${k}");`).join('\n');
+  // minAge 两键走常量声明 + 变量读（N1a-M12 落地形态）
+  const consts = [
+    '    pub const KEY_MIN_AGE_HOURS: &str = "minAgeHours";',
+    '    pub const KEY_MIN_AGE_DAYS: &str = "minAgeDays";',
+    '    let _ = rule.get(KEY_MIN_AGE_HOURS);',
+    '    let _ = rule.get(KEY_MIN_AGE_DAYS);',
+  ].join('\n');
+  return `${head}${direct}\n${consts}\n}\n#[cfg(test)]\nmod tests {}`;
+})();
+POSITIVE_CONTROLS.push([
+  '原生消费键改名应判红（N1a-M12）',
+  () => {
+  const schema = {
+    cleanup: {
+      itemFields: [
+        'id', 'name', 'risk', 'pathPs', 'fileKeys', 'regKeys', 'excludePaths',
+        'globCandidatesPs', 'candidatesPs', 'detect', 'special', 'ageAxis',
+        'minAgeHours', 'minAgeDays', 'requiredStoppedProcesses', 'restartProcesses',
+      ],
+    },
+    residue: {}, crossTrack: {},
+  };
+    // 正常：字面量与常量值都在 itemFields ⇒ 无 bad
+    const ok = nativeVsItemFieldsProblems(NATIVE_CLEAN, schema).bad;
+    // 破坏：把常量值改成 schema 里不存在的「minAge」（模拟 schema 改名没同步常量）⇒ 应判红
+    const drift = NATIVE_CLEAN.replaceAll('minAgeHours', 'minAge').replaceAll('minAgeDays', 'minAge');
+    const bad = nativeVsItemFieldsProblems(drift, schema).bad;
+    return ok.length === 0 && bad.some((x) => x.includes('minAge')) ? '' : '原生消费键对拍器失真（正常样本未绿或破坏样本未红）';
+  },
+]);
+
 // ---------- 反向：表里的叶子键必须有消费者（A6-L03 / P2-C，2026-10-26） ----------
 // 「每个叶子都必须被 req_* 查询」过宽：结构表 / 类型表 / 允许集各有消费方式。
 // 判据 = 直接查询集（四类 query + cross） ∪ 书面 scope 登记；两边都没有 ⇒ 红。
@@ -332,6 +445,7 @@ console.log('\n=== 真仓对拍 ===');
 const rustText = readFileSync(RUST_SCHEMA, 'utf8');
 const rulesText = readFileSync(RULES_RS, 'utf8');
 const residueText = readFileSync(RESIDUE_RS, 'utf8');
+const nativeText = readFileSync(NATIVE_SCAN_RS, 'utf8');
 let schema;
 try {
   schema = JSON.parse(readFileSync(SCHEMA_FILE, 'utf8'));
@@ -373,6 +487,13 @@ check(
   rev.leaves.length >= 50 && rev.missing.length === 0 && rev.stale.length === 0,
   `5. 反向：表里叶子键均有消费者（叶子 ${rev.leaves.length} / 直接查询 ${rev.direct.size} / 书面 scope ${Object.keys(TOOL_CONSUMED_SCOPE).length}）`,
   `无消费者 ${rev.missing.join('、') || '无'}；过期 scope ${rev.stale.join('、') || '无'}`,
+);
+// N1a-M12：原生扫描侧消费键 ⇄ `cleanup.itemFields` 对拍（改名 ⇏ 静默失护栏）。
+const native = nativeVsItemFieldsProblems(nativeText, schema);
+check(
+  native.bad.length === 0,
+  `6. 原生消费键 ⇄ itemFields（消费 ${native.consumed} 项 / 经变量读 ${NATIVE_VARIABLE_READ.size} 项）`,
+  native.bad.join('；'),
 );
 
 if (fail > 0) {

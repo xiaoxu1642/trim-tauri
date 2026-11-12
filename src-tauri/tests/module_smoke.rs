@@ -777,58 +777,126 @@ fn peripheral_restore_requires_explicit_high_risk_field() {
     }
 }
 
-/// X1-M01（v7.2 C08）：`optimizer_run` 的高危确认闸此前零回归网。
+/// X1-N01（v2 P1-01）：快速组负例不得让被测动作真实发生。
 ///
-/// 判据结构（`preflight_reason`，apply.rs）：**is_admin 先于确认闸** ⇒ 两态各有一条
-/// 能红的断言腿，不存在「某权限态静默跳过计 passed」（照 X1-K01 的两态腿模式）：
-/// - 提权态：is_admin 已过，缺确认必须落在 `needConfirm: true` —— 这条腿直接守着
-///   确认闸本身，闸被摘掉/改松 ⇒ 红；
-/// - 非提权态：必须落在 `needAdmin: true` —— 守着「is_admin 先行」的判据顺序，
-///   顺序若被改成确认闸先行，本态会看到 needConfirm ⇒ 红。
-/// 零副作用：两种拒绝都在执行链之前早退，不组装步骤、不落盘。
+/// 旧形态直接调 `optimizer_run` 且只传 `confirmedHighRisk:false`，看起来是负例，但失败
+/// 模式是**真实系统变更**：确认闸一旦被摘掉/改松，本机会真的执行目录里第一个 high 项
+/// （当前是关 UAC），然后才在 `needConfirm` 断言处判红——测试自己成了事故现场。
+///
+/// 现在改打只读同源入口 `optimizer_batch_preflight`：它与 `optimizer_run` 共用
+/// `preflight_reason`，只读 `is_admin` 与数据层 steps，不改任何系统状态；判据被摘掉
+/// 只会让回执形状变化，不会落盘。
+///
+/// 两态腿（`preflight_reason` 里 **is_admin 先于确认闸**）：
+/// - 提权态：高危 id 必须进 `needsConfirm`（同时仍在 `runnable`，批量入口靠它弹红色
+///   二次确认）——闸被摘掉时 `needsConfirm` 为空 ⇒ 红；
+/// - 非提权态：必须落 `rejected[].reason == "需要管理员权限"`，且 `needsConfirm` 为空
+///   ——判据顺序若被改成确认闸先行，本态会看到 `needsConfirm` ⇒ 红。
+///
+/// 另加一条**方向对照**（仅提权态）：`restore:true` 时确认闸按设计豁免（审查 2026-09-27
+/// H1），`needsConfirm` 必须为空。它证明上面的 `needsConfirm` 不是恒真/恒假的常量；
+/// 若有人把方向豁免写丢，本腿会红。还原预检同样只读。
+///
 /// 高危 id **动态取**（目录里第一个 `risk=="high"`）：写死 id 会在目录退役时假红，
 /// 而目录本身是 `include_str!` 进二进制的，退役即编译期事实。
 #[test]
-fn optimizer_run_high_risk_confirm_gate_has_two_state_legs() {
+fn optimizer_batch_preflight_high_risk_confirm_gate_has_two_state_legs() {
     let w = main_window();
     let list = invoke(&w, "optimizer_list", json!({}));
     let rows = list["data"]
         .as_array()
         .expect("optimizer_list 回执 data 应为数组（渲染层直接 .map）");
-    let high_id = rows
+    let high_row = rows
         .iter()
         .find(|r| r.get("risk").and_then(|v| v.as_str()) == Some("high"))
-        .and_then(|r| r.get("id").and_then(|v| v.as_str()))
         .expect("目录里应存在 risk==high 的优化项（高危确认闸的服役对象）");
-    let res = invoke(
-        &w,
-        "optimizer_run",
-        json!({ "optionId": high_id, "params": { "confirmedHighRisk": false } }),
-    );
-    assert_eq!(res["success"], json!(false), "高危项缺确认必须拒: {res}");
+    let high_id = high_row
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("高危项必须有 id")
+        .to_string();
+
+    // 正向预检：只读判定。旧用例在这里直接调 optimizer_run —— 闸一松就会真执行。
+    let res = invoke(&w, "optimizer_batch_preflight", json!({ "ids": [high_id.as_str()] }));
+    assert_eq!(res["success"], json!(true), "预检是只读判定，应报成功: {res}");
+    let needs_confirm: Vec<&str> = res["needsConfirm"]
+        .as_array()
+        .expect("needsConfirm 必须是数组（渲染层直接 .map）")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    let rejected = res["rejected"].as_array().cloned().unwrap_or_default();
+    let has_rejected = |id: &str| rejected.iter().any(|r| r["id"].as_str() == Some(id));
+
     if trim_tauri_lib::engine::sysinfo::is_admin() {
-        assert_eq!(
-            res["needConfirm"],
-            json!(true),
-            "提权态下高危缺确认应命 needConfirm（确认闸本身）: {res}"
+        let runnable = res["runnable"].as_array().cloned().unwrap_or_default();
+        assert!(
+            runnable.iter().any(|v| v.as_str() == Some(high_id.as_str())),
+            "提权态下高危项应保留在 runnable（批量入口要弹红色二次确认）: {res}"
+        );
+        assert!(
+            needs_confirm.contains(&high_id.as_str()),
+            "提权态下高危项必须进 needsConfirm（确认闸本身；闸被摘掉时这里为空）: {res}"
+        );
+        assert!(
+            !has_rejected(high_id.as_str()),
+            "高危项只能进 needsConfirm，不能同时以「需高危确认」进 rejected（前端会当硬失败）: {res}"
+        );
+        // 方向对照：还原方向确认闸按设计豁免（2026-09-27 H1）⇒ needsConfirm 必须为空。
+        // 只读：restore 预检同样不执行任何步骤。
+        // 前置：该项必须真带还原段，否则还原预检会先撞 `NoRestorePath`，这条腿就成了
+        // 「needsConfirm 为空」的空过（恒真）。目录漂移让首个高危项失去还原段时这里红。
+        assert!(
+            high_row
+                .get("restore")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false),
+            "首个高危项必须带还原段，否则方向对照腿空过: {high_row}"
+        );
+        let restore = invoke(
+            &w,
+            "optimizer_batch_preflight",
+            json!({ "ids": [high_id.as_str()], "restore": true }),
+        );
+        assert_eq!(restore["success"], json!(true), "还原预检也应成功: {restore}");
+        let restore_confirm = restore["needsConfirm"].as_array().cloned().unwrap_or_default();
+        assert!(
+            !restore_confirm.iter().any(|v| v.as_str() == Some(high_id.as_str())),
+            "还原方向不应再要求高危确认（方向豁免写丢会红）: {restore}"
         );
     } else {
+        assert!(
+            needs_confirm.is_empty(),
+            "非提权态 is_admin 先行，不得进入确认闸分支（顺序被改会红）: {res}"
+        );
+        let hit = rejected
+            .iter()
+            .find(|r| r["id"].as_str() == Some(high_id.as_str()))
+            .unwrap_or_else(|| panic!("非提权态高危项必须进 rejected: {res}"));
         assert_eq!(
-            res["needAdmin"],
-            json!(true),
-            "非提权态下 is_admin 先行，应命 needAdmin（判据顺序）: {res}"
+            hit["reason"],
+            json!("需要管理员权限"),
+            "非提权态拒因必须来自同源 preflight_reason: {res}"
         );
     }
 }
 
 /// X1-M01（v7.2 C08）：syspanel 三条写侧出口的 `confirmedHighRisk` 闸此前零回归网。
 ///
-/// 与 optimizer_run 不同，这三条的确认闸是**命令体第一道**（guard 之后、任何系统
+/// 与 optimizer_run 不同，这类命令的确认闸是**命令体第一道**（guard 之后、任何系统
 /// 调用之前）⇒ 非提权态也可达，本机恒提权态也一样可达（闸不看权限）。
 /// 破坏自证：摘掉任一闸 ⇒ 对应调用落到命令体——`pagefile_apply` 还有
-/// `validate_pagefile` 第二道（managed=false + entries=[] 必拒），另两条传不存在
-/// 的 GUID/powercfg 必错——但两种落点的文案都不含「二次确认」⇒ 本用例红。
-/// 零副作用：`confirmedHighRisk` 恒为 false，永远到不了真实删除/写入。
+/// `validate_pagefile` 第二道（managed=false + entries=[] 必拒），`power_plan_delete`
+/// 传不存在的 GUID 必错——两种落点的文案都不含「二次确认」⇒ 本用例红。
+/// 零副作用：`confirmedHighRisk` 恒为 false，且入参指向不存在/不可执行的目标，
+/// 永远到不了真实删除/写入。
+///
+/// v2 P1-01b（X1-N01 同族）：`syspanel_power_hide_high_performance` **已移出本用例**。
+/// 它没有「不存在目标」这层第二防线——入参只有一个布尔值，闸一旦被摘掉就会
+/// **真的把「高性能」方案导出并删除**。快速组不该有这种失败模式，故改为：
+/// ① 本用例内做**源码级**闸位断言（只读文件，零系统调用）；
+/// ② 运行时负例下沉到 `#[ignore]` 的真机组 `syspanel_power_hide_gate_real_machine`。
 #[test]
 fn syspanel_high_risk_confirm_gates_reject_unconfirmed() {
     let w = main_window();
@@ -839,7 +907,6 @@ fn syspanel_high_risk_confirm_gates_reject_unconfirmed() {
             "syspanel_power_plan_delete",
             json!({ "guid": "00000000-0000-0000-0000-trimnosuchplan", "confirmedHighRisk": false }),
         ),
-        ("syspanel_power_hide_high_performance", json!({ "confirmedHighRisk": false })),
         // managed=false + entries=[] 是「全关虚拟内存」形态：validate_pagefile 必拒
         // （双防线之二）；确认闸失守时落点也不是删除。
         (
@@ -848,7 +915,7 @@ fn syspanel_high_risk_confirm_gates_reject_unconfirmed() {
         ),
     ];
     for (cmd, args) in cases {
-        // 三条命令签名都是 Result<Value, String>：闸拒走 Err，回执不是 JSON，
+        // 这两条命令签名都是 Result<Value, String>：闸拒走 Err，回执不是 JSON，
         // 必须用 invoke_text 取文本（invoke 会 panic）。
         let text = invoke_text(&w, cmd, args.clone());
         assert!(
@@ -856,6 +923,50 @@ fn syspanel_high_risk_confirm_gates_reject_unconfirmed() {
             "{cmd} 缺 confirmedHighRisk 必须点名「二次确认」后拒: {text}"
         );
     }
+
+    // ③ `power_hide` 的闸位用源码口径锁（只读文件，不碰 Power API）。
+    // 判据顺序与命令体一致：`if !confirmed_high_risk { return Err(...「二次确认」...) }`
+    // 必须**先于**引擎调用 `power_high_performance_hide(`。闸被删/被挪到引擎调用之后
+    // ⇒ 本断言红。文案判据取「二次确认」，与上面运行时腿同一个 needle。
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/syspanel.rs");
+    let src = std::fs::read_to_string(&p).expect("读得到 src-tauri/src/commands/syspanel.rs");
+    let start = src
+        .find("fn syspanel_power_hide_high_performance")
+        .expect("找不到 syspanel_power_hide_high_performance，判据坐标已漂");
+    let body = &src[start..];
+    let body = &body[..body.find("\n#[tauri::command]").unwrap_or(body.len())];
+    let gate = body
+        .find("if !confirmed_high_risk")
+        .unwrap_or_else(|| panic!("power_hide 命令体的确认闸不见了（闸被摘掉就会真删方案）: {body}"));
+    let engine = body
+        .find("power_high_performance_hide(")
+        .expect("power_hide 里找不到引擎调用，判据已失效");
+    assert!(gate < engine, "power_hide 的确认闸写在引擎调用之后，等于没闸");
+    assert!(
+        body[gate..engine].contains("二次确认"),
+        "power_hide 的闸拒文案必须点名「二次确认」: {body}"
+    );
+}
+
+/// v2 P1-01b（X1-N01 同族）：`syspanel_power_hide_high_performance` 的运行时负例。
+///
+/// **为什么必须 `#[ignore]`**：这条命令的入参只有一个布尔值，没有「目标不存在」这层
+/// 第二防线。闸一旦被摘掉/改松，本机就会**真的导出并删除内置「高性能」方案**——
+/// 负例的失败模式是真实系统变更，不能留在快速组。快速组保留源码级闸位断言
+/// （`syspanel_high_risk_confirm_gates_reject_unconfirmed` ③），这里只做真机复核。
+///
+/// 跑法：`cargo test --test module_smoke -- --ignored syspanel_power_hide_gate_real_machine`
+/// 前置：本机存在内置「高性能」方案且未在使用中（`powercfg /L` 可见）。
+#[test]
+#[ignore = "闸失效会真删「高性能」方案，只能真机手动/发布前门禁跑"]
+fn syspanel_power_hide_gate_real_machine() {
+    let _data = probe_guard();
+    let w = main_window();
+    let text = invoke_text(&w, "syspanel_power_hide_high_performance", json!({ "confirmedHighRisk": false }));
+    assert!(
+        text.contains("二次确认"),
+        "缺 confirmedHighRisk 必须点名「二次确认」后拒（闸被摘掉时这里会真的删方案）: {text}"
+    );
 }
 
 /// M5 D1：卸载域注册表备份的列表/还原两条通道都是 MAIN 档。
@@ -2094,6 +2205,12 @@ fn startup_toggle_registry_probe_disable_and_enable() {
         "id": format!("reg|HKEY_CURRENT_USER\\{RUN_KEY}|{NAME}"),
         "name": NAME,
         "source": "registry",
+        // R5a-M01 ②：执行两臂只收「本次扫描现读得到」的行（`require_scan_origin`）。
+        // 真机扫描会把每一行打成 `origin:"scan"`，本用例手工构造行时漏了它，
+        // 于是来源闸落地之后这两条真机腿一直被挡在门外而红；已在上一发布点的
+        // 干净工作树上复核（git worktree 检出同一提交重跑），该红同样存在，
+        // 不是本版引入的回归。
+        "origin": "scan",
         "hive": "HKCU",
         "regPath": format!("HKEY_CURRENT_USER\\{RUN_KEY}"),
         "valueName": NAME,
@@ -2201,6 +2318,9 @@ fn r5a_same_name_items() -> (serde_json::Value, serde_json::Value) {
             "id": format!("reg|{reg_path}|{NAME}"),
             "name": NAME,
             "source": "registry",
+            // 同 startup_toggle_registry_probe_disable_and_enable：扫描侧会打 origin，
+            // 手工构造行必须带上，否则被 require_scan_origin 判「非本次扫描结果」。
+            "origin": "scan",
             "hive": "HKCU",
             "regPath": reg_path,
             "valueName": NAME,
@@ -2226,6 +2346,8 @@ fn runonce_probe_item_named(name: &str, data: &str) -> serde_json::Value {
         "id": format!("reg|HKEY_CURRENT_USER\\{RUNONCE_KEY}|{name}"),
         "name": name,
         "source": "registry",
+        // 同 startup_toggle_runonce_probe_uses_backup_delete：来源闸要求 origin=="scan"。
+        "origin": "scan",
         "hive": "HKCU",
         "regPath": format!("HKEY_CURRENT_USER\\{RUNONCE_KEY}"),
         "valueName": name,
@@ -2722,17 +2844,13 @@ fn u_r1d_netcheck_unknown_action_rejected_by_snapshot_gate() {
 #[test]
 fn u_r1d_diskbench_single_flight_not_dirty_after_path_reject() {
     let w = main_window();
-    // X1-M01：用 Public 下真实存在的目录验证白名单拒因（非存在路径会在更早的
-    // exists() 分支早退，白名单被摘掉也照样绿）。测完即删；无 PUBLIC 则显式 SKIP。
-    let Some(public) = std::env::var_os("PUBLIC") else {
-        skip_and_record("diskbench 单飞：本机没有 PUBLIC 目录，本节未验证");
+    // v2 P1-01b（X1-N01 同族）：样本换成**必然不可写的系统目录**（存在、非重解析、
+    // 能规范化 ⇒ 拒因只会来自白名单闸，不是更早的 exists()/canonicalize 早退）；
+    // 同时闸一旦失效也不会真跑测速，只落到「临时目录不可用」。
+    let Some(outside) = common::unwritable_outside_whitelist_dir("singleflight") else {
+        skip_and_record("diskbench 单飞：本机没有必然不可写的系统目录，本节未验证");
         return;
     };
-    let outside = std::path::PathBuf::from(public).join(format!("TrimSmoke-diskbench-{}", std::process::id()));
-    if std::fs::create_dir_all(&outside).is_err() {
-        skip_and_record("diskbench 单飞：Public 下自建目录失败，本节未验证");
-        return;
-    }
     let bad = json!({ "options": { "path": outside.to_string_lossy() } });
     let first = invoke(&w, "diskbench_run", bad.clone());
     assert_eq!(first["success"], json!(false), "白名单外路径必须拒: {first}");
@@ -2752,7 +2870,6 @@ fn u_r1d_diskbench_single_flight_not_dirty_after_path_reject() {
         json!(true),
         "早退路径必须释放单飞位（RAII Drop），否则第二次请求被误判进行中: {second}"
     );
-    let _ = std::fs::remove_dir_all(&outside);
 }
 
 /// 真机 `#[ignore]` 探针（v7.2 `R1d-U03`）：diskbench **成功分支**跑完后盘上不得留残。

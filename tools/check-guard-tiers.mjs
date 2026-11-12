@@ -192,7 +192,7 @@ const MUST_MAIN = [
   'uninstall_batch_restore',
   // R2b-L08（v7.2 P2，2026-10-22）：原先登记在只读档的理由是「疑点：写 logo 缓存文件」，
   // 与本命令的实现相反——它一个字节都不写，只读 `\WindowsApps\` 下的 .png 回 base64。
-  // 消费面现算只有主窗：唯一调用点是 `appxLogo`（坐标 `src/scripts/uninstall.js:186`），
+  // 消费面现算只有主窗：唯一调用点是 `appxLogo`（坐标 `src/scripts/uninstall.js:360`），
   // 而 uninstall.js 只由
   // app.js 的 `uninstall: ['scripts/uninstall.js']` 按需加载、app.js 只出现在 index.html；
   // 三个副窗页面各挂自己的 *-window.js，`rg appxLogo src/*.html` 零命中
@@ -336,7 +336,9 @@ for (const f of files) fileTables.set(f, buildTable(readFileSync(join(CMD_DIR, f
  */
 const ELEVATION_SHAPE = /runas|ShellExecuteEx|elevate/i;
 // T1i-M02：keepStrings 视图只认「真实内联命令形态」，不能把普通字符串里的 runas 当出口。
-const INLINE_ELEVATION_SHAPE = /Start-Process[\s\S]{0,240}-Verb\s+["']?RunAs/i;
+// P2-18：内联串里的等效出口不止 `Start-Process -Verb RunAs`；`runas /user:` 与
+// `ShellExecuteEx(W)(...)` 只出现在字符串里时会被 code 视图整段抹掉，由本视图兜住。
+const INLINE_ELEVATION_SHAPE = /Start-Process[\s\S]{0,240}-Verb\s+["']?RunAs|\brunas(?:\.exe)?\s+\/|ShellExecuteExW?\s*\(/i;
 
 /**
  * 建一个「命令可达提权形态」解析器。

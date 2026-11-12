@@ -1,0 +1,545 @@
+{
+  "_说明": "门禁实测读取面基线（按 12 模块）。由 `node tools/check-gate-roster.mjs --emit-reads` 生成：每条门禁在隔离进程里真跑一遍，记录它 stat/read 过的仓内文件，再按 review-units 的认领结果折算成模块集合。srcHash 是生成时的门禁源码指纹：门禁源码一改，对应条目即失效，必须重跑 --emit-reads（防止「映射写死、门禁改了读取面却没人知道」）。",
+  "modules": [
+    "M-01",
+    "M-02",
+    "M-03",
+    "M-04",
+    "M-05",
+    "M-06",
+    "M-07",
+    "M-08",
+    "M-09",
+    "M-10",
+    "M-11",
+    "M-12"
+  ],
+  "srcHash": {
+    "check-channel-map": "d4550f5ac8344224",
+    "check-guard-tiers": "3b29773e7a705d5c",
+    "check-layering": "2eafd617abcf47b6",
+    "check-delete-exits": "c7c3b79a79f4928d",
+    "check-delete-callsites": "79d427976edd7625",
+    "check-fail-closed": "23812150076bbd2f",
+    "check-system-bin": "e5543f449007f9bc",
+    "check-residue-rule-contract": "b9cb889602e43fe2",
+    "check-cleanup-rule-contract": "55730099eeb938e0",
+    "check-scan-rule-diff": "8ba6c2b2becfa4d8",
+    "check-ps-callsites": "2e183ed7c60f02f1",
+    "check-ps-extraction": "842c51ea10d3b307",
+    "check-html-contract": "da877b2f4f947020",
+    "check-csp-consistency": "28a811b4ade815c8",
+    "check-a11y": "2e70d99f923c5366",
+    "check-native-hygiene": "5f9b1e10cf396e77",
+    "check-handle-lifecycle": "4313924ba71fe08c",
+    "check-comment-coords": "258b906560a69d1c",
+    "check-css-tokens": "895c7b9f63f8c218",
+    "check-css-hygiene": "30c86d5d7f2a8c1e",
+    "check-assets-used": "2aee5e7cad5b131d",
+    "check-asset-size": "a3904ba3bcd55a1c",
+    "check-artifact-size": "ddcdb671a4dc8c97",
+    "check-first-paint": "54b601c348a05bcd",
+    "check-contrast": "43e229bdf4fa517c",
+    "check-subwindow-css": "4629e05fd3d05b6e",
+    "check-idle-scripts": "c9ea50dec0f9d6ea",
+    "check-escape-delegation": "eee652a5c2305a07",
+    "check-appearance-prefs": "76b2bd7c5919e9c2",
+    "check-subwindow-init": "e999fbcc650a1836",
+    "check-confirm-danger": "4db38784f080dccc",
+    "check-silent-catch": "5b036529922ee201",
+    "check-material-parity": "b7a4b6fffc8dbeb0",
+    "check-treemap-layout": "37630f30b2b71f3b",
+    "check-item-intro": "dbcf84a50a79270d",
+    "check-desktop-entry": "8eec3b36ed2d2215",
+    "check-data-parity": "e2997063c1f90497",
+    "check-rule-schema-sync": "5ae617f44718b245",
+    "check-optimizer-dynamic": "21c85facdc8f03ca",
+    "check-optimizer-security": "66c321a56cd6b7d1",
+    "check-optimizer-subitem-contract": "173ef968987eb658",
+    "check-optimizer-groups-sidecar": "f8359681eee0f2dc",
+    "check-optimizer-schema-sync": "4878f3eced74efb2",
+    "check-bcd-row-ids": "2d3d8d209426fdd1",
+    "check-optimizer-write-contract": "d1aa092a64e993e4",
+    "check-power-write-surface": "05d67579eba7bda6",
+    "check-cleanup-postactions": "7fab3b90021428b8",
+    "check-cleanup-aggregates": "e8f25f0bf8abc022",
+    "check-desc-vs-writes": "b41b2b568fe1c9c1",
+    "check-elapsed-facts": "f304136bf6794c55",
+    "check-version-sync": "52c5b0be6f4e081b",
+    "check-updater-pubkey": "fd4341f59ac2d84c",
+    "check-release-artifacts": "0d61626334af6747",
+    "check-readme-claims": "e5b1e648922011a9",
+    "check-readme-negative-claims": "bb7217f8a25fe9ab",
+    "check-doc-refs": "074df80e114fd37a",
+    "check-tools-doc-paths": "1693222d2faa9503",
+    "check-comment-rot": "7980975842e1ef87",
+    "check-positive-controls": "0704ff1b426fc29b",
+    "check-review-units": "b1346bf1600df8d4",
+    "check-tests-helper-parity": "fb2af723d16b11f0",
+    "check-data-signatures": "184c94336a582594",
+    "check-fixture-freshness": "264dcec8a506125d",
+    "check-gate-roster": "e3090dd9937afe61",
+    "check-delete-root-guard": "4dcef9b6844e6293",
+    "check-ignored-isolation": "895c3de9e28b5ef0",
+    "check-async-exits": "62218ef1c427dd6c",
+    "check-degraded-consumption": "41aaaf00357ff5f5",
+    "check-test-sandbox": "bbabffd5d1ad280d",
+    "check-finder-scan-notes": "d353cb678acc30e3",
+    "check-registry-delete-guard": "e879cb639cf1c1f2",
+    "check-receipt-tri-state": "8dadff078ed8a4d2",
+    "check-user-copy-policy": "2d46ab57018cc892"
+  },
+  "reads": {
+    "check-channel-map": [
+      "M-01",
+      "M-02",
+      "M-03",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-12"
+    ],
+    "check-guard-tiers": [
+      "M-03",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-12"
+    ],
+    "check-layering": [
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08"
+    ],
+    "check-delete-exits": [
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-12"
+    ],
+    "check-delete-callsites": [
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-09",
+      "M-11",
+      "M-12"
+    ],
+    "check-fail-closed": [
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-09",
+      "M-12"
+    ],
+    "check-system-bin": [
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-12"
+    ],
+    "check-residue-rule-contract": [
+      "M-06",
+      "M-11",
+      "M-12"
+    ],
+    "check-cleanup-rule-contract": [
+      "M-02",
+      "M-04",
+      "M-09",
+      "M-11",
+      "M-12"
+    ],
+    "check-scan-rule-diff": [
+      "M-04",
+      "M-09"
+    ],
+    "check-ps-callsites": [
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-12"
+    ],
+    "check-ps-extraction": [
+      "M-11"
+    ],
+    "check-html-contract": [
+      "M-01",
+      "M-02"
+    ],
+    "check-csp-consistency": [
+      "M-01",
+      "M-12"
+    ],
+    "check-a11y": [
+      "M-01",
+      "M-02"
+    ],
+    "check-native-hygiene": [
+      "M-02",
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-09",
+      "M-12"
+    ],
+    "check-handle-lifecycle": [
+      "M-01",
+      "M-02",
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-09",
+      "M-12"
+    ],
+    "check-comment-coords": [
+      "M-01",
+      "M-02",
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-09",
+      "M-10",
+      "M-11",
+      "M-12"
+    ],
+    "check-css-tokens": [
+      "M-01",
+      "M-02"
+    ],
+    "check-css-hygiene": [
+      "M-01",
+      "M-02"
+    ],
+    "check-assets-used": [
+      "M-01",
+      "M-02",
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-12"
+    ],
+    "check-asset-size": [
+      "M-01",
+      "M-02"
+    ],
+    "check-artifact-size": [
+      "M-11"
+    ],
+    "check-first-paint": [
+      "M-01",
+      "M-02"
+    ],
+    "check-contrast": [
+      "M-01",
+      "M-02"
+    ],
+    "check-subwindow-css": [
+      "M-01",
+      "M-02"
+    ],
+    "check-idle-scripts": [
+      "M-01",
+      "M-02"
+    ],
+    "check-escape-delegation": [
+      "M-01",
+      "M-02"
+    ],
+    "check-appearance-prefs": [
+      "M-01",
+      "M-02",
+      "M-03",
+      "M-05",
+      "M-12"
+    ],
+    "check-subwindow-init": [
+      "M-01",
+      "M-02",
+      "M-12"
+    ],
+    "check-confirm-danger": [
+      "M-01",
+      "M-02"
+    ],
+    "check-silent-catch": [
+      "M-01",
+      "M-02"
+    ],
+    "check-material-parity": [
+      "M-01",
+      "M-02",
+      "M-03"
+    ],
+    "check-treemap-layout": [
+      "M-01",
+      "M-02"
+    ],
+    "check-item-intro": [
+      "M-01",
+      "M-02",
+      "M-05",
+      "M-06",
+      "M-12"
+    ],
+    "check-desktop-entry": [],
+    "check-data-parity": [
+      "M-01",
+      "M-02",
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-09",
+      "M-10",
+      "M-11",
+      "M-12"
+    ],
+    "check-rule-schema-sync": [
+      "M-03",
+      "M-06",
+      "M-08",
+      "M-09",
+      "M-11"
+    ],
+    "check-optimizer-dynamic": [
+      "M-02",
+      "M-07",
+      "M-12"
+    ],
+    "check-optimizer-security": [
+      "M-12"
+    ],
+    "check-optimizer-subitem-contract": [
+      "M-11",
+      "M-12"
+    ],
+    "check-optimizer-groups-sidecar": [
+      "M-02",
+      "M-11",
+      "M-12"
+    ],
+    "check-optimizer-schema-sync": [
+      "M-02",
+      "M-07",
+      "M-11",
+      "M-12"
+    ],
+    "check-bcd-row-ids": [
+      "M-02",
+      "M-07",
+      "M-12"
+    ],
+    "check-optimizer-write-contract": [
+      "M-07",
+      "M-12"
+    ],
+    "check-power-write-surface": [
+      "M-01",
+      "M-02",
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-09",
+      "M-12"
+    ],
+    "check-cleanup-postactions": [
+      "M-12"
+    ],
+    "check-cleanup-aggregates": [
+      "M-02"
+    ],
+    "check-desc-vs-writes": [],
+    "check-elapsed-facts": [
+      "M-05",
+      "M-09"
+    ],
+    "check-version-sync": [
+      "M-03",
+      "M-05",
+      "M-12"
+    ],
+    "check-updater-pubkey": [
+      "M-12"
+    ],
+    "check-release-artifacts": [
+      "M-12"
+    ],
+    "check-readme-claims": [
+      "M-02",
+      "M-04",
+      "M-12"
+    ],
+    "check-readme-negative-claims": [
+      "M-12"
+    ],
+    "check-doc-refs": [
+      "M-01",
+      "M-02",
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-09",
+      "M-10",
+      "M-11",
+      "M-12"
+    ],
+    "check-tools-doc-paths": [
+      "M-10",
+      "M-11"
+    ],
+    "check-comment-rot": [
+      "M-01",
+      "M-02",
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-09",
+      "M-10",
+      "M-11",
+      "M-12"
+    ],
+    "check-positive-controls": [
+      "M-10",
+      "M-11"
+    ],
+    "check-review-units": [
+      "M-01",
+      "M-02",
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-09",
+      "M-10",
+      "M-11",
+      "M-12"
+    ],
+    "check-tests-helper-parity": [
+      "M-03",
+      "M-12"
+    ],
+    "check-data-signatures": [
+      "M-03",
+      "M-11",
+      "M-12"
+    ],
+    "check-fixture-freshness": [
+      "M-11",
+      "M-12"
+    ],
+    "check-gate-roster": [
+      "M-01",
+      "M-10",
+      "M-11"
+    ],
+    "check-delete-root-guard": [
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-09",
+      "M-12"
+    ],
+    "check-ignored-isolation": [
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-12"
+    ],
+    "check-async-exits": [
+      "M-01",
+      "M-02"
+    ],
+    "check-degraded-consumption": [
+      "M-01",
+      "M-02",
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08"
+    ],
+    "check-test-sandbox": [
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-09",
+      "M-12"
+    ],
+    "check-finder-scan-notes": [
+      "M-02"
+    ],
+    "check-registry-delete-guard": [
+      "M-03",
+      "M-04",
+      "M-05",
+      "M-06",
+      "M-07",
+      "M-08",
+      "M-12"
+    ],
+    "check-receipt-tri-state": [
+      "M-01",
+      "M-02"
+    ],
+    "check-user-copy-policy": [
+      "M-12"
+    ]
+  },
+  "bodyHash": "1b69bdd9b47ed8bc"
+}

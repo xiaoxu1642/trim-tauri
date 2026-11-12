@@ -68,12 +68,14 @@ pub(super) unsafe fn service_status(name: &str) -> Option<u32> {
 pub(super) unsafe fn service_stop(name: &str) -> Result<(), u32> {
     use windows::Win32::System::Services::{
         CloseServiceHandle, ControlService, OpenSCManagerW, OpenServiceW, QueryServiceStatus,
-        SERVICE_CONTROL_STOP, SERVICE_STOP, SERVICE_STATUS,
+        SERVICE_CONTROL_STOP, SERVICE_QUERY_STATUS, SERVICE_STOP, SERVICE_STATUS,
     };
     let scm = OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT)
         .map_err(|e| win32_of(&e))?;
     let name_w = to_wide(name);
-    let svc = match OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_STOP) {
+    // 回读终态必须带 SERVICE_QUERY_STATUS：QueryServiceStatus 按 Win32 契约要求句柄具备
+    // 该访问权，只给 SERVICE_STOP 时首轮即拒，1s 等待与「未停稳」日志都会失真。
+    let svc = match OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_STOP | SERVICE_QUERY_STATUS) {
         Ok(s) => s,
         Err(e) => {
             let _ = CloseServiceHandle(scm);
@@ -84,13 +86,24 @@ pub(super) unsafe fn service_stop(name: &str) -> Result<(), u32> {
     let r = ControlService(svc, SERVICE_CONTROL_STOP, &mut status).map_err(|e| win32_of(&e));
     if r.is_ok() {
         // 回读终态（1s / 50ms 一档）：只有真在运行的服务才会走到这里，代价可控
+        let mut query_failed = false;
         for _ in 0..20 {
-            if QueryServiceStatus(svc, &mut status).is_err() || status.dwCurrentState.0 == SVC_STOPPED {
-                break;
+            match QueryServiceStatus(svc, &mut status) {
+                Ok(()) if status.dwCurrentState.0 == SVC_STOPPED => break,
+                Ok(()) => {}
+                Err(_) => {
+                    query_failed = true;
+                    break;
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        if status.dwCurrentState.0 != SVC_STOPPED {
+        if query_failed {
+            crate::engine::log::write_log(
+                "info",
+                &format!("服务 {name} 停止请求已受理，但终态回读失败（查询状态被拒），按已受理记账"),
+            );
+        } else if status.dwCurrentState.0 != SVC_STOPPED {
             crate::engine::log::write_log(
                 "info",
                 &format!("服务 {name} 停止请求已受理但 1s 内未停稳（state={}），按已受理记账", status.dwCurrentState.0),

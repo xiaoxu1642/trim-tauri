@@ -382,13 +382,16 @@ for (const s of WALK_DEPTH_SITES) {
 // v6-P2：stripRust 修好 raw-string 吞段后，测试区里的用例名（如
 // ledger_takes_the_newest_copy_not_the_new_root）也会被看见——N7 守的是**生产**
 // 实现唯一性，测试区与 N10 同口径在首个 #[cfg(test)] 处切割。
+// P2-04（T1a-M02）：生产段切割口径与 N15 的 stripTestModules 统一——只剔除
+// `#[cfg(test)] mod … {` 测试模块块，不按首个 `#[cfg(test)]` 整段截断（后者会把
+// `#[cfg(test)] const`（如 src-tauri/src/engine/native/startup.rs:899）之后的真实生产代码一并切掉，致假绿）。
 const NEWEST_FN = /fn\s+\w*(?:newest|latest)\w*\s*\(/g;
+// P2-04（T1a-M02）：测试模块可见性前缀——`mod` 可能带 `pub(super)/pub(crate)/
+// pub(in path)`，必须一并识别为测试模块头，否则这类测试模块不被切除。
+const TEST_MOD_VIS = /(?:pub(?:\(\s*(?:crate|super|in\s+[\w:]+|\w+)\s*\))?\s+)?/;
 function stripRustProduction(src) {
-  // 内层属性 `#![cfg(test)]` 也算切割点：整文件都是测试代码（如 src-tauri/src/testutil.rs），
-  // 只认外层 `#[cfg(test)]` 会把这种文件当成全生产面，于是测试守卫里的 `.expect()`
-  // 被 N10 记成「生产面 panic」——那是判据失明，不是缺陷。
-  const cut = src.search(/^\s*#!?\s*\[cfg\(test\)\]/m);
-  return blankNonCode(cut === -1 ? src : src.slice(0, cut));
+  // 复用 N15 同款精确切法（含整文件 `#![cfg(test)]` 守卫，如 testutil.rs）。
+  return blankNonCode(stripTestModules(src));
 }
 let n7sites = 0;
 {
@@ -462,15 +465,12 @@ let n7sites = 0;
 // game_platform_orphan 五处：match/filter_map/let-else/&'static str 收紧）。
 const PANIC_RE = /\.unwrap\(\)|\.expect\(|panic!\(|unreachable!\(|todo!\(|unimplemented!\(/;
 function panicViolations(src) {
+  // P2-04（T1a-M02）：生产段切割复用 stripTestModules（与 N7/N15 同口径），
+  // 不再用行级 inTest 跳整文件。整文件 `#![cfg(test)]`（如 testutil.rs）由
+  // stripTestModules 直接判空，避免误把测试基建的 `.expect()` 记入生产面。
   const out = [];
-  const lines = src.split('\n');
-  let inTest = false;
+  const lines = stripTestModules(src).split('\n');
   lines.forEach((l, i) => {
-    // `#![cfg(test)]`（内层属性）与 `#[cfg(test)]` 同等对待：前者表示**整文件**都是测试代码
-    // （如 src-tauri/src/testutil.rs 的沙箱守卫），只认外层属性会把这种文件当全生产面，
-    // 于是测试基建里的 `.expect()` 被记成「生产面 panic」——那是判据失明，不是缺陷。
-    if (/^\s*#!?\s*\[cfg\(test\)\]/.test(l)) inTest = true;
-    if (inTest) return;
     if (PANIC_RE.test(l)) out.push({ line: i + 1, snippet: l.trim().slice(0, 80) });
   });
   return out;
@@ -503,7 +503,11 @@ function panicViolations(src) {
   }
 }
 const PANIC_ALLOW = [
-  { file: 'native-scanner/src/util.rs', count: 6, reason: '编译期 const 布局断言两族（RM_PROCESS_INFO 668/12/652 + OSVERSIONINFOW 276/4/12），panic 只可能发生在编译错' },
+  { file: 'native-scanner/src/util.rs', count: 7, reason: '编译期 const 布局断言两族（RM_PROCESS_INFO 668/12/652 + OSVERSIONINFOW 276/4/12），panic 只可能发生在编译错；另含 sandbox() 的 create_dir_all expect（测试沙箱建不出来即环境坏，fail-fast 才能定位）' },
+  { file: 'src-tauri/src/commands/optimizer/overview.rs', count: 3, reason: 'P2-04 修正切法后暴露的存量：三处 reg_hive("HKEY_LOCAL_MACHINE") 字面量展开，根键是常量必然命中 → 打开失败即该命令整体不可用，fail-fast 优于静默跳过检测项' },
+  { file: 'src-tauri/src/engine/native/startup.rs', count: 1, reason: 'P2-04 修正切法后暴露的存量：del_out.is_err() 短路在前，短路为真时不求值 unwrap，故不会 panic（保留 is_err || !unwrap 形态以保持「解析失败按未生效回执」的原语义）' },
+  { file: 'src-tauri/src/engine/paths.rs', count: 1, reason: 'P2-04 修正切法后暴露的存量：lib_test_data_root() 的测试数据根创建（cfg(test) 分支），建不出来即环境坏，fail-fast 优于让后续断言在错根上假绿' },
+  { file: 'native-scanner/src/scan.rs', count: 2, reason: 'P2-04 修正切法后暴露的存量：① with_protect_roots 重建后 g 必然为 Some（刚写入），unwrap 不可能触发；② set_creation_time_days_ago 是 #[cfg(all(test, windows))] 模块级测试辅助（不在 mod 块内，切割口径看不见），SystemTime 早于 Unix 纪元不可达' },
   { file: 'src-tauri/src/lib.rs', count: 2, reason: '启动期 main 窗口创建 / Tauri 运行时构建失败——无 UI 可落，fail-fast 是唯一选择' },
   { file: 'src-tauri/src/commands/cleanup/rules.rs', count: 1, reason: '生成器产物 cleanup-postactions.json 的 expect，合法性由 contract_tests 钉住（对 build 产物 fail-fast 正确）' },
   { file: 'src-tauri/src/commands/maintenance.rs', count: 1, reason: '手维护件 maintenance-tasks.json 的 expect（D1-M10：实盘无写盘器），同上' },
@@ -748,7 +752,15 @@ const SYMLINK_ALLOW = [
   { file: 'src-tauri/src/commands/uninstall/list_run.rs', count: 1, reason: '卸载项扫描只跳过快捷方式链接；删除链另有 protect::is_path_protected + is_reparse' },
 ];
 /** 只切 `#[cfg(test)] mod … {` 测试模块，不误切 `#[cfg(test)] use …` 单行属性。 */
+// P2-04（T1a-M02）：生产段切割口径统一为「只剔除 `#[cfg(test)] mod … {` 块」。
+// 两处增强（与 N7/N10 复用同一函数，避免三套口径不一致）：
+//  (a) 整文件 `#![cfg(test)]` 守卫——整文件都是测试代码（如 testutil.rs），
+//      直接视为空生产面，否则其 `.expect()` 会被 N10 记成生产面 panic（判据失明）。
+//  (b) `mod` 可见性覆盖 `pub(super)/pub(crate)/pub(in path)`——否则 `pub(super) mod …`
+//      测试模块（如 appx.rs 的 uninstall_appx_tests）不被切除，其断言被误算进生产面。
+//      TEST_MOD_VIS 见文件顶部模块级常量（提升为避免 TDZ：N7 在 stripTestModules 定义前调用它）。
 function stripTestModules(src) {
+  if (/^\s*#!\[cfg\(test\)\]/m.test(src)) return '';
   const lines = src.split('\n');
   const out = [];
   let skipping = false;
@@ -758,13 +770,13 @@ function stripTestModules(src) {
     if (!skipping && /^\s*#\[cfg\(test\)\]\s*$/.test(line)) {
       let j = i + 1;
       while (j < lines.length && lines[j].trim() === '') j++;
-      if (j < lines.length && /^\s*(?:pub\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{/.test(lines[j])) {
+      if (j < lines.length && new RegExp(`^\\s*${TEST_MOD_VIS.source}mod\\s+[A-Za-z_][A-Za-z0-9_]*\\s*\\{`).test(lines[j])) {
         skipping = true;
         depth = 0;
         out.push('');
         continue;
       }
-      if (j < lines.length && /^\s*(?:pub\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*;/.test(lines[j])) {
+      if (j < lines.length && new RegExp(`^\\s*${TEST_MOD_VIS.source}mod\\s+[A-Za-z_][A-Za-z0-9_]*\\s*;`).test(lines[j])) {
         // 外部测试模块（`#[cfg(test)] mod contract_tests;`）：其后没有生产代码。
         break;
       }

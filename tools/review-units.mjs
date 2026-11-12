@@ -587,6 +587,31 @@ export const UNITS = [
 ];
 
 /**
+ * 模块表（= vault《本项目审查方案》§0.3.1 模块表的唯一真源）。
+ *
+ * 为什么模块表必须落在**跟踪文件**里：`check-gate-roster --module` 要按模块挑门禁，
+ * 模块 ⇄ 单元的对应关系一旦只活在文档里，就是「模块门禁挑哪些」的第二本账。
+ * 单元 ID 在这里只是**引用**（成员关系），不复制单元内容；U5d 会核对每个单元
+ * 恰好属于一个模块，漏归/双归即红。
+ *
+ * 顺序即 `--list-modules` 的输出顺序，也是模块名排序依据。
+ */
+export const MODULES = [
+  { id: 'M-01', name: '前端·设计系统与窗体', units: ['F1a', 'F1b', 'F1c', 'F2', 'F3', 'F5'] },
+  { id: 'M-02', name: '前端·功能页面链', units: ['F4a1', 'F4a2', 'F4b', 'F4c', 'F4d'] },
+  { id: 'M-03', name: 'engine·核心与执行基元', units: ['R6a', 'R6b', 'R6c', 'R6d', 'R7', 'R8'] },
+  { id: 'M-04', name: 'engine·native', units: ['R5a', 'R5b', 'R5c', 'R5d', 'R5e'] },
+  { id: 'M-05', name: 'commands·顶层', units: ['R1a', 'R1b', 'R1d'] },
+  { id: 'M-06', name: 'uninstall', units: ['R2a', 'R2b', 'R2c', 'R2d'] },
+  { id: 'M-07', name: 'optimizer', units: ['R3', 'R3b'] },
+  { id: 'M-08', name: 'cleanup', units: ['R4'] },
+  { id: 'M-09', name: 'native-scanner', units: ['N1a', 'N1b', 'N1c'] },
+  { id: 'M-10', name: '门禁·安全与契约面', units: ['T1a', 'T1e', 'T1i', 'T1j', 'T1k'] },
+  { id: 'M-11', name: '门禁·数据与前端面', units: ['T1b', 'T1c', 'T1d', 'T1f', 'T1g', 'T1h'] },
+  { id: 'M-12', name: '数据与测试底座', units: ['D1', 'X1'] },
+];
+
+/**
  * 主 agent 横切项（X0）：不属于任何目录，纵向单元审不了的东西。
  * X0-7…X0-10 是 v4 修复阶段四条真机回归的直接编码——它们当时在单元表里根本没有工位。
  */

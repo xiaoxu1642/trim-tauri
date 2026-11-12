@@ -151,11 +151,19 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
 
     // 目录型
     if !target_path.is_empty() && std::path::Path::new(target_path).exists() {
-        let mut files: Vec<Value> = Vec::new();
-        let mut total = 0usize;
-        let mut seen = std::collections::HashSet::new();
-        enumerate_files(target_path, "*", true, &mut files, &mut total, &mut seen, cap, &mut unreadable);
-        return Ok(json!({"kind": "files", "total": total, "truncated": total > cap, "files": files, "unresolved": unresolved, "unreadable": unreadable, "degraded": unreadable > 0, "degradedReason": if unreadable > 0 { Some("部分目录/文件不可读，明细可能偏少") } else { None }}));
+        // R5a-M04-01：目录型分支此前只判 `exists()`（跟随链接），junction 根会把
+        // 链接目标整棵列出；执行侧用 `cleanup_root_ok(target)` 拒收 ⇒ 预览列了
+        // 执行侧根本不会删的条目。与 fileKeys 分支（R5a-L03）同判据：判不过就
+        // 显式记 unresolved、零枚举。
+        if !cleanup_root_ok(target_path) {
+            unresolved.push(format!("{target_path}（根不是可信目录，预览与执行同判据拒收）"));
+        } else {
+            let mut files: Vec<Value> = Vec::new();
+            let mut total = 0usize;
+            let mut seen = std::collections::HashSet::new();
+            enumerate_files(target_path, "*", true, &mut files, &mut total, &mut seen, cap, &mut unreadable);
+            return Ok(json!({"kind": "files", "total": total, "truncated": total > cap, "files": files, "unresolved": unresolved, "unreadable": unreadable, "degraded": unreadable > 0, "degradedReason": if unreadable > 0 { Some("部分目录/文件不可读，明细可能偏少") } else { None }}));
+        }
     }
 
     Ok(json!({"kind": "files", "total": 0, "truncated": false, "files": [], "unresolved": unresolved, "unreadable": unreadable, "degraded": unreadable > 0, "degradedReason": if unreadable > 0 { Some("部分目录/文件不可读，明细可能偏少") } else { None }}))
@@ -218,6 +226,10 @@ fn enumerate_files_at(
     if depth >= ENGINE_WALK_MAX_DEPTH { return; }
     let Ok(rd) = std::fs::read_dir(dir) else { *unreadable += 1; return };
     for entry in rd {
+        // R5a-M04-02：与扫描侧同源的总条数上限（`PLAN_CAP_TOTAL`）。目录型预览
+        // 此前无上限地全量遍历计数，大目录（SoftwareDistribution\Download 等）
+        // 点开明细纯耗时。达到上限即停止遍历，回执的 `truncated` 随即为真。
+        if *total >= trim_finder::cleanup_scan::PLAN_CAP_TOTAL { return; }
         let Ok(entry) = entry else { *unreadable += 1; continue; };
         let path = entry.path();
         // 跳过 reparse 点（v2-L4P-11/C-1：0x400 属性位口径，见 expand_glob_dirs 注释）
@@ -4312,6 +4324,53 @@ mod review_shape_tests {
         assert!(
             src.lines().any(|l| l.trim_start().starts_with("if !cleanup_root_ok(&base)")),
             "预览侧必须过 cleanup_root_ok 闸（与执行侧同判据）"
+        );
+        assert!(
+            src.lines().any(|l| l.trim_start().starts_with("if !cleanup_root_ok(target_path)")),
+            "目录型预览分支也必须过 cleanup_root_ok 闸（与执行侧同判据）"
+        );
+    }
+
+    /// R5a-M04-01 对偶用例：目录型分支的 reparse 根拒收 + 正常目录放行。
+    /// 链接造不出来（需开发者模式/管理员）时显式 SKIP，不伪装通过。
+    #[test]
+    fn r5a_dir_preview_rejects_reparse_root() {
+        let sb = crate::testutil::Sandbox::new("r5a-dir-preview");
+        let real = sb.path().join("real");
+        let link = sb.path().join("link-root");
+        std::fs::create_dir_all(&real).expect("建真实目录");
+        std::fs::write(real.join("marker.txt"), b"x").expect("写标记文件");
+        if std::os::windows::fs::symlink_dir(&real, &link).is_err() {
+            eprintln!("SKIP: 当前环境无法创建目录链接，未验证 reparse 根拒收");
+            return;
+        }
+        let rule = serde_json::json!({});
+        let preview = cleanup_detail(&rule, &link.to_string_lossy()).expect("预览不应失败");
+        assert_eq!(
+            preview["total"].as_u64(),
+            Some(0),
+            "reparse 根不得枚举出文件: {preview}"
+        );
+        assert!(
+            preview["unresolved"].as_array().is_some_and(|v| v
+                .iter()
+                .any(|x| x.as_str().unwrap_or_default().contains("根不是可信目录"))),
+            "reparse 根必须显式 unresolved: {preview}"
+        );
+        let ok = cleanup_detail(&rule, &real.to_string_lossy()).expect("正常目录预览不应失败");
+        assert_eq!(ok["total"].as_u64(), Some(1), "正常目录必须放行: {ok}");
+    }
+
+    /// R5a-M04-02：目录型预览枚举受与扫描侧同源的 `PLAN_CAP_TOTAL` 上限约束。
+    /// 破坏自证：删掉 `enumerate_files_at` 的逐条上限判断 ⇒ 本用例红。
+    #[test]
+    fn r5a_dir_preview_respects_plan_cap_total() {
+        let src = include_str!("cleanup.rs");
+        assert!(
+            src.lines().any(|l| {
+                l.trim_start().starts_with("if *total >= trim_finder::cleanup_scan::PLAN_CAP_TOTAL")
+            }),
+            "目录型预览枚举必须受 PLAN_CAP_TOTAL 上限约束（达到上限即停止遍历）"
         );
     }
 

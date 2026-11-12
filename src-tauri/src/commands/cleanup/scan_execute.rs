@@ -973,18 +973,20 @@ pub async fn cleanup_item_detail<R: tauri::Runtime>(window: WebviewWindow<R>, id
         }
     };
     // v2.2 第3批（D13）：fileKeys 条目明细直接读扫描快照里的可删文件清单——明细与执行同源
-    let (known_files, has_known) = {
+    // P3-10（R4-M08-M01）：锁内只取条目 `Arc`（引用计数 +1），files 深克隆移到锁外；
+    // 单条目上限 10 万行，旧写法整段数组复制都在快照锁存活期间完成（同 R4-L06 口径）。
+    let known_item = {
         let buckets = snapshots().lock().unwrap_or_else(|e| e.into_inner());
-        let known = buckets
-            .get(window.label())
-            .and_then(|m| m.get(&id))
-            .and_then(|it| it.get("files"))
-            .and_then(|f| f.as_array())
-            .cloned();
-        match known {
-            Some(f) => (f, true),
-            None => (Vec::new(), false),
-        }
+        buckets.get(window.label()).and_then(|m| m.get(&id)).cloned()
+    };
+    let known = known_item
+        .as_ref()
+        .and_then(|it| it.get("files"))
+        .and_then(|f| f.as_array())
+        .cloned();
+    let (known_files, has_known) = match known {
+        Some(f) => (f, true),
+        None => (Vec::new(), false),
     };
     let rule = find_cleanup_rule_by_id(&rules, &id);
     let rule_file_keys_non_empty = rule

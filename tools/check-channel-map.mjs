@@ -2,7 +2,8 @@
 //
 // 迁移方案 D2 的硬要求：**映射表键集合必须等于 preload.js 的通道集合**，
 // 且新增通道必须同表登记，防止「Rust 有了、前端没接」或反向的静默断裂
-// （R18：178 条通道中任一漏迁，表现为按钮没反应而非报错，最难发现）。
+// （R18：当前迁移通道共 177 条（node tools/check-channel-map.mjs --strict 现算：176 invoke + 1 send），
+// 任一漏迁表现为按钮没反应而非报错，最难发现）。
 //
 // 五组断言：
 //   A. preload 的 invoke 通道集合 == tauri-api.js 的 CHANNEL_MAP 键集合

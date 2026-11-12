@@ -134,14 +134,17 @@ function scanJudgement(src) {
  *
  * @param {string} src 源码全文
  * @param {RegExp} failRe 失败分支的特征（出现多次即逐个检查）
- * @returns {string[]} 问题描述，空数组 = 干净
+ * @returns {{ matched: number, hits: string[] }} matched=命中的失败分支数（C 组对象地板），
+ *   hits=问题描述（空数组 = 干净）
  */
 const MAX_GAP = 50;
 function scanFailPathTimer(src, failRe) {
   const lines = src.split('\n');
   const hits = [];
+  let matched = 0;
   lines.forEach((l, i) => {
     if (!failRe.test(l)) return;
+    matched += 1;
     // 限定在同一顶层函数体内（坑④：别处函数里的Instant::now() 不算）
     let fnStart = 0;
     for (let k = i; k >= 0; k--) {
@@ -158,7 +161,7 @@ function scanFailPathTimer(src, failRe) {
       );
     }
   });
-  return hits;
+  return { matched, hits };
 }
 
 // ============================================================
@@ -230,7 +233,13 @@ const DOMAIN_FAIL = [
 ];
 const failPath = [];
 for (const [label, src, failRe] of DOMAIN_FAIL) {
-  for (const hit of scanFailPathTimer(src, failRe)) failPath.push(`${label}: ${hit}`);
+  const { matched, hits } = scanFailPathTimer(src, failRe);
+  // 对象地板：锚点 0 命中 = 本域根本没被校验，不能静默 ✓（SKIP 也不算通过）。
+  if (matched === 0) {
+    failPath.push(`${label}: 失败分支锚点 0 命中 ⇒ 本域 C 组未校验，按失败处理`);
+    continue;
+  }
+  for (const hit of hits) failPath.push(`${label}: ${hit}`);
 }
 check(
   failPath.length === 0,
@@ -281,7 +290,7 @@ console.log('✓ E4 耗时字段：两个域都带、都不参与判定、失败
     ].join('\n'), ERR],
   ];
   const missedTimer = timerViolations
-    .filter(([, src, re]) => scanFailPathTimer(src, re).length === 0)
+    .filter(([, src, re]) => scanFailPathTimer(src, re).hits.length === 0)
     .map(([n]) => n);
 
   const total = judgeViolations.length + timerViolations.length;

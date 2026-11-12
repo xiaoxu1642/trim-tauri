@@ -32,11 +32,15 @@ const judgeAll = (rustSrc, htmlSrc, jsSrc) => {
     const same = selectable.length === cardSet.length
         && selectable.every((x) => cardSet.includes(x))
         && cardSet.every((x) => selectable.includes(x));
-    return same
+    return materials.length >= 2 && cardSet.length >= 2
+        && same
         && jsSrc.includes("current === 'none' && materialOn")
         && jsSrc.includes('materialOn = false');
 };
 check(judgeAll(rust, html, js), '材质枚举、卡片集合或 none 等价开关不一致');
+check(badCards !== html, '负向对照变异生效：卡片里必须存在 data-material="mica" 可被替换');
+check(badNone !== js, '负向对照变异生效：pathbinding 里必须存在 none 等价开关语义');
+check(badEnum !== rust, '负向对照变异生效：枚举里必须存在 "thin-acrylic", "none" 可被扩充');
 check(!judgeAll(rust, badCards, js), '改动卡片集合必须判红');
 check(!judgeAll(rust, html, badNone), '删除 none 等价语义必须判红');
 check(!judgeAll(badEnum, html, js), '新增枚举项必须判红');

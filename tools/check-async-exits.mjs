@@ -565,7 +565,7 @@ g.controlFailed(
 const SILENT_SITES = [
   { file: 'src/scripts/cleanup.js', anchor: 'console.warn(`[Trim] 文件清理扫描失败', need: 'window.app?.log', label: '文件清理扫描失败' },
   { file: 'src/scripts/cleanup.js', anchor: 'console.warn(`[Trim] 文件清理扫描异常', need: 'window.app?.log', label: '文件清理扫描异常' },
-  { file: 'src/scripts/theme.js', anchor: '} catch (e) {}', need: 'log', label: 'theme catch', transition: 'P2/C-W2' },
+  { file: 'src/scripts/theme.js', anchor: '} catch (e) {}', need: 'window.app?.log', label: 'theme catch', transition: 'P2/C-W2' },
 ];
 {
   const probe = (text, anchor, need) => {
@@ -579,6 +579,13 @@ const SILENT_SITES = [
   if (probe(POS, 'console.warn("x")', 'window.app?.log') !== true
     || probe(NEG, 'console.warn("x")', 'window.app?.log') !== false) {
     g.fail('A2-L03 正向对照失败：失败出口判定器失真（必须能把「补日志」与「仅 console」分开）');
+  }
+  // T1e-M02：过渡条目的 need 也必须是应用日志精确形态。console.log 不进日志页，不算出口；
+  // 这里用条目自身的 need 做对照——有人把它退回裸 'log' 时，本条必须判红。
+  const themeNeed = SILENT_SITES.find((s) => s.label === 'theme catch')?.need;
+  if (probe('} catch (e) {}\nconsole.log("x");', '} catch (e) {}', themeNeed) !== false
+    || probe('} catch (e) {}\nwindow.app?.log("warn", "x");', '} catch (e) {}', themeNeed) !== true) {
+    g.fail('A2-L03 对照失败：console.log 不得当作应用日志出口（过渡条目 need 必须为 app.log 精确形态）');
   }
   let silentBad = 0;
   let silentTransition = 0;

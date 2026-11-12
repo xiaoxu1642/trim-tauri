@@ -1043,7 +1043,8 @@ pub async fn optimizer_batch_preflight<R: Runtime>(
 /// 记录在这里被整批删除（下方 `drop_pending_ids` → `remove_many`），以免动态项改名后
 /// 留下一堆永远对不上的 pending。这是**已登记的例外**：只删动态项的遗留 pending，
 /// 不碰用户选择的忽略名单、也不碰已应用记录；
-/// `check-guard-tiers` 的 `guard_readonly` 写原语扫描把本命令登记为例外。
+/// 只读档放宽的真实登记点是 `tools/check-channel-map.mjs` 的「只读档无子窗消费方」豁免表
+/// （该表只登记档位放宽，不是写例外表）。
 #[tauri::command]
 pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> Value {
     if let Err(msg) = guard::guard_readonly(&window) {

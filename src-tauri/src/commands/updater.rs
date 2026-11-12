@@ -524,9 +524,12 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
     }
     let task = tauri::async_runtime::spawn(async move {
         // 插件回的是**增量**字节数，累计值、百分比与速度由我们自己算。
-        // 每次尝试的开头各自赋值（见下面循环里那两行），所以这里只声明不初始化。
+        // 每次尝试的开头各自赋值（见下面循环开头的重置），所以这里只声明不初始化。
         let mut transferred: u64;
         let mut started: std::time::Instant;
+        // P3-05：进度节流状态，与累计值一样在每次换线尝试开头重置
+        let mut last_emit_at: std::time::Instant;
+        let mut last_emit_percent: u32;
         let app2 = app.clone();
         // 下载候选：锁定那条线路优先，其余线路**只有在给出同一个版本、同一份签名**时才入列。
         // 「换线路」允许的只是换通道，不允许换包 —— 两线给不同签名意味着有人在中间换包，
@@ -560,6 +563,8 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
             transferred = 0;
             // 换线后重新计时：否则第二条线路的速度被第一条的等待时间摊薄，界面显示会误导
             started = std::time::Instant::now();
+            last_emit_at = started;
+            last_emit_percent = 0;
             let r = cand
                 .download(
                     |chunk, total| {
@@ -568,6 +573,21 @@ pub async fn updater_download<R: Runtime>(window: WebviewWindow<R>) -> Result<Va
                             .filter(|t| *t > 0)
                             .map(|t| ((transferred as f64 / t as f64) * 100.0).round() as u32)
                             .unwrap_or(0);
+                        // P3-05：插件每 chunk 回调一次，原实现逐次全窗广播，高频线路下
+                        // 会放大成每秒数百至数千次 IPC。改为「距上次 ≥100ms 或进度前进
+                        // ≥1%」才发；100% 末帧必发一次，否则界面会停在 99%。累计值与
+                        // 速度仍逐 chunk 实时累加，只削减发射频率，不改语义。
+                        let now = std::time::Instant::now();
+                        let advanced = percent >= last_emit_percent + 1;
+                        let finished = percent >= 100 && last_emit_percent < 100;
+                        if !advanced
+                            && !finished
+                            && now.duration_since(last_emit_at).as_millis() < 100
+                        {
+                            return;
+                        }
+                        last_emit_at = now;
+                        last_emit_percent = percent;
                         let secs = started.elapsed().as_secs_f64().max(0.001);
                         let _ = app2.emit(
                             "updater:state-changed",

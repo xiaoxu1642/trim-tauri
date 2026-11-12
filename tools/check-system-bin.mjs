@@ -26,6 +26,50 @@ import { walkRs } from './lib/fs-walk.mjs';
 import { gate } from './lib/gate.mjs';
 import { blankNonCode, splitFunctions } from './lib/src-scan.mjs';
 
+// 精确切「生产段」：只剔除 `#[cfg(test)] mod X { … }` 测试模块块，保留其它所有
+// 生产代码（含位于首个 `#[cfg(test)]` 之前的 const / fn 测试项之后的生产段）。
+// 与 check-native-hygiene 的 N15 `stripTestModules` 同口径——按花括号配平识别块，
+// 遇到 `#[cfg(test)] mod X;`（外部模块声明）立即停。不能用 `split('#[cfg(test)]')[0]`
+// 按首个截断，否则 src-tauri/src/engine/native/startup.rs:899 的 `#[cfg(test)] const` 之后两千多行生产代码整段脱网。
+function stripTestMods(src) {
+  const lines = src.split('\n');
+  const out = [];
+  let skipping = false;
+  let depth = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!skipping && /^\s*#\[cfg\(test\)\]\s*$/.test(line)) {
+      let j = i + 1;
+      while (j < lines.length && lines[j].trim() === '') j++;
+      if (j < lines.length && /^\s*(?:pub\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{/.test(lines[j])) {
+        skipping = true;
+        depth = 0;
+        out.push('');
+        continue;
+      }
+      if (j < lines.length && /^\s*(?:pub\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*;/.test(lines[j])) {
+        break;
+      }
+    }
+    if (skipping) {
+      for (const ch of line) {
+        if (ch === '{') depth++;
+        else if (ch === '}') {
+          depth--;
+          if (depth === 0) {
+            skipping = false;
+            break;
+          }
+        }
+      }
+      out.push('');
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
 const SRC = join(REPO_ROOT, 'src-tauri', 'src');
 
 /**
@@ -166,6 +210,11 @@ const RAW_EXEMPT = [
     file: 'src-tauri/src/engine/testcmd.rs',
     anchor: 'let listing = Command::new("tasklist")',
     reason: 'A14（X1-L01）超时后「不留孤儿」自证的观测端：查 ping.exe 是否还在（只读观测，非生产执行面）',
+  },
+  {
+    file: 'src-tauri/src/commands/gameclean.rs',
+    anchor: 'let made = std::process::Command::new("cmd")',
+    reason: 'P1-08 junction 回归夹具：测试内 mklink /J 造 junction，免管理员，不触网（cfg(test) 专用、非生产执行面；junction 无稳定 Rust API，symlink_dir 需特权）',
   },
 ];
 
@@ -333,7 +382,7 @@ for (const f of files) {
   // （let t = system_tool("x"); let u = t; quiet_cmd(u)）的源头也要逐字校验。
   // `#[cfg(test)]` 里的 system_tool("git") / 安装包路径是**负例断言**，不是生产调用；
   // 与 shell_run_wait 的 I 组同口径，只收生产段。
-  const keep = blankNonCode(text.split('#[cfg(test)]')[0], 'rs', { keepStrings: true });
+  const keep = blankNonCode(stripTestMods(text), 'rs', { keepStrings: true });
   for (const m of keep.matchAll(/system_tool\s*\(\s*(?:r?)"((?:[^"\\]|\\.)*)"/g)) {
     systemToolLiterals.push({ file: rel, name: m[1], index: m.index });
   }
@@ -631,7 +680,10 @@ check(
 // 与 `&exe`/`&original.0`（直接吃注册表原文）都判红。探针/负向样本在 `#[cfg(test)]`
 // 段内，不参与生产判定。判定器抽成纯函数，与 I2 合成样本共用同一实现。
 function shellWaitViolations(text) {
-  const prod = text.split('#[cfg(test)]')[0];
+  // 只剔除 `#[cfg(test)] mod X { … }` 测试块；首个 `#[cfg(test)]` 之后若还有
+  // 生产代码（如 startup.rs 在 const 测试项之后两千多行生产），必须纳入判定，
+  // 否则 uninstall_run 的生产执行臂等调用点会整段脱网（T1a-M01）。
+  const prod = stripTestMods(text);
   const out = [];
   for (const line of prod.split('\n')) {
     if (line.trimStart().startsWith('//')) continue;

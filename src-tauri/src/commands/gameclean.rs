@@ -89,6 +89,28 @@ pub(crate) struct Candidate {
     pub(crate) lossy: bool,
 }
 
+/// 平台根入参闸：reparse / 保护根 / 系统命名空间任一命中即拒。
+///
+/// R2d-M06-1：BFS 此前只判子项 reparse，**根自身**没人判。平台清单里的目录值
+/// （WeGame `config.ini` 用户级可写）可被注入成指向任意本机位置的 junction，
+/// `read_dir` 会直接穿透到链接另一头整棵枚举。根闸与子项同口径（属性位判据），
+/// 并统一拒保护根 / 系统命名空间。
+fn scan_root_ok(game_dir: &Path) -> Result<(), String> {
+    let md = std::fs::symlink_metadata(game_dir)
+        .map_err(|e| format!("目录属性不可读（{e}），本轮不扫"))?;
+    if protect::is_reparse(&md) {
+        return Err("目录是重解析点（junction/链接/占位符），本轮不扫".into());
+    }
+    let p = game_dir.to_string_lossy();
+    if protect::is_path_protected(p.as_ref()) {
+        return Err("目录命中保护根，本轮不扫".into());
+    }
+    if protect::is_system_namespace(p.as_ref()) {
+        return Err("目录位于系统命名空间，本轮不扫".into());
+    }
+    Ok(())
+}
+
 /// 对一个游戏目录做 BFS，收集候选。
 pub(crate) fn scan_game_dir(
     game_dir: &Path,
@@ -96,6 +118,10 @@ pub(crate) fn scan_game_dir(
     notes: &mut Vec<String>,
     global_cap: &mut usize,
 ) {
+    if let Err(reason) = scan_root_ok(game_dir) {
+        notes.push(format!("游戏「{}」{reason}", game_dir.display()));
+        return;
+    }
     let mut queue: std::collections::VecDeque<(PathBuf, usize, Option<(String, String)>)> =
         std::collections::VecDeque::new();
     queue.push_back((game_dir.to_path_buf(), 0, None));
@@ -420,5 +446,53 @@ mod tests {
         assert_eq!(actual, expected);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// R2d-M06-1 回归：平台根是 junction 时不得枚举链接另一头；同一棵真实目录
+    /// 直扫仍照常命中（证明拒因来自根闸，不是夹具本身没候选）。
+    /// `mklink /J` 免管理员；受限环境建不出来时显式 SKIP 并声明未校验，不假绿。
+    #[test]
+    fn junction_root_rejected() {
+        let root = std::env::temp_dir().join(format!("trim-gc-root-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let real = root.join("RealGame");
+        let redist = real.join("_CommonRedist");
+        std::fs::create_dir_all(&redist).unwrap();
+        std::fs::write(redist.join("DXSETUP.exe"), b"dx").unwrap();
+
+        let link = root.join("LinkGame");
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !made {
+            eprintln!("SKIP 根目录 reparse 回归：本环境建不出 junction，该判据未校验");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+
+        let mut found: Vec<Candidate> = Vec::new();
+        let mut notes = vec![];
+        let mut cap = 2000;
+        scan_game_dir(&link, &mut found, &mut notes, &mut cap);
+        assert!(found.is_empty(), "junction 根不得枚举到链接另一头：{found:?}");
+        assert!(
+            notes.iter().any(|n| n.contains("重解析点")),
+            "拒绝必须留痕：{notes:?}"
+        );
+
+        // 对照：真实目录直扫必须命中，避免把「夹具没候选」误当成闸生效
+        let mut found_real: Vec<Candidate> = Vec::new();
+        let mut notes_real = vec![];
+        let mut cap_real = 2000;
+        scan_game_dir(&real, &mut found_real, &mut notes_real, &mut cap_real);
+        assert_eq!(found_real.len(), 1, "普通根必须照扫：{notes_real:?}");
+
+        // junction 先按链接本体摘掉，再清树（直接 remove_dir_all 会跟着链接走）
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

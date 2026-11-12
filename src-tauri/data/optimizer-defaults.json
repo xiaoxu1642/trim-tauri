@@ -347,7 +347,7 @@
     "privacy_permissions_tune": {
       "defaultKnown": true,
       "defaultValue": null,
-      "why": "该键由本项执行时新建（steps 有 / restore 无，共 18 个），原状态必然是「键不存在」",
+      "why": "该键由本项执行时新建（steps 有 / restore 无，共 20 个），原状态必然是「键不存在」",
       "reviewedAt": "2026-10-03"
     },
     "svc_connected_devices_manual": {

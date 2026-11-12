@@ -19,7 +19,21 @@
 
   // 启动项管理页的「启动项列表」面板不倾斜（需求指定），同页统计卡不受影响
   // 磁盘清理各扫描结果表格（重复文件/大文件/空文件）不加入 3D 倾斜
-  var EXCLUDE_CONTAINS = '#startupList, .finder-table';
+  // B-P2 追加 .an-tm-box：磁盘分析的树图卡有上百个绝对定位格子，
+  // 跟随光斑每帧重绘整块树图不划算，连光斑一起排除（顶部高光仍在）。
+  var EXCLUDE_CONTAINS = '#startupList, .finder-table, .an-tm-box';
+
+  // 极光琉璃 B-P2：这几类卡片只吃「光斑跟随」不吃 3D 倾斜。
+  // 为什么分开：倾斜会写行内 transform/transition，而 .card 的悬停过渡由样式表管
+  // （背景/描边），行内 transition 合并会把它们覆盖成瞬跳；且倾斜工具栏属新增动效，
+  // 不在本期范围。合成一条 closest 选择器，不额外挂监听器、不多一次 closest。
+  var SPOT_ONLY = ['.card', '.benchmark-result-group', '.external-test-panel'].join(',');
+  var HIT = SELECTOR + ',' + SPOT_ONLY;
+
+  // 有 --mx/--my 消费方（::after 光斑层）的卡片才算「要写坐标」。
+  // .table-card 刻意不在内：它装上千行可滚动长表，每帧写变量会触发整表样式重算，
+  // 而 main.css 已把它从光斑层排除、只留顶部高光 —— 写了也没人读。
+  var SPOT_NONE = '.table-card';
 
   var MAX_ANGLE = 7;        // 最大角度（°）
   var PERSPECTIVE = 900;    // 透视距离（px）
@@ -29,6 +43,8 @@
   var MOVE_TRANSITION = 'transform .12s ease-out';
 
   var current = null;
+  var currentTiltable = false;  // 当前元素是否属于倾斜目标（否则只写光斑坐标）
+  var currentSpot = false;      // 当前元素是否需要 --mx/--my（长表卡不需要）
   // 性能 v3 ②：原实现每个 mousemove 都做「matchMedia → closest → 全子树 querySelector →
   // getBoundingClientRect → 写 transform/transition」，即每事件一次强制回流。
   // 现在改成：rect 与排除判定都只在**换元素**时算一次（后者结果进 dataset），
@@ -37,6 +53,11 @@
   var pendingEl = null;     // 待提交帧的目标（提交时要求它仍是 current）
   var pendingX = 0, pendingY = 0;
   var tiltRaf = 0;
+
+  // 极光琉璃 B-P2：卡片光斑跟随（main.css「4b) 材质层」消费 --mx/--my）。
+  // 只写 0-100% 的百分比，不写 px —— 卡片尺寸变化时无需重算，也省掉一次 rect 读取。
+  // 同一帧内与 transform 一起提交，不额外挂监听器（复用下面这条 mousemove）。
+  var pendingMx = 50, pendingMy = 50;
 
   // M3（v3.6.5）N-4：剔除 base 中「旧的 transform 过渡片段」，而不是整条替换。
   // 原实现：base 只要含 'transform' 就把整个 base 丢掉 → 连带丢弃容器自带的
@@ -83,9 +104,13 @@
 
   function reset(el) {
     if (!el) return;
+    // 只复位真正倾斜过的元素：非倾斜卡片没写过 transform/transition，
+    // 这里一旦 setTransform 就会给它们塞行内 transition，覆盖样式表的悬停过渡。
+    if (el.dataset.tiltApplied !== '1') return;
     // reduced-motion 下复位直接清除姿态，不做 0.5s 过渡动画
     setTransform(el, '', isReducedMotion() ? 'none' : RESET_TRANSITION);
     el.style.willChange = '';
+    delete el.dataset.tiltApplied;
   }
 
   // 审查v4-M1：reduced-motion 改为事件回调内实时求值——原实现模块加载时求值一次，
@@ -116,6 +141,8 @@
   function clearTilt() {
     reset(current);
     current = null;
+    currentTiltable = false;
+    currentSpot = false;
     currentRect = null;
     pendingEl = null;
   }
@@ -125,7 +152,13 @@
     var el = pendingEl;
     // 待提交帧与当前悬停脱节（换了元素 / 已复位 / 已离开窗口）时不写旧元素
     if (!el || el !== current) return;
+    if (currentSpot) {
+      el.style.setProperty('--mx', pendingMx.toFixed(1) + '%');
+      el.style.setProperty('--my', pendingMy.toFixed(1) + '%');
+    }
+    if (!currentTiltable) return;
     el.style.willChange = 'transform';
+    el.dataset.tiltApplied = '1';
     setTransform(
       el,
       'perspective(' + PERSPECTIVE + 'px) rotateY(' + (pendingX * MAX_ANGLE * 2).toFixed(2) + 'deg) rotateX(' +
@@ -137,14 +170,18 @@
   document.addEventListener('mousemove', function (e) {
     if (e.pointerType && e.pointerType !== 'mouse') return;
     if (isReducedMotion()) { clearTilt(); return; }
-    var el = e.target && e.target.closest ? e.target.closest(SELECTOR) : null;
-    // 命中「启动项列表」/扫描结果表格所在面板时取消倾斜
-    if (el && isExcludedCard(el)) el = null;
+    var el = e.target && e.target.closest ? e.target.closest(HIT) : null;
+    // 命中光斑专用卡片时只写坐标，不做倾斜（判定按元素缓存，见下面换元素分支）
+    var tiltable = !!el && el.matches(SELECTOR);
+    // 命中「启动项列表」/扫描结果表格/树图所在面板时整块退出（倾斜与光斑都不做）
+    if (el && isExcludedCard(el)) { el = null; tiltable = false; }
     if (el !== current) {
       // 先读后写：换元素时才量一次 rect，避免被紧随的 reset() 写脏而再触发回流
       var fresh = el ? el.getBoundingClientRect() : null;
       reset(current);
       current = el;
+      currentTiltable = tiltable;
+      currentSpot = !!el && !el.matches(SPOT_NONE);
       currentRect = fresh ? { left: fresh.left, top: fresh.top, width: fresh.width, height: fresh.height } : null;
     }
     if (!el) return;
@@ -157,6 +194,9 @@
     if (x < -0.5 || x > 0.5 || y < -0.5 || y > 0.5) return;
 
     pendingEl = el; pendingX = x; pendingY = y;
+    // 光斑位：把 -0.5..0.5 的偏移换算成 0-100%（与 --glass-spot 的 circle at 对齐）
+    pendingMx = (x + 0.5) * 100;
+    pendingMy = (y + 0.5) * 100;
     if (!tiltRaf) tiltRaf = requestAnimationFrame(applyTilt);
   }, { passive: true });
 

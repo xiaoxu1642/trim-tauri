@@ -64,6 +64,9 @@ const allIndexes = (src, needle) => {
 
 const CASES = [];
 const addCase = (id, ok) => { CASES.push({ id, ok }); };
+// 判据块条数地板：24 条判据是六族「失败被念成成功」问题的唯一机检，
+// 删块/注释块会让对象集缩小却仍 exit 0（假绿），故设地板并 fail-closed。
+const MIN_CASES = 24;
 
 // ---------- M10：丢包采样失败不得沿用上一拍 ----------
 {
@@ -114,30 +117,63 @@ const addCase = (id, ok) => { CASES.push({ id, ok }); };
   }
 }
 
-// ---------- M18：三处写侧必须读回执 ----------
+// ---------- M18：三处写侧的成功提示必须由成功回执守卫 ----------
 {
   const src = read('src/scripts/diskbench.js');
   if (!src) {
     g.fail('M18：src/scripts/diskbench.js 不存在（判定对象缺失）');
   } else {
     const sites = ['benchHistory.add(', 'benchHistory.delete(', 'benchHistory.clear('];
+    // 判据必须打在「提示由成功回执触发」这条语义上，只查窗口内出现过 success === false
+    // 会被「先报成功、再判空」和「判了但空分支」两种表演骗过：
+    //  ① 失败守卫必须存在（`!receipt || receipt.success === false` / `success !== true`）；
+    //  ② 成功提示只能出现在守卫块闭合之后——写在守卫之前就是失败也念「已保存」；
+    //  ③ 守卫块必须能截断成功路径（return/throw），空守卫不算读回执。
+    const FAIL_GUARD = /if\s*\([^)]*success\s*(?:===\s*false|!==\s*true)[^)]*\)\s*\{/;
+    const SUCCESS_HINT = /(?:toast\s*\(\s*['"]success|toast\.success\s*\(|textContent\s*=|\.remove\(\))/g;
+    const matchBrace = (text, openAt) => {
+      let depth = 0;
+      for (let i = openAt; i < text.length; i++) {
+        if (text[i] === '{') depth++;
+        else if (text[i] === '}' && --depth === 0) return i;
+      }
+      return -1;
+    };
     const judge = (text, needle) => {
       const w = windowAfter(text, needle, 24);
-      return !!w && /\.success\s*===\s*false/.test(w);
+      const guard = w && FAIL_GUARD.exec(w);
+      if (!guard) return false;
+      const openAt = guard.index + guard[0].length - 1;
+      const closeAt = matchBrace(w, openAt);
+      if (closeAt < 0) return false;
+      const guardBody = w.slice(openAt, closeAt + 1);
+      let hint = null;
+      let hasHint = false;
+      SUCCESS_HINT.lastIndex = 0;
+      while ((hint = SUCCESS_HINT.exec(w))) {
+        hasHint = true;
+        if (hint.index < closeAt) return false;
+      }
+      return !hasHint || /\b(?:return|throw)\b/.test(guardBody);
     };
-    const goodSample = 'await window.api.benchHistory.add(x);\nif (!receipt || receipt.success === false) { return; }';
+    const goodSample = 'const receipt = await window.api.benchHistory.add(x);\nif (!receipt || receipt.success === false) { return; }\nwindow.app.toast("success", "已保存");';
     const badSample = 'await window.api.benchHistory.add(x);\nbtn.remove();';
-    if (!judge(goodSample, 'benchHistory.add(') || judge(badSample, 'benchHistory.add(')) {
-      g.fail('M18 正向对照失败：写侧回执判定器失真（必须能把「读回执」与「不读回执」分开）');
+    // 反样本二：先报成功、再判空回执（旧判据实测放过这一形态）。
+    const badSample2 = 'const receipt = await window.api.benchHistory.add(x);\nwindow.app.toast("success", "已保存");\nif (!receipt || receipt.success === false) { return; }';
+    // 反样本三：判了回执但守卫块是空的，成功提示照发。
+    const badSample3 = 'const receipt = await window.api.benchHistory.add(x);\nif (!receipt || receipt.success === false) { }\nwindow.app.toast("success", "已保存");';
+    if (!judge(goodSample, 'benchHistory.add(') || judge(badSample, 'benchHistory.add(')
+      || judge(badSample2, 'benchHistory.add(') || judge(badSample3, 'benchHistory.add(')) {
+      g.fail('M18 正向对照失败：写侧回执判定器失真（必须能把「成功提示在守卫之后」与「不读回执 / 先报成功再判空 / 空守卫」分开）');
     }
     let bad = 0;
     for (const s of sites) {
       if (!judge(src, s)) {
-        g.fail(`M18：${s} 之后没有读回执的分支 ⇒ 失败会被念成「已保存 / 已删除 / 已清空」`);
+        g.fail(`M18：${s} 之后没有成功回执守卫（或成功提示写在守卫之前 / 守卫是空的）⇒ 失败会被念成「已保存 / 已删除 / 已清空」`);
         bad++;
       }
     }
-    if (bad === 0) g.ok('M18：历史记录的三处写侧都读了回执');
+    if (bad === 0) g.ok('M18：历史记录三处写侧的成功提示都由成功回执守卫');
     addCase('M18', bad === 0);
   }
 }
@@ -767,6 +803,10 @@ const addCase = (id, ok) => { CASES.push({ id, ok }); };
 }
 
 if (!g.skipUnlessPresent(join(ROOT, 'src', 'scripts', 'optimizer.js'), 'src/scripts（本门禁的判定对象）')) g.finish();
+
+if (CASES.length < MIN_CASES) {
+  g.fail(`回执三态判据块被删/被跳过：现 ${CASES.length} 条 < 地板 ${MIN_CASES} 条 ⇒ 本节未校验，不是通过`);
+}
 
 const failed = CASES.filter(c => !c.ok).length;
 if (failed > 0) g.fail(`回执三态判据：${failed} 条不达标（共 ${CASES.length} 条）`);

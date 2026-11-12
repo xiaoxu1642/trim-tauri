@@ -559,9 +559,10 @@ for (const [id, spec] of Object.entries(items)) {
   // 用 Map.set 会让后者**覆盖**前者 ⇒ 基础组整段判成「少列」（踩过一次）。
   const gotGroups = (spec.groups || []).map((g) => ({ expect: g.expectStart, set: new Set(g.services || []) }));
   // v6-K20：判据本体是 judgeSideTableDiff（与 G 组共用同一实现）。
-  // hasArray 由本项的 steps 重算（A 组的 marks 是块局部量）。
-  const bBlob = (spec.steps || []).map((s) => s.pwsh || '').join('\n');
-  const bHasArray = /\$(?:disabled|svcs|drv|services|storeSvc|apps|keys|names|paths|tasks)\s*=\s*@\(/.test(bBlob);
+  // T1a-M06：hasArray 不能取侧表的 `steps` —— 该键被白名单禁止（13/13 不存在），
+  // 恒 false 会让 want 空集兜底永不触发。改由**运行时条目**判定：本项确实在写
+  // 服务 Start 才要求 want 非空；纯注册表项（如 `$paths` 数组）不适用本兜底。
+  const bHasArray = writesServiceStart(o);
   for (const p of judgeSideTableDiff({ want, gotGroups, storeSet, regWriteKeys: inRegWrites, hasArray: bHasArray })) {
     drift.push(`${id}: ${p}`);
   }
@@ -844,6 +845,16 @@ check(
 (function positiveControls() {
   const findings = [];
 
+  // T1a-M06：合成「数组名改名」样本。放在样本表外，构造失败要显式红，
+  // 不能把「样本没造出来」也当成「判据抓到了」。
+  const renamedArrayOpt = {
+    steps: [{
+      pwsh: '$blocked = @("SvcA")\nforeach ($s in $blocked) { New-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$s" -Name Start -Value 4 -Force | Out-Null }',
+    }],
+  };
+  const renamedArrayWant = parseGroups(renamedArrayOpt);
+  if (renamedArrayWant.size !== 0) findings.push('B 改名数组样本构造失败：parseGroups 未塌成空 want');
+
   // 第一批：B/D 组（侧表 ⇄ pwsh 对拍 / 商店分离）
   const bdCases = [
     {
@@ -901,6 +912,20 @@ check(
         want: new Map([[4, new Set(['SvcA', 'SvcB'])]]),
         gotGroups: [{ expect: 4, set: new Set(['SvcA', 'SvcB']) }],
       }),
+      expectHit: false,
+    },
+    {
+      name: 'B want 空集但确实写服务 Start（数组名改名，必红）',
+      fn: () => judgeSideTableDiff({
+        want: renamedArrayWant,
+        gotGroups: [],
+        hasArray: writesServiceStart(renamedArrayOpt),
+      }),
+      expectHit: true,
+    },
+    {
+      name: 'B want 空集且不写服务 Start（纯注册表项，放行）',
+      fn: () => judgeSideTableDiff({ want: new Map(), gotGroups: [], hasArray: false }),
       expectHit: false,
     },
     {

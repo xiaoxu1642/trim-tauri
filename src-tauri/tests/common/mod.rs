@@ -177,6 +177,53 @@ pub fn skip_and_record(what: &str) {
     eprintln!("⚠ [skip-sample] {what}");
 }
 
+/// diskbench 负例样本：**必然不可写**的系统目录（v2 P1-01b / X1-N01 同族）。
+///
+/// 为什么不用 `PUBLIC` 下自建目录：那类样本可写，白名单闸一旦被摘掉/改松，负例就会
+/// **真的落盘测速**——用例自己成了事故现场。这里只从「存在、非重解析点、能规范化、
+/// 且当前用户建子目录必失败」的系统目录里挑：闸失效时最多落到
+/// 「测速临时目录不可用」（`claim_residue_dir` 建目录失败），不会跑任何测速、不留残。
+///
+/// 判据顺序与 `commands/diskbench.rs` 一致（存在 → 普通目录/非重解析 → 规范化 →
+/// 白名单）：候选若在规范化这一步就失败，拒因会变成「无法规范化」，负例就测不到白名单闸，
+/// 因此这类候选直接跳过。
+///
+/// 返回 `None` 表示本机没有任何候选可用——调用方 `skip_and_record`，不许硬红。
+pub fn unwritable_outside_whitelist_dir(tag: &str) -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        let root = std::path::PathBuf::from(root);
+        // 这三个目录的 ACL 只给 TrustedInstaller/SYSTEM 写权限，普通管理员也建不出子目录。
+        candidates.push(root.join("WinSxS"));
+        candidates.push(root.join("servicing"));
+        candidates.push(root.join("Boot"));
+    }
+    if let Some(pf) = std::env::var_os("ProgramFiles") {
+        candidates.push(std::path::PathBuf::from(pf).join("WindowsApps"));
+    }
+    for dir in candidates {
+        let Ok(meta) = std::fs::symlink_metadata(&dir) else {
+            continue;
+        };
+        if !meta.is_dir() || trim_tauri_lib::engine::protect::is_reparse(&meta) {
+            continue;
+        }
+        if std::fs::canonicalize(&dir).is_err() {
+            continue;
+        }
+        // 试建再删：建得出来说明这个样本可写，不能用来证明「闸失效也不会真测速」。
+        let probe = dir.join(format!("TrimSmoke-diskbench-probe-{tag}-{}", std::process::id()));
+        match std::fs::create_dir(&probe) {
+            Ok(()) => {
+                let _ = std::fs::remove_dir(&probe);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Some(dir),
+        }
+    }
+    None
+}
+
 /// 四个子窗 label（剔除主窗），从 `engine::guard::APP_WINDOWS` 派生——
 /// 单一真源在 guard.rs，新增子窗时这里自动跟随，不会和守卫清单漂移。
 /// ipc_smoke 的「子窗口来源校验档位」组与新的子窗档位测试都用它。

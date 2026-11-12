@@ -12,7 +12,9 @@
     contextmenu: { label: '右键管理' },
     memoryclean: { label: '内存清理' },
     // v0.7.0：漏这档不会报错，只会在残留窗里静默按「右键管理」显示模型选择器标题
-    residue: { label: '应用卸载残留' }
+    residue: { label: '应用卸载残留' },
+    // 2026-11-12：软件卸载页「应用详情」二级页；漏这档会静默显示成「右键管理」
+    uninstallapp: { label: '软件卸载·应用详情' }
   };
 
   let settingsCache = null;

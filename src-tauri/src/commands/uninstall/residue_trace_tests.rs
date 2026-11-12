@@ -185,7 +185,7 @@ use super::residue_update::*;
             expected_staged += kids.len();
         }
 
-        let rows = enum_appx_store_extras(&HashSet::new());
+        let (rows, _) = enum_appx_store_extras(&HashSet::new());
         let staged = rows.iter().filter(|r| r["appxState"] == json!("staged")).count();
         assert_eq!(staged, expected_staged, "Staged 子树漏读（实现数 {staged} / 注册表数 {expected_staged}）");
 
@@ -217,7 +217,7 @@ use super::residue_update::*;
             if let Some(first) = kids.first() {
                 let mut seen = HashSet::new();
                 seen.insert(first.clone());
-                let again = enum_appx_store_extras(&seen);
+                let (again, _) = enum_appx_store_extras(&seen);
                 assert!(
                     again.iter().all(|r| r["id"] != json!(format!("APPX|{first}"))),
                     "seen 里的 {first} 又出了一次"

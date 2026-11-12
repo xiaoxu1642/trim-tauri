@@ -74,7 +74,9 @@ if (!byId || typeof byId !== 'object') {
 // ⓪ 数据文件自身的版本字段（T1f-L07）：`rule-schema.json` 没有与它对应的键，也没有
 // 任何消费方读它（`intro.js` 只按 scope 取简介），所以这里按现值钉住 —— 删掉或静默
 // 改版都会红；真升版时改这里也等于强制有人看一眼「为什么升」。
-const ITEM_INTRO_VERSION = 3;
+// v4（2026-11-12）：新增 uninstallapp 档（软件卸载页「应用详情」二级页）。
+// 这行是「按现值钉住」的棘轮：改数据版本必须同步改这里，防止版本号被静默改写。
+const ITEM_INTRO_VERSION = 4;
 check(intro.version === ITEM_INTRO_VERSION,
   `⓪ item-intro.version = ${ITEM_INTRO_VERSION}（无 schema 对应键，按现值钉住）`,
   `实际 ${JSON.stringify(intro.version)}`);

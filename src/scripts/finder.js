@@ -72,20 +72,21 @@
       if (!resp.success) throw new Error(resp.message || '盘符枚举失败');
       const drives = resp.data || [];
       if (!drives.length) {
-        box.innerHTML = '<span class="finder-pager-info">未发现固定磁盘（按 C: 处理）</span>';
-        renderDriveChips(key, box, ['C:']);
+        renderDriveChips(key, box, ['C:'], '未发现固定磁盘（按 C: 处理）');
         return;
       }
       drives.forEach((d) => driveSel[key].add(d));
       renderDriveChips(key, box, drives);
     } catch (e) {
-      box.innerHTML = `<span class="finder-pager-info">盘符枚举失败（按 C: 处理）：${esc(String(e.message || e))}</span>`;
-      renderDriveChips(key, box, ['C:']);
+      renderDriveChips(key, box, ['C:'], `盘符枚举失败（按 C: 处理）：${String(e.message || e)}`);
     }
   }
 
-  function renderDriveChips(key, box, drives) {
-    box.innerHTML = drives.map((d) => `
+  // P2-33（F4b-M02-01）：说明条与胶囊由本函数一次写入。
+  // 旧实现先写报错行再整盒渲染 chips，失败证据被当场覆盖成「正常态只有一个 C:」。
+  function renderDriveChips(key, box, drives, note) {
+    const noteHtml = note ? `<span class="finder-pager-info">${esc(note)}</span>` : '';
+    box.innerHTML = noteHtml + drives.map((d) => `
       <span class="drive-chip ${driveSel[key].has(d) ? 'active' : ''}" data-drive="${esc(d)}" data-drive-for="${key}" role="checkbox" tabindex="0" aria-checked="${driveSel[key].has(d)}">${esc(d)}</span>
     `).join('');
   }

@@ -29,6 +29,7 @@ import { writeFileAtomic } from './lib/atomic-write.mjs';
 import { nextRulesVersion } from './lib/next-rules-version.mjs';
 import { allItems } from './lib/rule-shape.mjs';
 import { list as schemaList, number as schemaNumber, tokens as schemaTokens } from './rule-schema.mjs';
+import { validateCleanupPackage } from './cleanup-contract.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const RULES_REL = path.join('src-tauri', 'data', 'cleanup-rules.json');
@@ -123,7 +124,17 @@ const TOKEN_MAP = new Map(Object.entries({
 const ALLOWED_TOKENS = schemaTokens('cleanup').allowed;
 const MAX_FILE_KEYS = schemaNumber('cleanup', 'maxFileKeysPerItem');
 const MAX_TARGET_LEN = schemaNumber('cleanup', 'maxTargetLen');
-const GROUP_KEY_LEN = schemaNumber('cleanup', 'maxGroupItems');
+// 仅分组键截断长度（groupKeyOf 里按软件身份聚组时取前 N 段），不是契约上限——
+// 「maxGroupItems」只在 residue.limits 下（残留库条件组条数上限），cleanup 段无此键，
+// 读 cleanup.maxGroupItems 会让模块在加载期即抛，stats/plan/apply 全不可用（T1c-M42）。
+const GROUP_KEY_LEN = 40;
+// 键位存在自检：residue.limits.maxGroupItems 是契约口径点，缺失即 fail-loud 而非半途抛。
+try {
+  schemaNumber('residue', 'maxGroupItems');
+} catch (e) {
+  console.error(`✗ 契约表 residue.limits.maxGroupItems 缺失或非正数：${e.message}`);
+  process.exit(1);
+}
 
 function normalizePath(p) {
   let out = String(p ?? '').replace(/\//g, '\\');
@@ -547,6 +558,23 @@ function existingFingerprints(rules) {
   return fingerprintsOf(allItems(rules));
 }
 
+// A15 后果文案：除最低档外必须告知「删了会怎样」。按性质给确定后果，high 风险再加重语气。
+function ifDeletedText(nature, risk, name) {
+  const byNature = {
+    cache: '删除后该软件需重新生成缓存，不影响已保存数据',
+    log: '删除后该软件的历史日志丢失，不影响运行',
+    temp: '删除后该软件的临时文件丢失，重新运行会自行重建',
+    history: '删除后该软件的历史记录（最近打开/访问）丢失，无法恢复',
+    updateResidual: '删除后该软件的更新残留被清理，不影响已安装版本',
+    dump: '删除后该软件的崩溃转储丢失，不影响运行',
+    staleBackup: '删除后该软件的旧备份丢失，无法恢复到备份时状态',
+    fileClean: '删除后该软件的相关残留文件被清理，可能影响其部分状态',
+  };
+  const base = byNature[nature] || '删除后该目标不可恢复，仅在你不再需要它时清理';
+  if (risk === 'high') return `高危：${name} 相关内容删除后不可恢复，可能含凭据/密码，务必确认`;
+  return base;
+}
+
 function buildItem(c, cls, rulesVersion, seen) {
   const nature = natureOf(c);
   const fileKeys = c.fileKeys.map((f) => ({ path: f.path, pattern: f.pattern, recurse: !!f.recurse }));
@@ -600,6 +628,11 @@ function buildItem(c, cls, rulesVersion, seen) {
   };
   if (fileKeys.length) item.fileKeys = fileKeys;
   if (detect.length) item.detect = detect;
+  // A15：除最低档外必须告知「删了会怎样」。导入器能按性质/风险给出确定后果文案，
+  // 不再把 medium/high 条目写成「缺 ifDeleted」（修好 M42 后缺失会导致写入契约判红灯库）。
+  if (risk !== 'low') {
+    item.ifDeleted = ifDeletedText(nature, risk, name);
+  }
   return { item };
 }
 
@@ -804,6 +837,14 @@ function apply() {
   if (missing.size) {
     console.error('✗ 找不到目标子类目:', [...missing].join(', '));
     console.error('  未写盘——先在 cleanup-rules.json 里建好这些子类目再重跑（写一半的库比没写更糟）');
+    process.exit(1);
+  }
+  // 写盘前合约地板（T1c-M43）：导入器产出的库必须自己过清理规则契约；任一 [Axx] 即
+  // exit 1 且不落盘、不签名——绝不把契约判红灯库写盘后再去签名/生成兜底。
+  const contractErrs = validateCleanupPackage(rules);
+  if (contractErrs.length) {
+    console.error('✗ 导入结果未通过清理规则契约，拒绝写盘（不签名、不生成兜底）:');
+    for (const e of contractErrs) console.error(`  ${e}`);
     process.exit(1);
   }
   const out = path.join(ROOT, RULES_REL);

@@ -44,7 +44,7 @@
   "remove_dir_all": {
     "src-tauri/src/commands/diskbench.rs": 1,
     "src-tauri/src/commands/fileclean.rs": 16,
-    "src-tauri/src/commands/gameclean.rs": 4,
+    "src-tauri/src/commands/gameclean.rs": 7,
     "src-tauri/src/commands/optimizer/backup_restore.rs": 4,
     "src-tauri/src/commands/realtime.rs": 2,
     "src-tauri/src/commands/uninstall/backup_report.rs": 5,
@@ -64,15 +64,19 @@
     "src-tauri/src/security/mod.rs": 11,
     "src-tauri/src/testutil.rs": 2,
     "native-scanner/src/cleanup_scan.rs": 16,
-    "native-scanner/src/scan.rs": 26,
+    "native-scanner/src/scan.rs": 23,
     "native-scanner/src/util.rs": 5
   },
   "remove_owned_font_copy": {
     "src-tauri/src/commands/fonts.rs": 4
   },
-  "reg_import_apply": {
-    "src-tauri/src/commands/optimizer/apply.rs": 1,
-    "src-tauri/src/engine/reg_backup.rs": 2
+  "remove_dir": {
+    "src-tauri/src/commands/gameclean.rs": 1,
+    "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 1,
+    "src-tauri/src/commands/updater.rs": 1,
+    "src-tauri/src/engine/native/cleanup.rs": 2,
+    "src-tauri/src/engine/paths.rs": 1,
+    "src-tauri/src/engine/restore_pack.rs": 1
   },
   "reg_key_remove": {
     "src-tauri/src/commands/optimizer/backup_restore.rs": 2,
@@ -93,13 +97,6 @@
     "src-tauri/src/commands/startup.rs": 1,
     "src-tauri/src/engine/native/startup.rs": 3
   },
-  "remove_dir": {
-    "src-tauri/src/commands/uninstall/residue_trace_tests.rs": 1,
-    "src-tauri/src/commands/updater.rs": 1,
-    "src-tauri/src/engine/native/cleanup.rs": 2,
-    "src-tauri/src/engine/paths.rs": 1,
-    "src-tauri/src/engine/restore_pack.rs": 1
-  },
   "RegDeleteValueW": {
     "src-tauri/src/engine/native/contextmenu.rs": 5,
     "src-tauri/src/engine/native/peripheral.rs": 1,
@@ -113,6 +110,9 @@
   },
   "RegDeleteKeyW": {
     "src-tauri/src/engine/native/registry.rs": 3
+  },
+  "reg_import_apply": {
+    "src-tauri/src/engine/reg_backup.rs": 2
   },
   "DeleteFileW": {
     "native-scanner/src/perf.rs": 1

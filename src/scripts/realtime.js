@@ -48,6 +48,7 @@
     adapter: '',          // 选中网卡名（空 = 所有活动网卡聚合）
     paused: false,        // 是否暂停采集
     adapters: [],         // 本机网卡列表
+    adaptersError: '',    // 网卡枚举失败原因（区分「枚举失败」与「确无网卡」）
     up: 0,                // 当前上传 B/s
     down: 0,              // 当前下载 B/s
     loss: { lossRate: 0, sent: 0, received: 0, latencyMs: 0, gateway: '' },
@@ -158,13 +159,16 @@
     if (window.api?.realtime) {
       try {
         const resp = await window.api.realtime.adapters();
-        if (resp && resp.success) {
-          state.adapters = resp.adapters || [];
+        if (resp && resp.success && Array.isArray(resp.adapters)) {
+          state.adapters = resp.adapters;
+          state.adaptersError = '';
         } else {
           state.adapters = [];
+          state.adaptersError = (resp && resp.message) || '网卡枚举无有效回执';
         }
       } catch (e) {
         state.adapters = [];
+        state.adaptersError = (e && e.message) || String(e);
       }
     } else {
       // 预览模式模拟网卡
@@ -172,6 +176,12 @@
         { name: 'Realtek PCIe GbE Family Controller', connectionName: '以太网', description: 'Realtek PCIe GbE Family Controller', status: 'Up', mac: 'AA:BB:CC:DD:EE:01', linkSpeed: '1000000000' },
         { name: 'Intel(R) Wi-Fi 6 AX200', connectionName: 'WLAN', description: 'Intel(R) Wi-Fi 6 AX200', status: 'Up', mac: 'AA:BB:CC:DD:EE:02', linkSpeed: '866700000' }
       ];
+      state.adaptersError = '';
+    }
+    // A1-01：失败不能再折成空列表静默——留日志与 toast，下拉框同时保留错误态
+    if (state.adaptersError) {
+      window.app?.log?.('warn', '网卡枚举失败: ' + state.adaptersError);
+      window.app?.toast?.('error', '网卡枚举失败：' + state.adaptersError);
     }
     renderAdapterSelect();
   }
@@ -181,12 +191,23 @@
     if (!sel) return;
     const prev = sel.value || state.adapter;
     const options = ['<option value="">所有活动网卡（聚合）</option>'];
+    if (state.adaptersError) {
+      options.push(`<option value="__adapter_error__" disabled>网卡枚举失败，仅监控聚合流量</option>`);
+    } else if (!state.adapters.length) {
+      options.push('<option value="__adapter_empty__" disabled>未检测到可用网卡</option>');
+    }
     state.adapters.forEach(a => {
       const label = a.connectionName ? `${a.connectionName}（${a.name}）` : a.name;
       const statusMark = a.status === 'Up' ? '' : '（未连接）';
       options.push(`<option value="${escapeAttr(a.name)}">${escapeHtml(label)}${escapeHtml(statusMark)}</option>`);
     });
     sel.innerHTML = options.join('');
+    // AGENTS §2：提示一律走 data-tip，不写原生 title
+    if (state.adaptersError) {
+      sel.dataset.tip = '网卡枚举失败：' + state.adaptersError;
+    } else {
+      delete sel.dataset.tip;
+    }
     // 恢复选中：保存的网卡仍存在则保留，否则回退聚合
     const names = state.adapters.map(a => a.name);
     sel.value = names.includes(prev) ? prev : '';

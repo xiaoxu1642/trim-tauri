@@ -167,6 +167,7 @@ for (const m of MAPPING) {
   console.log(`${textOk ? '✓' : '✗'} ${m.ps1} 文本层（PROVENANCE 块${provenance ? '有' : '缺失!'}）`);
   if (!textOk) {
     textDrift++;
+    fail++; // 文本层漂移必须进 fail：打印红不等于判红（AGENTS §4.1）；否则本门禁唯一目的「任意字符漂移=悄悄改行为」失效，现盘漂移仍 exit 0
     console.log('⊘ 严格逐字比较发现首尾空白漂移；生成物不在本批授权写面，文本层结论未校验（不把旧 trim 口径当通过）');
     const a = jsText.trim().split('\n');
     const b = body.trim().split('\n');
@@ -270,7 +271,7 @@ const verdict = ok
         ? `SKIP（文本层通过；行为层无对象：0 条断言可跑，不算验证${STRICT ? '。--strict 已按零对象放行' : ''}）`
         : '✓ 文本层门禁通过（行为层未验证，见上）')
   : textFail > 0
-    ? `✗ ${textFail} 项未通过${strictUnmet ? '（另：--strict 要求行为层已验证，本次未达成）' : ''}`
+    ? `✗ ${textFail} 项未通过（含文本层漂移 ${textDrift} 处，生成物需按流程重出${strictUnmet ? '；另：--strict 要求行为层已验证，本次未达成' : ''}）`
     : '✗ 行为层未覆盖（--strict 要求行为层已验证：加 --run 真跑）';
 console.log(`\n${verdict}`);
 if (textDrift > 0) console.log(`※ 文本层严格逐字比较：${textDrift} 处未校验（生成物需按流程重出）`);

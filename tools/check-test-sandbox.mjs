@@ -53,7 +53,8 @@ const CEILING = {
   'src-tauri/src/engine/reg_backup.rs': 3,
   'src-tauri/src/engine/protect.rs': 2,
   'src-tauri/src/commands/updater.rs': 2,
-  'src-tauri/src/commands/gameclean.rs': 2,
+  // P1-08 junction 回归新增的沙箱同样带 pid + Drop 守卫
+  'src-tauri/src/commands/gameclean.rs': 3,
   'src-tauri/src/commands/runtimes.rs': 2,
   'src-tauri/src/engine/native/peripheral.rs': 1,
   'src-tauri/src/engine/native/contextmenu.rs': 1,

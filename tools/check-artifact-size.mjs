@@ -60,11 +60,15 @@ export function judgeSizes(current, baseline) {
   return { problems, shrink };
 }
 
+// T1b-P27-M02：同角色可能并存多个版本产物（如 Trim_0.9.0 与 Trim_0.10.0 的 setup）。
+// 旧实现按遍历到的最后一文件取值，陈旧旧包会顶掉新包、体积棘轮被整体绕过。
+// 这里逐件登记，判定取同角色最大件，保证任何一件超 cap 都判红。
 function scanArtifacts() {
   const out = {};
   for (const f of readdirSync(DIR)) {
     for (const { role, re } of ROLES) {
-      if (re.test(f)) out[role] = statSync(join(DIR, f)).size;
+      if (!re.test(f)) continue;
+      (out[role] ??= []).push({ file: f, size: statSync(join(DIR, f)).size });
     }
   }
   return out;
@@ -103,12 +107,23 @@ if (!g.skipUnlessPresent(DIR, 'build-release/（发版产物目录，未跟踪�
   g.finish();
   process.exit(0);
 }
-const current = scanArtifacts();
-if (!Object.keys(current).length) {
+const scanned = scanArtifacts();
+if (!Object.keys(scanned).length) {
   console.warn('⚠ build-release/ 存在但没有可识别的产物（setup / portable / Trim.exe 三种角色均未命中）：本节**未校验**');
   g.finish();
   process.exit(0);
 }
+for (const [role, hits] of Object.entries(scanned)) {
+  if (hits.length > 1) {
+    g.warn(
+      `同角色 ${role} 命中 ${hits.length} 件，按最大件判定：` +
+        hits.map((h) => `${h.file} ${h.size.toLocaleString('en-US')} B`).join('；'),
+    );
+  }
+}
+const current = Object.fromEntries(
+  Object.entries(scanned).map(([role, hits]) => [role, Math.max(...hits.map((h) => h.size))]),
+);
 
 if (WRITE) {
   writeFileSync(BASELINE_PATH, JSON.stringify(current, null, 2) + '\n', 'utf8');

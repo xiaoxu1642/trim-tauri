@@ -55,9 +55,11 @@ function writesServiceStart(stepText) {
   const inServices = t.includes('CurrentControlSet\\Services') || /Services\\[^\r\n"']+/i.test(t);
   const pwshStart = /-Name\s+Start\s+-Value/.test(t);
   const regStart = /^"Start"=/m.test(t);
-  const cmdStart = /sc\s+config\s+\S+\s+start=/i.test(t);
-  // cmd 的 `sc config <svc>` 本身就点名了服务 ⇒ 不需要再找 Services 路径。
-  if (cmdStart) return true;
+  // cmd 的 `sc[.exe] config <svc> start=` 本身就点名了服务，且是服务自启写 ⇒ 不需要再找 Services 路径（补 .exe 形态）。
+  const cmdStart = /sc(?:\.exe)?\s+config\s+\S+\s+start=/i.test(t);
+  // PowerShell 的 `Set-Service -Name <svc> -StartupType …` 直接点名服务并改其启动类型（Start 值），同样是服务自启写 ⇒ 短路点名。
+  const pwshSvcStartType = /\bSet-Service\b[^\r\n]*-StartupType/i.test(t);
+  if (cmdStart || pwshSvcStartType) return true;
   return inServices && (pwshStart || regStart);
 }
 
@@ -129,6 +131,21 @@ if (flagged === 0) {
     {
       label: 'T1b-M08（cmd sc config 形态）',
       item: { id: 'fake_cmd', desc: '商店与同步相关服务保持系统默认（不再修改）。', steps: [{ cmd: cmdBody }] },
+      wantHit: true,
+    },
+    {
+      label: 'P2-07（cmd sc.exe config 形态）',
+      item: { id: 'fake_cmd_exe', desc: '商店与同步相关服务保持系统默认（不再修改）。', steps: [{ cmd: 'sc.exe config FakeSvc start= disabled' }] },
+      wantHit: true,
+    },
+    {
+      label: 'P2-07（Set-Service -StartupType 位置参数形态）',
+      item: { id: 'fake_set_svc', desc: '商店与同步相关服务保持系统默认（不再修改）。', steps: [{ pwsh: 'Set-Service -Name FakeSvc -StartupType Disabled -ErrorAction SilentlyContinue' }] },
+      wantHit: true,
+    },
+    {
+      label: 'P2-07（Set-Service -StartupType 管道形态）',
+      item: { id: 'fake_set_svc_pipe', desc: '商店与同步相关服务保持系统默认（不再修改）。', steps: [{ pwsh: 'Get-Service FakeSvc | Set-Service -StartupType Disabled' }] },
       wantHit: true,
     },
   ];

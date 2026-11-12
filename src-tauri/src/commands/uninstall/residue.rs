@@ -1540,6 +1540,9 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             false => None,
         };
         let mut details: Vec<Value> = Vec::new();
+        // R2a-M06-1（P3-08）：本批是否写过注册表备份。保留上限裁剪与管理员摘要对账
+        // 只取决于「这批写没写过」，与单个目标无关，统一挪到两条分支都跑完之后做一次。
+        let mut reg_backup_written = false;
         // D3：只读闸门先一次跑完（判定顺序集中在 classify_residue_op），下面的变更代码里
         // 不再出现任何保护判断 —— 「谁查了哪几道闸」从"通读三段"变成"看一个函数的行序"。
         let mut ops: Vec<ResidueOp> = Vec::new();
@@ -1593,16 +1596,9 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             // P0-01：提权窗口补 HKLM 管理员摘要（非提权写失败仅日志）
             // P1-02：两份锚共用一次哈希快照（两次重读可能分叉）
             write_reg_backup_seals("uninstall", &file, target);
-            // N3：写完裁一次保留上限。只裁新根，封条随主文件同删（paths::prune_backups）；
-            // 刚写的这份是最新项，不会被自己裁掉。
-            crate::engine::paths::prune_backups(&backup_dir, crate::engine::paths::BACKUP_KEEP);
-            // P0-01：裁剪后对账 HKLM 摘要
-            // P1-03：对账读根 = 候选读根（新根 + 老根兜底）；读根出错整轮放弃（零删除）
-            {
-                let dirs = crate::engine::paths::backup_read_dirs(UNINSTALL_REG_BACKUP_SUB);
-                let roots = crate::engine::reg_backup::seal_read_roots(&dirs);
-                reconcile_admin_seals("uninstall", &roots);
-            }
+            // N3 的裁剪与 P0-01 的对账移至本批收尾统一执行（R2a-M06-1）：
+            // 原先每个目标各跑一次 = N×(全备份目录重读 + HKLM 值名枚举)。
+            reg_backup_written = true;
             // R2a-L03（2026-11-01 重审）：副本入包失败与 reg_value 分支同一口径 ——
             // 不再静默丢弃，也不再另记一行 skip；写进本条回执的附加说明
             // （.reg 原件仍在，原还原入口不受影响）。
@@ -1679,16 +1675,8 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             // D2：封条记的是**被备份的父键**（删单值前整父键导出，还原粒度也是父键）
             // P0-01：同 reg_key 分支补管理员摘要；P1-02：两份锚共用一次哈希快照
             write_reg_backup_seals("uninstall", &file, key_part);
-            // N3：与 reg_key 分支同一口径裁保留上限（同一目录，两处都要裁，漏一处
-            // 就等于"删值的备份不参与限额"，盘上照样无限涨）
-            crate::engine::paths::prune_backups(&backup_dir, crate::engine::paths::BACKUP_KEEP);
-            // P0-01：同样对账（幂等，与 reg_key 分支同目录）
-            // P1-03：对账读根 = 候选读根（新根 + 老根兜底）；读根出错整轮放弃（零删除）
-            {
-                let dirs = crate::engine::paths::backup_read_dirs(UNINSTALL_REG_BACKUP_SUB);
-                let roots = crate::engine::reg_backup::seal_read_roots(&dirs);
-                reconcile_admin_seals("uninstall", &roots);
-            }
+            // 与 reg_key 分支同一目录，裁剪与对账同样并入本批收尾（R2a-M06-1）。
+            reg_backup_written = true;
             // R2a-L03（2026-11-01 重审）：副本入包失败原先单独记一行 skip、随后同一目标
             // 再记 ok —— skipCount 虚高且报告自相矛盾。改成 ok/fail 行的附加说明，
             // `skip` 只保留「未尝试删除」的语义。
@@ -1711,6 +1699,21 @@ pub async fn uninstall_residue_execute<R: tauri::Runtime>(
             } else {
                 details.push(detail(kind, target, "fail", &format!("注册表值删除失败{pack_note}")));
             }
+        }
+
+        // N3 + P0-01（R2a-M06-1）：整批收尾各跑一次。prune 只裁新根，封条随主文件同删；
+        // 对账读根 = 候选读根（新根 + 老根兜底），读根出错整轮放弃（零删除）。
+        // 两条分支写的是同一个目录，故合并为一次；本批没写过备份则完全跳过。
+        // 终态与逐目标执行相同（prune 留最新 N 份、对账删孤儿摘要），中途崩溃只是
+        // 把清账推迟到下一批——两者本身幂等，不产生错误终态。
+        if reg_backup_written {
+            crate::engine::paths::prune_backups(
+                &uninstall_reg_backup_dir(),
+                crate::engine::paths::BACKUP_KEEP,
+            );
+            let dirs = crate::engine::paths::backup_read_dirs(UNINSTALL_REG_BACKUP_SUB);
+            let roots = crate::engine::reg_backup::seal_read_roots(&dirs);
+            reconcile_admin_seals("uninstall", &roots);
         }
 
         // 文件/目录/快捷方式：回收站批量（trim_finder 三端同源删除，含 protect 注入）

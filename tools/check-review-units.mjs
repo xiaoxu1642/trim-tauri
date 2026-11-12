@@ -22,12 +22,12 @@ import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { walkFiles } from './lib/fs-walk.mjs';
-import { CAP_LINES, FLOOR, AUDIT_ROOTS, UNITS, CROSS_UNITS, ANTI_UNITS } from './review-units.mjs';
+import { collectAuditFiles, claimUnits, IGNORE_DIR } from './lib/claims.mjs';
+import { CAP_LINES, FLOOR, AUDIT_ROOTS, UNITS, MODULES, CROSS_UNITS, ANTI_UNITS } from './review-units.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const norm = (p) => p.replace(/\\/g, '/');
 
-const IGNORE_DIR = (n) => n === 'target' || n === 'node_modules' || n === 'vendor' || n === '.git';
 const argOf = (flag) => {
   const i = process.argv.indexOf(flag);
   return i >= 0 ? process.argv[i + 1] : null;
@@ -169,6 +169,35 @@ export function detectFloor({ units, cross, anti }) {
   return { out, dupIds: units.map((u) => u.id).filter((id, i, a) => a.indexOf(id) !== i), ids };
 }
 
+/**
+ * U5d：12 模块表 ⇄ 纵向单元表双向咬合。
+ * 判据三条，任一条不成立都会让「按模块跑门禁」漏跑：
+ *   ① 每个纵向单元恰好属于一个模块（漏归 = 该单元的门禁无人认领；双归 = 挑哪份都说不清）；
+ *   ② 模块表里点名的单元必须真实存在（拼错 ID = 静默少一个单元的覆盖）；
+ *   ③ 模块 ID 唯一且形如 M-01…M-12，模块数 = 12（地板，防表被删空后「0 模块全绿」）。
+ * @param {{modules:Array<{id:string,units:string[]}>, units:Array<{id:string}>}} input
+ */
+export function detectModuleCoverage({ modules, units }) {
+  const out = [];
+  const unitIds = new Set(units.map((u) => u.id));
+  const seen = new Map();
+  const modIds = new Set();
+  for (const m of modules ?? []) {
+    if (modIds.has(m.id)) out.push(`模块 ID 重复：${m.id}`);
+    modIds.add(m.id);
+    if (!/^M-\d{2}$/.test(m.id)) out.push(`${m.id} 形状不是 M-NN`);
+    if (!m.units || m.units.length === 0) out.push(`${m.id} 没登记任何单元`);
+    for (const u of m.units ?? []) {
+      if (!unitIds.has(u)) out.push(`${m.id} 点名了不存在的单元 ${u}`);
+      if (seen.has(u) && seen.get(u) !== m.id) out.push(`单元 ${u} 同时归 ${seen.get(u)} 与 ${m.id}`);
+      else seen.set(u, m.id);
+    }
+  }
+  for (const u of units) if (!seen.has(u.id)) out.push(`单元 ${u.id} 不属于任何模块（按模块跑会漏它）`);
+  if ((modules ?? []).length !== 12) out.push(`模块数 ${(modules ?? []).length} ≠ 12（地板）`);
+  return out;
+}
+
 /** U7：从文档正文抽仓库内路径与单元 ID（反引号里的仓库相对形状 + 围栏代码块内的命令路径）。 */
 export function extractRepoPaths(text) {
   const out = new Set();
@@ -235,26 +264,31 @@ function judgeCoverageLedger(ledger, knownIds, unitsWithClaims) {
   const gaps = [];
   const overclaims = [];
   const noCommands = [];
+  const noCovered = [];
   const noCounts = [];
   // T1a-M14：covered 条目是带注解的字符串（路径后跟括号说明）——与认领
   // 路径精确相等会 19/19 恒假红。两侧都归一成「路径前缀」再比对。
   const pathOf = (s) => (String(s).match(/[\w./\\-]+/) || [''])[0].replace(/\\/g, '/').replace(/\/+$/, '');
   for (const [id, rec] of Object.entries(ledger)) {
     if (!knownIds.has(id)) continue;
+    // P2-05 / T1a-M04：covered 为空（没声明读过任何文件）必须在 `if (!unit) continue;`
+    // 之前判红，否则横向 A1–A6（不在 unitsWithClaims 里）空台账恒 ✓（假绿）。横向允许
+    // 「命中 0」但不允许「没读文件」。
+    if (!Array.isArray(rec.covered) || rec.covered.length === 0) noCovered.push(id);
+    if (!rec.counts || typeof rec.counts !== 'object' || Array.isArray(rec.counts)) noCounts.push(id);
+    if (!Array.isArray(rec.commandsRun) || rec.commandsRun.length === 0) noCommands.push(id);
     const unit = unitsWithClaims.find((u) => u.id === id);
     if (!unit) continue;
     // T1a-M14：coverage 契约把 counts 写成必填，但本判定器从不校验 ⇒ 「必填」只有文字
     // 纪律（现算半数以上缺）。缺失/非对象即进 noCounts。
-    if (!rec.counts || typeof rec.counts !== 'object' || Array.isArray(rec.counts)) noCounts.push(id);
     const covered = new Set((rec.covered ?? []).map(pathOf));
     const claimed = new Set((unit.claimed || []).map(pathOf));
     const missed = [...claimed].filter((f) => !covered.has(f));
     if (missed.length) gaps.push(`${id} 漏 ${missed.length}：${missed.slice(0, 3).join(',')}`);
     const extra = [...covered].filter((f) => f && !claimed.has(f));
     if (extra.length) overclaims.push(`${id} over-claim ${extra.length}：${extra.slice(0, 3).join(',')}`);
-    if (!Array.isArray(rec.commandsRun) || rec.commandsRun.length === 0) noCommands.push(id);
   }
-  return { unknown, gaps, overclaims, noCommands, noCounts };
+  return { unknown, gaps, overclaims, noCommands, noCounts, noCovered };
 }
 
 // ── 正向对照自检（§4.1：能判红 + 真样本不假红，两向都要）──────────────────────
@@ -335,6 +369,28 @@ const POSITIVE_CONTROLS = [
     expect: (v) => v === true,
   },
   {
+    // 按模块跑门禁的前提：单元 ⇄ 模块双向咬合。漏归 / 双归 / 拼错 / 表塌缩四向都必须判红，
+    // 真仓表必须 0 问题（否则 --module 挑出来的门禁集合从根上就缺东西）。
+    label: 'U5d 模块表：漏归 / 双归 / 拼错单元 / 表塌缩必判红，真仓表不假红',
+    run: () => {
+      const units = Array.from({ length: 12 }, (_, i) => ({ id: `U${i}` }));
+      const good = Array.from({ length: 12 }, (_, i) => ({
+        id: `M-${String(i + 1).padStart(2, '0')}`, units: [`U${i}`],
+      }));
+      const leak = good.map((m, i) => (i === 0 ? { ...m, units: [] } : m));
+      const dup = good.map((m, i) => (i === 1 ? { ...m, units: ['U0'] } : m));
+      const typo = good.map((m, i) => (i === 2 ? { ...m, units: ['U99'] } : m));
+      const real = detectModuleCoverage({ modules: MODULES, units: UNITS });
+      return detectModuleCoverage({ modules: good, units }).length === 0
+        && detectModuleCoverage({ modules: leak, units }).length >= 1
+        && detectModuleCoverage({ modules: dup, units }).length >= 1
+        && detectModuleCoverage({ modules: typo, units }).length >= 1
+        && detectModuleCoverage({ modules: [], units }).length >= 1
+        && real.length === 0;
+    },
+    expect: (v) => v === true,
+  },
+  {
     label: 'U6 coverage：未知单元 / 漏读 / over-claim / 空命令 / 缺 counts 必判红；注解 covered 归一放行',
     run: () => {
       const known = new Set(['T1a']);
@@ -371,13 +427,19 @@ const POSITIVE_CONTROLS = [
         { A9: { covered: [], commandsRun: ['x'], counts } },
         coverageKnownIds(), unitsWithClaims,
       );
+      // P2-05 / T1a-M04：横向/纵向单元 covered 为空必判红（此前恒 ✓ 假绿）。
+      const emptyCovered = judgeCoverageLedger(
+        { A3: { covered: [], commandsRun: ['rg'], counts } },
+        coverageKnownIds(), unitsWithClaims,
+      );
       return bad.unknown.length === 1 && bad.gaps.length === 1
         && over.overclaims.length === 1 && over.noCommands.length === 1
         && clean.unknown.length === 0 && clean.gaps.length === 0
         && clean.overclaims.length === 0 && clean.noCommands.length === 0
         && annotated.gaps.length === 0 && annotated.overclaims.length === 0
         && noCountsRec.noCounts.length === 1
-        && horizontal.unknown.length === 0 && fakeAnti.unknown.length === 1;
+        && horizontal.unknown.length === 0 && fakeAnti.unknown.length === 1
+        && emptyCovered.noCovered.length === 1;
     },
     expect: (v) => v === true,
   },
@@ -434,72 +496,15 @@ if (SELF_TEST) {
 // ── 真跑 ──────────────────────────────────────────────────────────────
 console.log('=== 审查单元台账机检（认领根 / 规模 / 互斥 / 覆盖 / 地板）===\n');
 
-const rootCounts = {};
-const allFiles = new Set();
-const rootLabels = [];
-for (const r of AUDIT_ROOTS) {
-  if (r.file) {
-    const label = r.file;
-    rootLabels.push(label);
-    const n = existsSync(join(ROOT, r.file)) ? 1 : 0;
-    rootCounts[label] = n;
-    if (n) allFiles.add(r.file);
-    continue;
-  }
-  const abs = join(ROOT, r.dir);
-  const label = `${r.dir}${r.ext ? ' *' + r.ext.join(',') : ''}${r.depth ? ' (直属)' : ''}`;
-  rootLabels.push(label);
-  if (!existsSync(abs) || !statSync(abs).isDirectory()) { rootCounts[label] = 0; continue; }
-  let files;
-  if (r.depth === 1) {
-    files = readdirSync(abs, { withFileTypes: true })
-      .filter((e) => e.isFile() && (!r.ext || r.ext.some((x) => e.name.endsWith(x))))
-      .map((e) => norm(join(relative(ROOT, abs), e.name)));
-  } else {
-    files = walkFiles(abs, (n) => !r.ext || r.ext.some((x) => n.endsWith(x)), { ignoreDir: IGNORE_DIR })
-      .map((p) => norm(relative(ROOT, p)));
-  }
-  rootCounts[label] = files.length;
-  for (const f of files) allFiles.add(f);
-}
+// 认领根枚举与「先到先得」认领的实现在 lib/claims.mjs —— 与 check-gate-roster --module
+// 共用同一份（两份实现会漂移，按模块跑就会静默漏门禁）。
+const { files: allFiles, rootCounts, rootLabels } = collectAuditFiles(ROOT, AUDIT_ROOTS);
 
 const emptyRoots = detectEmptyRoots(rootCounts);
 check(emptyRoots.length === 0, `U1 认领根全部非空（${rootLabels.length} 个根 / ${allFiles.size} 个文件）`,
   emptyRoots.join('、'));
 
-// 先到先得的认领
-const ownerOf = new Map();
-const unitsWithClaims = UNITS.map((u) => {
-  const claimed = [];
-  for (const f of [...(u.files ?? [])]) {
-    if (!allFiles.has(f)) continue; // 缺件由下面的 U1/U4 与「点名不存在」判红
-    if (!ownerOf.has(f)) { ownerOf.set(f, u.id); claimed.push(f); }
-  }
-  const dirClaimed = [];
-  for (const d of u.dirs ?? []) {
-    const abs = join(ROOT, d.dir);
-    if (!existsSync(abs)) continue;
-    let files;
-    if (d.depth === 1) {
-      files = readdirSync(abs, { withFileTypes: true })
-        .filter((e) => e.isFile() && (!d.ext || d.ext.some((x) => e.name.endsWith(x))))
-        .map((e) => norm(join(relative(ROOT, d.dir), e.name)));
-    } else {
-      files = walkFiles(abs, (n) => !d.ext || d.ext.some((x) => n.endsWith(x)), { ignoreDir: IGNORE_DIR })
-        .map((p) => norm(relative(ROOT, p)));
-    }
-    for (const f of files) {
-      if (d.onlyPrefix && !f.split('/').pop().startsWith(d.onlyPrefix)) continue;
-      const nps = Array.isArray(d.notPrefix) ? d.notPrefix : (d.notPrefix ? [d.notPrefix] : []);
-      if (nps.some((np) => f.split('/').pop().startsWith(np))) continue;
-      if (ownerOf.has(f)) continue;
-      ownerOf.set(f, u.id);
-      claimed.push(f);
-      dirClaimed.push(f);
-    }
-  }
-  return { ...u, claimed, dirClaims: [dirClaimed] };
-});
+const { ownerOf, unitsWithClaims } = claimUnits({ root: ROOT, units: UNITS, auditFiles: allFiles });
 
 const sizeOf = new Map([...allFiles].map((f) => [f, nonEmptyLines(join(ROOT, f))]));
 
@@ -540,6 +545,15 @@ check(floor.out.length === 0 && floor.dupIds.length === 0,
   const orphans = detectOrphanGenerated(unitsWithClaims, readersOf);
   check(orphans.length === 0, 'U5c 生成物台账⇄生成器出处可追（标 generated 却无人点名 = 静默免检）',
     orphans.slice(0, 8).join('、'));
+}
+
+// U5d（2026-11-12）：12 模块表 ⇄ 纵向单元表双向咬合 —— 按模块跑门禁的前提。
+{
+  const bad = detectModuleCoverage({ modules: MODULES, units: UNITS });
+  const unitCount = MODULES.reduce((a, m) => a + m.units.length, 0);
+  check(bad.length === 0,
+    `U5d 模块表 ⇄ 单元表双向咬合（${MODULES.length} 模块 / ${unitCount} 个单元归属，漏归与双归均为 0）`,
+    bad.slice(0, 8).join('、'));
 }
 
 // 逐单元台账（派单时直接抄这张表，不手抄数字）
@@ -599,10 +613,15 @@ if (!covPath) {
     try { absorb(JSON.parse(readFileSync(cp, 'utf8'))); }
     catch (e) { badParts.push(`${cp} JSON 损坏（${e.message.slice(0, 60)}）`); }
   }
-  const { unknown, gaps, overclaims, noCommands, noCounts } =
+  const { unknown, gaps, overclaims, noCommands, noCounts, noCovered } =
     judgeCoverageLedger(ledger, coverageKnownIds(), unitsWithClaims);
+  // P2-06 / T1a-M05：对象数=0 的绿不算通过（铁律 C）。空台账（主 agent 传错目录 /
+  // 指向空目录）必须显式 SKIP 并声明未校验，不能打 ✓ exit 0。
+  if (Object.keys(ledger).length === 0) {
+    skip('U6 分报告 coverage 对账', '合并后台账为空（0 份）——未校验，不判通过');
+  } else {
   check(
-    badParts.length === 0 && unknown.length === 0 && gaps.length === 0 && overclaims.length === 0 && noCommands.length === 0 && noCounts.length === 0,
+    badParts.length === 0 && unknown.length === 0 && gaps.length === 0 && overclaims.length === 0 && noCommands.length === 0 && noCounts.length === 0 && noCovered.length === 0,
     `U6 coverage 台账对拍（${Object.keys(ledger).length} 份，来源 ${covPath.split(',').length} 路径）`,
     [
       ...badParts.map((b) => `台账读取失败：${b}`),
@@ -611,8 +630,10 @@ if (!covPath) {
       ...overclaims.map((o) => `台账 covered 超出本单元认领面：${o}`),
       ...noCommands.map((id) => `${id} 的 commandsRun 为空（没跑命令的台账不算取证）`),
       ...noCounts.map((id) => `${id} 的 counts 缺失或非对象（契约必填项，T1a-M14）`),
+      ...noCovered.map((id) => `${id} 的 covered 为空（没声明读过任何文件，横向单元也须至少声明 covered）`),
     ].join(' | '),
   );
+  }
 }
 
 const docPath = argOf('--doc');
@@ -626,9 +647,14 @@ if (!docPath) {
   const broken = paths.filter((p) => !existsSync(join(ROOT, p)) && !existsSync(join(ROOT, `${p}/`)));
   const ids = extractUnitIds(text);
   const unknownIds = ids.filter((i) => !isKnownUnitId(i, floor.ids));
-  check(broken.length === 0 && unknownIds.length === 0,
-    `U7 文档对拍（点名路径 ${paths.length} 条、单元 ID ${ids.length} 个）`,
-    [...broken.map((b) => `路径不存在 ${b}`), ...unknownIds.map((u) => `未知单元 ${u}`)].join(' | '));
+  // P2-06 / T1a-M05：空文档（0 条路径 / 0 个 ID）必须显式 SKIP，不能打 ✓ exit 0。
+  if (paths.length === 0 || ids.length === 0) {
+    skip('U7 文档对拍', `点名路径 ${paths.length} 条、单元 ID ${ids.length} 个 —— 为空，未校验，不判通过`);
+  } else {
+    check(broken.length === 0 && unknownIds.length === 0,
+      `U7 文档对拍（点名路径 ${paths.length} 条、单元 ID ${ids.length} 个）`,
+      [...broken.map((b) => `路径不存在 ${b}`), ...unknownIds.map((u) => `未知单元 ${u}`)].join(' | '));
+  }
 }
 
 console.log(`\ncheck-review-units: ${fail === 0 ? '全部通过' : `${fail} 项失败`}${skipped ? `（SKIP ${skipped} 节，未校验）` : ''}`);

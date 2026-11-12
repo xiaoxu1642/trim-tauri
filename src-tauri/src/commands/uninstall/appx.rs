@@ -61,6 +61,11 @@ pub(super) const APPX_ENUM_TIMEOUT: std::time::Duration = std::time::Duration::f
 pub(super) const APPX_REMOVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub(super) fn enum_appx_packages() -> Result<Vec<Value>, String> {
+    enum_appx_packages_counted().map(|(rows, _)| rows)
+}
+
+/// P3-07：返回 (行, 包全名未过字符集闸的条数)；计数交给 `uninstall_list` 回执如实呈现。
+pub(super) fn enum_appx_packages_counted() -> Result<(Vec<Value>, usize), String> {
     // Logo 取法（U-3 复检修真，2026-09-28）：Get-AppxPackage 对象**没有 Logo 属性**
     // （初版 Select Logo 恒空，前端从不请求）——真身在 manifest 的 Application/
     // VisualElements 元素的 **XML 属性** 上，PS 点号只取子元素不取属性，必须
@@ -96,7 +101,7 @@ catch { Write-Output ('ERR:' + $_.Exception.Message); exit 1 }";
         });
     }
     if text.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
     let parsed: Value = serde_json::from_str(&text).map_err(|e| format!("Appx 输出解析失败: {e}"))?;
     let items: Vec<Value> = match parsed {
@@ -104,11 +109,13 @@ catch { Write-Output ('ERR:' + $_.Exception.Message); exit 1 }";
         obj @ Value::Object(_) => vec![obj], // 单包时 ConvertTo-Json 出对象而非数组
         _ => return Err("Appx 输出结构异常".to_string()),
     };
-    Ok(items
+    let mut invalid_fullname = 0usize;
+    let rows = items
         .into_iter()
         .filter_map(|p| {
             let fullname = p.get("PackageFullName")?.as_str()?.to_string();
             if !valid_appx_fullname(&fullname) {
+                invalid_fullname += 1;
                 return None;
             }
             let publisher_raw = p.get("Publisher").and_then(|v| v.as_str()).unwrap_or("");
@@ -134,7 +141,8 @@ catch { Write-Output ('ERR:' + $_.Exception.Message); exit 1 }";
                 "removable": true,
             }))
         })
-        .collect())
+        .collect();
+    Ok((rows, invalid_fullname))
 }
 
 /// Appx 执行准入的**执行侧**复验（R2b-L04）：列表侧 `removable` 不是执行凭据。
@@ -187,12 +195,16 @@ pub(super) fn appx_install_display_dir(install: &str) -> String {
     }
 }
 
-pub(super) fn enum_appx_store_extras(seen: &std::collections::HashSet<String>) -> Vec<Value> {
+/// P3-07：返回 (行, 包全名未过字符集闸的条数)；注册表是外部输入，畸形名不能无声消失。
+pub(super) fn enum_appx_store_extras(
+    seen: &std::collections::HashSet<String>,
+) -> (Vec<Value>, usize) {
     use crate::engine::native;
     use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
 
     const STORE: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore";
     let mut out: Vec<Value> = Vec::new();
+    let mut invalid_fullname = 0usize;
     // (子树, 状态标签, 家族名层是否存在)：Staged 多一层家族名，Applications 直接是包全名
     for (sub, state, two_level) in [("Staged", "staged", true), ("Applications", "provisioned", false)] {
         for a in native::reg_enum_subkeys_pub(HKEY_LOCAL_MACHINE, &format!("{STORE}\\{sub}")) {
@@ -202,7 +214,11 @@ pub(super) fn enum_appx_store_extras(seen: &std::collections::HashSet<String>) -
                 vec![a.clone()]
             };
             for full in leaves {
-                if full.is_empty() || !valid_appx_fullname(&full) || seen.contains(&full) {
+                if full.is_empty() || !valid_appx_fullname(&full) {
+                    invalid_fullname += 1;
+                    continue;
+                }
+                if seen.contains(&full) {
                     continue;
                 }
                 // 包全名 `<名>_<版本>_<架构>_<发行商>`：取下划线路径里的名字与版本做展示
@@ -268,7 +284,7 @@ pub(super) fn enum_appx_store_extras(seen: &std::collections::HashSet<String>) -
             }
         }
     }
-    out
+    (out, invalid_fullname)
 }
 
 /// Appx 移除（当前用户，对齐 HiBit 的 `powershell Remove-AppxPackage` 实测口径）。

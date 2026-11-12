@@ -85,6 +85,180 @@
     return tip;
   }
 
+  // ==================== 应用详情（二级页） ====================
+  // 2026-11-12 用户需求：点每一项都能打开详情页，三板块 ——
+  //   ① 应用详情：名称 / 发行商 / 版本（注册表原值）
+  //   ② exe 位置：主程序路径（下面 inferExePath 的三级推导）
+  //   ③ 简介：本地简介库命中即显示，未命中可点「获取AI简介」走所选大模型
+  //
+  // exe 路径**不新增命令**，全部复用列表已返回的字段：
+  //   ① DisplayIcon 去掉 `,索引` 后缀后若以 .exe 结尾 ⇒ 直接用（最常见且最准）
+  //   ② 否则 InstallLocation + 显示名/目录名匹配的 .exe
+  //   ③ 都拿不到 ⇒ 显示「未提供安装路径」，不猜、不编。
+  function stripIconIndex(raw) {
+    const s = String(raw || '').trim();
+    if (!s) return '';
+    // `"C:\Apps\foo.exe",0` / `C:\Apps\foo.exe,0` / `C:\Apps\foo.exe` 三种形态
+    const unquoted = s.replace(/^"(.*)"$/, '$1');
+    const noIndex = unquoted.replace(/,\s*-?\d+\s*$/, '').trim();
+    return noIndex;
+  }
+
+  function inferExePath(a) {
+    const icon = stripIconIndex(a.displayIcon);
+    if (icon && /\.exe$/i.test(icon)) {
+      return { path: icon, source: '注册表 DisplayIcon' };
+    }
+    const loc = String(a.installLocation || '').trim().replace(/[\\/]+$/, '');
+    if (!loc) return null;
+    // ② 目录里最可能的主程序：先用显示名里出现的英文/数字词做候选名，
+    //    再退化到「目录名同名的 exe」。这里只做**命名推导**，不读盘 ——
+    //    读盘要新命令，而用户已明确「用现有能力」。
+    const words = String(a.displayName || '')
+      .match(/[A-Za-z0-9][A-Za-z0-9._-]{1,}/g) || [];
+    const dirBase = loc.split(/[\\/]/).pop() || '';
+    const candidates = [];
+    for (const w of words) candidates.push(w.toLowerCase() + '.exe');
+    if (dirBase) candidates.push(dirBase.toLowerCase() + '.exe');
+    return {
+      path: '',
+      dir: loc,
+      candidates: [...new Set(candidates)].slice(0, 6),
+      source: '注册表 InstallLocation',
+    };
+  }
+
+  function detailRow(key, value, tip) {
+    return `<div class="un-detail-row">
+      <span class="un-detail-key">${esc(key)}</span>
+      <span class="un-detail-val"${tip ? ` data-tip="${esc(tip)}"` : ''}>${esc(value || '—')}</span>
+    </div>`;
+  }
+
+  // 简介上限 300 字（用户 2026-11-12 定：本地库条目 20–300 字，工具类允许更短）。
+  // 本地库是手写真源，门禁只校验「非空」，长度靠这里兜底 —— 超长时截断并显式标注，
+  // 不静默丢字（AGENTS §3「用户看不到的截断要写在脸上」）。
+  const INTRO_MAX_CHARS = 300;
+  function clampIntro(text) {
+    const s = String(text || '');
+    if (s.length <= INTRO_MAX_CHARS) return s;
+    return s.slice(0, INTRO_MAX_CHARS) + '…（已截断）';
+  }
+
+  function openAppDetail(appId) {
+    const a = apps.find((x) => x.id === appId);
+    if (!a) return;
+    if (!window.modal?.create) {
+      window.app?.toast?.('error', '弹窗组件未加载，无法查看应用详情');
+      return;
+    }
+    const exe = inferExePath(a);
+    const exeText = exe
+      ? (exe.path || (exe.dir + '\\' + (exe.candidates && exe.candidates[0] ? exe.candidates[0] : '')))
+      : '未提供安装路径';
+    const exeTip = exe && exe.source ? ('来源：' + exe.source + (exe.candidates && exe.candidates.length ? '；候选：' + exe.candidates.join(' / ') : '')) : '注册表里没有 InstallLocation / DisplayIcon';
+
+    const ctrl = window.modal.create({
+      id: 'unAppDetailBackdrop',
+      title: a.displayName || '应用详情',
+      modalClass: 'un-detail-modal',
+      bodyHtml: `
+        <section class="un-detail-section">
+          <h3 class="un-detail-title">应用详情</h3>
+          ${detailRow('名称', a.displayName)}
+          ${detailRow('发行商', a.publisher)}
+          ${detailRow('版本', a.displayVersion)}
+        </section>
+        <section class="un-detail-section">
+          <h3 class="un-detail-title">安装位置</h3>
+          ${detailRow('主程序', exeText, exeTip)}
+          ${a.installLocation ? detailRow('安装目录', a.installLocation) : ''}
+        </section>
+        <section class="un-detail-section">
+          <h3 class="un-detail-title">简介</h3>
+          <div class="un-detail-intro" data-role="intro">
+            <div class="un-detail-intro-loading">正在读取本地简介…</div>
+          </div>
+          <div class="un-detail-intro-actions">
+            <button class="btn btn-secondary btn-small" data-role="fetch" type="button">获取AI简介</button>
+            <button class="btn btn-secondary btn-small" data-role="pick" type="button">选择模型</button>
+          </div>
+        </section>`,
+      footerClass: 'pw-footer',
+      footerHtml: `
+        <span class="model-picker-spacer"></span>
+        <button class="btn btn-primary" data-role="doneBtn" type="button">关闭</button>`,
+    });
+
+    const body = ctrl.body;
+    ctrl.footer.querySelector('[data-role="doneBtn"]').addEventListener('click', () => ctrl.close('btn'));
+    const introEl = body.querySelector('[data-role="intro"]');
+    const fetchBtn = body.querySelector('[data-role="fetch"]');
+    const pickBtn = body.querySelector('[data-role="pick"]');
+    const item = { name: a.displayName, publisher: a.publisher || '', version: a.displayVersion || '' };
+
+    // 本地简介：命中即显示，并标明来源；未命中给出可点的 AI 入口
+    (async () => {
+      let local = null;
+      try {
+        if (window.intro?.getLocal) {
+          await window.intro.load();
+          local = window.intro.getLocal('uninstallapp', item);
+        }
+      } catch (e) { /* 简介库不可用则走 AI */ }
+      if (!document.body.contains(body)) return;
+      if (local && local.level !== 'default' && local.text) {
+        introEl.innerHTML = `<div class="un-detail-intro-text">${esc(clampIntro(local.text))}</div>
+          <div class="un-detail-intro-src">本地简介库 · ${esc(local.label || '')}</div>`;
+      } else {
+        introEl.innerHTML = `<div class="un-detail-intro-empty">本地简介库暂未收录这个应用，可点击「获取AI简介」由大模型介绍。</div>`;
+      }
+    })();
+
+    fetchBtn.addEventListener('click', () => {
+      Promise.resolve(fetchAiIntro()).catch((e) => {
+        window.app?.log?.('error', '应用详情 AI 简介失败: ' + ((e && e.message) || e));
+      });
+    });
+
+    async function fetchAiIntro() {
+      if (!window.api?.aidesc?.get) {
+        introEl.innerHTML = '<div class="un-detail-intro-empty">当前环境不支持联网 AI 简介。</div>';
+        return;
+      }
+      fetchBtn.disabled = true;
+      fetchBtn.textContent = '获取中…';
+      introEl.innerHTML = '<div class="un-detail-intro-loading">正在生成…</div>';
+      try {
+        const resp = await window.api.aidesc.get(a.displayName, a.publisher || '', false, 'uninstallapp', null);
+        if (!document.body.contains(body)) return;
+        if (resp && resp.success && resp.data && resp.data.desc) {
+          introEl.innerHTML = `<div class="un-detail-intro-text">${esc(clampIntro(resp.data.desc))}</div>
+            <div class="un-detail-intro-src">联网 AI 简介 · ${esc(resp.data.source || '')}${resp.data.cached ? ' · 缓存' : ''}</div>`;
+        } else if (resp && resp.message === 'disabled') {
+          introEl.innerHTML = '<div class="un-detail-intro-empty">所选模型未启用，请在「设置 - 大模型管理」中启用后重试。</div>';
+        } else {
+          introEl.innerHTML = `<div class="un-detail-intro-empty">${esc((resp && resp.message) || '暂时无法获取该应用的简介')}</div>`;
+        }
+      } catch (e) {
+        introEl.innerHTML = `<div class="un-detail-intro-empty">获取失败：${esc((e && e.message) || e)}</div>`;
+      } finally {
+        fetchBtn.disabled = false;
+        fetchBtn.textContent = '获取AI简介';
+      }
+    }
+
+    pickBtn.addEventListener('click', () => {
+      if (window.modelpicker?.open) {
+        Promise.resolve(window.modelpicker.open('uninstallapp')).catch((e) => {
+          window.app?.toast?.('error', '打开模型选择器失败：' + ((e && e.message) || e));
+        });
+      } else {
+        window.app?.toast?.('warning', '模型选择暂不可用');
+      }
+    });
+  }
+
   // ==================== 渲染页节点索引 ====================
   // 重绘时一次性 querySelectorAll 建 id→单元格 索引，补图标 / 补体积只查表。
   // 为什么不许留着循环里的 document.querySelector：每个单元格回填都是 cell.innerHTML=
@@ -325,29 +499,32 @@
     const from = (appsPage - 1) * APPS_PAGE_SIZE;
     const view = apps.slice(from, from + APPS_PAGE_SIZE);
     const rows = view.map((a) => `
-      <tr>
-        <td><div class="finder-cell"><span class="un-icon" data-un-icon="${esc(a.id)}"></span><span class="finder-name-text">${esc(a.displayName)}</span></div></td>
-        <td class="finder-col-size" style="width:180px"><span class="finder-name-text" style="opacity:.7">${esc(a.publisher || '—')}</span></td>
-        <td class="finder-col-size" style="width:110px"><span class="finder-name-text" style="opacity:.7">${esc(a.displayVersion || '—')}</span></td>
-        <td class="finder-col-size" style="width:90px"><span data-un-size="${esc(a.id)}">${fmtSizeKb(a.estimatedSizeKb)}</span></td>
-        <td class="finder-col-size" style="width:110px"><span class="finder-name-text" style="opacity:.7" data-tip="${esc(installDateTip(a))}">${esc(a.installDate || '—')}</span></td>
-        <td class="finder-col-size" style="width:290px">
+      <div class="un-app-card row-card" data-un-row="${esc(a.id)}" role="button" tabindex="0" aria-label="${window.ds.escAttr(a.displayName)} 应用详情">
+        <div class="un-app-main">
+          <div class="finder-cell"><span class="un-icon" data-un-icon="${esc(a.id)}"></span><span class="finder-name-text">${esc(a.displayName)}</span></div>
+          <div class="un-app-meta">
+            <span class="un-app-meta-item" data-tip="发行商"><span class="un-app-meta-key">发行商</span>${esc(a.publisher || '—')}</span>
+            <span class="un-app-meta-item" data-tip="版本"><span class="un-app-meta-key">版本</span>${esc(a.displayVersion || '—')}</span>
+            <span class="un-app-meta-item un-app-size" data-tip="大小"><span class="un-app-meta-key">大小</span><span data-un-size="${esc(a.id)}">${fmtSizeKb(a.estimatedSizeKb)}</span></span>
+            <span class="un-app-meta-item" data-tip="${esc(installDateTip(a))}"><span class="un-app-meta-key">安装</span>${esc(a.installDate || '—')}</span>
+          </div>
+        </div>
+        <div class="row-card-actions">
           <button class="btn btn-secondary btn-small" data-un-app="${esc(a.id)}"${noRemoveAttr(a)}>卸载</button>
           <button class="btn btn-secondary btn-small" data-un-modify="${esc(a.id)}"${modifyBtnAttr(a)}${noModifyAttr(a)}>修改</button>
           <button class="btn btn-secondary btn-small" data-un-repair="${esc(a.id)}"${modifyBtnAttr(a)}${noRepairAttr(a)}>修复</button>
-        </td>
-      </tr>`).join('');
+        </div>
+      </div>`).join('');
     // 未显示的部分必须写在脸上：措辞按「本页」而非「剩余」，末页也要成立
     const hidden = total - view.length;
     const more = hidden > 0
-      ? `<tr><td colspan="6" class="finder-empty">本页显示第 ${from + 1}–${from + view.length} 项，共 ${total} 项；`
-        + `另有 ${hidden} 项未在本页显示，翻页查看后才会为它们补图标与体积</td></tr>`
+      ? `<div class="finder-empty">本页显示第 ${from + 1}–${from + view.length} 项，共 ${total} 项；`
+        + `另有 ${hidden} 项未在本页显示，翻页查看后才会为它们补图标与体积</div>`
       : '';
     return `
-      <table class="finder-table">
-        <thead><tr><th>程序<span class="page-summary">共 ${total} 个应用</span></th><th class="finder-col-size" style="width:180px">发行商</th><th class="finder-col-size" style="width:110px">版本</th><th class="finder-col-size" style="width:90px">大小</th><th class="finder-col-size" style="width:110px">安装日期</th><th class="finder-col-size" style="width:290px">操作</th></tr></thead>
-        <tbody>${rows}${more}</tbody>
-      </table>${pages > 1 ? appsPagerHtml(appsPage, pages) : ''}`;
+      <div class="un-app-list-head"><span>程序<span class="page-summary">共 ${total} 个应用</span></span></div>
+      <div class="un-app-list">${rows}</div>
+      ${more}${pages > 1 ? appsPagerHtml(appsPage, pages) : ''}`;
   }
 
   // Windows 应用（Appx）卸载按钮的禁用属性。判据只有一条 `removable === false`（后端把
@@ -378,19 +555,21 @@
     const section = (title, list, withTotal) => {
       if (!list.length) return '';
       const rows = list.map((a) => `
-        <tr>
-          <td><div class="finder-cell"><span class="un-icon" data-un-icon="${esc(a.id)}"></span><span class="finder-name-text">${esc(a.displayName)}</span></div></td>
-          <td class="finder-col-size" style="width:190px"><span class="finder-name-text" style="opacity:.7">${esc(a.publisher || '—')}</span></td>
-          <td class="finder-col-size" style="width:130px"><span class="finder-name-text" style="opacity:.7">${esc(a.displayVersion || '—')}</span></td>
-          <td class="finder-col-size" style="width:230px">
+        <div class="un-app-card row-card" data-un-row="${esc(a.id)}" role="button" tabindex="0" aria-label="${window.ds.escAttr(a.displayName)} 应用详情">
+          <div class="un-app-main">
+            <div class="finder-cell"><span class="un-icon" data-un-icon="${esc(a.id)}"></span><span class="finder-name-text">${esc(a.displayName)}</span></div>
+            <div class="un-app-meta">
+              <span class="un-app-meta-item" data-tip="发布者"><span class="un-app-meta-key">发布者</span>${esc(a.publisher || '—')}</span>
+              <span class="un-app-meta-item" data-tip="版本"><span class="un-app-meta-key">版本</span>${esc(a.displayVersion || '—')}</span>
+            </div>
+          </div>
+          <div class="row-card-actions">
             <button class="btn btn-secondary btn-small" data-un-app="${esc(a.id)}"${uninstallBlockAttr(a)}>卸载</button>
-          </td>
-        </tr>`).join('');
+          </div>
+        </div>`).join('');
       return `<div class="finder-group-header"><span>${title} · ${list.length} 项</span></div>
-        <table class="finder-table">
-          <thead><tr><th>应用名${withTotal ? `<span class="page-summary">共 ${total} 个应用</span>` : ''}</th><th class="finder-col-size" style="width:190px">发布者</th><th class="finder-col-size" style="width:130px">版本</th><th class="finder-col-size" style="width:230px">操作</th></tr></thead>
-          <tbody>${rows}</tbody>
-        </table>`;
+        <div class="un-app-list-head"><span>应用名${withTotal ? `<span class="page-summary">共 ${total} 个应用</span>` : ''}</span></div>
+        <div class="un-app-list">${rows}</div>`;
     };
     // 未显示的部分写在脸上（与 Win32 同一措辞口径，措辞按「本页」，末页也成立）
     const hidden = total - view.length;
@@ -844,8 +1023,22 @@
       if (mod && !mod.disabled) runModify(mod.dataset.unModify, 'modify').catch(e => window.app?.toast?.('error', '修改失败: ' + ((e && e.message) || e)));
       const rep = e.target.closest('[data-un-repair]');
       if (rep && !rep.disabled) runModify(rep.dataset.unRepair, 'repair').catch(e => window.app?.toast?.('error', '修复失败: ' + ((e && e.message) || e)));
+      // 应用详情（二级页）：点卡片本体打开。三个按钮都先被上面的分支接走并 return 了吗？
+      // 没有 —— 它们是独立 if，会继续往下走，所以这里必须排除按钮内部点击，
+      // 否则「点卸载」会连带弹出详情页。
+      if (btn || mod || rep) return;
+      const card = e.target.closest('.un-app-card[data-un-row]');
+      if (card) openAppDetail(card.dataset.unRow);
       // 行内「查残留」按钮已按用户 2026-10-05 裁定删除：软件既然还装在机器上，谈不上残留。
       // 唯一的入口是卸载完成后自动打开残留副窗（见 runUninstall 尾部），主窗已无常驻入口。
+    });
+    // 键盘等价路径：卡片是 role=button + tabindex=0，Enter/Space 与点击同一终点
+    document.getElementById('uninstallList')?.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const card = e.target.closest('.un-app-card[data-un-row]');
+      if (!card || e.target.closest('button')) return;
+      e.preventDefault();
+      openAppDetail(card.dataset.unRow);
     });
     // v0.7.0：residueBtn* / residueBackupToggle / residueList 这些主窗元素随面板一起搬走了，
     // 对应的监听不在这儿 —— 勾选、删除、删前备份偏好、重启后撤回落 in src/scripts/residue-window.js

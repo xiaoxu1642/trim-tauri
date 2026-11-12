@@ -506,11 +506,19 @@ const measurementBaseline = measurementDebt;
 const measurementProbe = (text) => (/(?:实测|真机|本机|现算)/.test(text) && /\d/.test(text)
   && !MEASUREMENT_COMMAND_RE.test(text) && !MEASUREMENT_CONST_RE.test(text))
   ? (text.match(MEASUREMENT_RE) || []).length : 0;
+// P2-20 / T1k-M02：量词集与 R3g 已统一（见 RE_NUM_CLAIM 补「件/次/B/段/倍」），
+// 故测量型数字「现算债务」与 R3g 债务的口径不再有缝；此处只做判定器自检，不自称「新增必红」。
+// 同时加总量上限兜底：债务只能随口径收紧而下降，上升说明量词漏匹配或算法漂了。
+const MEASUREMENT_CAP = 332; // 现算债务（node tools/check-comment-rot.mjs，与门禁自报一致）
 check(
   measurementProbe('实测 123 件') === 1 && measurementProbe('实测见 node tools/x.mjs，123 件') === 0,
-  `R3 测量型数字判据可判红（现算债务 ${measurementBaseline} 行；新增无取数命令数字必红）`,
+  `R3 测量型数字判据可判红（现算债务 ${measurementBaseline} 行；总量上限 MEASUREMENT_CAP=${MEASUREMENT_CAP}）`,
   '裸测量数字未计数或带取数命令样本被误报',
 );
+if (measurementBaseline > MEASUREMENT_CAP) {
+  fail++;
+  console.error(`✗ R3 测量型数字债务 ${measurementBaseline} 超过上限 MEASUREMENT_CAP=${MEASUREMENT_CAP}：量词漏匹配或算法漂移，先回落再抬高上限`);
+}
 // RE_HISTORICAL 已在 R1 段定义，此处复用（「曾经 66 个 .ps1」是史实，不是承诺）
 
 // ③ `NAME=NUM`（反引号内，全大写常量名——避免误伤 `x=1` 这类示意）
@@ -934,7 +942,7 @@ check(
 // 一次大编辑会把注释区改成没人再读的取数命令堆（方案 §4 明确禁止合并成一次大编辑）。
 // 所以：基线落 `tools/fixtures/comment-number-baseline.json`（按文件计数），
 // **任一文件计数上升或新文件进场即红**，下降则提示同步收紧 —— 只减不增，逐批清零。
-const RE_NUM_CLAIM = /\d+\s*(处|条|个|行|字节|KB|MB|ms|%|组|站点|文件|窗|键|项|步)/;
+const RE_NUM_CLAIM = /\d+\s*(处|条|个|行|字节|KB|MB|B|ms|%|组|站点|文件|窗|键|项|步|件|次|段|倍)/;
 // A4-M01（T1b 承接）：「现算」二字从入口标记中**除名** —— 35 行只写「现算」的假入口
 // 实测 9 行数字已错（入口率 0.34%），把措辞当入口等于让门禁的 ✓ 冒充「这些数字被复核过」。
 // 收紧后 R3g 债务数上升是诚实化的结果：随本次 --write-r3g 重算基线，之后继续只减不增。
@@ -947,6 +955,10 @@ function numberClaimsWithoutSource(cs) {
   return out;
 }
 const R3G_FIXTURE = join(ROOT, 'tools', 'fixtures', 'comment-number-baseline.json');
+// P2-08 / T1k-M01：R3g 债务总量硬天花板。`--write-r3g` 抬高基线前必须先改这个值，
+// 那是一次会被复核的编辑（对照 check-async-exits.mjs:78 的 TRANSITION_CAP）。
+// 取值为「扩量词集后的现算总量」；量词集或算法变了，先用 --write-r3g 重算再同步抬高。
+const R3G_CAP = 1284; // 现算上限：扩量词集（补件/次/B/段/倍）后 --write-r3g 实测 1284 处 / 212 文件（node tools/check-comment-rot.mjs --write-r3g）
 {
   const live = new Map();
   for (const [rel, cs] of commentsByFile) {
@@ -955,13 +967,22 @@ const R3G_FIXTURE = join(ROOT, 'tools', 'fixtures', 'comment-number-baseline.jso
   }
   const liveTotal = [...live.values()].reduce((s, n) => s + n, 0);
   if (process.argv.includes('--write-r3g')) {
+    if (liveTotal > R3G_CAP) {
+      fail++;
+      console.error(`✗ R3g 债务总量 ${liveTotal} 超过上限 R3G_CAP=${R3G_CAP}：禁止借 --write-r3g 抬高基线。先回落债务或显式抬高 R3G_CAP（一次会被复核的编辑）。`);
+    } else {
     const body = JSON.stringify({ _说明: 'R3g 过渡基线：注释里「数字声明但无取数命令」的按文件计数，只减不增。生成：node tools/check-comment-rot.mjs --write-r3g', files: Object.fromEntries([...live.entries()].sort()) }, null, 1) + '\n';
     writeFileSync(R3G_FIXTURE, body);
     console.log(`✓ R3g 基线已重算落盘：tools/fixtures/comment-number-baseline.json（${liveTotal} 处 / ${live.size} 个文件）`);
+    }
   } else if (!existsSync(R3G_FIXTURE)) {
     fail++;
     console.error('✗ R3g 基线文件缺失（tools/fixtures/comment-number-baseline.json，随仓库跟踪）⇒ 本条**未校验**，跑 --write-r3g 生成');
   } else {
+    if (liveTotal > R3G_CAP) {
+      fail++;
+      console.error(`✗ R3g 债务总量 ${liveTotal} 超过上限 R3G_CAP=${R3G_CAP}（基线瓶颈在 ${Object.values(JSON.parse(readFileSync(R3G_FIXTURE, 'utf8')).files || {}).reduce((s, n) => s + n, 0)}）：基线已被非法抬高，先回落`);
+    }
     const base = JSON.parse(readFileSync(R3G_FIXTURE, 'utf8')).files || {};
     const worse = [];
     const shrunk = [];

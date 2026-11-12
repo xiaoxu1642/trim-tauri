@@ -127,6 +127,49 @@
   --ease-standard: cubic-bezier(0.23, 1, 0.32, 1); /* 雾屿 V1：柔和 ease-out（原 M2 legacy 0.4,0,0.2,1） */
   --ease-emphasized: cubic-bezier(0.1, 0.9, 0.2, 1);
 
+  /* 极光琉璃 B-P1：曲线与编排时长（新名新值；旧 --duration-* / --ease-* 原样保留，
+     存量消费点不动。取值见设计文档 §3.1「曲线与编排时长」）
+     B-P2 已接入：expo=扫光 / spring=分段标签按压 / inout=分段标签底色切换 /
+     out-soft=卡片光斑淡入。零消费的 --ease-emph 与 --dur-4/5/6（长档氛围时长）
+     已按反向棘轮删除，B-P3 接入氛围层时再落。 */
+  --ease-expo: cubic-bezier(0.16, 1, 0.30, 1);
+  --ease-spring: cubic-bezier(0.34, 1.42, 0.52, 1);
+  --ease-emph: cubic-bezier(0.20, 0.90, 0.22, 1);
+  --ease-inout: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-out-soft: cubic-bezier(0.33, 1, 0.68, 1);
+  --dur-1: 140ms;
+  --dur-2: 240ms;
+  --dur-3: 400ms;
+  --dur-4: 620ms;
+  --dur-5: 900ms;
+  --dur-6: 1400ms;
+
+  /* 极光琉璃 B-P1：材质装饰层令牌（P2 已挂到卡片伪元素与光斑跟随）。
+     --glass-sheen 已被玻璃皮肤占用（body[data-skin="glass"] 的静态光泽），
+     新扫光另名 --glass-sweep，避免同 token 两处定义被层叠静默改写。
+     --mx/--my 是光斑默认位；CSS 自定义属性在声明元素处求值——:root 上的
+     --glass-spot 会把 var(--mx) 冻结为 50%，故 --glass-spot 只在卡片作用域
+     定义（见「极光琉璃 B-P2 · 材质层」段），这里只留 --mx/--my 的兜底位。 */
+  --glass-top-hi: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.28), transparent);
+  --mx: 50%;
+  --my: 50%;
+  /* 扫光强度按主题分档（实测口径见「4b) 材质层」段）：暗色底是近黑，
+     白色扫光会把 --fg-tertiary 压到 2.3:1（0.30 档）——故暗色只留 0.06 的微光；
+     亮色底是近白，白色扫光只会提亮，0.30 档实测 4.61:1 仍过 AA。 */
+  --glass-sweep: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.06), transparent);
+
+  /* 极光琉璃 B-P3：氛围场令牌（方案 §3.4 / §3.5）。
+     强度不是审美值，是被三级文字 AA 现算钉死的：极光层垫在 .layout 里、正文卡片
+     底色为透明（--surface-alpha-card: 0），所以它实质上就是文字背景。故用
+     --aurora-veil 把极光回压一层，观感保留、可读性不破。
+     应用恒挂 theme-light（暗色档不可达，AGENTS 2026-10-22 裁定），故只按亮色档取值；
+     改任一侧（op / veil / accent 色板）都必须重跑现算：node tools/check-contrast.mjs */
+  --aurora-op: 0.55;
+  --aurora-veil: 0.90;
+  --aurora-noise: 0.03;
+  --aurora-accent-2: #1EA6C0;
+  --aurora-accent-3: #C6459C;
+
   /* 字体管理：全局字体族 / 字号缩放（基准 16px）/ 字重缩放（基准 400）
      由「设置 → 字体选择」弹窗运行时写入，全部 font-size / font-weight 均经 calc 关联 */
   /* 2026-09-28 八轮拍板：默认系统字体（MiSans 异步加载导致卡片高度漂移/看板重叠）；
@@ -1107,19 +1150,30 @@ body {
   display: none;
 }
 
-/* 分类列表 */
+/* 分类列表（2026-11-12 用户点名：每个清理域各自成卡，不再是一张长表里叠五行）
+   容器只做纵向排布与间距，**不再**持有底色/描边/圆角 —— 那三样下放到每个
+   .category-group，拆成「一域一卡」，与内存清理页的 .row-card 列表同一观感。
+   保留 id=categoryList 节点与它的 innerHTML 重渲染方式，JS 一行未改。 */
 .category-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: transparent;
+  border: none;
+  overflow: visible;
+}
+
+.category-group {
   background: var(--bg-card);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-medium);
   overflow: hidden;
+  transition: border-color 180ms var(--ease-standard), box-shadow 180ms var(--ease-standard);
 }
-
-.category-group {
-  border-bottom: 1px solid var(--border-default);
-}
-.category-group:last-child {
-  border-bottom: none;
+/* 悬停只抬描边与投影，不做位移：展开态的整卡上浮会让下面的行跟着跳 */
+.category-group:hover {
+  border-color: var(--border-strong);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.06);
 }
 
 .category-group-header {
@@ -1362,9 +1416,11 @@ body {
   font-size: var(--fs-secondary);
   font-weight: calc(500 * var(--font-weight-scale, 1));
   cursor: pointer;
-  /* v3.5.1 动效审查 M4：分段控件同样缺 :active；M8：transition: all 白名单化。 */
-  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard),
-              border-color var(--duration-fast) var(--ease-standard), transform var(--duration-fast) var(--ease-emphasized);
+  /* v3.5.1 动效审查 M4：分段控件同样缺 :active；M8：transition: all 白名单化。
+     极光琉璃 B-P2：按压回弹改弹簧曲线（--ease-spring），底色切换走对称往返
+     （--ease-inout，来回过渡观感一致）；位移短档用 --dur-1，底色用 --dur-2。 */
+  transition: background var(--dur-2) var(--ease-inout), color var(--duration-fast) var(--ease-standard),
+              border-color var(--duration-fast) var(--ease-standard), transform var(--dur-1) var(--ease-spring);
 }
 .filter-tab:hover {
   background:
@@ -1372,7 +1428,8 @@ body {
     linear-gradient(165deg, var(--lg-tint-primary), var(--lg-tint-secondary));
 }
 .filter-tab:active {
-  transform: scale(0.98);
+  /* 弹簧曲线要有落位回弹，按压量比旧 0.98 深一档才看得出来（R2 不涉，非辉光） */
+  transform: scale(0.96);
 }
 .filter-tab.active {
   /* v3 方案 A：选中分段实底转中性胶囊（Apple 分段控件语言：轨道灰、选中白胶囊）；
@@ -5031,6 +5088,144 @@ body.bg-image-on .main-content {
   .empty-pane-chevron { transition: none; }
 }
 
+/* ---------- 软件卸载：应用列表（2026-11-12 用户点名「把这页也割开」） ----------
+   原先是 `.table-card` 里一张 finder-table：全页只有一张外框，行与行靠细线分隔，
+   与磁盘清理的分类卡、内存清理的 .row-card 观感不一致。现改为「一条应用一张卡」：
+   外壳走共享 .row-card（bg-card + border + radius-medium + padding 14/16 + hover-lift），
+   这里只补卸载页特有的两栏内部排布。
+   保留全部 `data-un-*` 定位属性（图标/体积按 data-un-icon / data-un-size 回写），
+   事件仍走 #uninstallList 的容器级委托 —— 结构与类名变了，锚点没变。 */
+.uninstall-host {
+  display: block;
+}
+.un-app-list-head {
+  display: flex;
+  align-items: center;
+  padding: 0 2px 8px;
+  font-size: var(--fs-secondary);
+  color: var(--fg-tertiary);
+}
+.un-app-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.un-app-card {
+  /* 覆盖 .row-card 的横向排布：卸载项是「名称/元信息两行 + 右侧操作」 */
+  align-items: flex-start;
+  gap: 12px;
+  /* 卡片底：.row-card 给的 --bg-card 在本仓 alpha 为 0（玻璃化常态），
+     列表又是长滚动面，只靠 1px 描边在浅色底上几乎看不出边界。
+     这里补一层极轻的表面底，让「一条一张卡」在视觉上真的成立。 */
+  background: color-mix(in srgb, var(--fg-primary) 3%, transparent);
+  /* 整卡可点开详情：指针与键盘都要能看出来 */
+  cursor: pointer;
+}
+.un-app-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.un-app-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.un-app-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  font-size: var(--fs-meta);
+  color: var(--fg-tertiary);
+}
+.un-app-meta-key {
+  margin-right: 4px;
+  /* 不用 opacity 压淡：那是「文字压暗」，会进 check-contrast 的 O 组台账。
+     字段名与值同色即可 —— 值本身已是 --fg-tertiary，再压一档会跌破可读边界。 */
+  color: inherit;
+}
+.un-app-meta-item {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.un-app-size { font-variant-numeric: tabular-nums; }
+
+/* ---------- 软件卸载：应用详情（二级页） ---------- */
+.un-detail-modal .usage-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+/* 详情弹窗必须有不透明底：.usage-modal 走的是 --bg-card，而本仓该 token 的 alpha 为 0
+   （玻璃化常态），长文本弹窗透出背后的极光层会直接吃掉可读性。这里补一层与
+   页面底同源的不透明表面，只作用于本弹窗，不动共享骨架。
+   选择器必须比材质段 `body.electron-mica .usage-modal`（specificity 0,2,0）更高：
+   裸 `.un-detail-modal`（0,1,0）和 `body .un-detail-modal`（0,1,1）都会被它压掉，
+   第一版两处都踩过。这里用 0,3,0 的两个形态覆盖「材质态 / 非材质态」。 */
+body.electron-mica .usage-modal.un-detail-modal,
+body[data-skin] .usage-modal.un-detail-modal {
+  background: var(--bg-base);
+}
+.un-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.un-detail-title {
+  font-size: var(--fs-secondary);
+  font-weight: calc(600 * var(--font-weight-scale, 1));
+  color: var(--fg-secondary);
+}
+.un-detail-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  font-size: var(--fs-secondary);
+  line-height: 1.6;
+}
+.un-detail-key {
+  flex: 0 0 5em;
+  color: var(--fg-tertiary);
+}
+.un-detail-val {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--fg-primary);
+  word-break: break-all;
+}
+.un-detail-intro {
+  padding: 12px 14px;
+  border-radius: var(--radius-small);
+  background: color-mix(in srgb, var(--fg-primary) 3%, transparent);
+  font-size: var(--fs-secondary);
+  line-height: 1.7;
+  color: var(--fg-primary);
+}
+.un-detail-intro-loading,
+.un-detail-intro-empty {
+  color: var(--fg-tertiary);
+}
+.un-detail-intro-src {
+  margin-top: 8px;
+  font-size: var(--fs-meta);
+  color: var(--fg-tertiary);
+}
+.un-detail-intro-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.un-app-card .row-card-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* 软件卸载列表的应用图标（2026-09-28）：shellicon 提取的 dataUrl，懒加载逐个补 */
 .un-icon {
   display: inline-flex;
@@ -5283,6 +5478,286 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
 .btn:disabled > .spot-layer { opacity: 0; }
 @media (prefers-reduced-motion: reduce) {
   .spot-layer { display: none; }
+}
+
+/* ---------- 4b) 极光琉璃 B-P2 · 卡片材质层（顶部高光 / 跟随光斑 / 悬停扫光） ----------
+   为什么用伪元素而不是给卡片补 background：这些卡片的底色链是
+   `.summary-card{background:var(--bg-card)}` + `body.theme-light .summary-card{background:…}`
+   + `body.theme-light[data-preset-bg] …{background-color:…}` 三段，
+   后两段特异度更高且会重置 background-image —— 在卡片本体上叠图会被静默抹掉。
+   伪元素不吃这条链，也不动任何既有底色。
+
+   层序：卡片 isolation 成栈上下文，伪元素 z-index:-1 ⇒ 画在卡片底之上、内容之下。
+   光斑/扫光是强调色装饰，压在文字上会直接吃掉对比度（check-contrast 不建模伪元素），
+   所以必须垫在内容后面，不能走 z-index:auto（那会盖到行内文字上）。
+
+   红线口径（合并方案 §12.1）：R1 渐变只取品牌紫（--accent 单色 + 白高光，无跨色相）；
+   R2 默认态无光斑无扫光，仅 hover 出现；R4 圆角一律 inherit，不引入 12/16/22 档。 */
+.card,
+.summary-card,
+.table-card,
+.settings-entry-card,
+.appearance-card,
+.benchmark-panel,
+.benchmark-result-group,
+.external-test-panel {
+  position: relative;
+  isolation: isolate;
+  /* 光斑必须在本作用域重声明：自定义属性在声明处求值，:root 上的 var(--mx) 会冻结成
+     中心点，只让 JS 覆写 --mx/--my 而把渐变留在 :root，光斑不会跟随（B-P1 注释已记的坑）。
+     强度是被对比度钉死的，不是审美值（伪元素在文字下方，会改文字实际背景；
+     check-contrast 不建模伪元素，只能在这里用现算守住 AA）：暗色与亮色各自取值，
+     亮色不能直接用裸 --accent（紫会把近白底压暗到不达 AA），需先提白再落底。
+     现算命令：node tools/check-contrast.mjs */
+  --glass-spot: radial-gradient(240px circle at var(--mx, 50%) var(--my, 50%),
+    color-mix(in srgb, var(--accent) 14%, transparent), transparent 60%);
+}
+
+/* 顶部高光边：1px 静态白线，给「表面」一层厚度；默认常驻（不是辉光，R2 不涉） */
+.card::before,
+.summary-card::before,
+.table-card::before,
+.settings-entry-card::before,
+.appearance-card::before,
+.benchmark-panel::before,
+.benchmark-result-group::before,
+.external-test-panel::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: inherit;
+  background-image: var(--glass-top-hi);
+  background-repeat: no-repeat;
+  background-size: 100% 1px;
+  background-position: left top;
+}
+
+/* 跟随光斑 + 悬停扫光：两层同挂 ::after，默认 opacity:0（R2：默认态无辉光）。
+   扫光是本段唯一一处**刻意不守**「只动 transform/opacity」的地方，理由：
+   扫光必须被卡片圆角裁掉，而 transform 会把裁剪盒一起搬走（渐变整块滑出卡外），
+   background-position 则始终把渐变裁在自身盒内。代价是只触发重绘、不进合成器，
+   故范围压到最小：仅 hover 单卡一次、400ms、不碰 width/height/top/left。
+   .table-card 刻意排除：它装的是可滚动长表（重复文件/大文件动辄上千行），
+   光斑坐标每次 mousemove 变化都要重绘整张表，收益远小于代价；大表面只留顶部高光。 */
+.card::after,
+.summary-card::after,
+.settings-entry-card::after,
+.appearance-card::after,
+.benchmark-panel::after,
+.benchmark-result-group::after,
+.external-test-panel::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: inherit;
+  background-image: var(--glass-spot), var(--glass-sweep);
+  background-repeat: no-repeat;
+  background-size: 100% 100%, 45% 100%;
+  background-position: 0 0, -100% 0;
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease-out-soft);
+}
+
+.card:hover::after,
+.summary-card:hover::after,
+.settings-entry-card:hover::after,
+.appearance-card:hover::after,
+.benchmark-panel:hover::after,
+.benchmark-result-group:hover::after,
+.external-test-panel:hover::after {
+  opacity: 1;
+  animation: aurora-sweep var(--dur-3) var(--ease-expo);
+}
+
+@keyframes aurora-sweep {
+  from { background-position: 0 0, -100% 0; }
+  to { background-position: 0 0, 200% 0; }
+}
+
+/* 亮色档：强调色提白后再落底（否则紫会把近白底压暗，--fg-tertiary 掉到 3.18:1），
+   扫光同步提到 0.30 —— 白叠白只会更亮，实测 4.61:1 仍过 AA。
+   只列挂了 ::after 光斑层的类；.table-card 只有顶部高光，不在此表。 */
+.theme-light .card,
+.theme-light .summary-card,
+.theme-light .settings-entry-card,
+.theme-light .appearance-card,
+.theme-light .benchmark-panel,
+.theme-light .benchmark-result-group,
+.theme-light .external-test-panel {
+  --glass-spot: radial-gradient(240px circle at var(--mx, 50%) var(--my, 50%),
+    color-mix(in srgb, color-mix(in srgb, var(--accent) 18%, #ffffff) 45%, transparent), transparent 60%);
+  --glass-sweep: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.30), transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* 材质层降级：顶部高光（静态 1px 白线）保留，光斑/扫光整层撤掉。
+     为什么不只关动画：光斑坐标由 tilt.js 在 RM 下停止写入，留下的是
+     进入 RM 前最后一帧的冻结光斑——静止的「污点」比没有更糟。
+     与既有 .spot-layer 的降级口径一致（RM 下 display:none）。 */
+  .card::after,
+  .summary-card::after,
+  .settings-entry-card::after,
+  .appearance-card::after,
+  .benchmark-panel::after,
+  .benchmark-result-group::after,
+  .external-test-panel::after {
+    display: none;
+  }
+}
+
+/* ---------- 4c) 极光琉璃 B-P3 · 氛围场（极光光斑 / conic 光带 / 噪点） ----------
+   为什么挂在 .layout 内而不是 body 上：body 自己有 `background: var(--bg-base)`，
+   且 .layout 也画了不透明底色；fixed 到 body 的层会被这两层实底整个盖住（照预览稿
+   直接搬过来的话，界面上什么都不会出现）。所以把三层放进 .layout 的栈上下文里：
+   z-index:0 垫在内容之下，.layout > .sidebar / .main-content 的既有 z-index:2 不动。
+
+   为什么需要 --aurora-veil：本仓卡片底是 `--surface-alpha-card: 0`（全透明），
+   极光等于直接铺在正文文字下面。预览稿的 0.35/0.55 是「极光即页面底」，搬到
+   透明卡片上会让 --fg-tertiary 掉到 3.14/2.25:1。回压一层 veil 后，2026-11-12
+   真机像素实测（隐藏文字取背景 + WCAG 公式）--fg-tertiary 最低 4.86:1、光斑可见
+   悬停态 6.14:1，--fg-secondary 6.08:1，均过 AA（取值与现算口径记在 :root 令牌注释里）。
+
+   性能口径（方案 §3.4）：blur 只给两团 blob，且每团固定尺寸、只动 transform；
+   conic 光带用极低不透明度 + blur，不参与布局；噪点是内联 SVG turbulence 平铺，
+   只做静态叠加。三者都 pointer-events:none，不拦截任何交互。 */
+.aurora-field {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  /* 默认 0：等 aurora-ready 才淡入，避免开屏刚退、极光「啪」地出现。
+     用过渡而不是 keyframes —— keyframes 里写 var(--aurora-op) 会命中
+     check-contrast 的 opacity 压暗判据（它不区分动画帧与静态声明）。 */
+  opacity: 0;
+  transition: opacity var(--dur-6) var(--ease-out-soft);
+}
+body.aurora-ready .aurora-field {
+  opacity: var(--aurora-op);
+}
+.aurora-field .aurora-blob {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(64px);
+  /* 漂移由 aurora.js 每 250ms 写一次 transform（4fps），不是 CSS animation。
+     2026-11-12 真机实测：CSS 动画让这三团大 blur 层每帧都进合成，
+     常驻 7.2%~9.8% 单核；改低频 JS 后 0.4%。详见 aurora.js 顶部注释。
+     will-change 一并去掉：既然只有 4fps，提前提层只会让合成器常驻，没有收益。 */
+}
+.aurora-field .aurora-blob-1 {
+  width: 46vw;
+  height: 46vw;
+  left: 2%;
+  top: 4%;
+  background: radial-gradient(circle at 50% 50%, var(--accent), transparent 68%);
+}
+.aurora-field .aurora-blob-2 {
+  width: 40vw;
+  height: 40vw;
+  right: 4%;
+  top: -2%;
+  background: radial-gradient(circle at 50% 50%, var(--aurora-accent-2), transparent 66%);
+}
+.aurora-field .aurora-blob-3 {
+  width: 42vw;
+  height: 42vw;
+  left: 28%;
+  bottom: -10%;
+  background: radial-gradient(circle at 50% 50%, var(--aurora-accent-3), transparent 68%);
+}
+/* conic 光带：叠在 blob 之上形成流动缎带。mix-blend-mode 只在有实底时成立，
+   这里刻意不用（.layout 底与卡片底都不保证），改用低不透明度 + blur 的等效观感。 */
+.aurora-field .aurora-ribbon {
+  position: absolute;
+  inset: -30%;
+  opacity: 0.12;
+  background: conic-gradient(from 0deg at 50% 50%,
+    transparent, var(--accent) 18%, transparent 32%,
+    var(--aurora-accent-2) 55%, transparent 70%,
+    var(--aurora-accent-3) 88%, transparent);
+  filter: blur(80px);
+}
+/* 回压层：把极光按 --aurora-veil 压回页面底色，保证正文三级文字仍过 AA */
+.aurora-field .aurora-veil {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-base);
+  opacity: var(--aurora-veil);
+}
+/* 噪点：内联 SVG turbulence，静态平铺，不参与动画（动它等于每帧重栅格化） */
+.aurora-field .aurora-grain {
+  position: absolute;
+  inset: 0;
+  opacity: var(--aurora-noise);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ---------- 4d) 极光琉璃 B-P3 · 入场编排 ----------
+   时序契约（AGENTS §3 保留项）：一切编排只在 body.aurora-ready 之后播放，而这个类
+   由 aurora.js 在开屏节点退场（splash.js 的 FLIP 落位结束）之后才挂 —— 那时黑闪握手
+   早已完成，不会被抢跑。默认态（没有该类）元素完全可见，绝不出现
+   「动画没跑成 = 内容永久隐身」。
+   降级：RM 下 aurora.js 不挂类，且本段自带 RM 归零兜底（见下方媒体查询）。 */
+body.aurora-ready .nav-item {
+  /* 强调曲线（--ease-emph）：侧栏逐条入场是整套编排里唯一的「强调级」位移 */
+  animation: aurora-nav-in 560ms var(--ease-emph) both;
+}
+body.aurora-ready .nav-section:nth-of-type(2) .nav-item { animation-delay: 45ms; }
+body.aurora-ready .nav-section:nth-of-type(3) .nav-item { animation-delay: 90ms; }
+@keyframes aurora-nav-in {
+  from { opacity: 0; transform: translateX(-14px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 页面标题（「系统概览」「磁盘清理」等 12 个模块的标题）刻意不做入场动画：
+   2026-11-12 用户点名——标题向上弹出会干扰阅读起点，标题应当立即到位。
+   切页时的既有 .page fadeIn 保留（那是整页淡入，不是标题位移）。 */
+
+/* 卡片弹性上浮：只对「概览页首屏卡片」做，其余页面的卡片保持原样 ——
+   方案 §3.3 的编排是「首屏进入」语义，切页时重复播会把高频导航变成拖沓。 */
+body.aurora-ready .page.active .summary-card,
+body.aurora-ready .page.active .device-info-row {
+  animation: aurora-card-in 820ms var(--ease-spring) both;
+}
+body.aurora-ready .page.active .summary-card:nth-child(2) { animation-delay: 60ms; }
+body.aurora-ready .page.active .summary-card:nth-child(3) { animation-delay: 120ms; }
+body.aurora-ready .page.active .summary-card:nth-child(4) { animation-delay: 180ms; }
+@keyframes aurora-card-in {
+  from { opacity: 0; transform: translateY(26px) scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 硬件信息表逐行揭示 */
+body.aurora-ready .page.active .device-info-row:nth-child(1) { animation-delay: 40ms; }
+body.aurora-ready .page.active .device-info-row:nth-child(2) { animation-delay: 80ms; }
+body.aurora-ready .page.active .device-info-row:nth-child(3) { animation-delay: 120ms; }
+body.aurora-ready .page.active .device-info-row:nth-child(4) { animation-delay: 160ms; }
+body.aurora-ready .page.active .device-info-row:nth-child(5) { animation-delay: 200ms; }
+body.aurora-ready .page.active .device-info-row:nth-child(6) { animation-delay: 240ms; }
+body.aurora-ready .page.active .device-info-row:nth-child(7) { animation-delay: 280ms; }
+body.aurora-ready .page.active .device-info-row:nth-child(n+8) { animation-delay: 320ms; }
+
+/* 进度条缓充 + 数字滚动：宽度/数字由 aurora.js 用 WAAPI 推，这里只给「落地那一跳」的
+   曲线与时长，避免 JS 与 CSS 各写一套时长口径。 */
+.overview-bar .progress-fill {
+  transition: width var(--dur-4) var(--ease-expo);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* RM 下整段编排撤掉：不靠「时长为 0」糊过去，直接不挂动画（冻结帧会让元素停在
+     from 态的位移上）。aurora.js 也不挂 body.aurora-ready，这里是双保险。 */
+  body.aurora-ready .nav-item,
+  body.aurora-ready .page.active .summary-card,
+  body.aurora-ready .page.active .device-info-row {
+    animation: none;
+  }
+  .aurora-field {
+    transition: none;
+  }
 }
 
 /* ---------- 5) 窗口材质总开关（Motion.Lab toggle-flip：滑动旋钮 + 主题 token） ---------- */
@@ -5615,6 +6090,45 @@ body[data-preset-bg] .layout {
 /* 启动页补充：落位期间隐藏真实标题栏品牌（:has 由 Electron 44 Chromium 支持），
    splash.js 在 FLIP 结束时给 #splash 加 .finished 并移除节点，品牌同步显现，视觉无缝 */
 body:has(.splash-overlay:not(.finished)) .titlebar-title { visibility: hidden; }
+
+/* 极光琉璃 B-P3 · 开场升级（方案 §3.3「描边 LOGO 绘制 → 渐变字揭示 → 进度条 → 缩放退场」）
+   边界：开屏是既有的一次性走场，v3.6.2 起无视系统 reduced-motion 完整播放；本次只换
+   视觉形态，不改 `app:first-paint` 握手、不改 splash.js 的 FLIP 落位与兜底链路。
+   Trim 字样必须保留纯色 —— 它要 FLIP 到标题栏品牌位，渐变字在落位瞬间会与
+   .titlebar-title 的纯色对不上，出现一帧跳色。渐变只给副标题与进度条。 */
+.splash-stage .splash-trim {
+  /* 描边揭示：初始为空心描边，走 --dur-5 把描边收回成实心 */
+  -webkit-text-stroke: 1.5px var(--splash-brand);
+  animation: splashTrimIn .7s cubic-bezier(.22, 1, .36, 1) .08s both,
+             splash-trim-reveal var(--dur-5) var(--ease-expo) .16s both;
+}
+@keyframes splash-trim-reveal {
+  from { -webkit-text-stroke-color: var(--splash-brand); }
+  to { -webkit-text-stroke-color: transparent; }
+}
+.splash-stage .splash-intro {
+  /* 渐变字揭示：只在品牌紫系内（R1 限定放行），两端都取深色，正文仍过 AA */
+  background-image: linear-gradient(100deg, var(--splash-ink), var(--splash-brand));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.splash-progress-track {
+  /* 进度条渐变：品牌紫 → 提亮档，与 .splash-enter 同色系 */
+  background: rgba(var(--splash-brand-rgb), .14);
+}
+.splash-progress-fill {
+  /* 刻意保持单色：进度条上没有任何文字，但它是 .splash-progress 的子节点，
+     渐变栈会让 check-contrast 把最深一端（#5948BD）当成父级文字的底来算，
+     得出 2.19:1 的假违规。单色既避开误判，也和 .splash-enter 同色。 */
+  background: var(--splash-brand);
+}
+/* 缩放退场：进入过渡时整层轻微放大淡出（与 splash.js 的 FLIP 同时进行，不抢它的 transform） */
+.splash-overlay.entering {
+  transition: opacity var(--dur-5) var(--ease-expo), transform var(--dur-5) var(--ease-expo);
+  transform: scale(1.06);
+}
+
 .splash-enter {
   margin-top: 6px;
   padding: 13px 44px;

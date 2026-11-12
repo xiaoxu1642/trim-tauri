@@ -87,8 +87,10 @@ function powerNsHits({ regText = '', text = '' }) {
   for (const v of String(regText).matchAll(/^\s*"([^"]+)"\s*=/gm)) {
     if (POWER_VALUE_NAMES.test(v[1])) out.push({ rule: 'power-ns', detail: `电源值名 ${v[1]}` });
   }
-  const m = String(text || '').match(POWER_NS);
-  if (m) {
+  // 文本分支必须逐命中上报：只取首个命中会让同文件后续新增的写点整片不可见
+  // （T1b-P27-M04 的根因之一）。POWER_NS 本体不带 g，这里按源串新建全局实例。
+  const re = new RegExp(POWER_NS.source, 'gi');
+  for (const m of String(text || '').matchAll(re)) {
     const i = m.index ?? 0;
     out.push({
       rule: 'power-ns',
@@ -127,17 +129,21 @@ function stripComments(text, file = '') {
 }
 
 // ===========================================================================
-// 允许写面登记表（双棘轮：命中未登记 ⇒ 红；登记不命中 ⇒ 红）
+// 允许写面登记表（双棘轮：命中未登记 ⇒ 红；登记命中数与 expect 不符 ⇒ 红）
+// expect = 该条登记当前应有的命中数。只查 consumed>0 会让同文件新增写点被既有登记
+// 静默吞掉（T1b-P27-M04）——命中数变化（新增或消失）都必须重走登记评审。
 // ===========================================================================
 const ALLOW = [
   {
     file: 'src-tauri/src/engine/native/syspanel.rs',
     match: (h) => h.rule === 'powercfg-write' && h.detail === 'powercfg export',
+    expect: 2,
     why: '电源计划编辑器·导出 .powrplan（v5 P0 走 systembin::quiet_cmd_timeout；2026-10-16 用户裁定编辑器整体保留为已授权写面）',
   },
   {
     file: 'src-tauri/src/engine/native/syspanel.rs',
     match: (h) => h.rule === 'power-ns' && /PowerSettings/.test(h.anchor || ''),
+    expect: 1,
     why: '编辑器「在注册表中查看」的 regedit 只读导航串（把编辑器定位到该设置键，不写注册表）',
   },
   // ---- P1-2（开启卓越性能 / 隐藏高性能）落地时在下方逐条补登记（用户 2026-10-16 裁定）：
@@ -149,27 +155,32 @@ const ALLOW = [
   // ---- T1b-M03（v7.2 C09）漫游面新增的四条登记（walkFiles 派生后首次现算命中）：
   {
     file: 'src-tauri/src/commands/optimizer/external_scan.rs',
-    match: (h) => h.rule === 'power-ns',
+    match: (h) => h.rule === 'power-ns' && /SESSION_POWER: &str = "SYSTEM/.test(h.anchor || ''),
+    expect: 1,
     why: '外部优化器足迹检测的只读判据常量（Session Manager\\Power 等）——本文件只读注册表做检出，不写',
   },
   {
     file: 'src-tauri/data/cleanup-rules.json',
-    match: (h) => h.rule === 'power-ns',
+    match: (h) => h.rule === 'power-ns' && /%WINDIR%/.test(h.anchor || '') && /SleepStudy/.test(h.anchor || ''),
+    expect: 2,
     why: '清理规则库的睡眠研究数据清理（%WINDIR%\\System32\\SleepStudy 的 ETL 产物，用户显式执行的清理项）——非漫游改电源配置',
   },
   {
     file: 'src/scripts/cleanup-fallback.generated.js',
-    match: (h) => h.rule === 'power-ns',
+    match: (h) => h.rule === 'power-ns' && /%WINDIR%/.test(h.anchor || '') && /SleepStudy/.test(h.anchor || ''),
+    expect: 2,
     why: 'cleanup-rules.json 的前端生成副本（P1 路已对拍，随源件同登记）',
   },
   {
     file: 'src-tauri/data/retired-optimizations.json',
     match: (h) => h.rule === 'powercfg-write' && h.detail === 'powercfg h',
+    expect: 2,
     why: '退役台账 note 原文引用 powercfg /h——描述已退役项的史实叙述，非可执行写面',
   },
   {
     file: 'src-tauri/src/commands/optimizer/backup_restore.rs',
-    match: (h) => h.rule === 'power-ns',
+    match: (h) => h.rule === 'power-ns' && /HKEY_LOCAL_MACHINE/.test(h.anchor || '') && /=dword:/.test(h.anchor || ''),
+    expect: 6,
     why: '退役项历史声明面表 RETIRED_RESTORE_STEPS_JSON（tf_hibern_off 等）—— R3-K01 目标收窄的对拍白名单，不是新增写面；实际写入仍走 native reg_restore_write/delete 且必须先过管理员摘要 + 声明面两道闸',
   },
 ];
@@ -329,11 +340,15 @@ check(
       ' —— 若属新授权写面（如 P1-2 两能力），在 ALLOW 表逐条登记后转绿；其余一律改掉，不许放宽判据'
     : '',
 );
-const rotten = ALLOW.map((a, i) => (consumed[i] === 0 ? `${a.file} · ${a.why}` : null)).filter(Boolean);
+const rotten = ALLOW.map((a, i) => {
+  if (consumed[i] === a.expect) return null;
+  if (consumed[i] === 0) return `${a.file} · ${a.why} —— 登记了却一次不命中（白名单腐烂比没有更危险）`;
+  return `${a.file} · ${a.why} —— 实际命中 ${consumed[i]} 处 ≠ 期望 ${a.expect} 处（同文件新增/消失的写点必须重走登记评审）`;
+}).filter(Boolean);
 check(
   rotten.length === 0,
-  `A3. ALLOW 白名单无空转（${ALLOW.length} 条登记，${consumed.join('/')} 次命中）`,
-  rotten.length ? `登记了却一次不命中（白名单腐烂比没有更危险）：${rotten.join('；')}` : '',
+  `A3. ALLOW 逐条命中数与期望一致（${ALLOW.length} 条登记，${consumed.join('/')} 次命中）`,
+  rotten.length ? rotten.join('；') : '',
 );
 
 // 打印扫描账（报告引用数字从这里抄）

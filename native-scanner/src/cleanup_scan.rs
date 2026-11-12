@@ -2707,14 +2707,28 @@ pub fn parse_global_min_age(text: &str) -> Option<u64> {
 /// `global_min_age_days`（G-2）由调用方**每次扫描读一次**后逐层传入：逐条规则读文件是
 /// N 次 IO，而进程内缓存会让「改了档次要重启才生效」—— 两种都不能接受。
 /// 并法固定为 `max(规则阈值, 全局阈值)`（[`AgeGuard::tighten`]），只收紧不放宽。
+// N1a-M12：minAge 两个字段名提成模块级常量——让 `check-rule-schema-sync` 能从本文件
+// 生产段抓到字面量，并与 `tools/rule-schema.json` 的 `itemFields` 对拍；字段改名 ⇏
+// 门禁静默失去护栏。常量值本身就是对拍真源，改字段名必须同步更新本常量与 schema。
+pub const KEY_MIN_AGE_HOURS: &str = "minAgeHours";
+pub const KEY_MIN_AGE_DAYS: &str = "minAgeDays";
 fn rule_age_guard_of(rule: &Json, global_min_age_days: Option<u64>) -> AgeGuard {
-    let num = |k: &str| match rule.get(k) {
+    // fail-closed（N1a-M12）：字段「出现过但不是数字」= 声明了却读不懂 ⇒ 直接 `Invalid`
+    // （判太新，宁可少删），不能当成「未声明」退回 `Off`——否则整条时效护栏消失、会删到
+    // 刚写入的文件（方向是多删）。未声明（键不存在）才走 `Off`（无护栏，既有口径）。
+    let min_hours = match rule.get(KEY_MIN_AGE_HOURS) {
+        None => None,
         Some(Json::Num(n)) => Some(*n),
-        _ => None,
+        Some(_) => return AgeGuard::Invalid,
+    };
+    let min_days = match rule.get(KEY_MIN_AGE_DAYS) {
+        None => None,
+        Some(Json::Num(n)) => Some(*n),
+        Some(_) => return AgeGuard::Invalid,
     };
     rule_age_guard(
-        num("minAgeHours"),
-        num("minAgeDays"),
+        min_hours,
+        min_days,
         rule.get("ageAxis").and_then(|v| v.as_str()),
     )
     .tighten(global_min_age_days)

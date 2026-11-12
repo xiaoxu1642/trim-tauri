@@ -1220,6 +1220,18 @@ pub fn run_net_sample(args: &[String]) -> i32 {
     // 调用方只能靠杀进程收场）。
     let daemon = args.iter().any(|a| a == "--daemon");
     if !daemon {
+        // N1c-M01：差分口径下首帧只写基线、结构上必然 `Ok(None)`；单帧模式必须
+        // 隔一个采样间隔再取第二帧，否则永远静默空输出。
+        let _ = sampler.sample_frame();
+        if let Some(code) = sampler.last_error() {
+            eprintln!(
+                "[finder-warn] net-sample 读接口表失败（GetIfTable2 返回 0x{:08X}）——\
+                 这与「本机没有可用网卡」是两种结论",
+                code as u32
+            );
+            return 0;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(interval));
         match sampler.sample_frame() {
             Some(line) => {
                 if out_line(&line).is_err() {
@@ -1229,9 +1241,12 @@ pub fn run_net_sample(args: &[String]) -> i32 {
             None => {
                 if let Some(code) = sampler.last_error() {
                     eprintln!(
-                        "[finder-warn] net-sample 读接口表失败（GetIfTable2 返回 0x{:08X}）——\
-                         这与「本机没有可用网卡」是两种结论",
+                        "[finder-warn] net-sample 第二帧读接口表失败（GetIfTable2 返回 0x{:08X}）",
                         code as u32
+                    );
+                } else {
+                    eprintln!(
+                        "[finder-warn] net-sample 两帧均无可用物理网卡（首帧基线已建立，不是静默空跑）"
                     );
                 }
             }
@@ -2169,6 +2184,10 @@ mod n1b_m01_tests {
         assert!(
             branch.contains("sample_frame()") && branch.contains("return 0;"),
             "不带 --daemon 必须跑一轮采样后退出，实得分支：\n{branch}"
+        );
+        assert!(
+            branch.matches("sample_frame()").count() >= 2,
+            "单帧模式必须先建基线再取第二帧（N1c-M01），实得分支：\n{branch}"
         );
     }
 }
