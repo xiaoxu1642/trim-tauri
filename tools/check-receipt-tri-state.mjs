@@ -262,23 +262,22 @@ const MIN_CASES = 24;
 }
 
 // ---------- P0-F4a1-M15：低危常规项永久删必须有确认 ----------
+// 2026-11-15 用户裁定：页面常显告知「常规清理项会直接永久删除…」按「让布局解释」口径删除；
+// 判据改钉**确认弹窗正文**必须含「不进入回收站」（执行前一刻的告知，语义不丢）。
 {
   const src = read('src/scripts/cleanup.js');
-  const html = read('src/index.html');
-  if (!src || !html) {
-    g.fail('F4a1-M15：cleanup.js 或 index.html 不存在（判定对象缺失）');
+  if (!src) {
+    g.fail('F4a1-M15：cleanup.js 不存在（判定对象缺失）');
   } else {
     const clean = blankNonCode(src, 'js', { keepStrings: true });
-    const block = funcBlock(clean, 'confirmCleanPlan') || '';
-    const judge = (text, markup) => {
+    const judge = (text) => {
       const fn = funcBlock(text, 'confirmCleanPlan') || '';
       return /const\s+lowRisk\s*=/.test(fn)
         && /r\.id\s*!==\s*RECYCLE_ID/.test(fn)
         && /!FILECLEAN_IDS\.includes\(r\.id\)/.test(fn)
         && /confirmWarning\(\s*'永久删除确认'/.test(fn)
         && /不进入回收站/.test(fn)
-        && /if\s*\(!ok\)\s*return null;/.test(fn)
-        && /id="cleanupPermanentHint"[^>]*>[^<]*不进入回收站/.test(markup);
+        && /if\s*\(!ok\)\s*return null;/.test(fn);
     };
     const goodSample = [
       'async function confirmCleanPlan() {',
@@ -293,16 +292,22 @@ const MIN_CASES = 24;
       '  return lowRisk;',
       '}',
     ].join('\n');
-    const goodHtml = '<div id="cleanupPermanentHint">常规清理项会直接永久删除，不进入回收站。</div>';
-    const badHtml = '<div id="cleanupPermanentHint">常规清理项。</div>';
-    if (!judge(goodSample, goodHtml) || judge(badSample, badHtml)) {
-      g.fail('F4a1-M15 正向对照失败：永久删确认判定器失真（必须能把「有确认+页面告知」与「零确认」分开）');
+    // 反向样本：有确认但没有「不进入回收站」告知 ⇒ 必须判红（防告知被删后仍绿）
+    const noHintSample = [
+      'async function confirmCleanPlan() {',
+      "  const lowRisk = selectedWithResultIds().filter(r => r.id !== RECYCLE_ID && !FILECLEAN_IDS.includes(r.id));",
+      "  const ok = await window.app?.confirmWarning('永久删除确认', '这些项目会被删除。');",
+      '  if (!ok) return null;',
+      '}',
+    ].join('\n');
+    if (!judge(goodSample) || judge(badSample) || judge(noHintSample)) {
+      g.fail('F4a1-M15 正向对照失败：永久删确认判定器失真（必须能把「有确认+弹窗告知」与「零确认」「无告知」分开）');
     }
-    const ok = judge(clean, html);
+    const ok = judge(clean);
     if (!ok) {
-      g.fail('F4a1-M15：低危常规项缺永久删确认/页面缺告知，或未排除文件清理项');
+      g.fail('F4a1-M15：低危常规项缺永久删确认、弹窗缺「不进入回收站」告知，或未排除文件清理项');
     } else {
-      g.ok('F4a1-M15：低危常规项永久删有确认，文件清理项被排除，页面有「不进入回收站」提示');
+      g.ok('F4a1-M15：低危常规项永久删有确认，文件清理项被排除，弹窗内有「不进入回收站」告知');
     }
     addCase('F4a1-M15', ok);
   }

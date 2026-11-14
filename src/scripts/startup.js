@@ -660,6 +660,9 @@
       // 系统输入链（CTF Loader 那一族）：判据与拦截都在后端两臂（startup_toggle / startup_delete），
       // 这里只负责「不给按钮 + 说明为什么」，避免用户点了才收到一条 error 回执。
       // 反向不锁：该项若已被系统或别的工具关掉，「启用」仍然给——拦启用等于替用户把输入法锁死。
+      // 单条卡片不给启停/删除按钮（用户裁定）：勾选 → 点批量按钮 → 过确认是唯一执行闸，
+      // 「点一下卡片就能改注册表」这道口子不存在。卡片里只留位置与安全中心两个只读动作。
+      // 注意：这段说明必须写在模板字符串之外——写进模板会作为文本渲染到卡片上。
       const guarded = !!i.protected;
       const guardBadge = guarded
         ? window.ds.badgeHtml('warn', '系统组件', {
@@ -684,12 +687,6 @@
           <div class="startup-item-ops">
             ${locBtn}
             ${secBtn}
-            ${i.enabled
-              ? (guarded
-                  ? ''
-                  : `<button class="btn btn-small btn-opt-toggle off" data-id="${escapeHtml(i.id)}" data-act="disable" data-tip="禁用（可逆）">禁用</button>`)
-              : `<button class="btn btn-small btn-opt-toggle on" data-id="${escapeHtml(i.id)}" data-act="enable" data-tip="重新启用">启用</button>`}
-            ${guarded ? '' : `<button class="btn btn-small btn-opt-del" data-id="${escapeHtml(i.id)}" data-act="delete" data-tip="备份后删除">删除</button>`}
           </div>
         </div>`;
     }).join('') + `
@@ -701,6 +698,9 @@
 
     // B2：有路径的项提取真实程序图标，失败或无路径时统一兜底为 Trim.ico
     applyStartupIcons(listEl);
+    // 单条操作按钮已移除，批量按钮是唯一执行闸：每次渲染后按当前勾选态复位，
+    // 防止重渲染把按钮留在「可点但没选中」的状态（点了会空转或误读成已生效）。
+    updateBatchButtons();
     // 逐项滑入（2026-11-12 用户点名）：仅在「扫描完成 / 切换筛选」后播放。
     // 单项启停走的是 receipt 局部更新，不进这里，因此不会反复重播。
     if (slideOnNextRender) {
@@ -773,6 +773,10 @@
     el('btnStartupDisable').disabled = !hasDisable;
     el('btnStartupEnable').disabled = !hasEnable;
     el('btnStartupDelete').disabled = !sel.length;
+    const bulk = (id, on) => { const b = el(id); if (b) b.disabled = !on; };
+    bulk('btnStartupDisableBulk', hasDisable);
+    bulk('btnStartupEnableBulk', hasEnable);
+    bulk('btnStartupDeleteBulk', sel.length > 0);
   }
 
   // 回执三态判序（F4a2-M02 / v7.2 C07）：**命令层整体拒绝** ≠ 部分失败 ≠ 全成。
@@ -1102,18 +1106,6 @@ ${enable ? '（启用后该项将随系统启动运行）' : '（禁用后可随
       const locBtn = e.target.closest('.btn-opt-loc');
       if (locBtn) {
         openSource(locBtn.dataset);
-        return;
-      }
-      const delBtn = e.target.closest('.btn-opt-del');
-      if (delBtn) {
-        const item = items.find(i => i.id === delBtn.dataset.id);
-        if (item) safeAction(() => doDelete([item]), '删除启动项')();
-        return;
-      }
-      const togBtn = e.target.closest('.btn-opt-toggle');
-      if (togBtn) {
-        const item = items.find(i => i.id === togBtn.dataset.id);
-        if (item) safeAction(() => doToggle([item], togBtn.dataset.act === 'enable'), '切换启动项')();
         return;
       }
       const bulkBtn = e.target.closest('#btnStartupDisableBulk, #btnStartupEnableBulk, #btnStartupDeleteBulk');

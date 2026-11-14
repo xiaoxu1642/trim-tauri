@@ -30,7 +30,7 @@
     "check-html-contract": "da877b2f4f947020",
     "check-csp-consistency": "28a811b4ade815c8",
     "check-a11y": "2e70d99f923c5366",
-    "check-native-hygiene": "5f9b1e10cf396e77",
+    "check-native-hygiene": "53dde08b035a4923",
     "check-handle-lifecycle": "4313924ba71fe08c",
     "check-comment-coords": "258b906560a69d1c",
     "check-css-tokens": "895c7b9f63f8c218",
@@ -541,5 +541,5 @@
       "M-12"
     ]
   },
-  "bodyHash": "f4c09bc2b30c3e57"
+  "bodyHash": "e39913c07298124a"
 }
