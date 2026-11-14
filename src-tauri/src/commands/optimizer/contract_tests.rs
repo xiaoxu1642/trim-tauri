@@ -1603,15 +1603,27 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
             .expect("数据层应有 risk=high 项");
         let high_id = high.get("id").and_then(|v| v.as_str()).unwrap_or("");
 
-        // 正向：被判「需高危确认」
-        assert_eq!(
-            preflight_reason(high, high_id, false),
-            Some(PreflightReject::NeedHighRiskConfirm),
-            "正向高危项必须被预检拦下"
-        );
+        // R3b-M07-11：管理员档优先 —— 非管理员环境下 preflight 先返回 NeedAdmin，
+        // 这里若硬断言 NeedHighRiskConfirm，cargo test 的真假就取决于机器权限。
+        // 与 m1_preflight拒绝理由分档互不吞并 同姿势按 is_admin 分支。
+        if crate::engine::sysinfo::is_admin() {
+            // 正向：被判「需高危确认」
+            assert_eq!(
+                preflight_reason(high, high_id, false),
+                Some(PreflightReject::NeedHighRiskConfirm),
+                "正向高危项必须被预检拦下"
+            );
+        } else {
+            assert_eq!(
+                preflight_reason(high, high_id, false),
+                Some(PreflightReject::NeedAdmin),
+                "非管理员环境下正向高危项应先被 NeedAdmin 拦下（管理员档优先于高危档）"
+            );
+        }
         // R1-1.3b 语义坑：还原方向豁免高危确认（审查 2026-09-27 H1）。
         // 若此处返回 NeedHighRiskConfirm 就是把「无值级备份的高危项走预置脚本还原
         // 整体死锁」那个 bug 重造一遍 —— 4 条还原入口全部命中过。
+        // 非管理员下该臂先落 NeedAdmin（≠ NeedHighRiskConfirm），豁免回归靠管理员机实跑。
         let restore_verdict = preflight_reason(high, high_id, true);
         assert_ne!(
             restore_verdict,
@@ -1677,6 +1689,56 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
         let uniq: std::collections::HashSet<&String> = msgs.iter().collect();
         assert_eq!(uniq.len(), 3, "三条拒绝理由文案出现重复: {msgs:?}");
         assert!(msgs[2].contains("示例步骤"), "UnsupportedStep 文案必须带出是哪一步");
+    }
+
+    /// R3b-M07-10（同源文案）：批量预检 `rejected[].reason` 与单条执行 `message`
+    /// 必须逐变体都取自 `PreflightReject::message()`，不许任何一侧手写第二份。
+    ///
+    /// 两个命令体都要 Tauri 运行时（`WebviewWindow`）进程内进不来，所以与
+    /// regTimeWindow 判据的姿势一致走**源码结构断言**：两侧消费点都被钉在
+    /// `r.message()` 上 —— 同一个 `preflight_reason` 判出的同一变体，两边必然取到
+    /// 同一段文案。旧版对 NeedAdmin / UnsupportedStep 在单条执行手写过第二份
+    /// 文案，同一项批量预检和点执行会看到两种拒因。措辞本身由
+    /// `m1_preflight拒绝理由分档互不吞并` 的文案唯一性断言兜底，这里不钉措辞。
+    #[test]
+    fn m1_preflight拒因文案批量与单条同源() {
+        let apply_src = include_str!("apply.rs");
+        // 批量侧唯一出口：非确认拒绝统一走 r.message()（对照坐标，只钉不治）
+        assert!(
+            include_str!("overview.rs").contains("\"reason\": r.message()"),
+            "批量预检的 rejected[].reason 必须统一取自 r.message()，不许按变体手写"
+        );
+        // 逐变体切出单条执行臂（用下一臂的模式作边界），臂内文案出口只许是 r.message()
+        let arm = |start: &str, end: &str, name: &str| -> String {
+            apply_src
+                .split(start)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{name} 臂不存在 —— preflight 拒因臂被摘除或改形，需同步本测试"))
+                .split(end)
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        };
+        let need_admin = arm(
+            "Some(r @ PreflightReject::NeedAdmin)",
+            "Some(PreflightReject::NeedHighRiskConfirm)",
+            "NeedAdmin",
+        );
+        assert!(need_admin.contains("r.message()"), "NeedAdmin 臂必须消费 r.message()（单一真源），实得: {need_admin}");
+        assert!(!need_admin.contains("优化操作需要管理员权限"), "NeedAdmin 臂不许手写第二份文案");
+        let unsupported = arm(
+            "Some(r @ PreflightReject::UnsupportedStep(_))",
+            "Some(PreflightReject::AlreadySatisfied",
+            "UnsupportedStep",
+        );
+        assert!(unsupported.contains("r.message()"), "UnsupportedStep 臂必须消费 r.message()，实得: {unsupported}");
+        assert!(!unsupported.contains("本机不支持该优化项的某一步"), "UnsupportedStep 臂不许手写第二份文案");
+        let no_restore = arm(
+            "Some(r @ PreflightReject::NoRestorePath)",
+            "_ => {}",
+            "NoRestorePath",
+        );
+        assert!(no_restore.contains("r.message()"), "NoRestorePath 臂必须消费 r.message()，实得: {no_restore}");
     }
 
     /// R1-1.4 / R1-1.5（命令层契约）：未知 id 必进 `rejected`，空 ids 不许乐观放行。

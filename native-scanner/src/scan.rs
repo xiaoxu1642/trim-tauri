@@ -1701,8 +1701,16 @@ fn load_empty_ignore(sink: Option<&dyn Sink>) -> Result<HashSet<String>, String>
                 }
                 Ok(s)
             }
+            // N1b-M10（P1-06）：「两处都没有」时 util::list_file_path（util.rs:211-222）
+            // 返回的是写入落点，read 必然 NotFound —— 名单从未创建/被手动删掉是常态而非
+            // 故障，按空名单放行；折成 Err 会让 empty() 首次使用即整轮停摆（零候选、零
+            // progress(100)），prune_tree_effectively_empty 的空目录删除预检也整批跳过。
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(s),
             Err(e) => {
-                let msg = format!("空目录忽略名单 {} 不可用: {e}，本轮按名单停用处理（N1b-L08）", f.display());
+                // 只剩「名单存在但读不了」（损坏/权限）：fail-closed（N1b-L08：不得当空
+                // 名单继续删），文案必须与 empty() 的实际行为一致 —— 整轮不扫；旧文案
+                // 「按名单停用处理」与行为相反，已废弃。
+                let msg = format!("空目录忽略名单 {} 读取失败: {e}，本轮不执行扫描（N1b-L08）", f.display());
                 if let Some(sink) = sink {
                     sink.warn(&msg);
                 }
@@ -1920,7 +1928,14 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
     init_scan_threads();
     let ignore = match load_empty_ignore(Some(sink)) {
         Ok(v) => v,
-        Err(_) => return,
+        Err(_) => {
+            // N1b-M10（P1-06）：走到这里只剩「名单存在但读不了」（NotFound 已按空名单
+            // 放行）。fail-closed 整轮不扫（N1b-L08：不得当空名单继续删，否则用户显式
+            // 排除的目录会进可删集合）；但必须发终值 —— 旧形态静默 return，界面停在
+            // 「正在准备」，与 bigfiles 空根早退同病同修（scan.rs:1580-1588）。
+            progress(sink, 100);
+            return;
+        }
     };
     // E-3 方向 B：canonical 一次，逐层传参（Sink 化后递归在并行闭包里，见 under_userprofile）
     let up = userprofile_root_canon();
@@ -1980,7 +1995,11 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
                             // P1-②：这一份 `ent.metadata()` 同时供「大小/时效」判定与
                             // created 字段取值 —— 旧形态只留路径，出口再 stat 一次拿创建时间。
                             let keep = match ent.metadata() {
-                                Ok(m) if m.len() == 0 && !created_too_new(&m) => {
+                                // N1b-M11（P1-07）：根层与子目录/空目录/删除侧复检共用同一
+                                // 组时效闸（collect_empty_fast :2179、空目录判定 :2208、
+                                // 删除侧复检 :2287）—— 漏「本年内」会让盘根等处往年创建的
+                                // 零字节系统文件重回可删候选（假阳性）。
+                                Ok(m) if m.len() == 0 && !created_too_new(&m) && created_in_current_year(&m) => {
                                     Some(created_epoch_of(&m))
                                 }
                                 _ => None,
@@ -4795,6 +4814,149 @@ mod tests {
         assert!(
             !got.iter().any(|s| s.ends_with("has_fresh_file")),
             "树内含太新 0 字节标记的目录不得判空（活跃标记保护）"
+        );
+    }
+
+    /// N1b-M10（P1-06）+ N1b-M11（P1-07）回归钉。三场景必须挤在**一个**用例里：
+    /// DATA_ROOTS 是进程级 OnceLock（set_data_roots 只认首次调用，同约束见 util.rs
+    /// data_roots_tests 的注释），拆开会让场景间读到彼此的名单状态。配置根对经
+    /// util::sandbox 守卫建点（check-test-sandbox 门禁口径），tag 刻意取 "roots-test"
+    /// 使沙箱与 data_roots_tests 的根对**同一路径** —— 全量并行跑时谁先 set 都指向
+    /// 同一对路径，两边的路径断言互不破坏；名单操作点一律取 `list_file_path` 给出的
+    /// 落点，不假设根是谁注入的。极端并行情形（本用例写损坏名单与
+    /// data_roots_tests 的写名单窗口重叠）实际不可达：对方用例全程毫秒级，本用例
+    /// 首次扫描前已过数十毫秒。
+    ///
+    /// 判红自证：
+    ///   · 摘掉 load_empty_ignore 的 NotFound 分支 ⇒ 场景①的「不告警 + 有候选」红
+    ///     （empty() 整轮早退，N1b-M10）；
+    ///   · 摘掉根层分支的 created_in_current_year ⇒ 场景①的「400 天前根层文件不进
+    ///     候选」红（N1b-M11）；
+    ///   · 场景②钉损坏名单的 fail-closed 语义与如实文案（N1b-L08）。
+    #[test]
+    fn empty_ignore缺失按空名单损坏则显式终止根层年份闸齐平() {
+        struct Collect {
+            items: Mutex<Vec<String>>,
+            progress: Mutex<Vec<u64>>,
+            warns: Mutex<Vec<String>>,
+        }
+        impl Sink for Collect {
+            fn item(&self, p: &Path, _line: &str) {
+                self.items.lock().unwrap().push(p.to_string_lossy().to_string());
+            }
+            fn progress(&self, n: u64) {
+                self.progress.lock().unwrap().push(n);
+            }
+            fn scanned(&self, _n: u64) {}
+            fn warn(&self, m: &str) {
+                self.warns.lock().unwrap().push(m.to_string());
+            }
+        }
+
+        // 配置根对（名单落点）：建点走 util::sandbox 守卫（check-test-sandbox 门禁
+        // 禁止 temp_dir() 下手拼 trim- 建点）。tag 刻意取 "roots-test"，使沙箱路径与
+        // util.rs data_roots_tests 的根对**同一路径**：DATA_ROOTS 是进程级 OnceLock
+        //（set_data_roots 只认首次调用），全量并行跑时谁先 set 都指向同一对路径，
+        // 两边用例的路径断言互不破坏（tag 换名会让后 set 的一方读到对方的根而判红）。
+        // 名单操作点一律取 list_file_path 给出的落点，不假设根是谁注入的。
+        let roots = sandbox("roots-test");
+        crate::util::set_data_roots(roots.join("cur"), roots.join("old"));
+        let land = crate::util::list_file_path("empty-ignore.txt").expect("数据根已注入");
+        let _ = fs::remove_file(&land); // 场景①③前置：名单缺失（常态，非故障）
+
+        // 扫描沙箱：CARGO_MANIFEST_DIR/target 下（userprofile 之外），同
+        // empty_scan_only_reports_items_created_before_min_age 的姿势，Drop 兜底清理。
+        struct Clean(PathBuf);
+        impl Drop for Clean {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("test-empty-ignore-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let _clean = Clean(base.clone());
+        fs::create_dir_all(base.join("sub")).unwrap();
+        fs::write(base.join("root_stale.txt"), b"").unwrap();
+        fs::write(base.join("root_ancient.txt"), b"").unwrap();
+        fs::write(base.join("sub").join("in_year.txt"), b"").unwrap();
+        // 锚点：15 天前（> 14 天下限）与 400 天前（必落往年）。1 月 1-14 日运行时
+        // 15 天前落去年 —— 「本年内」闸把 15 天样本也滤掉（规则本身正确），断言自适应。
+        set_creation_time_days_ago(&base.join("root_stale.txt"), 15);
+        set_creation_time_days_ago(&base.join("root_ancient.txt"), 400);
+        set_creation_time_days_ago(&base.join("sub").join("in_year.txt"), 15);
+        let now_days = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            / 86_400;
+        let in_year_window = civil_year(now_days) == civil_year(now_days - 15);
+
+        // —— 场景①③：名单缺失 ⇒ 照常扫描且进度闭合；根层年份闸与三处共用口径齐平 ——
+        let s1 = Collect {
+            items: Mutex::new(Vec::new()),
+            progress: Mutex::new(Vec::new()),
+            warns: Mutex::new(Vec::new()),
+        };
+        empty(&[base.to_string_lossy().to_string()], &s1);
+        let items1 = s1.items.into_inner().unwrap();
+        let warns1 = s1.warns.into_inner().unwrap();
+        assert!(
+            s1.progress.into_inner().unwrap().contains(&100),
+            "名单缺失是常态而非故障，empty() 必须跑完并闭合进度（N1b-M10）"
+        );
+        assert!(
+            warns1.is_empty(),
+            "名单缺失按空名单放行不得告警，否则干净安装每次扫描都报警（N1b-M10）: {warns1:?}"
+        );
+        if in_year_window {
+            assert!(
+                items1.iter().any(|s| s.ends_with("root_stale.txt")),
+                "满足 14 天+本年的根层 0 字节文件应进候选: {items1:?}"
+            );
+            assert!(
+                items1.iter().any(|s| s.ends_with("in_year.txt")),
+                "子目录同口径 0 字节文件应进候选（扫描链路健康对照）: {items1:?}"
+            );
+        } else {
+            assert!(
+                items1.is_empty(),
+                "跨年窗口内 15 天/400 天样本都该被年份闸滤掉: {items1:?}"
+            );
+        }
+        assert!(
+            !items1.iter().any(|s| s.ends_with("root_ancient.txt")),
+            "400 天前（必落往年）的根层 0 字节文件不得进候选（N1b-M11）: {items1:?}"
+        );
+
+        // —— 场景②：名单损坏（非 NotFound）⇒ 显式终止 + 文案如实 + 零候选 ——
+        // 损坏名单残留会毒化同进程后续所有 empty() 用例（fail-closed 整轮早退）：
+        // 名单在 roots 沙箱内，Sandbox 的 Drop 在断言失败 / panic 路径同样整树删净。
+        fs::create_dir_all(land.parent().unwrap()).unwrap();
+        fs::write(&land, [0xFFu8, 0xFE, 0x00]).unwrap();
+        let s2 = Collect {
+            items: Mutex::new(Vec::new()),
+            progress: Mutex::new(Vec::new()),
+            warns: Mutex::new(Vec::new()),
+        };
+        empty(&[base.to_string_lossy().to_string()], &s2);
+        let warns2 = s2.warns.into_inner().unwrap();
+        assert!(
+            s2.progress.into_inner().unwrap().contains(&100),
+            "损坏名单必须显式终止并闭合进度，不得静默早退（N1b-M10）"
+        );
+        assert!(
+            warns2.iter().any(|w| w.contains("本轮不执行扫描")),
+            "损坏名单的告警必须如实写「本轮不执行扫描」: {warns2:?}"
+        );
+        assert!(
+            !warns2.iter().any(|w| w.contains("停用处理")),
+            "旧文案「按名单停用处理」与整轮终止行为相反（N1b-M10）: {warns2:?}"
+        );
+        assert!(
+            s2.items.into_inner().unwrap().is_empty(),
+            "fail-closed：损坏名单不得当空名单继续扫（N1b-L08）"
         );
     }
 

@@ -2047,6 +2047,16 @@ unsafe fn toggle_cm_item(
         if want_enabled {
             // AutorunsDisabled 重命名还原
             let lower_leaf = leaf.to_lowercase();
+            // R5a-M04-10：键名**恰为** `AutorunsDisabled`（无后缀）时，它本身就是禁用约定，
+            // 没有可去掉的前缀，下面的改名还原不会发生；继续走四值清除会按隐藏值回读成
+            // 「已启用」回 ok，而键名一动没动（与 shellex 臂 R5a-L05 同一类假成功）。
+            // 如实回 skip；文案经 `cm_shellex_external_disable` 与 shellex 臂同源，
+            // 精确叶名恒回 Some（cm_toggle_scope_tests 既有两条用例钉住）。
+            if lower_leaf == "autorunsdisabled" {
+                if let Some(msg) = cm_shellex_external_disable(&leaf) {
+                    return Ok(json!({ "status": "skip", "message": msg }));
+                }
+            }
             if lower_leaf.starts_with("autorunsdisabled") {
                 let rest = if lower_leaf.starts_with("autorunsdisabled_") { &leaf[17..] } else { &leaf[16..] };
                 if !rest.is_empty() {
@@ -2757,6 +2767,43 @@ mod cm_toggle_scope_tests {
         assert!(
             msg2.contains("外部工具") && !msg2.contains("本身"),
             "带后缀形态的理由不得与无后缀形态混同，实得：{msg2}"
+        );
+    }
+
+    /// R5a-M04-10：shell 臂启用方向对**精确** `AutorunsDisabled` 叶名必须如实回 skip。
+    /// 探测父键保证键不存在，而 skip 在任何注册表访问之前返回 ⇒ 用例零副作用。
+    /// 破坏自证：摘掉调用点的 skip 分支 ⇒ 精确叶名落到写侧臂、探测键打不开回 Err ⇒ 本用例红。
+    #[test]
+    fn shell臂精确autorunsdisabled叶名回skip形态() {
+        let item = json!({"blockedBy": "", "clsid": ""});
+        let target = r"HKEY_CURRENT_USER\Software\Classes\*\shell\TrimProbeR5aM0410\AutorunsDisabled";
+        let res = unsafe { toggle_cm_item(&item, "shell", target, target, true, "t1", "测试项") };
+        let res = res.expect("精确叶名必须回 Ok(skip)，不得 Err 也不得假成功");
+        assert_eq!(
+            res.get("status").and_then(|v| v.as_str()),
+            Some("skip"),
+            "精确叶名必须回 skip，实得：{res}"
+        );
+        let msg = res.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            msg.contains("本身") && msg.contains("不猜"),
+            "文案必须与 shellex 臂同一句禁用约定说明，实得：{msg}"
+        );
+    }
+
+    /// R5a-M04-10：前缀形态（`autorunsdisabled_x`）有可去掉的后缀，必须照常进入
+    /// 改名还原/写侧分支，不得被精确判据误拦成 skip。探测父键保证键不存在 ⇒
+    /// 写侧臂回「路径不存在」Err；若被误拦成 skip 则是 Ok ⇒ 本用例红。
+    #[test]
+    fn shell臂前缀叶名不被精确判据误拦() {
+        let item = json!({"blockedBy": "", "clsid": ""});
+        let target =
+            r"HKEY_CURRENT_USER\Software\Classes\*\shell\TrimProbeR5aM0410\AutorunsDisabled_Foo";
+        let res = unsafe { toggle_cm_item(&item, "shell", target, target, true, "t2", "测试项") };
+        let err = res.expect_err("前缀形态必须照常进写侧分支（探测键不存在 ⇒ Err）");
+        assert!(
+            err.contains("注册表路径不存在"),
+            "前缀形态应走到写侧臂的键打不开报错，实得：{err}"
         );
     }
 

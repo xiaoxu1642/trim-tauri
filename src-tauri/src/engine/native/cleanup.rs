@@ -90,6 +90,18 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
         }
     }
 
+    // R5a-M04-09：明细预览必须与执行侧同一时效护栏——真源是 `cleanup_execute` 的
+    // guard 计算（同表达式 + 同 tighten；G-2 并法 = max(规则阈值, 全局阈值)，只收紧
+    // 不放宽）。此前预览写死 `AgeGuard::Off`，声明 minAge 的规则（含 pathPs 目录型）
+    // 会把执行侧 `collect_files_at` 里 `old_enough` 拒掉的太新文件列进明细——用户勾了
+    // 却什么都没删。fileKeys 与目录型两条分支吃同一份 guard。
+    let guard = trim_finder::cleanup_scan::rule_age_guard(
+        rule.get("minAgeHours").and_then(Value::as_f64),
+        rule.get("minAgeDays").and_then(Value::as_f64),
+        rule.get("ageAxis").and_then(Value::as_str),
+    )
+    .tighten(trim_finder::cleanup_scan::load_global_min_age_days());
+
     // fileKeys 型
     if let Some(file_keys) = rule.get("fileKeys").and_then(|v| v.as_array()) {
         if !file_keys.is_empty() {
@@ -123,7 +135,7 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
                         &base,
                         pattern,
                         recurse,
-                        trim_finder::cleanup_scan::AgeGuard::Off,
+                        guard,
                         &mut preview_files,
                         &mut too_new,
                         &mut lossy,
@@ -161,7 +173,7 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
             let mut files: Vec<Value> = Vec::new();
             let mut total = 0usize;
             let mut seen = std::collections::HashSet::new();
-            enumerate_files(target_path, "*", true, &mut files, &mut total, &mut seen, cap, &mut unreadable);
+            enumerate_files(target_path, "*", true, guard, &mut files, &mut total, &mut seen, cap, &mut unreadable);
             return Ok(json!({"kind": "files", "total": total, "truncated": total > cap, "files": files, "unresolved": unresolved, "unreadable": unreadable, "degraded": unreadable > 0, "degradedReason": if unreadable > 0 { Some("部分目录/文件不可读，明细可能偏少") } else { None }}));
         }
     }
@@ -210,15 +222,17 @@ const ENGINE_WALK_MAX_DEPTH: usize = 64;
 
 fn enumerate_files(
     dir: &str, pattern: &str, recurse: bool,
+    guard: trim_finder::cleanup_scan::AgeGuard,
     files: &mut Vec<Value>, total: &mut usize,
     seen: &mut std::collections::HashSet<String>, cap: usize,
     unreadable: &mut i64,
 ) {
-    enumerate_files_at(dir, pattern, recurse, files, total, seen, cap, 0, unreadable)
+    enumerate_files_at(dir, pattern, recurse, guard, files, total, seen, cap, 0, unreadable)
 }
 
 fn enumerate_files_at(
     dir: &str, pattern: &str, recurse: bool,
+    guard: trim_finder::cleanup_scan::AgeGuard,
     files: &mut Vec<Value>, total: &mut usize,
     seen: &mut std::collections::HashSet<String>, cap: usize,
     depth: usize, unreadable: &mut i64,
@@ -237,11 +251,15 @@ fn enumerate_files_at(
         if crate::engine::protect::is_reparse(&meta) { continue; }
         if meta.is_dir() {
             if recurse {
-                enumerate_files_at(&path.to_string_lossy(), pattern, recurse, files, total, seen, cap, depth + 1, unreadable);
+                enumerate_files_at(&path.to_string_lossy(), pattern, recurse, guard, files, total, seen, cap, depth + 1, unreadable);
             }
         } else if meta.is_file() {
             let name = entry.file_name().to_string_lossy().to_string();
             if !glob_match(pattern, &name) { continue; }
+            // R5a-M04-09：与 `collect_files_at` 的时效判定同款——太新文件不进预览候选，
+            // 否则声明 minAge 的目录型规则会把执行侧不会删的文件列进明细。判定本体在
+            // 共享的 `AgeGuard::old_enough`（与执行侧清理链同一份实现）。
+            if !guard.old_enough(&meta) { continue; }
             let full = path.to_string_lossy().to_string();
             if !seen.insert(full.clone()) { continue; }
             *total += 1;
@@ -3676,6 +3694,109 @@ mod cleanup_engine_contract_tests {
             "归一后不得落「无基线」档（落了说明键仍不同源）: {d}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R5a-M04-09：明细预览与执行侧必须同一时效护栏（pathPs 目录型 + fileKeys 型
+    /// 两条分支）。修前预览写死 `AgeGuard::Off`，声明 minAge 的规则会把执行侧
+    /// `old_enough` 拒掉的太新文件列进明细（假阳性）。样本（真实文件系统 +
+    /// SetFileTime，复用本模块既有的 `BackupSandbox` 私有 tmp 沙箱与拨时 helper；
+    /// 样式参照 review_shape_tests 的 r5a_dir_preview_* 两条）：
+    /// minAgeDays=3 的规则；old.txt 拨回 30 天前（越过规则阈值与 G-2 全局默认 14 天，
+    /// 两侧集合可比）；mid.txt 拨回 10 天前（只在并上全局阈值后才太新，钉住 tighten
+    /// 接线）；fresh.txt 不拨（两种轴都太新）。
+    /// 零删除副作用：预览只枚举；执行侧真源取目录型链同款 `collect_files` 收集
+    /// （guard 表达式与 `cleanup_execute` 逐字一致）。单测环境全局策略文件不存在 ⇒
+    /// `load_global_min_age_days()` 恒为默认 14 天（无测试写该文件），mid.txt 的
+    /// 「太新」结论由此确定。
+    /// 破坏自证：把预览任一分支的 guard 接线改回 `AgeGuard::Off`（或去掉 tighten）
+    /// ⇒ 本用例红。
+    #[test]
+    #[cfg(windows)]
+    fn r5a_preview_ageguard_matches_execute() {
+        let sb = BackupSandbox::new("r5a-preview-ageguard");
+        let base = sb.path().join("target");
+        std::fs::create_dir_all(&base).expect("建目标目录");
+        std::fs::write(base.join("old.txt"), b"old").expect("写够老文件");
+        std::fs::write(base.join("mid.txt"), b"mid").expect("写中间文件");
+        std::fs::write(base.join("fresh.txt"), b"new").expect("写太新文件");
+        set_file_times_days_ago(&base.join("old.txt"), Some(30), Some(30));
+        set_file_times_days_ago(&base.join("mid.txt"), Some(10), Some(10));
+        let base_str = base.to_string_lossy().to_string();
+
+        // 执行侧真源（与 `cleanup_execute` 同款 guard 表达式 + 目录型链同款收集）。
+        let guard_of = |rule: &Value| {
+            trim_finder::cleanup_scan::rule_age_guard(
+                rule.get("minAgeHours").and_then(Value::as_f64),
+                rule.get("minAgeDays").and_then(Value::as_f64),
+                rule.get("ageAxis").and_then(Value::as_str),
+            )
+            .tighten(trim_finder::cleanup_scan::load_global_min_age_days())
+        };
+        let exec_names = |base: &str, guard: trim_finder::cleanup_scan::AgeGuard| {
+            let mut files: Vec<(String, u64)> = Vec::new();
+            let mut too_new = 0i64;
+            let mut lossy = 0i64;
+            let mut drops = CollectDrops::default();
+            collect_files(base, "*", true, guard, &mut files, &mut too_new, &mut lossy, &mut drops);
+            let mut names: Vec<String> = files
+                .iter()
+                .filter_map(|(p, _)| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()))
+                .collect();
+            names.sort();
+            (names, too_new)
+        };
+        let detail_names = |preview: &Value| {
+            let mut names: Vec<String> = preview["files"]
+                .as_array()
+                .expect("明细回执带 files")
+                .iter()
+                .filter_map(|f| f["path"].as_str())
+                .filter_map(|p| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()))
+                .collect();
+            names.sort();
+            names
+        };
+
+        // ① pathPs 目录型：预览候选集合 = 执行侧 guard 过滤后的集合
+        let rule = serde_json::json!({
+            "id": "r5a-ageguard-dir", "name": "年龄护栏预览契约（目录型）",
+            "pathPs": base_str, "minAgeDays": 3
+        });
+        let preview = cleanup_detail(&rule, &base_str).expect("目录型预览不应失败");
+        let (exec, too_new) = exec_names(&base_str, guard_of(&rule));
+        assert_eq!(
+            detail_names(&preview),
+            exec,
+            "目录型预览候选集合必须等于执行侧 guard 过滤集合: {preview}"
+        );
+        assert_eq!(
+            exec,
+            vec!["old.txt".to_string()],
+            "执行侧只收够老文件（并上全局阈值后 mid/fresh 都太新）"
+        );
+        assert_eq!(too_new, 2, "太新记账：mid.txt 与 fresh.txt");
+
+        // ② fileKeys 型：同一 guard 表达式、同一真源（预览走 `collect_files_at` 接线）
+        let rule_fk = serde_json::json!({
+            "id": "r5a-ageguard-fk", "name": "年龄护栏预览契约（fileKeys）",
+            "fileKeys": [{ "path": base_str, "pattern": "*", "recurse": true }],
+            "minAgeDays": 3
+        });
+        let preview_fk = cleanup_detail(&rule_fk, "").expect("fileKeys 预览不应失败");
+        let (exec_fk, _) = exec_names(&base_str, guard_of(&rule_fk));
+        assert_eq!(
+            detail_names(&preview_fk),
+            exec_fk,
+            "fileKeys 预览候选集合必须等于执行侧 guard 过滤集合: {preview_fk}"
+        );
+
+        // 零删除副作用：预览/收集只枚举，三个样本原样在盘上
+        assert!(
+            base.join("old.txt").exists()
+                && base.join("mid.txt").exists()
+                && base.join("fresh.txt").exists(),
+            "预览与收集不得真删"
+        );
     }
 }
 

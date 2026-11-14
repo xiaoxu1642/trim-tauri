@@ -243,14 +243,39 @@ pub async fn cleanup_backup_purge<R: tauri::Runtime>(
         crate::engine::backup_purge::purge(&targets)
     })
     .await
-    .unwrap_or_else(|e| json!({ "removed": 0, "failed": [], "items": [], "message": format!("备份清除任务异常: {e}") }));
+    .unwrap_or_else(|e| {
+        // R4-M08-M02：JoinError 兜底必须补与 purge 失败项同 shape 的失败项——
+        // failed 置空会让 success 位派生把任务异常误判成全成功，渲染层照常报「已清除」。
+        let reason = format!("备份清除任务异常: {e}");
+        json!({
+            "removed": 0,
+            "failed": [{ "name": "", "reason": reason }],
+            "items": [],
+            "message": reason,
+        })
+    });
     let mut data = resp;
     if !rejected.is_empty() {
         if let Some(failed) = data.get_mut("failed").and_then(|v| v.as_array_mut()) {
             failed.extend(rejected);
         }
     }
-    json!({ "success": true, "data": data })
+    backup_purge_receipt(data)
+}
+
+/// 备份清除回执组装（R4-M08-M02）：success 位按引擎回执派生，不硬编码 true。
+fn backup_purge_receipt(data: Value) -> Value {
+    // 整批失败（removed==0 且 failed 非空，含 JoinError 兜底补项）必须 success:false——
+    // 命令层此前无条件 success:true，把根判定全失败降级成清除成功提示。
+    // 部分失败（removed>0 且 failed 非空）保持 success:true，failed 明细交给渲染层
+    // 既有 warning 分支如实告警；全成功自然为 true。removed 缺失按零处理（fail-closed）。
+    let removed = data.get("removed").and_then(|v| v.as_u64()).unwrap_or(0);
+    let failed_non_empty = data
+        .get("failed")
+        .and_then(|v| v.as_array())
+        .map_or(false, |a| !a.is_empty());
+    let success = !(failed_non_empty && removed == 0);
+    json!({ "success": success, "data": data })
 }
 
 /// manifest 文件名准入：`manifest-<纯数字>.json`——防路径穿越
@@ -697,6 +722,89 @@ mod tests {
         let r0 = restored["data"]["results"][0].clone();
         assert_eq!(r0["data"]["restored"], json!(true), "目标消失后应能还原: {r0}");
         assert_eq!(fs::read(&original).expect("目标应已还原"), b"BACKUP");
+    }
+
+    /// R4-M08-M02：回执 success 位四态判红——全成功 / 部分失败 / 整批失败 / JoinError 兜底
+    /// 必须各自落到正确的 success 位。判红自证：派生改回无条件 success:true ⇒ 本用例红。
+    #[test]
+    fn 备份清除回执success位四态派生() {
+        // 全成功：failed 空 ⇒ success:true
+        let all_ok = json!({ "removed": 3, "failed": [], "items": [] });
+        assert_eq!(
+            super::backup_purge_receipt(all_ok)["success"],
+            json!(true),
+            "全成功不得误红"
+        );
+        // 部分失败：removed>0 且 failed 非空 ⇒ success:true，failed 明细原样透传
+        let partial = json!({
+            "removed": 2,
+            "failed": [{ "name": "a", "reason": "文件被占用" }],
+            "items": [],
+        });
+        let resp = super::backup_purge_receipt(partial);
+        assert_eq!(resp["success"], json!(true), "部分失败走前端 warning 分支: {resp}");
+        assert_eq!(
+            resp["data"]["failed"].as_array().map(|a| a.len()),
+            Some(1),
+            "部分失败明细不得丢失: {resp}"
+        );
+        // 整批失败：removed==0 且 failed 非空 ⇒ success:false（根判定全失败不降级）
+        let all_fail = json!({
+            "removed": 0,
+            "failed": [{ "name": "b", "reason": "备份目录未通过根判定" }],
+            "items": [],
+        });
+        assert_eq!(
+            super::backup_purge_receipt(all_fail)["success"],
+            json!(false),
+            "整批失败必须 success:false"
+        );
+        // JoinError 兜底：removed==0、failed 带补条目 ⇒ success:false
+        let join_err = json!({
+            "removed": 0,
+            "failed": [{ "name": "", "reason": "备份清除任务异常: panicked" }],
+            "items": [],
+            "message": "备份清除任务异常: panicked",
+        });
+        assert_eq!(
+            super::backup_purge_receipt(join_err)["success"],
+            json!(false),
+            "JoinError 兜底必须 success:false"
+        );
+    }
+
+    /// R4-M08-M02：JoinError 兜底必须补失败项（failed 不得置空）且保留任务异常字样，
+    /// 命令收尾必须走派生函数而非硬编码 success:true。判红自证：兜底改回 "failed": []
+    /// 或收尾改回无条件 success:true ⇒ 本用例红。
+    #[test]
+    fn 备份清除joinerror兜底补失败项且success派生接线() {
+        let src = include_str!("backup.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let fallback = src
+            .split("crate::engine::backup_purge::purge(&targets)")
+            .nth(1)
+            .and_then(|s| s.split("let mut data = resp;").next())
+            .expect("找不到 purge 的 JoinError 兜底段");
+        assert!(fallback.contains("备份清除任务异常"), "兜底必须保留任务异常字样");
+        assert!(
+            fallback.contains("\"failed\": [{"),
+            "JoinError 兜底必须补一条失败项，failed 不得置空"
+        );
+        let tail = src
+            .split("let mut data = resp;")
+            .nth(1)
+            .and_then(|s| s.split("/// manifest 文件名准入").next())
+            .expect("找不到 purge 回执收尾段");
+        assert!(
+            tail.contains("backup_purge_receipt(data)"),
+            "回执 success 位必须走派生函数"
+        );
+        assert!(
+            !tail.contains("\"success\": true"),
+            "purge 收尾不得硬编码 success:true"
+        );
     }
 }
 

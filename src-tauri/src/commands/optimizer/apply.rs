@@ -1229,10 +1229,10 @@ pub async fn optimizer_run<R: Runtime>(
     // confirmedHighRisk 且不处理 needConfirm，导致无值级备份的高危项走预置脚本还原时
     // **整体死锁**（4 条还原入口全部命中）。preflight 必须复刻这个豁免，否则把死锁重造一遍。
     match preflight_reason(&opt, &option_id, p.restore) {
-        Some(PreflightReject::NeedAdmin) => {
+        Some(r @ PreflightReject::NeedAdmin) => {
             return json!({
                 "success": false, "needAdmin": true,
-                "message": "优化操作需要管理员权限，请先提权"
+                "message": r.message()
             });
         }
         Some(PreflightReject::NeedHighRiskConfirm) if !p.confirmed_high_risk => {
@@ -1247,9 +1247,9 @@ pub async fn optimizer_run<R: Runtime>(
         }
         // 步骤在本机编译不出来时预先拒绝：原先这条只在执行中段才暴露（apply.rs 的
         // pwsh 分支 `failed += 1`），用户看到的是「第 5 项失败」而前 4 项已落盘。
-        Some(PreflightReject::UnsupportedStep(reason)) => {
-            log::write_log("warn", &format!("优化项步骤不可执行，已预先拒绝: {option_id} ({reason})"));
-            return json!({ "success": false, "message": format!("本机不支持该优化项的某一步：{reason}") });
+        Some(r @ PreflightReject::UnsupportedStep(_)) => {
+            log::write_log("warn", &format!("优化项步骤不可执行，已预先拒绝: {option_id} ({})", r.message()));
+            return json!({ "success": false, "message": r.message() });
         }
         // 目标状态已满足（Defender 已卸载/已禁用）：不当失败处理，明确告知无需执行
         Some(PreflightReject::AlreadySatisfied(reason)) => {
