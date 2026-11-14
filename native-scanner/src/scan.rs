@@ -3200,8 +3200,26 @@ fn set_creation_time_days_ago(p: &Path, days: u64) {
     unsafe { CloseHandle(h) };
 }
 
+/// 串行化所有共享 `empty-ignore.txt` / 进程级 `DATA_ROOTS` 的用例（跨测试模块共用）。
+///
+/// 为什么必须串行：`set_data_roots` 是进程级 `OnceLock`（只能设一次），而各用例对
+/// 「名单是否存在/是否损坏」的要求互斥——一个用例写损坏名单时，并行跑的另一个用例
+/// 会让 `empty()` 整轮提前返回、候选为空，表现为与本用例无关的断言失败
+/// （2026-11-15 发版前实撞：empty_scan_only_reports_items_created_before_min_age
+/// 单独跑绿、全量并行红）。替代方案是每个用例独立进程，代价过大。
+#[cfg(test)]
+static EMPTY_LIST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 取锁并容忍前一个用例 panic 造成的 poisoning（锁只用于互斥，不携带数据）。
+#[cfg(test)]
+fn empty_list_guard() -> std::sync::MutexGuard<'static, ()> {
+    EMPTY_LIST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
+
+    use super::empty_list_guard;
 
     /// A1-M02（v7.2 C06）：不可读目录的计数出口必须接线（计数 + 输出字段 + 主 walk 记录）。
     #[test]
@@ -4683,6 +4701,7 @@ mod tests {
     /// 两条方向都要点名抓手（正向放行 + 反向拦截），否则「恒 false」也能骗过一条断言。
     #[test]
     fn prune_tree_effectively_empty_allows_only_empty_trees() {
+        let _g = empty_list_guard();
         let _sb = sandbox(&format!("prune-empty-{}", std::process::id()));
         let base = _sb.path().to_path_buf();
         fs::create_dir_all(base.join("a")).unwrap();
@@ -4730,6 +4749,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn empty_scan_only_reports_items_created_before_min_age() {
+        let _g = empty_list_guard();
         struct CollectSink(std::sync::Mutex<Vec<String>>);
         impl Sink for CollectSink {
             fn item(&self, p: &Path, _line: &str) {
@@ -4835,6 +4855,7 @@ mod tests {
     ///   · 场景②钉损坏名单的 fail-closed 语义与如实文案（N1b-L08）。
     #[test]
     fn empty_ignore缺失按空名单损坏则显式终止根层年份闸齐平() {
+        let _g = empty_list_guard();
         struct Collect {
             items: Mutex<Vec<String>>,
             progress: Mutex<Vec<u64>>,
@@ -5214,6 +5235,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn 空扫描created字段与stat口径逐字节一致() {
+        let _g = empty_list_guard();
         #[derive(Default)]
         struct PairSink(std::sync::Mutex<Vec<(PathBuf, String)>>);
         impl Sink for PairSink {
@@ -5386,6 +5408,7 @@ mod depth_cap_tests {
     #[cfg(windows)]
     #[test]
     fn 空扫描_根本身是用户目录时零候选() {
+        let _g = empty_list_guard();
         struct CollectSink(std::sync::Mutex<Vec<String>>);
         impl Sink for CollectSink {
             fn item(&self, p: &Path, _line: &str) {
@@ -5513,6 +5536,7 @@ mod depth_cap_tests {
     #[cfg(windows)]
     #[test]
     fn 删除侧复检_用户目录子树一律判非空() {
+        let _g = empty_list_guard();
         // 刻意用 %TEMP%：它在 %USERPROFILE% 之下，整棵都在排除面内。
         // 必须过 canonical 再喂进去 —— 生产上候选来自 `empty()`（根过 `canonical(r)`），
         // 而 %TEMP% 的原始串在本机是 `C:\Users\ADMINI~1\...` 这种**短名**形态，
