@@ -1160,17 +1160,6 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.uninstall-busy-detail {
-  margin: 8px 0 0;
-  font-size: var(--fs-meta);
-  color: var(--fg-tertiary);
-  line-height: 1.5;
-}
-
-.uninstall-busy.collapsed .uninstall-busy-detail {
-  display: none;
-}
-
 /* 分类列表（2026-11-12 用户点名：每个清理域各自成卡，不再是一张长表里叠五行）
    容器只做纵向排布与间距，**不再**持有底色/描边/圆角 —— 那三样下放到每个
    .category-group，拆成「一域一卡」，与内存清理页的 .row-card 列表同一观感。
@@ -4311,7 +4300,6 @@ img.ctx-col-icon {
   margin-bottom: 16px;
 }
 .rt-intro-card p { margin: 0; font-size: var(--fs-secondary); line-height: 1.7; color: var(--fg-primary); }
-.rt-intro-card .rt-intro-sub { margin-top: 4px; font-size: var(--fs-meta); color: var(--fg-tertiary); }
 .rt-node.ok .rt-node-ring { stroke: var(--success); }
 .rt-node.ok .rt-node-dot { fill: var(--success); }
 .rt-node.warn .rt-node-ring { stroke: var(--warning); }
@@ -6132,16 +6120,6 @@ body.electron-mica.win-maximized.bg-image-on .layout {
   letter-spacing: .02em;
   animation: splashTrimIn .7s cubic-bezier(.22, 1, .36, 1) .08s both;
 }
-.splash-intro {
-  font-size: clamp(1rem, 2.2vw, 1.2rem);
-  /* 实测（CDP 读 CSSOM）：本行原先不声明 line-height，只能继承 body 的 21px 固定行高，
-     而字号是 16~19.2px ⇒ 行距只有 1.1~1.3 倍，中文长句挤成一片（用户反馈的「行贴行」）。
-     中文正文舒适区是 1.6~1.8，这里取 1.6；字号与 clamp 区间不动。 */
-  line-height: 1.6;
-  color: var(--splash-ink);
-  max-width: 30em;
-  animation: splashFadeIn .6s ease-out .18s both;
-}
 .splash-progress {
   display: flex;
   flex-direction: column;
@@ -6150,8 +6128,7 @@ body.electron-mica.win-maximized.bg-image-on .layout {
   width: min(380px, 80vw);
   animation: splashFadeIn .6s ease-out .26s both;
 }
-.splash-overlay.compact .splash-badge,
-.splash-overlay.compact .splash-intro { display: none; }
+.splash-overlay.compact .splash-badge { display: none; }
 /* 进入过渡：背景层与辅助内容淡出，Trim 走 FLIP transform（PowerPoint 平滑） */
 .splash-overlay.entering .splash-bg,
 .splash-overlay.entering #splash-canvas,
@@ -6167,7 +6144,7 @@ body.electron-mica.win-maximized.bg-image-on .layout {
 @media (prefers-reduced-motion: reduce) {
   /* v3.6.2：仅在非开屏状态下关断 splash 入场与进入过渡；开屏期间（body.splash-live）正常播放 */
   body:not(.splash-live) .splash-badge, body:not(.splash-live) .splash-trim,
-  body:not(.splash-live) .splash-intro, body:not(.splash-live) .splash-progress { animation: none; }
+  body:not(.splash-live) .splash-progress { animation: none; }
   body:not(.splash-live) .splash-overlay.entering .splash-bg,
   body:not(.splash-live) .splash-overlay.entering #splash-canvas,
   body:not(.splash-live) .splash-overlay.entering .splash-vignette { transition: none; }
@@ -6180,7 +6157,8 @@ body:has(.splash-overlay:not(.finished)) .titlebar-title { visibility: hidden; }
    边界：开屏是既有的一次性走场，v3.6.2 起无视系统 reduced-motion 完整播放；本次只换
    视觉形态，不改 `app:first-paint` 握手、不改 splash.js 的 FLIP 落位与兜底链路。
    Trim 字样必须保留纯色 —— 它要 FLIP 到标题栏品牌位，渐变字在落位瞬间会与
-   .titlebar-title 的纯色对不上，出现一帧跳色。渐变只给副标题与进度条。 */
+   .titlebar-title 的纯色对不上，出现一帧跳色。渐变只给进度条（副标题已按
+   「让布局解释」口径移除）。 */
 .splash-stage .splash-trim {
   /* 描边揭示：初始为空心描边，走 --dur-5 把描边收回成实心 */
   -webkit-text-stroke: 1.5px var(--splash-brand);
@@ -6190,13 +6168,6 @@ body:has(.splash-overlay:not(.finished)) .titlebar-title { visibility: hidden; }
 @keyframes splash-trim-reveal {
   from { -webkit-text-stroke-color: var(--splash-brand); }
   to { -webkit-text-stroke-color: transparent; }
-}
-.splash-stage .splash-intro {
-  /* 渐变字揭示：只在品牌紫系内（R1 限定放行），两端都取深色，正文仍过 AA */
-  background-image: linear-gradient(100deg, var(--splash-ink), var(--splash-brand));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
 }
 .splash-progress-track {
   /* 进度条渐变：品牌紫 → 提亮档，与 .splash-enter 同色系 */

@@ -298,9 +298,8 @@
       modalClass: 'font-modal',
       bodyClass: 'fm-body',
       bodyHtml: `
-          <p class="model-picker-tip">选择应用界面显示字体，支持系统字体与自定义导入字体。字重滑块调节字体粗细（100-1000，可变字体支持无级连续调节），字号滑块（12-24px）在所有字体通用。调整仅实时预览于下方「字体预览」，点击右下角「应用」后才会应用到整体界面。</p>
           <div class="fm-field">
-            <span class="fm-field-label">界面字体</span>
+            <span class="fm-field-label" data-tip="选择应用界面显示字体，支持系统字体与自定义导入字体。字重滑块调节字体粗细（100-1000，可变字体支持无级连续调节），字号滑块（12-24px）在所有字体通用。调整仅实时预览于下方「字体预览」，点击右下角「应用」后才会应用到整体界面">界面字体</span>
             <div class="fm-field-main">
               <div class="fm-row">
                 <select class="field-input" data-role="select" aria-label="选择界面字体"></select>
@@ -311,23 +310,21 @@
             </div>
           </div>
           <div class="fm-field">
-            <span class="fm-field-label">字重</span>
+            <span class="fm-field-label" data-tip="基准 400 · 范围 100-1000 · 显示当前粗细百分比（400 = 40%）">字重</span>
             <div class="fm-field-main">
               <div class="fm-slider-row">
                 <input type="range" data-role="weightInput" min="100" max="1000" step="10" value="400" aria-label="界面字重" />
                 <span class="fm-slider-val" data-role="weightVal">400 · 40%</span>
               </div>
-              <span class="fm-field-tip">基准 400 · 范围 100-1000 · 显示当前粗细百分比（400 = 40%）</span>
             </div>
           </div>
           <div class="fm-field">
-            <span class="fm-field-label">字号</span>
+            <span class="fm-field-label" data-tip="范围 12px-24px · 对所有字体全局生效（基准 16px）">字号</span>
             <div class="fm-field-main">
               <div class="fm-slider-row">
                 <input type="range" data-role="sizeInput" min="12" max="24" step="1" value="16" aria-label="界面字号" />
                 <span class="fm-slider-val" data-role="sizeVal">16px</span>
               </div>
-              <span class="fm-field-tip">范围 12px-24px · 对所有字体全局生效（基准 16px）</span>
             </div>
           </div>
           <div class="fm-preview" data-role="previewBox">
@@ -336,7 +333,7 @@
           </div>`,
       footerClass: 'pw-footer',
       footerHtml: `
-          <span class="pw-last-scan">配置保存在本机的应用数据目录内（v2-M21：原先写死的 %APPDATA%\\Trim 是 Electron 轨路径）</span>
+          <span class="pw-last-scan" data-tip="配置保存在本机的应用数据目录内"></span>
           <span class="model-picker-spacer"></span>
           <button class="btn btn-secondary" data-role="resetBtn" type="button">恢复默认</button>
           <button class="btn btn-primary" data-role="applyBtn" type="button">应用</button>`,

@@ -76,24 +76,22 @@
   const BODY_HTML = `
     <section class="peri-section">
       <div class="peri-section-head">
-        <h2 class="peri-section-title">
+        <h2 class="peri-section-title" data-tip="按需设置 Win32PrioritySeparation 的十进制数值（处理器优先级，越大越偏向前台响应）">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M11 2h2v6h-2V2zm-1 6h4a4 4 0 0 1 4 4v1H6v-1a4 4 0 0 1 4-4zm-4 7h6v7h-2a4 4 0 0 1-4-4v-3zm8 0h6v3a4 4 0 0 1-4 4h-2v-7z"/></svg>
           处理器调度优化
           <button type="button" class="peri-explain-btn" data-explain="win32" data-tip="这个数在系统里控制什么">数值解释</button>
         </h2>
-        <p class="peri-section-sub">按需设置 Win32PrioritySeparation 的十进制数值（处理器优先级，越大越偏向前台响应）</p>
       </div>
       <div class="peri-cards" data-group="win32" role="radiogroup" aria-label="处理器调度优先级数值（单选其一）"></div>
     </section>
 
     <section class="peri-section">
       <div class="peri-section-head">
-        <h2 class="peri-section-title">
+        <h2 class="peri-section-title" data-tip="按需设置 MouseDataQueueSize 的十进制数值（驱动事件缓冲，默认 100，越小延迟越低，过小可能丢事件）">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c.83 0 1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5s-1.5-.67-1.5-1.5v-5c0-.83.67-1.5 1.5-1.5z"/></svg>
           鼠标队列优化
           <button type="button" class="peri-explain-btn" data-explain="mouse" data-tip="这个数在系统里控制什么">数值解释</button>
         </h2>
-        <p class="peri-section-sub">按需设置 MouseDataQueueSize 的十进制数值（驱动事件缓冲，默认 100，越小延迟越低，过小可能丢事件）</p>
       </div>
       <div class="peri-cards" data-group="mouse" role="radiogroup" aria-label="鼠标事件队列深度数值（单选其一）"></div>
     </section>

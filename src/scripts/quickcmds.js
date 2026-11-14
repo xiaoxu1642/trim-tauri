@@ -72,7 +72,6 @@
     if (!list.length) {
       el.innerHTML = `<div class="empty-state">
         <div class="empty-state-title">没有匹配的快捷指令</div>
-        <div class="empty-state-desc">换个关键字或切换分类试试</div>
       </div>`;
       return;
     }

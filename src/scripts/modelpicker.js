@@ -105,10 +105,6 @@
         pickerChanged = false;
 
         const bodyHtml = `
-            <p class="model-picker-tip">
-              这里只选择「${escapeHtml(meta.label)}」使用的模型，不会影响其它模块。
-              模型是否启用、接口地址与密钥请在「设置 - 大模型管理」中维护。
-            </p>
             <div class="model-picker-list">
               ${list.map(m => {
                 const stateText = m.enabled ? (m.verified ? '已启用 · 已验证' : '已启用') : '未启用';
@@ -120,7 +116,7 @@
                     <span class="model-picker-radio"></span>
                     <span class="model-picker-copy">
                       <span class="model-picker-name">${escapeHtml(m.displayName || m.label)}</span>
-                      <span class="model-picker-desc">${escapeHtml(m.builtin ? '内置模型' : '用户自定义（OpenAI 兼容 chat/completions）')}</span>
+                      <span class="model-picker-desc" data-tip="${m.builtin ? `这里只选择「${escapeHtml(meta.label)}」使用的模型，不会影响其它模块；模型是否启用、接口地址与密钥请在「设置 - 大模型管理」中维护` : `用户自定义模型走 OpenAI 兼容接口（chat/completions）。这里只选择「${escapeHtml(meta.label)}」使用的模型，不会影响其它模块；模型是否启用、接口地址与密钥请在「设置 - 大模型管理」中维护`}">${escapeHtml(m.builtin ? '内置模型' : '用户自定义')}</span>
                     </span>
                     <span class="model-picker-state ${stateCls}">${escapeHtml(stateText)}</span>
                   </label>`;

@@ -13,8 +13,7 @@
   <div class="mw-shell">
     <div class="pw-topbar">
       <div class="pw-topbar-copy">
-        <h1>大模型管理</h1>
-        <div class="pw-topbar-sub">管理百度千帆 / 知乎直答 / 秘塔 AI / 自定义模型的启用状态与接口参数，为各模块的「联网 AI 简介」提供模型。点击分组标题可展开 / 折叠；密钥留空保存时不会发起联网校验。</div>
+        <h1 data-tip="管理百度千帆 / 知乎直答 / 秘塔 AI / 自定义模型的启用状态与接口参数，为各模块的「联网 AI 简介」提供模型。点击分组标题可展开 / 折叠；密钥留空保存时不会发起联网校验。">大模型管理</h1>
       </div>
       <div class="pw-topbar-actions">
         <button class="btn btn-secondary" id="mwRefreshBtn" data-tip="重新读取已保存的模型配置">
@@ -29,7 +28,6 @@
       <div class="mw-card">
         <div class="mw-card-head">
           <span class="mw-card-title">模型项</span>
-          <span class="mw-card-desc">按模型逐一配置 · 保存后自动发起连通性校验</span>
         </div>
         <div class="mw-body" id="mwBody">
           <div class="pw-empty">正在加载模型配置…</div>
@@ -38,7 +36,7 @@
     </div>
 
     <div class="mw-footer">
-      <span class="mw-foot-hint">配置保存在本机的应用数据目录内（标准模式在 %APPDATA% 下，便携模式在程序目录 data 下）</span>
+      <span class="mw-foot-hint" data-tip="配置保存在本机的应用数据目录内（标准模式在 %APPDATA% 下，便携模式在程序目录 data 下）"></span>
       <span class="mw-foot-hint" id="mwGlobalHint" role="status" aria-live="polite" style="margin:0"></span>
     </div>
   </div>

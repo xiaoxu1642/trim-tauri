@@ -438,13 +438,11 @@
 .benchmark-layout { display: grid; grid-template-columns: 1.45fr 1fr; gap: 16px; margin-bottom: 16px; }
 .panel-kicker { color: var(--fg-tertiary); font-size: calc(11px * var(--font-size-scale, 1)); font-weight: calc(700 * var(--font-weight-scale, 1)); letter-spacing: 0; text-transform: uppercase; margin-bottom: 14px; }
 .benchmark-fields { display: grid; grid-template-columns: repeat(4, minmax(90px, 1fr)); gap: 10px; margin-top: 12px; }
-.benchmark-note, .benchmark-status-detail { color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1.55; margin: 14px 0 0; }
 .benchmark-status { font-size: calc(24px * var(--font-size-scale, 1)); font-weight: calc(700 * var(--font-weight-scale, 1)); color: var(--accent); }
 .bench-progress { margin-top: 12px; height: 6px; border-radius: var(--radius-badge); background: var(--bg-elevated); border: 1px solid var(--border-default); overflow: hidden; }
 .bench-progress-fill { height: 100%; width: 0%; border-radius: var(--radius-badge); background: linear-gradient(90deg, var(--accent), var(--accent-hover)); transition: width var(--duration-base) var(--ease-standard); }
 .external-site-picker { display: flex; justify-content: flex-end; margin: -10px 0 16px; }
 .benchmark-results { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.external-test-source { margin: -8px 0 12px; color: var(--fg-tertiary); font-size: var(--fs-meta); }
 /* v3.2.1：设置页「系统信息」容器隐藏——入口改为首页「系统健康度」卡连点 7 次彩蛋弹窗
    （信息 DOM 数据仍由 app.js 填充，弹窗打开时整块移入、关闭时移回，专家模式开关可用） */
 #systemInfoSection { display: none; }
@@ -997,7 +995,6 @@
 }
 .startup-defend-text { flex: 1; min-width: 0; }
 .startup-defend-title { font-size: var(--fs-secondary); font-weight: calc(600*var(--font-weight-scale,1)); color: var(--fg-primary); }
-.startup-defend-desc { font-size: var(--fs-meta); color: var(--fg-tertiary); margin-top: 2px; line-height: 1.5; }
 .startup-item-check {
   flex-shrink: 0;
 }
@@ -1069,13 +1066,6 @@
 .process-entry-btn {
   flex: 0 0 auto;
 }
-.process-entry-hint {
-  margin: 6px 2px 0;
-  font-size: calc(11px * var(--font-size-scale, 1));
-  color: var(--fg-tertiary);
-  line-height: 1.5;
-}
-
 /* 字体选择弹窗（设置 → 功能入口 → 字体选择）：复用 usage-backdrop > usage-modal 三段式 */
 .font-modal { max-width: 760px; }
 .fm-body { display: flex; flex-direction: column; gap: 14px; }
@@ -1276,6 +1266,9 @@
   margin-left: 10px;
   white-space: nowrap;
 }
+/* 汇总文案按「让布局解释」口径清空后，空 span 仍占 a11y-live 挂载位（门禁钉住 id），
+   但不应再留 10px 缩进空白 */
+.page-summary:empty { margin-left: 0; }
 .ctx-apply-text { flex: 1 1 auto; min-width: 0; }
 
 .opt-kanban,
@@ -1915,24 +1908,6 @@
   word-break: break-word;
   line-height: 1.35;
 }
-/* 快捷指令页标题旁管理员模式说明（需求：图四标注位） */
-.qc-admin-note {
-  display: inline-block;
-  margin-left: 10px;
-  padding: 2px 10px;
-  font-size: var(--fs-meta, 11px);
-  font-weight: calc(600*var(--font-weight-scale,1));
-  /* 审查 K2/M-2（2026-10-03 L3）：原为字面色 #000000，注释还把适用范围写反了。
-   实测暗色（默认主题）合成底 #191b25 上仅 1.22:1，远低于 AA 4.5:1——深墨底上的近黑文字
-   几乎不可见，且 check-contrast 的 color 正则只认 var()，对这条完全失明。
-   改用语义 token 后：暗 15.1:1 / 亮 14.6:1。 */
-  color: var(--fg-primary);
-  background: var(--accent-light);
-  border: 1px solid var(--border-accent);
-  border-radius: 999px;
-  vertical-align: middle;
-  white-space: nowrap;
-}
 .qc-desc {
   margin-top: 3px;
   font-size: var(--fs-meta, 11px);
@@ -2095,13 +2070,6 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   border: 1px solid var(--border-subtle);
   padding: 2px 9px;
   border-radius: var(--radius-btn);
-  white-space: nowrap;
-}
-.empty-pane-sub {
-  margin-left: auto;
-  flex: 0 0 auto;
-  font-size: calc(11px*var(--font-size-scale,1));
-  color: var(--fg-tertiary);
   white-space: nowrap;
 }
 .un-icon-fallback { color: var(--fg-tertiary); font-size: var(--fs-meta); line-height: 1; }

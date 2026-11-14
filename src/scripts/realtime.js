@@ -907,7 +907,7 @@
               <button class="btn btn-secondary btn-small rt-row-del" type="button">删除</button>
             </div>`).join('') : emptyHtml}`,
       footerHtml: `
-          <span class="pw-last-scan">${loadError ? '读取失败' : `共 ${reports.length} 份 · 超 7 天自动清理`}</span>
+          <span class="pw-last-scan" data-tip="超 7 天自动清理">${loadError ? '读取失败' : `共 ${reports.length} 份`}</span>
           <span class="model-picker-spacer"></span>
           <button class="btn btn-secondary rt-clear-all" type="button">清空全部</button>
           <button class="btn btn-primary rt-close-btn" type="button">关闭</button>`,
@@ -971,7 +971,7 @@
           row.remove();
           const cnt = backdrop.querySelectorAll('.rt-report-row').length;
           const foot = backdrop.querySelector('.pw-last-scan');
-          if (foot) foot.textContent = cnt ? `共 ${cnt} 份 · 超 7 天自动清理` : '暂无记录';
+          if (foot) foot.textContent = cnt ? `共 ${cnt} 份` : '暂无记录';
         } catch (e) {
           window.app?.toast('error', `删除失败：${e && e.message ? e.message : e}`, 5000);
         }
@@ -1003,7 +1003,7 @@
         }
         backdrop.querySelector('.rt-report-body').innerHTML = '<div class="empty-state"><p>已清空全部记录。</p></div>';
         const foot = backdrop.querySelector('.pw-last-scan');
-        if (foot) foot.textContent = '共 0 份 · 超 7 天自动清理';
+        if (foot) foot.textContent = '共 0 份';
         window.app?.toast('success', '网速报告已全部清空');
       } catch (e) {
         window.app?.toast('error', `清空失败：${e && e.message ? e.message : e}`, 5000);

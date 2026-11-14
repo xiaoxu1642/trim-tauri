@@ -141,9 +141,7 @@
       </div>
       ${info ? section('是什么', info.what) + section('什么情况下会用到它', info.when) + section('用了之后应该达到的效果', info.effect)
              : section('是什么', task.desc || '暂无说明')}
-      <div class="maint-detail-ai" data-role="aiBox">
-        <div class="maint-detail-ai-hint">点击「AI大模型解释」后，由所选大模型联网补充解释（需在「设置 → 大模型管理」启用模型）</div>
-      </div>`;
+      <div class="maint-detail-ai" data-role="aiBox"></div>`;
     const footerHtml = `
       <button class="btn btn-secondary" data-role="aiBtn" type="button">AI大模型解释</button>
       <span class="model-picker-spacer"></span>

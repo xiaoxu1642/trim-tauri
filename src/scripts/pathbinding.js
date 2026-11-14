@@ -194,7 +194,6 @@
       const itemsHtml = group.items.map(item => {
         const value = pathConfig[item.key] || '';
         let hint = '', hintCls = '';
-        if (!value) { hint = '未绑定，可点击「浏览」选择或手动填写'; hintCls = ''; }
         // F4a2-L02：删除 startsWith('!') 哨兵分支 —— 全仓现算无任何生产者写入 '!' 前缀
         // （唯一命中即原消费点本身），死分支会让读者误以为存在该约定；若将来要恢复，
         // 须先在写入侧定义约定并配门禁。
@@ -297,7 +296,7 @@
       const resp = await window.api.paths.save(key, value);
       if (resp && resp.success) {
         pathConfig[key] = value;
-        if (!value) { setHint(key, '未绑定，可点击「浏览」选择或手动填写', ''); }
+        if (!value) { setHint(key, '', ''); }
         else if (!resp.exists) { setHint(key, '路径不存在，请检查', 'warn'); window.app?.toast('warning', `${getLabel(key)} 路径不存在，请检查`); }
         else { setHint(key, '已保存', 'ok'); }
         const group = groupOf(key);

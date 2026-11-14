@@ -254,7 +254,7 @@
     return `
       <div class="opt-choice-group" data-choice-for="${window.ds.escAttr(entry.id)}">
         <div class="opt-choice-title">${escapeHtml(entry.title)}</div>
-        <div class="opt-choice-desc">${escapeHtml(ctl ? ctl.tip : '该项需要指定参数后才能执行。')}</div>
+        <div class="opt-choice-desc"${ctl ? '' : ' data-tip="该项需要指定参数后才能执行"'}>${escapeHtml(ctl ? ctl.tip : '')}</div>
         <div class="model-picker-list">${rows}</div>
       </div>`;
   }
@@ -273,7 +273,7 @@
         iconSvg: `<span class="opt-detail-icon"><svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor">${GEAR_ICON}</svg></span>`,
         bodyHtml: `<div class="opt-choice-body">${entries.map(choiceGroupHtml).join('')}</div>`,
         footerHtml: `
-          <span class="opt-choice-hint" data-role="hint">每一项都要选定一个做法才能继续。</span>
+          <span class="opt-choice-hint" data-role="hint"></span>
           <span class="model-picker-spacer"></span>
           <button class="btn btn-secondary" data-role="cancelBtn" type="button">取消</button>
           <button class="btn btn-primary" data-role="okBtn" type="button" disabled>确认选择</button>`,
@@ -869,7 +869,7 @@
           <span class="opt-col-title">永劫无间专项</span>
           <span class="opt-col-count opt-nara-count">${optCount} 项</span>
         </div>
-        <div class="opt-nara-desc">${sections.length} 个分区 · ${optCount} 优化项${taskCount ? ' · ' + taskCount + ' 维护任务' : ''}，进入面板默认勾选可执行项</div>
+        <div class="opt-nara-desc">${sections.length} 个分区 · ${optCount} 优化项${taskCount ? ' · ' + taskCount + ' 维护任务' : ''}</div>
         <div class="opt-col-body">
           ${sections.map(s => {
             const meta = naraSectionMeta(s);
@@ -1320,7 +1320,7 @@
           <span class="opt-col-title">隐私自护</span>
           <span class="opt-col-count opt-privacy-count">${count} 项</span>
         </div>
-        <div class="opt-nara-desc">${sections.length} 个分区 · ${count} 个隐私与遥测开关集中管理，进入面板默认勾选可执行项</div>
+        <div class="opt-nara-desc">${sections.length} 个分区 · ${count} 个隐私与遥测开关集中管理</div>
         <div class="opt-col-body">
           ${sections.map(s => `
             <div class="opt-nara-row">
@@ -1529,9 +1529,7 @@
     );
     // 所有看板按项数从少到多升序排列（稳定排序，项数相同保持原相对顺序）
     order.sort((a, b) => byGroup[a].length - byGroup[b].length);
-    const totalItems = order.reduce((s, g) => s + byGroup[g].length, 0);
-    const summary = document.getElementById('optimizerSummary');
-    if (summary) summary.textContent = `共 ${totalItems} 项优化 · ${order.length} 个分类`;
+    // 页头汇总「共 N 项优化 · M 个分类」已按用户裁定移除：看板列本身已把分类与条目数摊开。
     // C3：永劫专项面板入口卡（存在则放在看板最顶部，跟 opt-col 并列）；
     // 2026-10-11：隐私自护入口卡同区并列第二张。
     const naraCol = renderNaraCol();

@@ -277,7 +277,6 @@
         <div class="intro-block intro-tips" role="group" aria-label="按场景看建议">
           <div class="intro-block-head">
             <span class="intro-block-title">按场景看建议</span>
-            <span class="intro-block-tag">离线内置 · 三档取舍</span>
           </div>
           <div class="intro-tips-list">
             <div class="intro-tips-row"><span class="intro-tips-key">日常</span><span class="intro-tips-val">${escapeHtml(tips.normal || '')}</span></div>
@@ -292,7 +291,6 @@
         <div class="intro-block intro-local">
           <div class="intro-block-head">
             <span class="intro-block-title">本地简介</span>
-            <span class="intro-block-tag">离线内置 · ${escapeHtml(local.label)}</span>
           </div>
           <div class="intro-local-text">${escapeHtml(local.text || '暂无本地简介')}</div>
         </div>
@@ -301,9 +299,7 @@
           <div class="intro-block-head">
             <span class="intro-block-title">联网 AI 简介</span>
           </div>
-          <div class="intro-ai-content" data-role="content">
-            <div class="intro-ai-idle">点击「获取AI简介」后，由所选大模型生成本条目的联网简介</div>
-          </div>
+          <div class="intro-ai-content" data-role="content"></div>
           <div class="intro-ai-actions">
             <button class="btn btn-secondary btn-small" data-role="fetch" type="button">获取AI简介</button>
             <button class="btn btn-secondary btn-small" data-role="pick" type="button">选择模型</button>

@@ -979,8 +979,7 @@
       return `
         <div class="syspanel-power-tile" data-active="${isActive ? '1' : ''}" data-guid="${window.ds.escAttr(guid)}" data-name="${window.ds.escAttr(name)}">
           <span class="syspanel-power-tile-main">
-            <span class="syspanel-power-tile-name">${window.ds.esc(name)}${isActive ? ' <span class="syspanel-badge">当前</span>' : ''}</span>
-            ${tip ? `<span class="syspanel-power-tile-tip" data-tip="${window.ds.escAttr(tip)}">${window.ds.esc(tip)}</span>` : ''}
+            <span class="syspanel-power-tile-name"${tip ? ` data-tip="${window.ds.escAttr(tip)}"` : ''}>${window.ds.esc(name)}${isActive ? ' <span class="syspanel-badge">当前</span>' : ''}</span>
           </span>
           <span class="syspanel-power-tile-actions">
             <button type="button" class="btn btn-secondary btn-small" data-act="apply"${isActive ? ' disabled data-tip="这已经是当前方案"' : ''}>应用</button>
@@ -1760,7 +1759,7 @@
       </div>`;
     const recHtml = rec ? `
       <div class="syspanel-pwr-rec">
-        <div class="syspanel-pwr-rec-title">调优参考<span class="syspanel-pwr-rec-sub">社区经验值，非官方推荐；不满意可随时改回或取消编辑恢复</span></div>
+        <div class="syspanel-pwr-rec-title" data-tip="社区经验值，非官方推荐；不满意可随时改回或取消编辑恢复">调优参考</div>
         <div class="syspanel-pwr-rec-grid">
           ${recCell('台式机 · AMD', rec.desktopAmd)}
           ${recCell('台式机 · Intel', rec.desktopIntel)}
@@ -1775,7 +1774,7 @@
         <div class="syspanel-pwr-detail-name">${window.ds.esc(pwrDisplayName(s))}</div>
         ${regeditBtn}
       </div>
-      <div class="syspanel-pwr-detail-desc">${desc ? window.ds.esc(desc) : '<span class="syspanel-pwr-muted">（该系统设置没有提供说明）</span>'}</div>
+      <div class="syspanel-pwr-detail-desc">${desc ? window.ds.esc(desc) : ''}</div>
       <div class="syspanel-pwr-detail-rows">
         ${controlHtml('ac', '接通电源（AC）')}
         ${editor.dcVisible ? controlHtml('dc', '使用电池（DC）') : ''}
@@ -2158,7 +2157,6 @@
         <thead><tr><th>路径</th><th>初始大小</th><th>最大值</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
-      <p class="syspanel-pf-hint">全部卷都关掉会让物理内存耗尽时蓝屏；写前的原配置已备份，可在「备份还原」导入回退。</p>
       <div class="syspanel-pf-actions">
         <button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPfEdit">编辑配置</button>
       </div>
@@ -2192,9 +2190,9 @@
         <td><button type="button" class="btn btn-secondary btn-small" data-pf-remove="${i}">删除</button></td>
       </tr>`).join('');
     mount.innerHTML = `
-      <label class="syspanel-pf-managed">
+      <label class="syspanel-pf-managed" data-tip="推荐；勾选则下方配置不生效">
         <input type="checkbox" id="syspanelPfManaged" ${managed ? 'checked' : ''} />
-        <span>由系统自动管理分页文件大小（推荐；勾选则下方配置不生效）</span>
+        <span>由系统自动管理分页文件大小</span>
       </label>
       <div id="syspanelPfManualArea" class="syspanel-pf-manual-area">
         <table class="syspanel-pf-table">
@@ -2415,7 +2413,7 @@
     sec.innerHTML = `
       <div class="syspanel-card-head">
         <h4>Windows 更新</h4>
-        <span class="syspanel-tag">三选一 · 改前自动备份</span>
+        <span class="syspanel-tag">改前自动备份</span>
       </div>
       <div class="qc-grid">
         ${WU_CARDS.map(w => `

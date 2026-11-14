@@ -506,9 +506,9 @@
         <div class="un-app-main">
           <div class="finder-cell"><span class="un-icon" data-un-icon="${esc(a.id)}"></span><span class="finder-name-text">${esc(a.displayName)}</span></div>
           <div class="un-app-meta">
-            <span class="un-app-meta-item" data-tip="发行商"><span class="un-app-meta-key">发行商</span>${esc(a.publisher || '—')}</span>
-            <span class="un-app-meta-item" data-tip="版本"><span class="un-app-meta-key">版本</span>${esc(a.displayVersion || '—')}</span>
-            <span class="un-app-meta-item un-app-size" data-tip="大小"><span class="un-app-meta-key">大小</span><span data-un-size="${esc(a.id)}">${fmtSizeKb(a.estimatedSizeKb)}</span></span>
+            <span class="un-app-meta-item"><span class="un-app-meta-key">发行商</span>${esc(a.publisher || '—')}</span>
+            <span class="un-app-meta-item"><span class="un-app-meta-key">版本</span>${esc(a.displayVersion || '—')}</span>
+            <span class="un-app-meta-item un-app-size"><span class="un-app-meta-key">大小</span><span data-un-size="${esc(a.id)}">${fmtSizeKb(a.estimatedSizeKb)}</span></span>
             <span class="un-app-meta-item" data-tip="${esc(installDateTip(a))}"><span class="un-app-meta-key">安装</span>${esc(a.installDate || '—')}</span>
           </div>
         </div>
@@ -562,8 +562,8 @@
           <div class="un-app-main">
             <div class="finder-cell"><span class="un-icon" data-un-icon="${esc(a.id)}"></span><span class="finder-name-text">${esc(a.displayName)}</span></div>
             <div class="un-app-meta">
-              <span class="un-app-meta-item" data-tip="发布者"><span class="un-app-meta-key">发布者</span>${esc(a.publisher || '—')}</span>
-              <span class="un-app-meta-item" data-tip="版本"><span class="un-app-meta-key">版本</span>${esc(a.displayVersion || '—')}</span>
+              <span class="un-app-meta-item"><span class="un-app-meta-key">发布者</span>${esc(a.publisher || '—')}</span>
+              <span class="un-app-meta-item"><span class="un-app-meta-key">版本</span>${esc(a.displayVersion || '—')}</span>
             </div>
           </div>
           <div class="row-card-actions">
@@ -841,10 +841,8 @@
     const overlay = document.getElementById('uninstallBusy');
     if (!overlay) return;
     overlay.style.display = 'block';
-    // 新一轮操作要把上一轮的收起状态复位，否则说明行一直是隐藏的
+    // 新一轮操作要把上一轮的收起状态复位（折叠按钮已移除，只留状态位兜底）
     overlay.classList.remove('collapsed');
-    const toggle = document.getElementById('uninstallBusyToggle');
-    if (toggle) { toggle.textContent = '收起'; toggle.setAttribute('aria-expanded', 'true'); }
     if (label) {
       const labelEl = document.getElementById('uninstallBusyLabel');
       if (labelEl) labelEl.textContent = label;
@@ -873,16 +871,8 @@
     if (busyHideTimer) { clearTimeout(busyHideTimer); busyHideTimer = null; }
   }
 
-  function initBusyToggle() {
-    const overlay = document.getElementById('uninstallBusy');
-    const toggle = document.getElementById('uninstallBusyToggle');
-    if (!overlay || !toggle) return;
-    toggle.addEventListener('click', () => {
-      const collapsed = overlay.classList.toggle('collapsed');
-      toggle.textContent = collapsed ? '展开' : '收起';
-      toggle.setAttribute('aria-expanded', String(!collapsed));
-    });
-  }
+  // 说明行（uninstallBusyDetail）与「收起」按钮已按「让布局解释」口径移除：
+  // 忙碌条只保留标签/计时/取消，不再有可折叠的说明区，initBusyToggle 随之删除。
 
 
 
@@ -1002,7 +992,6 @@
     });
     document.getElementById('uninstallBtnRefresh')?.addEventListener('click', loadApps);
     document.getElementById('btnUninstallReports')?.addEventListener('click', openReportManager);
-    initBusyToggle();
     // §2.3：还原点开关的偏好持久化（真源 settings.json，localStorage 键降级为镜像；见本文件开关定义处）
     const restoreToggle = document.getElementById('uninstallRestoreToggle');
     if (restoreToggle) {

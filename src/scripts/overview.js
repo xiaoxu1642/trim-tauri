@@ -261,7 +261,6 @@
       title: '系统信息',
       bodyHtml: '<div class="system-info-egg-mount"></div>',
       footerHtml: `
-        <span class="pw-last-scan">开发者信息入口</span>
         <span class="model-picker-spacer"></span>
         <button class="btn btn-primary" data-role="okBtn" type="button">关闭</button>`,
       onClose() {

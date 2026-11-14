@@ -304,13 +304,7 @@
       return;
     }
 
-    // 页头汇总：总条目数 + 软件数（原来是「N 个分类」）
-    const totalShown = groups.reduce((s, g) => s + g.items.length, 0);
-    const summary = document.getElementById('contextSummary');
-    if (summary) {
-      const prefix = demoMode ? '演示数据（未读写系统） · ' : '';
-      summary.textContent = `${prefix}共 ${totalShown} 项 · ${groups.length} 个软件`;
-    }
+    // 页头汇总「共 N 项 · M 个软件」已按用户裁定移除：看板一列一软件，条目数各列自明。
 
     // 看板：一列 = 一个软件。原来「空分类也占一列」是为了让扫描范围可见，
     // 按软件分组后空组根本不存在，扫描范围改由页头与详情弹窗交代。

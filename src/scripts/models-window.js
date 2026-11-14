@@ -8,28 +8,24 @@
   const MODEL_META = {
     baidu_pro: {
       name: '百度千帆',
-      sub: '百度智能搜索引擎，支持思考模型',
       icon: '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm3 15H9v-1.5h6zm.5-3.5H8.5v-1h7zm0-3.5h-7V8.5h7z"/></svg>',
       needsModel: true,
       modelMode: 'select'
     },
     zhihu: {
       name: '知乎直答',
-      sub: '知乎官方直答，含引用来源',
       icon: '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm3 15H9v-1.5h6zm.5-3.5H8.5v-1h7zm0-3.5h-7V8.5h7z"/></svg>',
       needsModel: true,
       modelMode: 'text'
     },
     metaso: {
       name: '秘塔 AI',
-      sub: '秘塔检索问答，无广告、带引用',
       icon: '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 4a6 6 0 0 1 6 6 6 6 0 0 1-6 6 6 6 0 0 1-6-6 6 6 0 0 1 6-6zm0 3a3 3 0 1 0 3 3 3 3 0 0 0-3-3z"/></svg>',
       needsModel: true,
       modelMode: 'text'
     },
     custom: {
       name: '自定义模型',
-      sub: '接入任意 OpenAI 兼容模型',
       icon: '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm3.5 6.5c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zm-11 0c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zM12 19c-3.87 0-7-3.13-7-7h2c0 2.76 2.24 5 5 5s5-2.24 5-5h2c0 3.87-3.13 7-7 7z"/></svg>',
       needsModel: true,
       modelMode: 'text'
@@ -114,7 +110,6 @@
             <span class="mw-group-icon">${meta.icon}</span>
             <div>
               <div class="mw-group-title">${escapeHtml(meta.name)}${DOC_LINKS[key] ? `<button class="mw-doc-link" type="button" data-doc-key="${escapeAttr(key)}" data-tip="${escapeAttr(DOC_LINKS[key].tip)}">${escapeHtml(DOC_LINKS[key].label)}</button>` : ''}</div>
-              <div class="mw-group-sub">${escapeHtml(meta.sub)}</div>
             </div>
             <span class="mw-group-meta">${stateBadge(key)}</span>
           </div>
@@ -123,11 +118,10 @@
               <span class="mw-field-label">启用AI简介</span>
               <div class="mw-field-main">
                 <div class="mw-row">
-                  <label class="toggle-switch" data-tip="开启后，该模型可被各模块的「获取AI简介」调用">
+                  <label class="toggle-switch" data-tip="开启后，该模型可被各模块的「获取AI简介」调用；关闭后，选择该模型时不会发起任何联网请求">
                     <input type="checkbox" data-role="enabled" data-model="${key}" ${cfg.enabled ? 'checked' : ''} />
                     <span class="toggle-track"><span class="toggle-thumb"></span></span>
                   </label>
-                  <span class="mw-field-tip mw-inline-tip">关闭后，选择该模型时不会发起任何联网请求</span>
                 </div>
               </div>
             </div>
@@ -136,7 +130,7 @@
               <div class="mw-field-main">
                 <input type="text" class="field-input" data-role="apiUrl" data-model="${key}"
                        value="${escapeAttr(cfg.apiUrl || '')}" placeholder="https://..." spellcheck="false" />
-                <span class="mw-field-tip">${isBaiduPro ? '百度千帆：固定为 /v2/ai_search/web_summary' : 'OpenAI 兼容地址，需以 /chat/completions 结尾'}</span>
+                <span class="mw-field-tip" data-tip="${isBaiduPro ? '百度千帆：固定为 /v2/ai_search/web_summary' : 'OpenAI 兼容地址，需以 /chat/completions 结尾'}"></span>
               </div>
             </div>
             <div class="mw-field">
@@ -147,7 +141,7 @@
                          value="${escapeAttr(cfg.apiKey || '')}" placeholder="请输入密钥（默认留空，保存后校验通过方可启用）" autocomplete="off" />
                   <button class="btn btn-secondary btn-small" data-role="toggleKey" data-model="${key}" type="button" aria-pressed="false">显示</button>
                 </div>
-                <span class="mw-field-tip">密钥仅保存在本机的应用数据目录内，不会写入日志；留空保存时不会发起校验</span>
+                <span class="mw-field-tip" data-tip="密钥仅保存在本机的应用数据目录内，不会写入日志；留空保存时不会发起校验"></span>
               </div>
             </div>
             ${isBaiduPro ? `
@@ -155,9 +149,9 @@
               <span class="mw-field-label">模型（思考能力）</span>
               <div class="mw-field-main">
                 <select class="field-input" data-role="model" data-model="${key}">
-                  ${thinkValues.map(v => `<option value="${v}" ${(cfg.model || 'thinking') === v ? 'selected' : ''}>${v === 'thinking' ? 'thinking（使用思考模型）' : v === 'auto_thinking' ? 'auto_thinking（自适应）' : 'non_thinking（非思考模型）'}</option>`).join('')}
+                  ${thinkValues.map(v => `<option value="${v}" ${(cfg.model || 'thinking') === v ? 'selected' : ''}>${v === 'thinking' ? 'thinking' : v === 'auto_thinking' ? 'auto_thinking' : 'non_thinking'}</option>`).join('')}
                 </select>
-                <span class="mw-field-tip">百度千帆使用固定枚举：thinking / auto_thinking / non_thinking</span>
+                <span class="mw-field-tip" data-tip="百度千帆使用固定枚举：thinking / auto_thinking / non_thinking"></span>
               </div>
             </div>` : `
             <div class="mw-field">
@@ -165,7 +159,7 @@
               <div class="mw-field-main">
                 <input type="text" class="field-input" data-role="model" data-model="${key}"
                        value="${escapeAttr(cfg.model || '')}" placeholder="${isCustom ? '例如 Qwen2.5-72B-Instruct、gpt-4o-mini' : '例如 fast_thinking、zhida-fast-1p5'}" spellcheck="false" />
-                <span class="mw-field-tip">${isCustom ? '此处填写的名称会直接显示在各模块的模型选择列表中' : '按服务商提供的模型档位填写'}</span>
+                <span class="mw-field-tip" data-tip="${isCustom ? '此处填写的名称会直接显示在各模块的模型选择列表中' : '按服务商提供的模型档位填写'}"></span>
               </div>
             </div>`}
             ${isCustom ? `
@@ -174,7 +168,7 @@
               <div class="mw-field-main">
                 <input type="text" class="field-input" data-role="customName" data-model="custom"
                        value="${escapeAttr(cfg.customName || '')}" placeholder="留空则直接使用「模型名称」" spellcheck="false" />
-                <span class="mw-field-tip">用于在选择列表中显示一个更好记的名字</span>
+                <span class="mw-field-tip" data-tip="用于在选择列表中显示一个更好记的名字"></span>
               </div>
             </div>` : ''}
             <div class="mw-field">
@@ -182,7 +176,7 @@
               <div class="mw-field-main">
                 <input type="number" class="field-input mw-timeout" data-role="timeout" data-model="${key}"
                        value="${escapeAttr(cfg.timeout || 30)}" min="5" max="120" step="1" />
-                <span class="mw-field-tip">取值范围 5 ~ 120 秒，默认 30 秒</span>
+                <span class="mw-field-tip" data-tip="取值范围 5 ~ 120 秒，默认 30 秒"></span>
               </div>
             </div>
             <div class="mw-actions">

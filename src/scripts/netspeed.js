@@ -67,9 +67,11 @@
   function fmtSpeed(bps) { return window.ds.fmtRate(bps); }
   function toMbps(bps) { return ((Number(bps) || 0) * 8 / 1e6).toFixed(1); }
 
+  // 测速进度/数据来源回执改走测速页 iframe 的悬浮提示：可见副标题已按「让布局解释」口径移除，
+  // 回执信息不丢（原 #externalTestSource 节点删除后，这里写 data-tip 由 ds 委托浮层展示）。
   function setStatus(text) {
-    const s = document.getElementById('externalTestSource');
-    if (s) s.textContent = text;
+    const frame = document.getElementById('externalTestFrame');
+    if (frame) frame.setAttribute('data-tip', text);
   }
 
   // ==================== 视图切换（实时图表 ↔ 测速网页） ====================
@@ -390,14 +392,13 @@
   function loadExternalTest(withDetect) {
     const frame = document.getElementById('externalTestFrame');
     const site = document.getElementById('externalTestSite');
-    const source = document.getElementById('externalTestSource');
     if (!frame || !site) return;
     const selectedUrl = site.value || 'https://www.speedtest.cn/';
     const selectedLabel = site.selectedOptions?.[0]?.textContent || 'SpeedTest.cn（推荐）';
     // 点击「开始测速」：自动从实时图表切换为测速网页
     if (withDetect) showTestView();
     frame.src = selectedUrl;
-    if (source) source.textContent = `数据来源：${selectedLabel}，仅加载所选测试站点`;
+    frame.setAttribute('data-tip', `数据来源：${selectedLabel}，仅加载所选测试站点`);
     loaded = true;
     // 每次加载即进入流量检测模式（如已有旧检测先复位）
     stopDetect();

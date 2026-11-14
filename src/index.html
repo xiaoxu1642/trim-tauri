@@ -36,7 +36,6 @@
     <div class="splash-stage">
       <div id="splash-badge" class="splash-badge">Provided By Xiaoxu</div>
       <div id="splash-trim" class="splash-trim">Trim</div>
-      <p id="splash-intro" class="splash-intro">轻量、纯净、高效的 Windows 11 清理优化工具</p>
       <div id="splash-progress" class="splash-progress" role="progressbar" aria-label="加载进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
         <div class="splash-progress-track"><div id="splash-progress-fill" class="splash-progress-fill"></div></div>
         <span id="splash-progress-text" class="splash-progress-text">正在加载 0%</span>
@@ -389,8 +388,6 @@
           </div>
         </div>
 
-        <div class="opt-hint" id="cleanupPermanentHint">常规清理项会直接永久删除，不进入回收站；文件清理项移入回收站，可从回收站还原。</div>
-
         <!-- 进度条 -->
         <div class="progress-section" id="progressSection" role="status" aria-live="polite" aria-busy="false" style="display:none">
           <div class="progress-header">
@@ -457,20 +454,18 @@
              可折叠——点击栏目头展开/折叠；默认空文件展开、空目录折叠） -->
         <div class="empty-accordion" id="emptyTable">
           <section class="empty-pane" data-empty-pane="files">
-            <button type="button" class="empty-pane-head" data-empty-toggle aria-expanded="true">
+            <button type="button" class="empty-pane-head" data-empty-toggle aria-expanded="true" data-tip="仅列出零字节且创建满 14 天的文件">
               <span class="empty-pane-chevron" aria-hidden="true">▾</span>
               <span class="empty-pane-title">空文件</span>
               <span class="empty-pane-count" id="emptyPaneCountFiles" role="status" aria-live="polite">0</span>
-              <span class="empty-pane-sub">0 字节 · 创建满 14 天</span>
             </button>
             <div class="empty-pane-body" id="emptyFilesBox"></div>
           </section>
           <section class="empty-pane collapsed" data-empty-pane="dirs">
-            <button type="button" class="empty-pane-head" data-empty-toggle aria-expanded="false">
+            <button type="button" class="empty-pane-head" data-empty-toggle aria-expanded="false" data-tip="只统计树内只含空文件与空子目录、且创建满 14 天的目录">
               <span class="empty-pane-chevron" aria-hidden="true">▾</span>
               <span class="empty-pane-title">空目录</span>
               <span class="empty-pane-count" id="emptyPaneCountDirs" role="status" aria-live="polite">0</span>
-              <span class="empty-pane-sub">树内只含空文件与空子目录 · 创建满 14 天</span>
             </button>
             <div class="empty-pane-body" id="emptyDirsBox"></div>
           </section>
@@ -479,12 +474,11 @@
 
       <!-- ============================ 磁盘清理 · 磁盘分析器（子视图，C-5） ============================ -->
       <div class="cleanup-view" id="cleanupAnalyzePanel" role="tabpanel" data-cleanup-panel="cleanup-analyze">
-        <div class="finder-toolbar card">
+        <div class="finder-toolbar card" data-tip="点击目录名逐层下钻；「删除」整树移入回收站并记入已删除清单">
           <!-- C-5 拍板：逐层按需下钻（每层一次扫描），删除复用 finder:delete 回收站链 -->
           <span class="opt-inline">分析磁盘
             <span class="drive-picker" id="anDrives"></span>
           </span>
-          <span class="opt-hint">点击目录名逐层下钻；「删除」整树移入回收站并记入已删除清单</span>
         </div>
         <div class="progress-section" id="anProgressSection" style="display:none">
           <div class="progress-header"><span class="progress-label" id="anProgressLabel">分析中...</span><span class="progress-value" id="anProgressValue">0%</span></div>
@@ -520,7 +514,7 @@
           <!-- C1-1（2026-10-16 拍板）：主窗内嵌卡片；查询与结束进程两步式——
                查询只读，结束只认本次查询写下的白名单；系统关键进程只展示、不出现在白名单 -->
           <span class="opt-inline">查询路径
-            <input type="text" class="field-input finder-path" id="lockQueryPath" placeholder="文件或目录，如 %TEMP%（支持环境变量）" spellcheck="false" />
+            <input type="text" class="field-input finder-path" id="lockQueryPath" placeholder="文件或目录" data-tip="支持环境变量，如 %TEMP%" spellcheck="false" />
           </span>
           <button class="btn btn-primary" id="lockQueryBtn">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
@@ -534,7 +528,7 @@
         </div>
         <div id="lockQueryResult">
           <div class="empty-state">
-            <p>输入文件或目录路径后点击「查询占用」。目录按整树检查（上限 2 万个文件，超出会注明「已截断」）。</p>
+            <p>尚未查询</p>
           </div>
         </div>
       </div>
@@ -577,11 +571,8 @@
             <span class="progress-label" id="uninstallBusyLabel">卸载器运行中…</span>
             <span class="uninstall-busy-side">
               <span class="uninstall-busy-elapsed" id="uninstallBusyElapsed" aria-live="off">已等待 00:00</span>
-              <button class="btn btn-small uninstall-busy-toggle" type="button" id="uninstallBusyToggle"
-                aria-expanded="true" aria-controls="uninstallBusyDetail" data-tip="收起说明行，继续浏览下方列表">收起</button>
             </span>
           </div>
-          <p class="uninstall-busy-detail" id="uninstallBusyDetail">耗时由外部程序自己掌握，应用读不到百分比，所以这里只显示已经等待的时间。</p>
         </div>
 
         <div class="uninstall-host" id="uninstallPanel" role="tabpanel"><div id="uninstallList"></div></div>
@@ -653,13 +644,12 @@
             </button>
           </div>
         </div>
-        <div class="rt-intro-card">
+        <div class="rt-intro-card" data-tip="覆盖范围：Microsoft Visual C++ 2015-2022 · .NET Framework 4.x / 3.5 · DirectX 9-12">
           <p>部分游戏或软件在运行时需要特定运行库支持，当缺失该类文件时，会无法正常启动。</p>
-          <p class="rt-intro-sub">覆盖范围：Microsoft Visual C++ 2015-2022 · .NET Framework 4.x / 3.5 · DirectX 9-12</p>
         </div>
         <div class="rt-radar-wrap">
           <div id="rtRadar"><!-- 雷达图：由 runtimes.js 渲染内联 SVG --></div>
-          <div class="rt-summary" id="rtSummary" role="status" aria-live="polite">尚未扫描 · 点击「开始扫描」检测本机运行库</div>
+          <div class="rt-summary" id="rtSummary" role="status" aria-live="polite">尚未扫描</div>
         </div>
         <div class="rt-list" id="runtimesList"><!-- 检测结果条目：由 JS 渲染 --></div>
       </div>
@@ -749,13 +739,12 @@
               <span class="process-entry-title">运行中的进程</span>
             </div>
             <div class="process-entry-content" id="memProcessSummary">
-              <span class="process-entry-summary">尚未管理进程 · 点击「去管理」打开管理窗口</span>
+              <span class="process-entry-summary">尚未管理进程</span>
             </div>
             <button class="btn btn-secondary btn-small process-entry-btn"
                     id="btnOpenProcessManager"
                     data-tip="打开「应用进程管理」窗口，逐项查看或结束进程，操作结果实时回显于此">去管理</button>
           </div>
-          <p class="process-entry-hint">点击「去管理」打开独立的「应用进程管理」窗口，逐项查看或结束进程；结束后的最新统计会实时回显在卡片中间。</p>
         </div>
       </div>
 
@@ -869,7 +858,6 @@
           <div class="empty-state">
             <div class="empty-state-icon"><svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></div>
             <div class="empty-state-title">尚未扫描右键菜单</div>
-            <div class="empty-state-desc">扫描将检测系统与第三方添加的右键菜单项，支持禁用、删除与恢复</div>
             <div class="empty-state-cta"><button class="btn btn-primary" type="button" data-empty-cta="btnScanContext">立即扫描</button></div>
           </div>
         </div>
@@ -892,7 +880,7 @@
           </div>
         </div>
         <div class="benchmark-layout">
-          <section class="benchmark-panel">
+          <section class="benchmark-panel" data-tip="测试会在目标磁盘创建临时文件，完成后自动删除">
             <div class="panel-kicker">测试参数</div>
             <label class="field-label">测试路径<input id="diskBenchPath" class="field-input" value="" placeholder="将自动检测当前用户 Downloads 目录" /></label>
             <div class="benchmark-fields">
@@ -900,13 +888,12 @@
               <!-- v3.7.0 议题四：队列深度与线程数此前是「禁用下拉 + 单个 1 选项」，看着像可配置；
                    实际四个测试循环均为同步单流 I/O，这两个值从未被消费。改为只读文本，不再伪装成选项。 -->
               <!-- v3.7.1 R1：Rust 原生引擎（OVERLAPPED 并发）下 QD/线程数真实生效；语义=QD 为每线程在途上限 -->
-              <label class="field-label">队列深度<select id="diskQueueDepth" class="field-input"><option value="1" selected>1（单队列）</option><option value="8">8</option><option value="32">32</option></select></label>
+              <label class="field-label">队列深度<select id="diskQueueDepth" class="field-input"><option value="1" selected>1</option><option value="8">8</option><option value="32">32</option></select></label>
               <label class="field-label">线程数<select id="diskThreads" class="field-input"><option value="1" selected>1</option><option value="4">4</option><option value="8">8</option></select></label>
               <label class="field-label">时长<select id="diskDuration" class="field-input"><option value="4">4 秒</option><option value="8" selected>8 秒</option><option value="16">16 秒</option></select></label>
             </div>
-            <p class="benchmark-note">测试会在目标磁盘创建临时文件，完成后自动删除。当前采用单队列单线程模型，块大小用于模拟不同负载。</p>
           </section>
-          <section class="benchmark-panel benchmark-status-panel"><div class="panel-kicker">状态</div><div class="benchmark-status" id="diskBenchStatus" role="status" aria-live="polite">等待测试</div><div class="benchmark-status-detail">顺序测试模拟大文件传输，随机测试模拟系统与应用的小文件 I/O。</div></section>
+          <section class="benchmark-panel benchmark-status-panel" data-tip="顺序测试模拟大文件传输，随机测试模拟系统与应用的小文件 I/O"><div class="panel-kicker">状态</div><div class="benchmark-status" id="diskBenchStatus" role="status" aria-live="polite">等待测试</div></section>
         </div>
         <div class="benchmark-results">
           <div class="benchmark-result-group"><h3>顺序读写</h3><div class="benchmark-result-grid"><div><span>顺序读取</span><strong id="diskSeqRead">--</strong></div><div><span>顺序写入</span><strong id="diskSeqWrite">--</strong></div></div></div>
@@ -997,7 +984,6 @@
             <div class="chart-header">
               <h3>外部网络测速</h3>
             </div>
-            <p class="external-test-source" id="externalTestSource">数据来源：SpeedTest.cn（推荐），仅加载所选测试站点</p>
             <iframe id="externalTestFrame" data-tip="外部网络测试页面" src="about:blank"></iframe>
           </div>
         </div>
@@ -1083,7 +1069,6 @@
           </label>
           <div class="startup-defend-text">
             <div class="startup-defend-title">防恢复自动删除</div>
-            <div class="startup-defend-desc">禁用的启动项若被外部程序反复恢复，达到次数后会自动删除并拦截其再次出现（删除前逐条红色确认）；关闭后仅提示、不再自动删除。</div>
           </div>
           <span class="startup-defend-state" id="startupDefendState">已开启</span>
         </div>
@@ -1098,7 +1083,6 @@
             <div class="empty-state">
               <div class="empty-state-icon"><svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg></div>
               <div class="empty-state-title">尚未扫描启动项</div>
-              <div class="empty-state-desc">扫描将检测启动文件夹、注册表 Run 键与计划任务中的开机自启项目</div>
               <div class="empty-state-cta"><button class="btn btn-primary" type="button" data-empty-cta="btnScanStartup">立即扫描</button></div>
             </div>
           </div>
@@ -1110,7 +1094,6 @@
         <div class="page-header">
           <div>
             <h1 class="page-title">快捷指令</h1>
-            <span class="qc-admin-note" data-tip="建议以管理员身份运行 Trim，确保全部快捷指令正常打开">默认以管理员模式启动</span>
           </div>
         </div>
         <div class="qc-toolbar">
@@ -1239,7 +1222,6 @@
           <div class="settings-section settings-bgtheme-section">
             <div class="appearance-card-head">
               <h4>背景与主题</h4>
-              <p>预设壁纸、导入图片与自动轮换</p>
             </div>
                 <div class="appearance-merge-grid">
                   <div class="appearance-merge-col">
@@ -1256,7 +1238,6 @@
                           <option value="wp-doll">Doll · 手办</option>
                         </select>
                       </div>
-                      <p class="appearance-hint">内置渐变墙纸与实拍壁纸铺于页面底层，可与下方导入的图片叠加使用</p>
                     </div>
                     <div class="appearance-sub">
                       <div class="appearance-sub-head">导入图片</div>
@@ -1313,7 +1294,6 @@
                           <option value="300">5 分钟</option>
                         </select>
                       </div>
-                      <p class="appearance-hint">窗口隐藏时自动暂停轮换，省电不打扰</p>
                     </div>
                     <!-- 背景模糊度（v3.0）：Motion.Lab range-drag 自定义滑块 -->
                     <div class="appearance-sub">
@@ -1325,7 +1305,6 @@
                         </div>
                         <span class="bbr-val" id="bgBlurVal">0%</span>
                       </div>
-                      <p class="appearance-hint">拖动滑块模糊壁纸背景，0% 清晰 / 100% 完全磨砂</p>
                     </div>
                 </div>
           </div>
@@ -1388,7 +1367,6 @@
                         <input type="range" id="bgBlur" min="0" max="100" value="0" />
                         <span id="bgBlurInputVal">0%</span>
                       </div>
-                      <p class="appearance-hint">0% 无磨砂，100% 为完整磨砂（界面本身已是玻璃质感）；配合壁纸或导入图片层次感更强</p>
                     </div>
                   </div>
                 </div>
@@ -1404,7 +1382,6 @@
                     <span class="toggle-track"><span class="toggle-thumb"></span></span>
                   </label>
                 </div>
-                <p class="appearance-hint">在软件范围内显示轻量指针轨迹，仅作用于当前窗口，可随时关闭</p>
               </div>
               <div class="appearance-sub">
                 <div class="appearance-sub-head">动效选择</div>
@@ -1429,14 +1406,13 @@
             <div class="about-row">
               <div class="about-row-copy">
                 <strong>使用说明</strong>
-                <p>查看主要功能、操作流程与安全注意事项。</p>
               </div>
               <button class="btn btn-secondary btn-small" id="btnUsageGuide">查看说明</button>
             </div>
             <div class="about-row">
               <div class="about-row-copy">
                 <strong>检查更新</strong>
-                <p id="updaterCheckHint">检查 Trim 是否有新版本</p>
+                <p id="updaterCheckHint"></p>
               </div>
               <div class="about-row-actions">
                 <button class="btn btn-secondary btn-small" id="btnCheckUpdate" type="button">检查更新</button>
@@ -1446,7 +1422,6 @@
             <div class="about-row">
               <div class="about-row-copy">
                 <strong>联系我</strong>
-                <p>欢迎在 GitHub / AtomGit 交流与提 Issue</p>
               </div>
               <div class="about-row-actions">
                 <button class="btn btn-secondary btn-small" id="btnGitHub" type="button" data-tip="打开 GitHub 反馈区">GitHub</button>

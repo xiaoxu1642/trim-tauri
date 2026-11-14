@@ -24,7 +24,6 @@
   var canvas = document.getElementById('splash-canvas');
   var trimEl = document.getElementById('splash-trim');
   var badgeEl = document.getElementById('splash-badge');
-  var introEl = document.getElementById('splash-intro');
   var progressEl = document.getElementById('splash-progress');
   var progressFill = document.getElementById('splash-progress-fill');
   var progressText = document.getElementById('splash-progress-text');
@@ -155,7 +154,7 @@
     state = 'entered';
     markSeen();
 
-    var fadeEls = [badgeEl, introEl, progressEl, enterBtn];
+    var fadeEls = [badgeEl, progressEl, enterBtn];
     fadeEls.forEach(function (el) {
       if (!el) return;
       // 关键：先解除入场动画（splashFadeIn ... both）对 opacity 的持续占用——

@@ -2632,7 +2632,7 @@
       // A1-L01：整段来源失败不能被渲染成「还没有备份」。
       body.innerHTML = failedSources.length
         ? `<div class="empty-state"><p>部分备份读取失败：${escapeHtml(failedSources.join('、'))}；其余来源也没有记录。</p></div>`
-        : '<div class="empty-state"><p>还没有备份。清理含注册表项的条目会自动导出 .reg 备份；永久删除的文件会在 64MB/文件、256MB/批次上限内自动留副本。卸载残留可在清理前勾选「先备份内容再删」生成本机还原包。</p></div>';
+        : '<div class="empty-state" data-tip="清理含注册表项的条目会自动导出 .reg 备份；永久删除的文件会在 64MB/文件、256MB/批次上限内自动留副本。卸载残留可在清理前勾选「先备份内容再删」生成本机还原包。"><p>还没有备份。</p></div>';
       return;
     }
     // 「旧版」徽章：这份躺在升级前的老数据目录里（N1 跨根兜底才看得见）。
