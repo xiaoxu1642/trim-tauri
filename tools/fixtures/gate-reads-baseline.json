@@ -70,15 +70,15 @@
     "check-release-artifacts": "0d61626334af6747",
     "check-readme-claims": "e5b1e648922011a9",
     "check-readme-negative-claims": "bb7217f8a25fe9ab",
-    "check-doc-refs": "074df80e114fd37a",
+    "check-doc-refs": "6cd600acee02e5b6",
     "check-tools-doc-paths": "1693222d2faa9503",
-    "check-comment-rot": "7980975842e1ef87",
+    "check-comment-rot": "9b0df36598efcf67",
     "check-positive-controls": "0704ff1b426fc29b",
     "check-review-units": "b1346bf1600df8d4",
     "check-tests-helper-parity": "fb2af723d16b11f0",
     "check-data-signatures": "184c94336a582594",
     "check-fixture-freshness": "264dcec8a506125d",
-    "check-gate-roster": "e3090dd9937afe61",
+    "check-gate-roster": "f30c14025b1bff46",
     "check-delete-root-guard": "4dcef9b6844e6293",
     "check-ignored-isolation": "895c3de9e28b5ef0",
     "check-async-exits": "62218ef1c427dd6c",
@@ -541,5 +541,5 @@
       "M-12"
     ]
   },
-  "bodyHash": "8c78a2224f45535e"
+  "bodyHash": "f4c09bc2b30c3e57"
 }

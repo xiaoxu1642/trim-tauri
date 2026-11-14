@@ -13,6 +13,8 @@
 //       node tools/check-gate-roster.mjs --run --changed       # 按 git 改动面自动挑模块
 //       node tools/check-gate-roster.mjs --list-modules        # 打印 12 模块与各自的模块门禁
 //       node tools/check-gate-roster.mjs --emit-reads          # 重算门禁读取面基线（改过门禁源码后跑）
+//       node tools/check-gate-roster.mjs --run --skip-ledger=<台账.md>
+//                                               # 全量 --run 收尾对拍 SKIP/0 对象台账（P1-2，2026-11-14）
 import { readdirSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -195,6 +197,9 @@ const READS_BASELINE = join(TOOLS, 'fixtures', 'gate-reads-baseline.json');
 const MODULE_ARG = (process.argv.find((a) => a.startsWith('--module=')) || '').split('=')[1] || '';
 const JOBS_ARG = (process.argv.find((a) => a.startsWith('--jobs=')) || '').split('=')[1] || '';
 const JOBS = Math.max(1, Number(JOBS_ARG) || 8);
+// P1-2（2026-11-14 未闭环方案）：SKIP/0 对象台账路径。给了路径就在全量 --run 收尾处对拍。
+// 显式传参模式，与 check-review-units 的 --coverage/--doc 同口径：本门禁不默认指向 docs 资料区。
+const SKIP_LEDGER = (process.argv.find((a) => a.startsWith('--skip-ledger=')) || '').slice('--skip-ledger='.length);
 
 // 刻意不在必跑清单的门禁注册表。新增可选/退役门禁必须在这里登记（带理由），
 // 否则磁盘多出一个 check 文件而两处注册表都没有 → 红。
@@ -685,6 +690,50 @@ if (selfReported.length > 0) {
   for (const s of selfReported) {
     console.log(`  · ${s.name}: ✗${s.x} / SKIP·未校验${s.skip} / 0 对象${s.zero}`);
   }
+}
+// P1-2（2026-11-14 未闭环方案）：SKIP/0 对象台账对拍 —— 台账不许静默腐烂。本轮自报集合与
+// 台账登记集合**双向必等**：台账多一行 = 该门禁修好没删行（台账过期）；少一行 = 新自报没登记
+// （漏登）；台账解析不到门禁名 = 被清空/格式破坏。三种都判红，且「全部通过」终态行不再打印。
+// 只对全量 --run 有意义：--module/--changed/--tier=readonly 轮的自报集合是子集，显式 SKIP 声明。
+if (process.argv.includes('--skip-ledger') && !SKIP_LEDGER) {
+  console.error('✗ --skip-ledger 需要显式路径（--skip-ledger=<台账.md>）');
+  process.exit(1);
+}
+let ledgerFailed = 0;
+if (SKIP_LEDGER) {
+  if (MODULE_ARG || process.argv.includes('--changed') || READONLY_TIER) {
+    console.log('– SKIP 台账对拍（--module/--changed/--tier=readonly 轮自报集合是子集，对拍只对全量 --run 有意义）');
+  } else if (!existsSync(SKIP_LEDGER)) {
+    ledgerFailed = 1;
+    console.error(`✗ 台账对拍：给了 --skip-ledger 但文件不在 ${SKIP_LEDGER} —— 对拍对象缺失判红，不算 SKIP`);
+  } else {
+    const ledgerSet = new Set(
+      readFileSync(SKIP_LEDGER, 'utf8')
+        .split(/\r?\n/)
+        .filter((l) => /^\s*\|/.test(l))
+        .map((l) => (/^\s*\|\s*`(check-[\w-]+)`\s*\|/.exec(l) || [])[1])
+        .filter(Boolean),
+    );
+    const runSet = new Set(selfReported.map((s) => s.name));
+    if (ledgerSet.size === 0) {
+      ledgerFailed = 1;
+      console.error('✗ 台账对拍：台账表格行里解析不到任何 `check-*` 门禁名 —— 台账被清空或格式破坏');
+    } else {
+      const stale = [...ledgerSet].filter((n) => !runSet.has(n));
+      const missing = [...runSet].filter((n) => !ledgerSet.has(n));
+      if (stale.length || missing.length) {
+        ledgerFailed = 1;
+        for (const n of stale) console.error(`✗ 台账对拍：${n} 本轮未自报 SKIP/0 对象 —— 台账过期（该门禁修好后须删行）`);
+        for (const n of missing) console.error(`✗ 台账对拍：${n} 本轮自报 SKIP/0 对象但台账缺行 —— 漏登`);
+      } else {
+        console.log(`✓ 台账对拍一致：${ledgerSet.size} 条（台账 ⇄ 本轮自报双向相等）`);
+      }
+    }
+  }
+}
+if (ledgerFailed > 0) {
+  console.error(`check-gate-roster --run: 台账对拍未通过（${selectionLabel}）`);
+  process.exit(1);
 }
 // T1a-M10：终态行并入 selfReported（原只在上文单列，只看最后一行会把「没测」读成「全绿」）。
 // 2026-11-12：终态行必须写清**这次跑了哪些**（--module / --changed 下「全部通过」只覆盖被选中的子集，

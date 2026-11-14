@@ -280,7 +280,7 @@ if (agentsPresent) {
 }
 
 // ---- 4. U8（v5 批次 9 门禁候选 9 / P2-A A-4）：审查文档的表值必须带可重跑取数命令 ----
-// 《方法论》的表格数字是下一轮审查的派单依据；表值旁没有取数命令，数字漂移就无人能发现
+// 《本项目审查方案》的表格数字是下一轮审查的派单依据；表值旁没有取数命令，数字漂移就无人能发现
 // （X0-3 现算 14+12 处过期）。
 //
 // A-4（2026-10-24 拍板 D1）：文档已从仓库内 `docs/` 搬进 Obsidian 库，门禁**直接读同一份**，
@@ -295,8 +295,9 @@ if (agentsPresent) {
   };
   const vaultRoot = argOf('--vault-root') || process.env.TRIM_VAULT_ROOT || '';
   const candidates = [
-    vaultRoot && join(vaultRoot, 'trim-tauri', '本仓库审查规范', '本仓库审查方法论.md'),
-    join(DOCS_DIR, '本仓库审查规范', '本仓库审查方法论.md'),
+    // 2026-11-14（P1 · 未闭环方案）：《本仓库审查方法论》已更名《本项目审查方案》，锚点同步。
+    vaultRoot && join(vaultRoot, 'trim-tauri', '本仓库审查规范', '本项目审查方案.md'),
+    join(DOCS_DIR, '本仓库审查规范', '本项目审查方案.md'),
   ].filter(Boolean);
   const METH = candidates.find((p) => existsSync(p)) || '';
   if (METH) {
@@ -305,22 +306,51 @@ if (agentsPresent) {
     const tableRows = text.split('\n').filter((l) => /^\s*\|/.test(l) && /\d{2,}/.test(l)).length;
     check(
       tableRows >= 50,
-      `4. U8 语料自检：《方法论》表格行 ${tableRows}（≥ 50 地板，防解析失明）—— ${vaultRoot ? 'vault 根' : '仓内 docs/'}`,
+      `4. U8 语料自检：《本项目审查方案》表格行 ${tableRows}（≥ 50 地板，防解析失明）—— ${vaultRoot ? 'vault 根' : '仓内 docs/'}`,
       tableRows < 50 ? '表格行趋零 ⇒ 文件被搬/改名或解析失明' : '',
     );
     const withCmd = (text.match(/现算|取数命令|命令：/g) || []).length;
     check(
       withCmd >= 10,
-      `4b. U8 骨架：取数标记 ${withCmd} 处（≥ 10；**骨架版**——过期值全量修复归后续批次，修复方案 §4）`,
+      `4b. U8 骨架：取数标记 ${withCmd} 处（≥ 10；时点快照均已带现算纪律、引用前重跑——P2-02 收口）`,
       withCmd < 10 ? '取数标记趋零 ⇒ U8 判据失明' : '',
     );
   } else if (vaultRoot) {
-    check(false, '4. U8：给了 --vault-root / TRIM_VAULT_ROOT 却找不到《方法论》',
+    check(false, '4. U8：给了 --vault-root / TRIM_VAULT_ROOT 却找不到《本项目审查方案》',
       `两个候选都不在：${candidates.join(' ; ')} ⇒ 库根传错、文件改名或搬家未同步本门禁（判红，不静默 SKIP）`);
   } else {
     skipped++;
     console.log('⚠ U8：未给 --vault-root / TRIM_VAULT_ROOT，且仓内 docs/ 副本不在 —— 表值取数命令检查**未校验**（SKIP，不是通过）');
   }
+}
+
+// ---- 5. 被取代方案横幅（P2-01，2026-11-15）：旧方案的「已被取代」横幅必须一直在场 ----
+// 取代关系只写在横幅里：横幅被摘掉，旧方案就退化成无人钉住的第二真源。此前破坏
+// 自证：全量门禁无一读取方案文档正文（U7 只查路径存在性），横幅唯一的对拍是人工
+// grep。登记表逐文件给各自的横幅标记（11-11 旧版是 ⚠️ 单行形态而非
+// callout，且正文也含「已被取代」字样 ⇒ 统一文本判据会被正文误绿，marker 必须唯一
+// 落在横幅行内）；docs/ 整个缺席 ⇒ 显式 SKIP（未跟踪资料区纪律）；条目不命中
+// （文件被删或横幅被摘）⇒ 判红，不许静默消失。本方案被取代时在此追加一行。
+const SUPERSEDED_BANNERS = [
+  { file: 'docs/本仓库修复方案/合并修复方案-全仓-2026-11-11.md', marker: '**已被取代（审计史）**' },
+  { file: 'docs/本仓库修复方案/合并修复方案-全仓-v2-2026-11-12.md', marker: '[!warning]' },
+  { file: 'docs/本仓库修复方案/未闭环项与B4-B10后续方案-v1-2026-11-14.md', marker: '[!warning]' },
+];
+if (!docsPresent) {
+  skipped++;
+  console.log('⚠ 5. 被取代方案横幅检查 SKIP（docs/ 本机资料区不存在）：横幅在场性**未校验**（SKIP，不是通过）');
+} else {
+  const bannerMiss = [];
+  for (const { file: rel, marker } of SUPERSEDED_BANNERS) {
+    const p = join(ROOT, rel);
+    if (!existsSync(p)) bannerMiss.push(`${rel} 文件不在盘上（被取代文件不许静默消失）`);
+    else if (!readFileSync(p, 'utf8').includes(marker)) bannerMiss.push(`${rel} 横幅缺席`);
+  }
+  check(
+    bannerMiss.length === 0,
+    `5. 被取代方案横幅 ${SUPERSEDED_BANNERS.length} 份全部在场（P2-01）`,
+    bannerMiss.join('；'),
+  );
 }
 
 if (fail > 0) {
