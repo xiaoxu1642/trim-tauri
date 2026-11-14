@@ -86,7 +86,7 @@
     "check-test-sandbox": "bbabffd5d1ad280d",
     "check-finder-scan-notes": "d353cb678acc30e3",
     "check-registry-delete-guard": "e879cb639cf1c1f2",
-    "check-receipt-tri-state": "399bc6e25d1bc65f",
+    "check-receipt-tri-state": "e59e303f2c84beee",
     "check-user-copy-policy": "2d46ab57018cc892"
   },
   "reads": {
@@ -541,5 +541,5 @@
       "M-12"
     ]
   },
-  "bodyHash": "e39913c07298124a"
+  "bodyHash": "799f6485c79ad941"
 }
