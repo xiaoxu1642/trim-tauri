@@ -314,7 +314,13 @@ body[data-skin="glass"] .appearance-card,
 body[data-skin="glass"] .card,
 body[data-skin="glass"] .empty-state,
 body[data-skin="glass"] .overview-card,
-body[data-skin="glass"] .table-card {
+body[data-skin="glass"] .table-card,
+/* B4-P1 子窗表面：三子窗 body 静态挂 data-skin="glass"（子窗无模糊度滑块，
+   玻璃为常态），这三类只存在于子窗 html，主窗零感知；.mw-group 等正文卡片
+   不入选——R2 口径：正文卡片默认无渐变无辉光 */
+body[data-skin="glass"] .pw-topbar,
+body[data-skin="glass"] .mw-card,
+body[data-skin="glass"] .mw-footer {
   /* 模糊半径由设置页「背景模糊度」滑块写入 --glass-blur（0-26px），缺省 26px 保持原液态玻璃观感 */
   border-color: var(--glass-border);
   box-shadow:
@@ -335,6 +341,21 @@ body[data-skin="glass"] .topbar {
   box-shadow:
     inset 0 1px 0 var(--glass-highlight),
     0 1px 0 var(--glass-border);
+}
+
+/* B4-P1 子窗模态（modal.js 骨架）：玻璃描边 + 静态光泽 + 顶部内嵌高光。
+   必须走 body.mw-window 作用域、不能并入上方装饰块——.usage-modal 是主窗共用
+   骨架，data-skin 作用域会把主窗模态一并改掉。浮起投影保留基类 .usage-modal
+   的原值（模态悬浮层需要强投影，不用卡片的 0 4px 18px 档），仅前置顶部高光；
+   prefers-reduced-transparency 降级段的 background 实底按源序覆写本条
+   background-image，光泽随降级自动摘除。 */
+body.mw-window .usage-modal {
+  border-color: var(--glass-border);
+  background-image: var(--glass-sheen);
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    0 20px 60px -20px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 255, 255, 0.04);
 }
 
 /* 全窗壁纸层基座（背景贯通标题栏批次）：fixed 铺满整窗（含标题栏区域），
@@ -5540,7 +5561,10 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
 .appearance-card,
 .benchmark-panel,
 .benchmark-result-group,
-.external-test-panel {
+.external-test-panel,
+/* B4-P2 子窗内容卡：与主窗 .card 同判——只吃光斑不吃倾斜（tilt.js SPOT_ONLY
+   同步收录）；该类仅存在于三子窗 html，主窗零感知 */
+.mw-card {
   position: relative;
   isolation: isolate;
   /* 光斑必须在本作用域重声明：自定义属性在声明处求值，:root 上的 var(--mx) 会冻结成
@@ -5561,7 +5585,8 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
 .appearance-card::before,
 .benchmark-panel::before,
 .benchmark-result-group::before,
-.external-test-panel::before {
+.external-test-panel::before,
+.mw-card::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -5587,7 +5612,8 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
 .appearance-card::after,
 .benchmark-panel::after,
 .benchmark-result-group::after,
-.external-test-panel::after {
+.external-test-panel::after,
+.mw-card::after {
   content: '';
   position: absolute;
   inset: 0;
@@ -5608,7 +5634,8 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
 .appearance-card:hover::after,
 .benchmark-panel:hover::after,
 .benchmark-result-group:hover::after,
-.external-test-panel:hover::after {
+.external-test-panel:hover::after,
+.mw-card:hover::after {
   opacity: 1;
   animation: aurora-sweep var(--dur-3) var(--ease-expo);
 }
@@ -5627,7 +5654,8 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
 .theme-light .appearance-card,
 .theme-light .benchmark-panel,
 .theme-light .benchmark-result-group,
-.theme-light .external-test-panel {
+.theme-light .external-test-panel,
+.theme-light .mw-card {
   --glass-spot: radial-gradient(240px circle at var(--mx, 50%) var(--my, 50%),
     color-mix(in srgb, color-mix(in srgb, var(--accent) 18%, #ffffff) 45%, transparent), transparent 60%);
   --glass-sweep: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.30), transparent);
@@ -5644,7 +5672,8 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
   .appearance-card::after,
   .benchmark-panel::after,
   .benchmark-result-group::after,
-  .external-test-panel::after {
+  .external-test-panel::after,
+  .mw-card::after {
     display: none;
   }
 }
@@ -5792,7 +5821,16 @@ body.aurora-ready .page.active .device-info-row:nth-child(n+8) { animation-delay
      from 态的位移上）。aurora.js 也不挂 body.aurora-ready，这里是双保险。 */
   body.aurora-ready .nav-item,
   body.aurora-ready .page.active .summary-card,
-  body.aurora-ready .page.active .device-info-row {
+  body.aurora-ready .page.active .device-info-row,
+  /* B4-P3 子窗入场面：三子窗的入场是 CSS 首帧动画（body.mw-window fadeIn /
+     .mw-shell modalScaleIn / .mw-group modalScaleIn backwards + 逐条错峰），
+     没有 splash、也没有 aurora-ready 开关可挂（挂它要新脚本或改主窗共用件，
+     且延迟内容可见性会撞黑闪握手红线）。跟主窗同口径：RM 下直接不挂动画，
+     不靠全局时长归零糊过去——backwards fill 的 from 态是透明加缩放，
+     冻结帧会让内容停在隐身态。默认态（非 RM）动画与时序一律不动。 */
+  body.mw-window,
+  body.mw-window .mw-shell,
+  body.mw-window .mw-group {
     animation: none;
   }
   .aurora-field {

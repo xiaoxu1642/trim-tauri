@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="styles/main.css" />
   <link rel="stylesheet" href="styles/ds.css" />
 </head>
-<body class="mw-window theme-light">
+<body class="mw-window theme-light" data-skin="glass">
   <div class="mw-shell">
     <div class="pw-topbar">
       <div class="pw-topbar-copy">
@@ -52,8 +52,13 @@
   <!-- 审查 M17：本窗的删除确认与 data-tip 都走 window.ds；liquid-glass 的
        reducedMotion 求值也走 window.ds（U-A3），必须排在它之前。 -->
   <script src="scripts/ds.js"></script>
+  <!-- 极光琉璃 B4-P2：跟随光斑两件（.btn 聚光 / .mw-card 光斑坐标 --mx/--my）。
+       文档级事件委托、无初始化依赖；RM 求值读 window.ds（缺件自带兜底）。
+       家族序随主窗 IDLE 清单：tilt 在 liquid-glass 之前、spotlight 在其后。 -->
+  <script src="scripts/tilt.js"></script>
   <!-- 液态玻璃引擎：子窗口与主窗共用四档效果（按钮折射/弹性形动），分段栏等选择器在子窗无命中自动跳过 -->
   <script src="scripts/liquid-glass.js"></script>
+  <script src="scripts/spotlight.js"></script>
   <!-- 2026-10-03 用户裁定「本窗弹窗改自绘」：本窗原先**只加载了 ds.js**，
        modal.js 从未在此挂载 ⇒ 本窗根本没有弹窗骨架（ds.focusTrap 也只能按缺席降级）。
        覆盖已有密钥/删除配置这类破坏性动作此前连二次确认都没有。

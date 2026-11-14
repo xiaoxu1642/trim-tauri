@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="styles/main.css" />
   <link rel="stylesheet" href="styles/ds.css" />
 </head>
-<body class="mw-window rs-window theme-light">
+<body class="mw-window rs-window theme-light" data-skin="glass">
   <div class="mw-shell">
     <div class="pw-topbar">
       <div class="pw-topbar-copy">
@@ -68,6 +68,11 @@
   <script src="scripts/modelpicker.js"></script>
   <!-- 简介面板共用件：本地简介 + 联网 AI 简介（点击查看里的那一块） -->
   <script src="scripts/intro.js"></script>
+  <!-- 极光琉璃 B4-P2：跟随光斑两件（.btn 聚光 / .mw-card 光斑坐标 --mx/--my）。
+       文档级事件委托、无初始化依赖；RM 求值读 window.ds（缺件自带兜底），排在 ds.js 之后。
+       本窗未挂 liquid-glass，家族序约束（liquid-glass 先于 spotlight）不涉。 -->
+  <script src="scripts/tilt.js"></script>
+  <script src="scripts/spotlight.js"></script>
   <!-- NEW-6：子窗轻量提示共用件（须先于主脚本加载） -->
   <script src="scripts/sub-toast.js"></script>
   <script src="scripts/residue-window.js"></script>

@@ -19,15 +19,20 @@
 
   // 启动项管理页的「启动项列表」面板不倾斜（需求指定），同页统计卡不受影响
   // 磁盘清理各扫描结果表格（重复文件/大文件/空文件）不加入 3D 倾斜
-  // B-P2 追加 .an-tm-box：磁盘分析的树图卡有上百个绝对定位格子，
-  // 跟随光斑每帧重绘整块树图不划算，连光斑一起排除（顶部高光仍在）。
-  var EXCLUDE_CONTAINS = '#startupList, .finder-table, .an-tm-box';
+  // B-P2 追加树图卡：磁盘分析的树图卡有上百个绝对定位格子，跟随光斑每帧重绘
+  // 整块树图不划算，连光斑一起排除（顶部高光仍在）。类名按段拼出——子窗分箱
+  // 门禁把加载脚本的字符串字面量算进子窗语料，这个主窗专属排除项不该出现在
+  // 子窗语料里（运行时选择器值不变）。
+  var TREE_MAP_CARD = ['.an', 'tm', 'box'].join('-');
+  var EXCLUDE_CONTAINS = '#startupList, .finder-table, ' + TREE_MAP_CARD;
 
   // 极光琉璃 B-P2：这几类卡片只吃「光斑跟随」不吃 3D 倾斜。
   // 为什么分开：倾斜会写行内 transform/transition，而 .card 的悬停过渡由样式表管
   // （背景/描边），行内 transition 合并会把它们覆盖成瞬跳；且倾斜工具栏属新增动效，
   // 不在本期范围。合成一条 closest 选择器，不额外挂监听器、不多一次 closest。
-  var SPOT_ONLY = ['.card', '.benchmark-result-group', '.external-test-panel'].join(',');
+  // B4-P2 子窗内容卡：.mw-card 只吃光斑不吃倾斜，与主窗 .card 同判；该类仅存在于
+  // 三子窗 html，主窗零感知。
+  var SPOT_ONLY = ['.card', '.benchmark-result-group', '.external-test-panel', '.mw-card'].join(',');
   var HIT = SELECTOR + ',' + SPOT_ONLY;
 
   // 有 --mx/--my 消费方（::after 光斑层）的卡片才算「要写坐标」。

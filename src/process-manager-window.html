@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="styles/main.css" />
   <link rel="stylesheet" href="styles/ds.css" />
 </head>
-<body class="mw-window theme-light">
+<body class="mw-window theme-light" data-skin="glass">
   <div class="mw-shell">
     <div class="pw-topbar">
       <div class="pw-topbar-copy">
@@ -55,8 +55,13 @@
   <script src="scripts/xtable.js"></script>
   <script src="scripts/icon-fallback.js"></script>
   <script src="scripts/processes.js"></script>
+  <!-- 极光琉璃 B4-P2：跟随光斑两件（.btn 聚光 / .mw-card 光斑坐标 --mx/--my）。
+       文档级事件委托、无初始化依赖；RM 求值读 window.ds（缺件自带兜底）。
+       家族序随主窗 IDLE 清单：tilt 在 liquid-glass 之前、spotlight 在其后。 -->
+  <script src="scripts/tilt.js"></script>
   <!-- 液态玻璃引擎：子窗口与主窗共用四档效果（按钮折射/弹性形动），分段栏等选择器在子窗无命中自动跳过 -->
   <script src="scripts/liquid-glass.js"></script>
+  <script src="scripts/spotlight.js"></script>
   <!-- NEW-6：子窗轻量提示共用件（各窗 toast 薄委托至此，须先于主脚本加载） -->
   <script src="scripts/sub-toast.js"></script>
   <script src="scripts/process-manager-window.js"></script>
