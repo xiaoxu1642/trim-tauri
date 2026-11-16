@@ -1,0 +1,1258 @@
+{
+  "_doc": "命令清单（唯一真源）：Tauri 命令面的单一登记口。字段：name=Rust 命令名；module=commands/ 模块段；channel=前端 invoke 通道（CHANNEL_MAP 键，null=无 invoke 通道：send/直连/探针类）；tier=档位（main|readonly|null，null=不进两张 MUST 表，档位由 tools/check-guard-tiers.mjs 其余登记面管理）；group=三处生成区共用的分组标签。生成三处产物：node tools/gen-command-manifest.mjs --write（勿手改生成区）。",
+  "commands": [
+    {
+      "name": "app_get_info",
+      "module": "app",
+      "channel": "app:get-info",
+      "tier": "readonly",
+      "group": "A 批：app"
+    },
+    {
+      "name": "app_read_usage",
+      "module": "app",
+      "channel": "app:read-usage",
+      "tier": "main",
+      "group": "A 批：app"
+    },
+    {
+      "name": "app_open_external",
+      "module": "app",
+      "channel": "app:open-external",
+      "tier": "main",
+      "group": "A 批：app"
+    },
+    {
+      "name": "app_open_doc",
+      "module": "app",
+      "channel": "app:open-doc",
+      "tier": "readonly",
+      "group": "A 批：app"
+    },
+    {
+      "name": "app_first_paint",
+      "module": "app",
+      "channel": null,
+      "tier": null,
+      "group": "A 批：app"
+    },
+    {
+      "name": "log_write",
+      "module": "log",
+      "channel": "log:write",
+      "tier": "readonly",
+      "group": "A 批：log / diag / modal / window / shutdown / intro"
+    },
+    {
+      "name": "log_read",
+      "module": "log",
+      "channel": "log:read",
+      "tier": "main",
+      "group": "A 批：log / diag / modal / window / shutdown / intro"
+    },
+    {
+      "name": "log_export",
+      "module": "log",
+      "channel": "log:export",
+      "tier": "main",
+      "group": "A 批：log / diag / modal / window / shutdown / intro"
+    },
+    {
+      "name": "diag_dwm_conflict",
+      "module": "misc",
+      "channel": "diag:dwm-conflict",
+      "tier": "main",
+      "group": "A 批：log / diag / modal / window / shutdown / intro"
+    },
+    {
+      "name": "modal_open",
+      "module": "misc",
+      "channel": "modal:open",
+      "tier": "readonly",
+      "group": "A 批：log / diag / modal / window / shutdown / intro"
+    },
+    {
+      "name": "modal_close",
+      "module": "misc",
+      "channel": "modal:close",
+      "tier": "readonly",
+      "group": "A 批：log / diag / modal / window / shutdown / intro"
+    },
+    {
+      "name": "intro_load",
+      "module": "misc",
+      "channel": "intro:load",
+      "tier": "readonly",
+      "group": "A 批：log / diag / modal / window / shutdown / intro"
+    },
+    {
+      "name": "debug_data_dirs",
+      "module": "misc",
+      "channel": null,
+      "tier": "readonly",
+      "group": "A 批：log / diag / modal / window / shutdown / intro"
+    },
+    {
+      "name": "device_scan",
+      "module": "device",
+      "channel": "device:scan",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "system_disk_type",
+      "module": "system",
+      "channel": "system:disk-type",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "system_disk_list",
+      "module": "system",
+      "channel": "system:disk-list",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_power_plan_get",
+      "module": "syspanel",
+      "channel": "syspanel:power-plan-get",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_power_plan_apply",
+      "module": "syspanel",
+      "channel": "syspanel:power-plan-apply",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_power_settings_dump",
+      "module": "syspanel",
+      "channel": "syspanel:power-settings-dump",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_power_plan_duplicate",
+      "module": "syspanel",
+      "channel": "syspanel:power-plan-duplicate",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_power_plan_rename",
+      "module": "syspanel",
+      "channel": "syspanel:power-plan-rename",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_power_plan_delete",
+      "module": "syspanel",
+      "channel": "syspanel:power-plan-delete",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_power_plan_import",
+      "module": "syspanel",
+      "channel": "syspanel:power-plan-import",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_power_plan_export",
+      "module": "syspanel",
+      "channel": "syspanel:power-plan-export",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_power_settings_unlock",
+      "module": "syspanel",
+      "channel": "syspanel:power-settings-unlock",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_power_settings_apply",
+      "module": "syspanel",
+      "channel": "syspanel:power-settings-apply",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_power_settings_revert",
+      "module": "syspanel",
+      "channel": "syspanel:power-settings-revert",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_power_settings_compare",
+      "module": "syspanel",
+      "channel": "syspanel:power-settings-compare",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_power_settings_open_regedit",
+      "module": "syspanel",
+      "channel": "syspanel:power-settings-open-regedit",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_power_ultimate_enable",
+      "module": "syspanel",
+      "channel": "syspanel:power-ultimate-enable",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_power_hide_high_performance",
+      "module": "syspanel",
+      "channel": "syspanel:power-hide-high-performance",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_power_restore_high_performance",
+      "module": "syspanel",
+      "channel": "syspanel:power-restore-high-performance",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_pagefile_state",
+      "module": "syspanel",
+      "channel": "syspanel:pagefile-state",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "syspanel_pagefile_apply",
+      "module": "syspanel",
+      "channel": "syspanel:pagefile-apply",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "overview_metrics",
+      "module": "overview",
+      "channel": "overview:metrics",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "overview_hardware",
+      "module": "overview",
+      "channel": "overview:hardware",
+      "tier": "main",
+      "group": "A 批：device / system / overview"
+    },
+    {
+      "name": "paths_load",
+      "module": "paths",
+      "channel": "paths:load",
+      "tier": "main",
+      "group": "A 批：paths"
+    },
+    {
+      "name": "paths_save",
+      "module": "paths",
+      "channel": "paths:save",
+      "tier": "main",
+      "group": "A 批：paths"
+    },
+    {
+      "name": "paths_browse",
+      "module": "paths",
+      "channel": "paths:browse",
+      "tier": "main",
+      "group": "A 批：paths"
+    },
+    {
+      "name": "paths_app_icon",
+      "module": "paths",
+      "channel": "paths:app-icon",
+      "tier": "main",
+      "group": "A 批：paths"
+    },
+    {
+      "name": "paths_file_icon",
+      "module": "paths",
+      "channel": "paths:file-icon",
+      "tier": "readonly",
+      "group": "A 批：paths"
+    },
+    {
+      "name": "realtime_adapters",
+      "module": "realtime",
+      "channel": "realtime:adapters",
+      "tier": "readonly",
+      "group": "A 批：realtime"
+    },
+    {
+      "name": "realtime_sample",
+      "module": "realtime",
+      "channel": "realtime:sample",
+      "tier": "readonly",
+      "group": "A 批：realtime"
+    },
+    {
+      "name": "realtime_loss",
+      "module": "realtime",
+      "channel": "realtime:loss",
+      "tier": "readonly",
+      "group": "A 批：realtime"
+    },
+    {
+      "name": "realtime_report_save",
+      "module": "realtime",
+      "channel": "realtime:report-save",
+      "tier": "readonly",
+      "group": "A 批：realtime"
+    },
+    {
+      "name": "realtime_report_list",
+      "module": "realtime",
+      "channel": "realtime:report-list",
+      "tier": "readonly",
+      "group": "A 批：realtime"
+    },
+    {
+      "name": "realtime_report_get",
+      "module": "realtime",
+      "channel": "realtime:report-get",
+      "tier": "readonly",
+      "group": "A 批：realtime"
+    },
+    {
+      "name": "realtime_report_delete",
+      "module": "realtime",
+      "channel": "realtime:report-delete",
+      "tier": "readonly",
+      "group": "A 批：realtime"
+    },
+    {
+      "name": "realtime_report_clear",
+      "module": "realtime",
+      "channel": "realtime:report-clear",
+      "tier": "readonly",
+      "group": "A 批：realtime"
+    },
+    {
+      "name": "finder_scan",
+      "module": "finder",
+      "channel": "finder:scan",
+      "tier": "readonly",
+      "group": "B 批：finder（只读扫描 + 删除，走原生引擎 sink 直调）"
+    },
+    {
+      "name": "finder_delete",
+      "module": "finder",
+      "channel": "finder:delete",
+      "tier": "main",
+      "group": "B 批：finder（只读扫描 + 删除，走原生引擎 sink 直调）"
+    },
+    {
+      "name": "finder_delete_manifest",
+      "module": "finder",
+      "channel": "finder:delete-manifest",
+      "tier": "readonly",
+      "group": "B 批：finder（只读扫描 + 删除，走原生引擎 sink 直调）"
+    },
+    {
+      "name": "finder_open_backup_dir",
+      "module": "finder",
+      "channel": "finder:open-backup-dir",
+      "tier": "readonly",
+      "group": "B 批：finder（只读扫描 + 删除，走原生引擎 sink 直调）"
+    },
+    {
+      "name": "finder_ignore_folder",
+      "module": "finder",
+      "channel": "finder:ignore-folder",
+      "tier": "main",
+      "group": "B 批：finder（只读扫描 + 删除，走原生引擎 sink 直调）"
+    },
+    {
+      "name": "finder_ignore_list",
+      "module": "finder",
+      "channel": "finder:ignore-list",
+      "tier": "main",
+      "group": "B 批：finder（只读扫描 + 删除，走原生引擎 sink 直调）"
+    },
+    {
+      "name": "finder_ignore_remove",
+      "module": "finder",
+      "channel": "finder:ignore-remove",
+      "tier": "main",
+      "group": "B 批：finder（只读扫描 + 删除，走原生引擎 sink 直调）"
+    },
+    {
+      "name": "uninstall_list",
+      "module": "uninstall",
+      "channel": "uninstall:list",
+      "tier": "main",
+      "group": "卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）"
+    },
+    {
+      "name": "uninstall_run",
+      "module": "uninstall",
+      "channel": "uninstall:run",
+      "tier": "main",
+      "group": "卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）"
+    },
+    {
+      "name": "uninstall_modify",
+      "module": "uninstall",
+      "channel": "uninstall:modify",
+      "tier": "main",
+      "group": "卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）"
+    },
+    {
+      "name": "uninstall_residue_scan",
+      "module": "uninstall",
+      "channel": "uninstall:residue-scan",
+      "tier": null,
+      "group": "卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）"
+    },
+    {
+      "name": "uninstall_residue_execute",
+      "module": "uninstall",
+      "channel": "uninstall:residue-execute",
+      "tier": null,
+      "group": "卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）"
+    },
+    {
+      "name": "uninstall_dir_size",
+      "module": "uninstall",
+      "channel": "uninstall:dir-size",
+      "tier": "main",
+      "group": "卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）"
+    },
+    {
+      "name": "uninstall_reg_backup_list",
+      "module": "uninstall",
+      "channel": "uninstall:reg-backup-list",
+      "tier": "main",
+      "group": "卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）"
+    },
+    {
+      "name": "uninstall_reg_backup_restore",
+      "module": "uninstall",
+      "channel": "uninstall:reg-backup-restore",
+      "tier": "main",
+      "group": "卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）"
+    },
+    {
+      "name": "uninstall_batch_list",
+      "module": "uninstall",
+      "channel": "uninstall:batch-list",
+      "tier": "main",
+      "group": "卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）"
+    },
+    {
+      "name": "uninstall_batch_restore",
+      "module": "uninstall",
+      "channel": "uninstall:batch-restore",
+      "tier": "main",
+      "group": "卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）"
+    },
+    {
+      "name": "uninstall_report_list",
+      "module": "uninstall",
+      "channel": "uninstall:report-list",
+      "tier": "main",
+      "group": "卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）"
+    },
+    {
+      "name": "uninstall_report_get",
+      "module": "uninstall",
+      "channel": "uninstall:report-get",
+      "tier": "main",
+      "group": "卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）"
+    },
+    {
+      "name": "uninstall_appx_logo",
+      "module": "uninstall",
+      "channel": "uninstall:appx-logo",
+      "tier": "main",
+      "group": "卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）"
+    },
+    {
+      "name": "memory_info",
+      "module": "memory",
+      "channel": "memory:info",
+      "tier": "readonly",
+      "group": "B 批：memory（6）+ processManager 窗口（2+send）"
+    },
+    {
+      "name": "memory_clean",
+      "module": "memory",
+      "channel": "memory:clean",
+      "tier": "main",
+      "group": "B 批：memory（6）+ processManager 窗口（2+send）"
+    },
+    {
+      "name": "memory_processes",
+      "module": "memory",
+      "channel": "memory:processes",
+      "tier": "readonly",
+      "group": "B 批：memory（6）+ processManager 窗口（2+send）"
+    },
+    {
+      "name": "memory_kill",
+      "module": "memory",
+      "channel": "memory:kill",
+      "tier": "readonly",
+      "group": "B 批：memory（6）+ processManager 窗口（2+send）"
+    },
+    {
+      "name": "memory_stubborn_kill",
+      "module": "memory",
+      "channel": "memory:stubborn-kill",
+      "tier": "main",
+      "group": "B 批：memory（6）+ processManager 窗口（2+send）"
+    },
+    {
+      "name": "process_manager_open_window",
+      "module": "processmanager",
+      "channel": "processManager:open-window",
+      "tier": "readonly",
+      "group": "B 批：memory（6）+ processManager 窗口（2+send）"
+    },
+    {
+      "name": "process_manager_close_window",
+      "module": "processmanager",
+      "channel": "processManager:close-window",
+      "tier": "readonly",
+      "group": "B 批：memory（6）+ processManager 窗口（2+send）"
+    },
+    {
+      "name": "process_manager_report",
+      "module": "processmanager",
+      "channel": null,
+      "tier": "readonly",
+      "group": "B 批：memory（6）+ processManager 窗口（2+send）"
+    },
+    {
+      "name": "cleanup_allow_preview_assets",
+      "module": "cleanup",
+      "channel": "cleanup:allow-preview-assets",
+      "tier": "main",
+      "group": "B 批：memory（6）+ processManager 窗口（2+send）"
+    },
+    {
+      "name": "residue_open_window",
+      "module": "residue",
+      "channel": "residue:open-window",
+      "tier": "main",
+      "group": "B 批：memory（6）+ processManager 窗口（2+send）"
+    },
+    {
+      "name": "residue_close_window",
+      "module": "residue",
+      "channel": "residue:close-window",
+      "tier": "readonly",
+      "group": "B 批：memory（6）+ processManager 窗口（2+send）"
+    },
+    {
+      "name": "runtimes_collect",
+      "module": "runtimes",
+      "channel": "runtimes:collect",
+      "tier": "readonly",
+      "group": "B 批：runtimes / netcheck / diskbench"
+    },
+    {
+      "name": "runtimes_install",
+      "module": "runtimes",
+      "channel": "runtimes:install",
+      "tier": "main",
+      "group": "B 批：runtimes / netcheck / diskbench"
+    },
+    {
+      "name": "netcheck_collect",
+      "module": "netcheck",
+      "channel": "netcheck:collect",
+      "tier": "readonly",
+      "group": "B 批：runtimes / netcheck / diskbench"
+    },
+    {
+      "name": "netcheck_repair",
+      "module": "netcheck",
+      "channel": "netcheck:repair",
+      "tier": "main",
+      "group": "B 批：runtimes / netcheck / diskbench"
+    },
+    {
+      "name": "diskbench_run",
+      "module": "diskbench",
+      "channel": "diskbench:run",
+      "tier": "main",
+      "group": "B 批：runtimes / netcheck / diskbench"
+    },
+    {
+      "name": "cleanup_rules",
+      "module": "cleanup",
+      "channel": "cleanup:rules",
+      "tier": "main",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_reg_backup_list",
+      "module": "cleanup",
+      "channel": "cleanup:reg-backup-list",
+      "tier": "readonly",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_reg_backup_restore",
+      "module": "cleanup",
+      "channel": "cleanup:reg-backup-restore",
+      "tier": "main",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_file_backup_list",
+      "module": "cleanup",
+      "channel": "cleanup:file-backup-list",
+      "tier": "readonly",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_file_backup_restore_batch",
+      "module": "cleanup",
+      "channel": "cleanup:file-backup-restore-batch",
+      "tier": "main",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_backup_purge",
+      "module": "cleanup",
+      "channel": "cleanup:backup-purge",
+      "tier": "main",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_scan",
+      "module": "cleanup",
+      "channel": "cleanup:scan",
+      "tier": "readonly",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_scan_cancel",
+      "module": "cleanup",
+      "channel": "cleanup:scan-cancel",
+      "tier": "main",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_execute",
+      "module": "cleanup",
+      "channel": "cleanup:execute",
+      "tier": "main",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_check_locked",
+      "module": "cleanup",
+      "channel": "cleanup:check-locked",
+      "tier": "readonly",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_kill_locked_processes",
+      "module": "cleanup",
+      "channel": "cleanup:kill-locked-processes",
+      "tier": "main",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_query_locked",
+      "module": "cleanup",
+      "channel": "cleanup:query-locked",
+      "tier": "main",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_item_detail",
+      "module": "cleanup",
+      "channel": "cleanup:item-detail",
+      "tier": "readonly",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_age_policy",
+      "module": "cleanup",
+      "channel": "cleanup:age-policy",
+      "tier": "main",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_set_age_policy",
+      "module": "cleanup",
+      "channel": "cleanup:set-age-policy",
+      "tier": "main",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_recycle_stats",
+      "module": "cleanup",
+      "channel": "cleanup:recycle-stats",
+      "tier": "main",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_empty_recycle_bin",
+      "module": "cleanup",
+      "channel": "cleanup:empty-recycle-bin",
+      "tier": "main",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "cleanup_open_recycle_bin",
+      "module": "cleanup",
+      "channel": "cleanup:open-recycle-bin",
+      "tier": "main",
+      "group": "C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）"
+    },
+    {
+      "name": "settings_load",
+      "module": "settings",
+      "channel": "settings:load",
+      "tier": "readonly",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "settings_get_prefs",
+      "module": "settings",
+      "channel": "settings:get-prefs",
+      "tier": "readonly",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "settings_set_pref",
+      "module": "settings",
+      "channel": "settings:set-pref",
+      "tier": "readonly",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "settings_cdp_state",
+      "module": "settings",
+      "channel": "settings:cdp-state",
+      "tier": "main",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "settings_cdp_set",
+      "module": "settings",
+      "channel": "settings:cdp-set",
+      "tier": "main",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "models_save",
+      "module": "models",
+      "channel": "models:save",
+      "tier": "readonly",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "models_set_scope",
+      "module": "models",
+      "channel": "models:set-scope",
+      "tier": "readonly",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "models_test",
+      "module": "models",
+      "channel": "models:test",
+      "tier": "readonly",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "models_open_window",
+      "module": "models",
+      "channel": "models:open-window",
+      "tier": "readonly",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "models_close_window",
+      "module": "models",
+      "channel": "models:close-window",
+      "tier": "readonly",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "aidesc_get",
+      "module": "aidesc",
+      "channel": "aidesc:get",
+      "tier": "readonly",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "quickcmds_run",
+      "module": "quickcmds",
+      "channel": "quickcmds:run",
+      "tier": "main",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "bench_history_add",
+      "module": "benchhistory",
+      "channel": "bench-history:add",
+      "tier": "main",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "bench_history_list",
+      "module": "benchhistory",
+      "channel": "bench-history:list",
+      "tier": "main",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "bench_history_delete",
+      "module": "benchhistory",
+      "channel": "bench-history:delete",
+      "tier": "main",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "bench_history_clear",
+      "module": "benchhistory",
+      "channel": "bench-history:clear",
+      "tier": "main",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "fonts_list",
+      "module": "fonts",
+      "channel": "fonts:list",
+      "tier": "readonly",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "fonts_import",
+      "module": "fonts",
+      "channel": "fonts:import",
+      "tier": "readonly",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "fonts_remove_imported",
+      "module": "fonts",
+      "channel": "fonts:remove-imported",
+      "tier": "readonly",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "fonts_save_config",
+      "module": "fonts",
+      "channel": "fonts:save-config",
+      "tier": "readonly",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "paths_scan",
+      "module": "paths",
+      "channel": "paths:scan",
+      "tier": "main",
+      "group": "C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan"
+    },
+    {
+      "name": "fileclean_scan",
+      "module": "fileclean",
+      "channel": "fileclean:scan",
+      "tier": "readonly",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "fileclean_delete_file",
+      "module": "fileclean",
+      "channel": "fileclean:delete-file",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "fileclean_execute",
+      "module": "fileclean",
+      "channel": "fileclean:execute",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "maintenance_tasks",
+      "module": "maintenance",
+      "channel": "maintenance:tasks",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "maintenance_run",
+      "module": "maintenance",
+      "channel": "maintenance:run",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "contextmenu_scan",
+      "module": "contextmenu",
+      "channel": "contextmenu:scan",
+      "tier": "readonly",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "contextmenu_toggle",
+      "module": "contextmenu",
+      "channel": "contextmenu:toggle",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "contextmenu_icons",
+      "module": "contextmenu",
+      "channel": "contextmenu:icons",
+      "tier": "readonly",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "contextmenu_open_in_regedit",
+      "module": "contextmenu",
+      "channel": "contextmenu:open-in-regedit",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "contextmenu_restart_explorer",
+      "module": "contextmenu",
+      "channel": "contextmenu:restart-explorer",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "startup_scan",
+      "module": "startup",
+      "channel": "startup:scan",
+      "tier": "readonly",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "startup_toggle",
+      "module": "startup",
+      "channel": "startup:toggle",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "startup_delete",
+      "module": "startup",
+      "channel": "startup:delete",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "startup_openlocation",
+      "module": "startup",
+      "channel": "startup:openlocation",
+      "tier": "readonly",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "startup_open_source",
+      "module": "startup",
+      "channel": "startup:open-source",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "startup_add",
+      "module": "startup",
+      "channel": "startup:add",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_run",
+      "module": "optimizer",
+      "channel": "optimizer:run",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_list",
+      "module": "optimizer",
+      "channel": "optimizer:list",
+      "tier": "readonly",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_check_optimized",
+      "module": "optimizer",
+      "channel": "optimizer:check-optimized",
+      "tier": "readonly",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_batch_preflight",
+      "module": "optimizer",
+      "channel": "optimizer:batch-preflight",
+      "tier": "readonly",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_state_overview",
+      "module": "optimizer",
+      "channel": "optimizer:state-overview",
+      "tier": "readonly",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_stale_dismiss",
+      "module": "optimizer",
+      "channel": "optimizer:stale-dismiss",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_list_groups",
+      "module": "optimizer",
+      "channel": "optimizer:list-groups",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_touch_recent",
+      "module": "optimizer",
+      "channel": "optimizer:touch-recent",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_svc_mem_current",
+      "module": "optimizer",
+      "channel": "optimizer:svc-mem-current",
+      "tier": "readonly",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_backup_reg",
+      "module": "optimizer",
+      "channel": "optimizer:backup-reg",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_restore_reg",
+      "module": "optimizer",
+      "channel": "optimizer:restore-reg",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_check_restore",
+      "module": "optimizer",
+      "channel": "optimizer:check-restore",
+      "tier": "readonly",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_create_restore",
+      "module": "optimizer",
+      "channel": "optimizer:create-restore",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_list_restore",
+      "module": "optimizer",
+      "channel": "optimizer:list-restore",
+      "tier": "readonly",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_restore_frequency",
+      "module": "optimizer",
+      "channel": "optimizer:restore-frequency",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_genadvice",
+      "module": "optimizer",
+      "channel": "optimizer:genadvice",
+      "tier": "readonly",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_bcd_enum",
+      "module": "optimizer",
+      "channel": "optimizer:bcd-enum",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_external_scan",
+      "module": "optimizer",
+      "channel": "optimizer:external-scan",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_nara_panel",
+      "module": "optimizer",
+      "channel": "optimizer:nara-panel",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "optimizer_privacy_panel",
+      "module": "optimizer",
+      "channel": "optimizer:privacy-panel",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "peripheral_query",
+      "module": "peripheral",
+      "channel": "peripheral:query",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "peripheral_apply",
+      "module": "peripheral",
+      "channel": "peripheral:apply",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "peripheral_restore_backup",
+      "module": "peripheral",
+      "channel": "peripheral:restore-backup",
+      "tier": "main",
+      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
+    },
+    {
+      "name": "appearance_get_material",
+      "module": "appearance",
+      "channel": "appearance:get-material",
+      "tier": "readonly",
+      "group": "E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好）"
+    },
+    {
+      "name": "appearance_set_material",
+      "module": "appearance",
+      "channel": "appearance:set-material",
+      "tier": "main",
+      "group": "E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好）"
+    },
+    {
+      "name": "appearance_set_material_enabled",
+      "module": "appearance",
+      "channel": "appearance:set-material-enabled",
+      "tier": "main",
+      "group": "E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好）"
+    },
+    {
+      "name": "appearance_get_env",
+      "module": "appearance",
+      "channel": "appearance:get-env",
+      "tier": "readonly",
+      "group": "E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好）"
+    },
+    {
+      "name": "appearance_bg_import",
+      "module": "appearance",
+      "channel": "appearance:bg-import",
+      "tier": "main",
+      "group": "E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好）"
+    },
+    {
+      "name": "appearance_bg_delete",
+      "module": "appearance",
+      "channel": "appearance:bg-delete",
+      "tier": "main",
+      "group": "E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好）"
+    },
+    {
+      "name": "appearance_bg_list",
+      "module": "appearance",
+      "channel": "appearance:bg-list",
+      "tier": "main",
+      "group": "E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好）"
+    },
+    {
+      "name": "appearance_bg_open_dir",
+      "module": "appearance",
+      "channel": "appearance:bg-open-dir",
+      "tier": "main",
+      "group": "E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好）"
+    },
+    {
+      "name": "appearance_get_prefs",
+      "module": "appearance",
+      "channel": "appearance:get-prefs",
+      "tier": "main",
+      "group": "E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好）"
+    },
+    {
+      "name": "appearance_set_pref",
+      "module": "appearance",
+      "channel": "appearance:set-pref",
+      "tier": "main",
+      "group": "E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好）"
+    },
+    {
+      "name": "elevate_request",
+      "module": "elevate",
+      "channel": "elevate:request",
+      "tier": "main",
+      "group": "E 批：elevate（UAC 自提权 + 新旧实例交接）"
+    },
+    {
+      "name": "updater_check",
+      "module": "updater",
+      "channel": "updater:check",
+      "tier": "main",
+      "group": "E 批：updater（多线路容灾 + minisign 断代）"
+    },
+    {
+      "name": "updater_completion",
+      "module": "updater",
+      "channel": "updater:completion",
+      "tier": "main",
+      "group": "E 批：updater（多线路容灾 + minisign 断代）"
+    },
+    {
+      "name": "updater_download",
+      "module": "updater",
+      "channel": "updater:download",
+      "tier": "main",
+      "group": "E 批：updater（多线路容灾 + minisign 断代）"
+    },
+    {
+      "name": "updater_cancel_download",
+      "module": "updater",
+      "channel": "updater:cancel-download",
+      "tier": "main",
+      "group": "E 批：updater（多线路容灾 + minisign 断代）"
+    },
+    {
+      "name": "updater_install",
+      "module": "updater",
+      "channel": "updater:install",
+      "tier": "main",
+      "group": "E 批：updater（多线路容灾 + minisign 断代）"
+    }
+  ]
+}

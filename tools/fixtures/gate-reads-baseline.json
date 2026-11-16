@@ -15,8 +15,8 @@
     "M-12"
   ],
   "srcHash": {
-    "check-channel-map": "3e696461366abe04",
-    "check-guard-tiers": "567a87d78e8beb8e",
+    "check-channel-map": "d52040002988ce44",
+    "check-guard-tiers": "b26212ede09385f6",
     "check-layering": "2eafd617abcf47b6",
     "check-delete-exits": "c7c3b79a79f4928d",
     "check-delete-callsites": "fd8c5fb7da03595d",
@@ -25,6 +25,7 @@
     "check-residue-rule-contract": "b9cb889602e43fe2",
     "check-cleanup-rule-contract": "55730099eeb938e0",
     "check-scan-rule-diff": "057ed4341fac7613",
+    "check-scanner-contract": "592d2bd532a94ed8",
     "check-ps-callsites": "5a72d91bd49bebd1",
     "check-ps-extraction": "842c51ea10d3b307",
     "check-html-contract": "da877b2f4f947020",
@@ -73,12 +74,12 @@
     "check-doc-refs": "6cd600acee02e5b6",
     "check-tools-doc-paths": "1693222d2faa9503",
     "check-comment-rot": "9b0df36598efcf67",
-    "check-positive-controls": "0704ff1b426fc29b",
+    "check-positive-controls": "b6651aa4cdeb8133",
     "check-review-units": "b1346bf1600df8d4",
     "check-tests-helper-parity": "fb2af723d16b11f0",
     "check-data-signatures": "4d4dd6d89c196d58",
     "check-fixture-freshness": "264dcec8a506125d",
-    "check-gate-roster": "f30c14025b1bff46",
+    "check-gate-roster": "ecb1ff6a4698d821",
     "check-delete-root-guard": "4dcef9b6844e6293",
     "check-ignored-isolation": "844fd88546a4f779",
     "check-async-exits": "d0ef6d3ef5513994",
@@ -98,14 +99,17 @@
       "M-06",
       "M-07",
       "M-08",
+      "M-10",
       "M-12"
     ],
     "check-guard-tiers": [
+      "M-01",
       "M-03",
       "M-05",
       "M-06",
       "M-07",
       "M-08",
+      "M-10",
       "M-12"
     ],
     "check-layering": [
@@ -171,6 +175,9 @@
     "check-scan-rule-diff": [
       "M-04",
       "M-09"
+    ],
+    "check-scanner-contract": [
+      "M-12"
     ],
     "check-ps-callsites": [
       "M-03",
@@ -542,5 +549,5 @@
       "M-12"
     ]
   },
-  "bodyHash": "ef52f18082eec55f"
+  "bodyHash": "b50cf8ea1d4d1e0c"
 }

@@ -158,14 +158,19 @@
   // 选型：动态 script 注入与现有 CSP（script-src 只允许 self）完全兼容，无需把现盘 IIFE 脚本
   // （src/scripts/*.js，现算：rg -c "^\s*\(function" src/scripts/*.js）改成 ESM、无需构建步骤、
   // 零新增依赖（AGENTS.md §2 红线）。数组内按依赖顺序排列，先加载的先执行（如 modelpicker ← intro ← contextmenu）。
-  const PAGE_SCRIPTS = {
+  // P1（2026-11-17）：cleanup 依赖组收敛为单一定义 CLEANUP_BUNDLE —— backups 是独立路由但钩子住在
+  // cleanup.js（onBackupsEnter），依赖与 cleanup 完全同组；原先两份逐字清单靠「改一边必须改另一边」的
+  // 注释约束同步，现在共享同一常量，改一处两条路由同时生效。
+  const CLEANUP_BUNDLE = [
     // v3 C（2026-10-02）：磁盘清理域两份脚本从 index.html 摘出，进页时按需注入（首屏最重的两块）。
     // 顺序固定 —— fallback 先于 cleanup：cleanup.js 的顶层 IIFE 要读 window.CLEANUP_RULES_FALLBACK 构建分类。
     // 性能批次①(a)：xtable.js 摘出首屏后前置到本清单最前 —— cleanup.js 调它的 sortItems / renderHeader /
     // buildLayout / bindHeader / createVirtualList / middleEllipsis，不在 cleanup.js 之前就 ReferenceError。
-    // backups 是独立路由但钩子住在 cleanup.js 里，依赖清单与 cleanup 逐字一致，改一边必须改另一边。
-    cleanup: ['scripts/xtable.js', 'scripts/cleanup-fallback.generated.js', 'vendor/litebox.js', 'scripts/cleanup.js'],
-    backups: ['scripts/xtable.js', 'scripts/cleanup-fallback.generated.js', 'vendor/litebox.js', 'scripts/cleanup.js'],
+    'scripts/xtable.js', 'scripts/cleanup-fallback.generated.js', 'vendor/litebox.js', 'scripts/cleanup.js'
+  ];
+  const PAGE_SCRIPTS = {
+    cleanup: CLEANUP_BUNDLE,
+    backups: CLEANUP_BUNDLE,
     // 查找器子视图（重复文件/空文件/磁盘分析）才需要 finder.js
     'cleanup-finder': ['scripts/finder.js'],
     // 软件卸载（卸载域 MVP 2026-09-28）：进页加载，脚本自初始化（readyState 守卫）
@@ -263,15 +268,31 @@
     return p;
   }
 
+  // 已完成整组加载的页面台账：重复进页直接短路。整组全部成功才记账 —— 组内任一脚本失败时
+  // 该脚本不进 _scriptLoaded（见 loadScript 头注），下次进页仍会逐条重试。
+  const _loadedPages = new Set();
+
   async function ensurePageScripts(page) {
+    if (_loadedPages.has(page)) return true;
     const list = PAGE_SCRIPTS[page];
-    if (!list || !list.length) return;
+    if (!list || !list.length) return true;
+    let allOk = true;
     for (const src of list) {
       const ok = await loadScript(src); // 顺序加载，保证依赖序
       // P3-4（F3-M01）：只有加载成功才 init —— 失败时 window.X 尚不存在，
       // 空 init 占了台账后补载成功也不再初始化（见 loadScript 头注）
       if (ok) initModuleOf(src);
+      else allOk = false;
     }
+    if (allOk) _loadedPages.add(page);
+    return allOk;
+  }
+
+  // 查找器子视图统一入口（P1 2026-11-17）：补脚本与 finder.init 收进同一条路径，
+  // 切页与分段切换不再各自 ensurePageScripts + ensureInit 分叉。finder 内部幂等。
+  async function ensureCleanupFinder() {
+    await ensurePageScripts('cleanup-finder');
+    window.finder?.ensureInit?.();
   }
 
   // 脚本加载完成后补一次 init（此前由启动时的 safeInit 统一调用，改成按需加载后必须在这里补，
@@ -354,8 +375,6 @@
     if (persist) {
       try { localStorage.setItem(CLEANUP_VIEW_KEY, view); } catch (e) {}
     }
-    // 查找器子视图：确保脚本已初始化（finder 内部幂等）
-    if (view !== 'cleanup') window.finder?.ensureInit?.();
     // 带动画刷新液态滑块（升级3：修复切换分段无动效——此前 refreshAll(false)
     // 在点击动画调度之后执行并把 schedulePlace 改写为无动画落位）
     window.liquidBar?.refreshAll?.(true);
@@ -390,9 +409,8 @@
     // F3-M01：等待期间又点了别的页 ⇒ 本次已过期，不落笔、不进页（否则旧结果会盖掉最后一次点击）
     if (seq !== navSeq) return;
     if (cleanupView && cleanupView !== 'cleanup') {
-      await ensurePageScripts('cleanup-finder');
+      await ensureCleanupFinder();
       if (seq !== navSeq) return;
-      window.finder?.ensureInit?.();
     }
     // 持久化活跃页（窗口状态记忆：启动恢复上次页面）。走到这里的一定是最新那次点击 ——
     // 过期续体已在上面两处 return，故本行是 ACTIVE_PAGE_KEY 的唯一写入口，只会写最终生效页。
@@ -1137,11 +1155,8 @@
       const tab = e.target.closest('.filter-tab');
       if (!tab || tab.classList.contains('active')) return;
       const view = tab.dataset.cleanupView;
-      // v3.7.0 议题五：查找器子视图需要 finder.js，进入视图前补齐（脚本内部 ensureInit 幂等）
-      if (view && view !== 'cleanup') {
-        await ensurePageScripts('cleanup-finder');
-        window.finder?.ensureInit?.();
-      }
+      // 查找器子视图：统一入口补脚本并 init（P1 2026-11-17 收口，见 ensureCleanupFinder）
+      if (view && view !== 'cleanup') await ensureCleanupFinder();
       setCleanupView(view);
     });
 

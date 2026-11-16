@@ -104,6 +104,9 @@ const PENDING_CONTROLS = [
   // check-fail-closed 已于 2026-10-18 v6 P2 配好 A/B 判定器自检并迁入 REGISTRY（本表只减不增）。
   { name: 'check-residue-rule-contract', reason: '对拍型：卸载残留规则库 ⇄ 执行侧契约，缺合成样本' },
   { name: 'check-scan-rule-diff', reason: '差分型：规则改动 → 命中集差分（按设计 spawn cargo test，重编译成本高），对照方案待定' },
+  // P3（2026-11-17）：与 check-scan-rule-diff 同型的 cargo 包装门禁，判红形态（删用例 /
+  // 改红断言 / cargo 失败）随登记当轮实跑验证，暂无内置对照块。
+  { name: 'check-scanner-contract', reason: '差分型（同 check-scan-rule-diff）：包装 cargo test --test scanner_contract 跑主仓侧扫描器公共契约（重复分组/空文件时效闸/年龄护栏/回收站原语 fail-closed，见 src-tauri/tests/scanner_contract.rs），按设计 spawn cargo test（要链接整个 trim_tauri_lib，重编译成本高），对照方案待定' },
   { name: 'check-ps-callsites', reason: '对拍型：PS 调用点 ⇄ 三张登记表（含超时秒数逐点核对），缺合成样本' },
   { name: 'check-csp-consistency', reason: '对拍型：meta CSP ⇄ 三子窗副本逐字一致，缺合成样本' },
   // check-css-tokens 已于 2026-10-18 v6 P2 配好三组判定器自检并迁入 REGISTRY（本表只减不增）。

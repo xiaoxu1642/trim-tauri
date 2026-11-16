@@ -30,6 +30,7 @@ import { join, relative } from 'node:path';
 import { ORIGIN, REPO_ROOT } from './ps-origin.mjs';
 import { walkRs, walkFiles } from './lib/fs-walk.mjs';
 import { blankNonCode } from './lib/src-scan.mjs';
+import { checkZones } from './gen-command-manifest.mjs';
 
 const STRICT = !process.argv.includes('--allow-pending');
 const TAURI_ROOT = REPO_ROOT;
@@ -1144,6 +1145,20 @@ if (!rustHazard || !jsHazard) {
             : ''
     );
   }
+}
+
+// ---- M. 命令清单 ⇄ 生成物对拍（P4 命令清单化） ----
+// CHANNEL_MAP 的条目区是 tools/command-manifest.json 的生成物（lib.rs generate_handler! 与
+// 两张 MUST 表同出该清单）；A~G 组管的是各表与其真源快照的对拍，本组管「清单 ⇄ 生成物」
+// 逐字对拍（同 gen-command-manifest --check 口径，一并对拍另外两处生成区）。
+// 清单漏改、漏跑生成器、手改生成区，都会在这里红。
+{
+  const mres = checkZones();
+  check(
+    mres.ok,
+    'M. 命令清单 ⇄ 生成物一致（command-manifest ⇄ 三处生成区：lib.rs / tauri-api.js / check-guard-tiers 两张 MUST 表）',
+    mres.ok ? '' : mres.problems.join('；'),
+  );
 }
 
 // ---- 迁移进度报告 ----

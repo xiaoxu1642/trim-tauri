@@ -52,6 +52,7 @@ import { join, relative } from 'node:path';
 import { REPO_ROOT } from './ps-origin.mjs';
 import { walkRs } from './lib/fs-walk.mjs';
 import { blankNonCode, lineAt, splitFunctions } from './lib/src-scan.mjs';
+import { checkZones } from './gen-command-manifest.mjs';
 
 const CMD_DIR = join(REPO_ROOT, 'src-tauri', 'src', 'commands');
 
@@ -69,193 +70,224 @@ const EXEMPT = {
 };
 
 /**
- * 必须是主窗档（guard::MAIN）的命令清单。
+ * 必须是主窗档（guard::MAIN）的命令清单（生成区：条目由 tools/command-manifest.json 的
+ * tier=main 经 gen-command-manifest.mjs --write 生成，锚区内勿手改）。
  *
- * 维护约定：改任何一条命令的档位，都必须同步改这张表 —— B 组断言是双向的，
- * 只改代码或只改表都会红。新增 MAIN 档命令时把名字加进来并写明理由。
+ * 维护约定：改任何一条命令的档位，先改清单 tier 再重跑生成器 —— B 组断言是双向的，
+ * 只改代码不改清单（或只手改生成区）都会红。
  * 由 v2 审查现场枚举（138 条走 guard，其中 guard(MAIN) 35 条）+ 本轮 F4/F6 升档得出。
  */
 const MUST_MAIN = [
+  // ⚓ 生成区 must-main：begin/end 之间由 tools/command-manifest.json（tier=main）经
+  // node tools/gen-command-manifest.mjs --write 生成 —— 生成物勿手改，改档先改清单再重跑生成器。
+  // command-manifest:begin must-main
+  'app_open_external',
+  'app_read_usage',
   'appearance_bg_delete',
   'appearance_bg_import',
   'appearance_bg_list',
   'appearance_bg_open_dir',
-  // 外观域偏好（真源从 localStorage 迁到 appearance.json）：现算消费方只有
-  // `src/scripts/pathbinding.js`，而它只被 `src/index.html` 加载（三个子窗挂的是
-  // `window-material.js`，只管材质）⇒ 按 AGENTS §3「没有子窗调用点就不给放宽」判 MAIN。
-  // 判成 readonly 会同时撞 check-channel-map 的 D5 棘轮（只读档却无子窗调用点即红）。
   'appearance_get_prefs',
+  'appearance_set_material',
+  'appearance_set_material_enabled',
   'appearance_set_pref',
-  'cleanup_execute',
-  // G-2 全局年龄策略：读写都只从主窗设置页发起（同 finder_ignore_* 三命令口径）
+  'bench_history_add',
+  'bench_history_clear',
+  'bench_history_delete',
+  'bench_history_list',
   'cleanup_age_policy',
-  'cleanup_set_age_policy',
-  // G-4（2026-10-07）回收站清空改 Shell API：查询条目数与体积（幂等只读，但消费方
-  // 只有主窗清理页，按 AGENTS §3「没有子窗调用点就不给放宽」判 MAIN）、
-  // 清空（不可逆破坏性动作，必须主窗专属）
-  'cleanup_recycle_stats',
-  'cleanup_empty_recycle_bin',
-  // G-4 修订（2026-10-07）：回收站行「明细」= 打开系统回收站。幂等无写面，但
-  // 消费方只有主窗清理页——同 cleanup_recycle_stats 口径判 MAIN。
-  'cleanup_open_recycle_bin',
-  'cleanup_kill_locked_processes',
-  // 2026-11-02：「扫描大小」按钮的停止档 —— 只置取消位，消费方只有主窗清理页，判 MAIN。
-  'cleanup_scan_cancel',
-  // C1-1（2026-10-16）：占用查询入口只在主窗磁盘清理页（内嵌卡片），按「谁真的需要
-  // 调它」判 MAIN——比 readonly 紧；与 check-locked 的 readonly 不冲突（那条的候选
-  // 来自扫描快照，子窗确认链也要用）。
-  'cleanup_query_locked',
-  // R4-U03（2026-10-20 用户裁定）：`cleanup:rules` 一次向渲染层下发**整库**（含每条规则
-  // 的删除路径与 regKeys 目标）。现算唯一调用点 = 主窗磁盘清理页（cleanup.js），
-  // 三个子窗零调用点 ⇒ 按 AGENTS §3「谁真的需要调它」收回主窗独占，不给 readonly。
-  'cleanup_rules',
-  'cleanup_reg_backup_restore', // C-4：reg import 写注册表，只放主窗
-  'cleanup_file_backup_restore_batch', // B1-批（2026-11-13）：整批文件备份还原（写面），只放主窗；旧单条命令随 D4 零调用方棘轮整链摘除
-  // 2026-11-12：备份清除（删除四类备份，回收站优先）。消费方只有主窗备份还原页，
-  // 四个子窗零调用点 ⇒ 按 AGENTS §3「谁真的需要调它」判 MAIN，不给 readonly。
+  'cleanup_allow_preview_assets',
   'cleanup_backup_purge',
-  'contextmenu_open_in_regedit', // v2-F6：会写 HKCU（Regedit\LastKey）且失败时 runas 弹 UAC
-  // 2026-10-09（D3）：contextmenu_remove / contextmenu_restore 随右键删除链整链退役
+  'cleanup_empty_recycle_bin',
+  'cleanup_execute',
+  'cleanup_file_backup_restore_batch',
+  'cleanup_kill_locked_processes',
+  'cleanup_open_recycle_bin',
+  'cleanup_query_locked',
+  'cleanup_recycle_stats',
+  'cleanup_reg_backup_restore',
+  'cleanup_rules',
+  'cleanup_scan_cancel',
+  'cleanup_set_age_policy',
+  'contextmenu_open_in_regedit',
   'contextmenu_restart_explorer',
   'contextmenu_toggle',
-  'uninstall_report_get', // U-6：读批次报告，卸载域全档 MAIN 约定
-  'uninstall_report_list', // U-6：同上
+  'device_scan',
+  'diag_dwm_conflict',
   'diskbench_run',
-  'elevate_request', // AGENTS §3：提权入口只认主窗口 label
-  'cleanup_allow_preview_assets', // 图片预览 asset 按需放行（主窗内嵌 LiteBox 的承接命令）
-  'fileclean_delete_file', // 预览子窗退役后删除入口只剩主窗，档位 APP_WINDOWS → MAIN
+  'elevate_request',
+  'fileclean_delete_file',
   'fileclean_execute',
   'finder_delete',
-  'finder_ignore_folder', // 2026-10-06 任务四：空目录忽略名单写侧（app_data 名单文件，只从主窗空目录页/名单弹窗触发）
-  'finder_ignore_list',   // 同上：名单弹窗的读侧（只读语义但只有主窗消费方，同档 MAIN）
-  'finder_ignore_remove', // 同上：名单移除（写侧）
+  'finder_ignore_folder',
+  'finder_ignore_list',
+  'finder_ignore_remove',
+  'log_export',
+  'log_read',
   'maintenance_run',
+  'maintenance_tasks',
   'memory_clean',
-  // v2-H2：顽固软件治理命令会批量结束进程，后端不校验任何前端确认值，
-  // 且只有主窗加载 memoryclean.js —— 必须锁为主窗档。
-  // （同族的 memory_stubborn_block 已于 2026-11-16 整链退役。）
   'memory_stubborn_kill',
   'netcheck_repair',
   'optimizer_backup_reg',
+  'optimizer_bcd_enum',
   'optimizer_create_restore',
-  'optimizer_restore_frequency', // 2026-10-06：还原点弹窗「恢复默认创建频率」——写 HKLM，只从主窗弹窗触发
+  'optimizer_external_scan',
+  'optimizer_list_groups',
+  'optimizer_nara_panel',
+  'optimizer_privacy_panel',
+  'optimizer_restore_frequency',
   'optimizer_restore_reg',
   'optimizer_run',
-  'optimizer_list_groups', // E7 分类侧表：只被主窗优化页消费（check-channel-map D5 组判「只读档须有子窗消费方」⇒ 判 MAIN）
-  'optimizer_touch_recent', // E10 最近使用写：主窗档
-  'optimizer_bcd_enum', // C3 BCD 面板枚举：主窗永劫专项面板消费，档位 MAIN（同 optimizer_list_groups 的 check-channel-map D5 判据）
-  'optimizer_external_scan', // 账外核对（2026-10-15）：只读但只被主窗优化页消费，判 MAIN（同 check-channel-map D5 判据）
-  'optimizer_nara_panel', // C3 永劫专项面板侧表下发：主窗 optimizer 页消费，档位 MAIN（同 optimizer_list_groups 的 check-channel-map D5 判据）
-  'optimizer_privacy_panel', // WinUtil 借鉴 V3 隐私自护面板侧表下发：主窗 optimizer 页消费，档位 MAIN（同上）
-  'optimizer_stale_dismiss', // 2026-10-03 根治：「未完成还原」横幅的 per-id 忽略——写记账 prefs 段，优化页只在主窗
-  // 2026-10-07：外设优化由独立子窗改为**主窗应用内弹窗**（src/scripts/peripheral.js），
-  // label `peripheral` 退役，三条通道的唯一调用方变成主窗，档位由 APP_WINDOWS 升到 MAIN。
-  'peripheral_query',
+  'optimizer_stale_dismiss',
+  'optimizer_touch_recent',
+  'overview_hardware',
+  'overview_metrics',
+  'paths_app_icon',
+  'paths_browse',
+  'paths_load',
+  'paths_save',
+  'paths_scan',
   'peripheral_apply',
+  'peripheral_query',
   'peripheral_restore_backup',
-  // 'pwsh_prepare' 已于 B11（2026-09-26）整链摘除，不再是一条命令
-  // v0.5.0 残留扫描副窗：主窗入口按钮是唯一调用点（关窗侧在 MUST_READONLY）
+  'quickcmds_run',
   'residue_open_window',
   'runtimes_install',
-  // 'settings_save' 已于 v2-F4 整链摘除（2026-09-26），不再是一条命令
-  // CDP 远程调试开关：消费方只有主窗「系统信息」弹窗（index.html 的 info-row），
-  // 三个子窗与残留/进程副窗都没有调用点 ⇒ 不给 readonly（AGENTS §3「谁真的需要调它」）。
-  'settings_cdp_state',
   'settings_cdp_set',
+  'settings_cdp_state',
   'startup_add',
   'startup_delete',
-  'startup_open_source', // B-6 增强：定位登记来源（写 HKCU regedit LastKey + 拉起 regedit/explorer；主窗档）
+  'startup_open_source',
   'startup_toggle',
-  'updater_cancel_download',
-  'updater_check',
-  'updater_completion', // 读后即删的「更新已完成」标记：只有主窗首启要弹完成提示，不给子窗
-  'updater_download',
-  'updater_install',
-  // updater_get_mirror / updater_set_mirror 已于 2026-10-06 随「更新线路」UI 整链退役
-  // （顺序固化 AtomGit 国内源优先、GitHub 兜底，不再暴露选择）。
-  // 卸载域 MVP（竞品借鉴落地方案 P0 §11）：卸载/残留执行是高危写操作，
-  // 且只有主窗加载 uninstall.js —— 六条命令全档 MAIN。
-  // 其中 check/update-residue 两条按「谁真的需要调它」定档（AGENTS §3 的 M1~M3 教训）：
-  // 更新入口在卸载页（主窗），**不得**因为"检查版本看着像只读"就下放成放行三个子窗的档位。
-  'uninstall_list',
-  'uninstall_run',
-  'uninstall_modify',
-  // v0.7.0：残留链 8 条（三链扫描 / 执行 / 不再提示 / 重启后删除三件套）从 MAIN 迁到
-  // **窄窗口集** `guard::RESIDUE_WINDOWS`，登记口在下面 MUST_WINDOWSET —— 面板整块搬进
-  // residue 副窗后主窗不再调它们，留在 MAIN 会让副窗每次 IPC 判越权（§3 M1~M3）。
-  'uninstall_dir_size',
-  // D1 还原入口：列表也走 MAIN（与 restore 同一弹窗，没必要放行子窗），
-  // restore 会 reg import 写注册表，必须主窗专属 + 危险确认。
-  'uninstall_reg_backup_list',
-  'uninstall_reg_backup_restore',
-  // H1（2026-09-29）：还原包两个入口都只在主窗备份弹窗。list 与同门
-  // uninstall_reg_backup_list 同档（子窗无消费方，按 readonly 放行等于白给目录列举面）；
-  // restore 往磁盘写文件，档位方向写错会锁死功能（M1~M3 教训的反面）
-  'uninstall_batch_list',
-  'uninstall_batch_restore',
-  // R2b-L08（v7.2 P2，2026-10-22）：原先登记在只读档的理由是「疑点：写 logo 缓存文件」，
-  // 与本命令的实现相反——它一个字节都不写，只读 `\WindowsApps\` 下的 .png 回 base64。
-  // 消费面现算只有主窗：唯一调用点是 `appxLogo`（坐标 `src/scripts/uninstall.js:360`），
-  // 而 uninstall.js 只由
-  // app.js 的 `uninstall: ['scripts/uninstall.js']` 按需加载、app.js 只出现在 index.html；
-  // 三个副窗页面各挂自己的 *-window.js，`rg appxLogo src/*.html` 零命中
-  // ⇒ 按 AGENTS §3「只有主窗会调的通道不给 readonly」收归 MAIN，改档不锁死任何副窗功能。
-  'uninstall_appx_logo',
-  // P2 §3.6（2026-10-03 RAINZ 对标）：系统面板三条 —— 电源方案写侧、系统级、
-  // 只在主窗 settings 页有入口；pagefile_state 虽只读但同域同档，
-  // 免得下一批加写侧时又要改档位（AGENTS §3 M1~M3 教训的"反向"：判档要看**下一批**会不会翻）。
-  'syspanel_power_plan_get',
-  'syspanel_power_plan_apply',
-  // v5 P0：电源计划新建/导入/导出/删除与逐设置编辑会话；入口只在主窗 settings 页，
-  // 写侧全部系统级，按 AGENTS §3「没有子窗调用点就不给放宽」判 MAIN。
-  'syspanel_power_settings_dump',
-  'syspanel_power_plan_duplicate',
-  'syspanel_power_plan_rename',
-  'syspanel_power_plan_delete',
-  'syspanel_power_plan_import',
-  'syspanel_power_plan_export',
-  'syspanel_power_settings_unlock',
-  'syspanel_power_settings_apply',
-  'syspanel_power_settings_revert',
-  'syspanel_power_settings_compare',      // v5 P2：跨方案对照读（只在主窗编辑器里触发）
-  'syspanel_power_settings_open_regedit', // v5 P2：拉起 regedit 只从主窗编辑器触发
-  // G-04（2026-10-16 裁定）：开启卓越性能 / 隐藏高性能 / 还原高性能 —— 写侧、系统级、
-  // 只在主窗「Windows设置 → 电源计划」卡触发，无子窗调用点 ⇒ MAIN。
-  'syspanel_power_ultimate_enable',
-  'syspanel_power_hide_high_performance',
-  'syspanel_power_restore_high_performance',
-  'syspanel_pagefile_state',
   'syspanel_pagefile_apply',
-  // v4-K04（2026-10-09）：quickcmds_run 从 readonly 升 MAIN —— 白名单里含
-  // `sys-cmd-admin`（`Start-Process cmd -Verb RunAs`）：挂 readonly 档等于让子窗
-  // 渲染层失陷即可弹 UAC、拿到管理员 CMD，等效提权出口按 §3「不得下放」。
-  // 子窗消费面实测为 0（四份子窗 HTML 均未挂 quickcmds.js），改档零功能代价。
-  'quickcmds_run',
-  // R1a-M01（P1-W2）：以下通道实测只有主窗消费方，按 AGENTS §3「没有子窗调用点
-  // 就不给放宽」迁 MAIN；paths_save 最重（配置路径会进入永久删链）。
-  'paths_save',
-  'app_open_external',
-  'app_read_usage',
-  'appearance_set_material',
-  'appearance_set_material_enabled',
-  'bench_history_add',
-  'bench_history_list',
-  'bench_history_delete',
-  'bench_history_clear',
-  'device_scan',
-  'diag_dwm_conflict',
-  'log_read',
-  'log_export',
-  'maintenance_tasks',
-  'overview_metrics',
-  'overview_hardware',
-  'paths_load',
-  'paths_browse',
-  'paths_app_icon',
-  'paths_scan',
+  'syspanel_pagefile_state',
+  'syspanel_power_hide_high_performance',
+  'syspanel_power_plan_apply',
+  'syspanel_power_plan_delete',
+  'syspanel_power_plan_duplicate',
+  'syspanel_power_plan_export',
+  'syspanel_power_plan_get',
+  'syspanel_power_plan_import',
+  'syspanel_power_plan_rename',
+  'syspanel_power_restore_high_performance',
+  'syspanel_power_settings_apply',
+  'syspanel_power_settings_compare',
+  'syspanel_power_settings_dump',
+  'syspanel_power_settings_open_regedit',
+  'syspanel_power_settings_revert',
+  'syspanel_power_settings_unlock',
+  'syspanel_power_ultimate_enable',
   'system_disk_list',
   'system_disk_type',
+  'uninstall_appx_logo',
+  'uninstall_batch_list',
+  'uninstall_batch_restore',
+  'uninstall_dir_size',
+  'uninstall_list',
+  'uninstall_modify',
+  'uninstall_reg_backup_list',
+  'uninstall_reg_backup_restore',
+  'uninstall_report_get',
+  'uninstall_report_list',
+  'uninstall_run',
+  'updater_cancel_download',
+  'updater_check',
+  'updater_completion',
+  'updater_download',
+  'updater_install',
+  // command-manifest:end must-main
 ];
+
+// ===== 行级语义注释（P4 自生成区迁出：原 MUST_MAIN 行内注释，一条不丢；前缀为归属命令）=====
+// appearance_get_prefs / appearance_set_pref：
+// 外观域偏好（真源从 localStorage 迁到 appearance.json）：现算消费方只有
+// `src/scripts/pathbinding.js`，而它只被 `src/index.html` 加载（三个子窗挂的是
+// `window-material.js`，只管材质）⇒ 按 AGENTS §3「没有子窗调用点就不给放宽」判 MAIN。
+// 判成 readonly 会同时撞 check-channel-map 的 D5 棘轮（只读档却无子窗调用点即红）。
+// cleanup_age_policy：G-2 全局年龄策略：读写都只从主窗设置页发起（同 finder_ignore_* 三命令口径）
+// cleanup_recycle_stats：G-4（2026-10-07）回收站清空改 Shell API：查询条目数与体积（幂等只读，但消费方
+// 只有主窗清理页，按 AGENTS §3「没有子窗调用点就不给放宽」判 MAIN）、
+// 清空（不可逆破坏性动作，必须主窗专属）
+// cleanup_open_recycle_bin：G-4 修订（2026-10-07）：回收站行「明细」= 打开系统回收站。幂等无写面，但
+// 消费方只有主窗清理页——同 cleanup_recycle_stats 口径判 MAIN。
+// cleanup_scan_cancel：2026-11-02：「扫描大小」按钮的停止档 —— 只置取消位，消费方只有主窗清理页，判 MAIN。
+// cleanup_query_locked：C1-1（2026-10-16）：占用查询入口只在主窗磁盘清理页（内嵌卡片），按「谁真的需要
+// 调它」判 MAIN——比 readonly 紧；与 check-locked 的 readonly 不冲突（那条的候选
+// 来自扫描快照，子窗确认链也要用）。
+// cleanup_rules：R4-U03（2026-10-20 用户裁定）：`cleanup:rules` 一次向渲染层下发**整库**（含每条规则
+// 的删除路径与 regKeys 目标）。现算唯一调用点 = 主窗磁盘清理页（cleanup.js），
+// 三个子窗零调用点 ⇒ 按 AGENTS §3「谁真的需要调它」收回主窗独占，不给 readonly。
+// cleanup_reg_backup_restore：C-4：reg import 写注册表，只放主窗
+// cleanup_file_backup_restore_batch：B1-批（2026-11-13）：整批文件备份还原（写面），只放主窗；旧单条命令随 D4 零调用方棘轮整链摘除
+// cleanup_backup_purge：2026-11-12：备份清除（删除四类备份，回收站优先）。消费方只有主窗备份还原页，
+// 四个子窗零调用点 ⇒ 按 AGENTS §3「谁真的需要调它」判 MAIN，不给 readonly。
+// contextmenu_open_in_regedit：v2-F6：会写 HKCU（Regedit\LastKey）且失败时 runas 弹 UAC
+// contextmenu_restart_explorer：2026-10-09（D3）：contextmenu_remove / contextmenu_restore 随右键删除链整链退役
+// uninstall_report_get：U-6：读批次报告，卸载域全档 MAIN 约定
+// uninstall_report_list：U-6：同上
+// elevate_request：AGENTS §3：提权入口只认主窗口 label
+// cleanup_allow_preview_assets：图片预览 asset 按需放行（主窗内嵌 LiteBox 的承接命令）
+// fileclean_delete_file：预览子窗退役后删除入口只剩主窗，档位 APP_WINDOWS → MAIN
+// finder_ignore_folder：2026-10-06 任务四：空目录忽略名单写侧（app_data 名单文件，只从主窗空目录页/名单弹窗触发）
+// finder_ignore_list：同上：名单弹窗的读侧（只读语义但只有主窗消费方，同档 MAIN）
+// finder_ignore_remove：同上：名单移除（写侧）
+// memory_stubborn_kill：v2-H2：顽固软件治理命令会批量结束进程，后端不校验任何前端确认值，
+// 且只有主窗加载 memoryclean.js —— 必须锁为主窗档。
+// （同族的 memory_stubborn_block 已于 2026-11-16 整链退役。）
+// optimizer_restore_frequency：2026-10-06：还原点弹窗「恢复默认创建频率」——写 HKLM，只从主窗弹窗触发
+// optimizer_list_groups：E7 分类侧表：只被主窗优化页消费（check-channel-map D5 组判「只读档须有子窗消费方」⇒ 判 MAIN）
+// optimizer_touch_recent：E10 最近使用写：主窗档
+// optimizer_bcd_enum：C3 BCD 面板枚举：主窗永劫专项面板消费，档位 MAIN（同 optimizer_list_groups 的 check-channel-map D5 判据）
+// optimizer_external_scan：账外核对（2026-10-15）：只读但只被主窗优化页消费，判 MAIN（同 check-channel-map D5 判据）
+// optimizer_nara_panel：C3 永劫专项面板侧表下发：主窗 optimizer 页消费，档位 MAIN（同 optimizer_list_groups 的 check-channel-map D5 判据）
+// optimizer_privacy_panel：WinUtil 借鉴 V3 隐私自护面板侧表下发：主窗 optimizer 页消费，档位 MAIN（同上）
+// optimizer_stale_dismiss：2026-10-03 根治：「未完成还原」横幅的 per-id 忽略——写记账 prefs 段，优化页只在主窗
+// peripheral_query：2026-10-07：外设优化由独立子窗改为**主窗应用内弹窗**（src/scripts/peripheral.js），
+// label `peripheral` 退役，三条通道的唯一调用方变成主窗，档位由 APP_WINDOWS 升到 MAIN。
+// residue_open_window：'pwsh_prepare' 已于 B11（2026-09-26）整链摘除，不再是一条命令
+// residue_open_window：v0.5.0 残留扫描副窗：主窗入口按钮是唯一调用点（关窗侧在 MUST_READONLY）
+// settings_cdp_state：'settings_save' 已于 v2-F4 整链摘除（2026-09-26），不再是一条命令
+// settings_cdp_state：CDP 远程调试开关：消费方只有主窗「系统信息」弹窗（index.html 的 info-row），
+// 三个子窗与残留/进程副窗都没有调用点 ⇒ 不给 readonly（AGENTS §3「谁真的需要调它」）。
+// startup_open_source：B-6 增强：定位登记来源（写 HKCU regedit LastKey + 拉起 regedit/explorer；主窗档）
+// updater_completion：读后即删的「更新已完成」标记：只有主窗首启要弹完成提示，不给子窗
+// uninstall_list：updater_get_mirror / updater_set_mirror 已于 2026-10-06 随「更新线路」UI 整链退役
+// uninstall_list：（顺序固化 AtomGit 国内源优先、GitHub 兜底，不再暴露选择）。
+// uninstall_list：卸载域 MVP（竞品借鉴落地方案 P0 §11）：卸载/残留执行是高危写操作，
+// uninstall_list：且只有主窗加载 uninstall.js —— 六条命令全档 MAIN。
+// uninstall_list：其中 check/update-residue 两条按「谁真的需要调它」定档（AGENTS §3 的 M1~M3 教训）：
+// uninstall_list：更新入口在卸载页（主窗），**不得**因为"检查版本看着像只读"就下放成放行三个子窗的档位。
+// uninstall_dir_size：v0.7.0：残留链 8 条（三链扫描 / 执行 / 不再提示 / 重启后删除三件套）从 MAIN 迁到
+// uninstall_dir_size：**窄窗口集** `guard::RESIDUE_WINDOWS`，登记口在下面 MUST_WINDOWSET —— 面板整块搬进
+// uninstall_dir_size：residue 副窗后主窗不再调它们，留在 MAIN 会让副窗每次 IPC 判越权（§3 M1~M3）。
+// uninstall_reg_backup_list：D1 还原入口：列表也走 MAIN（与 restore 同一弹窗，没必要放行子窗），
+// uninstall_reg_backup_list：restore 会 reg import 写注册表，必须主窗专属 + 危险确认。
+// uninstall_batch_list：H1（2026-09-29）：还原包两个入口都只在主窗备份弹窗。list 与同门
+// uninstall_batch_list：uninstall_reg_backup_list 同档（子窗无消费方，按 readonly 放行等于白给目录列举面）；
+// uninstall_batch_list：restore 往磁盘写文件，档位方向写错会锁死功能（M1~M3 教训的反面）
+// uninstall_appx_logo：R2b-L08（v7.2 P2，2026-10-22）：原先登记在只读档的理由是「疑点：写 logo 缓存文件」，
+// uninstall_appx_logo：与本命令的实现相反——它一个字节都不写，只读 `\WindowsApps\` 下的 .png 回 base64。
+// uninstall_appx_logo：消费面现算只有主窗：唯一调用点是 `appxLogo`（坐标 `src/scripts/uninstall.js:360`），
+// uninstall_appx_logo：而 uninstall.js 只由
+// uninstall_appx_logo：app.js 的 `uninstall: ['scripts/uninstall.js']` 按需加载、app.js 只出现在 index.html；
+// uninstall_appx_logo：三个副窗页面各挂自己的 *-window.js，`rg appxLogo src/*.html` 零命中
+// uninstall_appx_logo：⇒ 按 AGENTS §3「只有主窗会调的通道不给 readonly」收归 MAIN，改档不锁死任何副窗功能。
+// syspanel_power_plan_get：P2 §3.6（2026-10-03 RAINZ 对标）：系统面板三条 —— 电源方案写侧、系统级、
+// syspanel_power_plan_get：只在主窗 settings 页有入口；pagefile_state 虽只读但同域同档，
+// syspanel_power_plan_get：免得下一批加写侧时又要改档位（AGENTS §3 M1~M3 教训的"反向"：判档要看**下一批**会不会翻）。
+// syspanel_power_settings_dump：v5 P0：电源计划新建/导入/导出/删除与逐设置编辑会话；入口只在主窗 settings 页，
+// syspanel_power_settings_dump：写侧全部系统级，按 AGENTS §3「没有子窗调用点就不给放宽」判 MAIN。
+// syspanel_power_settings_compare：v5 P2：跨方案对照读（只在主窗编辑器里触发）
+// syspanel_power_settings_open_regedit：v5 P2：拉起 regedit 只从主窗编辑器触发
+// syspanel_power_ultimate_enable：G-04（2026-10-16 裁定）：开启卓越性能 / 隐藏高性能 / 还原高性能 —— 写侧、系统级、
+// syspanel_power_ultimate_enable：只在主窗「Windows设置 → 电源计划」卡触发，无子窗调用点 ⇒ MAIN。
+// quickcmds_run：v4-K04（2026-10-09）：quickcmds_run 从 readonly 升 MAIN —— 白名单里含
+// quickcmds_run：`sys-cmd-admin`（`Start-Process cmd -Verb RunAs`）：挂 readonly 档等于让子窗
+// quickcmds_run：渲染层失陷即可弹 UAC、拿到管理员 CMD，等效提权出口按 §3「不得下放」。
+// quickcmds_run：子窗消费面实测为 0（四份子窗 HTML 均未挂 quickcmds.js），改档零功能代价。
+// paths_save：R1a-M01（P1-W2）：以下通道实测只有主窗消费方，按 AGENTS §3「没有子窗调用点
+// paths_save：就不给放宽」迁 MAIN；paths_save 最重（配置路径会进入永久删链）。
 
 // ---- 枚举所有 #[tauri::command] 及其档位 ----
 // v3 D2：命令文件会再往下沉目录（commands/uninstall/*.rs），这里必须递归扫——
@@ -561,17 +593,17 @@ check(
 // 口径与 B 组对称：代码里判 readonly 的命令集合 == 清单登记的集合，双向差集非空即红。
 // 注意与 B 组的区别：B 组管「MAIN 档是谁」，本组管「**谁被放宽到了 readonly**」——
 // 一条命令在这两组里只能出现一次，两组同时绿才说明档位没有被偷偷挪动。
+// ⚠️ 本清单是**现状如实登记**，不是背书。R1-1.2b 的目的是让「偷偷放宽到 readonly」
+// 变成门禁红，不是重新审一遍全部档位。带「疑点」注释的条目确有写/删/起进程副作用，
+// 却挂在 readonly 档（放行全部四个窗口 label）—— 逐条列在文件头「已知档位疑点」一节。
+// 本批**不改**这些档位：改档会锁死或放开功能，须按 AGENTS §3「档位以谁真的需要调它
+// 为准」的 M1~M3 教训单独评审。
 const MUST_READONLY = [
-  // ⚠️ 本清单是**现状如实登记**，不是背书。R1-1.2b 的目的是让「偷偷放宽到 readonly」
-  // 变成门禁红，不是重新审一遍全部档位。带「疑点」注释的条目确有写/删/起进程副作用，
-  // 却挂在 readonly 档（放行全部四个窗口 label）—— 逐条列在文件头「已知档位疑点」一节。
-  // 本批**不改**这些档位：改档会锁死或放开功能，须按 AGENTS §3「档位以谁真的需要调它
-  // 为准」的 M1~M3 教训单独评审。
+  // ⚓ 生成区 must-readonly：begin/end 之间由 tools/command-manifest.json（tier=readonly）经
+  // node tools/gen-command-manifest.mjs --write 生成 —— 生成物勿手改，改档先改清单再重跑生成器。
+  // command-manifest:begin must-readonly
   'aidesc_get',
   'app_get_info',
-  // 2026-10-22 目检批：模型子窗标题里的「API 文档」入口。按 readonly 档不是「放宽」而是
-  // 「按谁真的需要调它落档」（AGENTS §3）——调用方就是 models 子窗，主窗反而没有入口。
-  // 面比 app:open-external 窄：只接受白名单 key，URL 在 Rust 常量表里，渲染层传不进地址。
   'app_open_doc',
   'appearance_get_env',
   'appearance_get_material',
@@ -579,8 +611,6 @@ const MUST_READONLY = [
   'cleanup_file_backup_list',
   'cleanup_item_detail',
   'cleanup_reg_backup_list',
-  // R4-U03：`cleanup_rules` 已收回主窗独占，登记在上面 MUST_MAIN（本表是双向棘轮，
-  // 留在这里是红）
   'cleanup_scan',
   'contextmenu_icons',
   'contextmenu_scan',
@@ -589,22 +619,22 @@ const MUST_READONLY = [
   'finder_delete_manifest',
   'finder_open_backup_dir',
   'finder_scan',
-  'fonts_import', // 疑点：导入字体文件
+  'fonts_import',
   'fonts_list',
-  'fonts_remove_imported', // 疑点：删已导入字体
-  'fonts_save_config', // 疑点：写字体配置
+  'fonts_remove_imported',
+  'fonts_save_config',
   'intro_load',
-  'log_write', // 疑点：写日志文件
+  'log_write',
   'memory_info',
-  'memory_kill', // 疑点：按 PID 结束进程
+  'memory_kill',
   'memory_processes',
   'modal_close',
   'modal_open',
   'models_close_window',
   'models_open_window',
-  'models_save', // 疑点：写模型配置文件
-  'models_set_scope', // 疑点：写模型作用域设置
-  'models_test', // 疑点：起进程测连通性
+  'models_save',
+  'models_set_scope',
+  'models_test',
   'netcheck_collect',
   'optimizer_batch_preflight',
   'optimizer_check_optimized',
@@ -615,31 +645,51 @@ const MUST_READONLY = [
   'optimizer_state_overview',
   'optimizer_svc_mem_current',
   'paths_file_icon',
-  // 'paths_save' 已按 R1a-M01 迁 MAIN（写路径配置会进入永久删链）。
   'process_manager_close_window',
   'process_manager_open_window',
   'process_manager_report',
   'realtime_adapters',
   'realtime_loss',
-  'realtime_report_clear', // 疑点：清实时报告
-  'realtime_report_delete', // 疑点：删实时报告
+  'realtime_report_clear',
+  'realtime_report_delete',
   'realtime_report_get',
   'realtime_report_list',
-  'realtime_report_save', // 疑点：写实时报告
+  'realtime_report_save',
   'realtime_sample',
-  // v0.5.0 残留扫描副窗（label `residue`）：关窗由副窗自己调，属放行全窗的只读档；
-  // 开窗只有主窗入口会调，落在 MUST_MAIN（check-channel-map D5 的判据：没有子窗调用点就不给放宽）
   'residue_close_window',
   'runtimes_collect',
-  // P2-13：UI 偏好键读写迁后端真源（settings.json）。两命令都只碰 PREF_KEYS 白名单键，
-  // 不含密钥面；挂 readonly 是因为消费方横跨窗口 —— 残留副窗要读写「删除前备份」开关、
-  // 模型/进程副窗的玻璃引擎要读档位偏好。写侧只改 settings.json 自身的偏好段。
   'settings_get_prefs',
   'settings_load',
   'settings_set_pref',
-  'startup_openlocation', // 疑点：打开资源管理器目录
+  'startup_openlocation',
   'startup_scan',
+  // command-manifest:end must-readonly
 ];
+
+// ===== 行级语义注释（P4 自生成区迁出：原 MUST_READONLY 行内注释，一条不丢；前缀为归属命令）=====
+// app_open_doc：2026-10-22 目检批：模型子窗标题里的「API 文档」入口。按 readonly 档不是「放宽」而是
+// app_open_doc：「按谁真的需要调它落档」（AGENTS §3）——调用方就是 models 子窗，主窗反而没有入口。
+// app_open_doc：面比 app:open-external 窄：只接受白名单 key，URL 在 Rust 常量表里，渲染层传不进地址。
+// cleanup_scan：R4-U03：`cleanup_rules` 已收回主窗独占，登记在上面 MUST_MAIN（本表是双向棘轮，
+// cleanup_scan：留在这里是红）
+// fonts_import：疑点：导入字体文件
+// fonts_remove_imported：疑点：删已导入字体
+// fonts_save_config：疑点：写字体配置
+// log_write：疑点：写日志文件
+// memory_kill：疑点：按 PID 结束进程
+// models_save：疑点：写模型配置文件
+// models_set_scope：疑点：写模型作用域设置
+// models_test：疑点：起进程测连通性
+// process_manager_close_window：'paths_save' 已按 R1a-M01 迁 MAIN（写路径配置会进入永久删链）。
+// realtime_report_clear：疑点：清实时报告
+// realtime_report_delete：疑点：删实时报告
+// realtime_report_save：疑点：写实时报告
+// residue_close_window：v0.5.0 残留扫描副窗（label `residue`）：关窗由副窗自己调，属放行全窗的只读档；
+// residue_close_window：开窗只有主窗入口会调，落在 MUST_MAIN（check-channel-map D5 的判据：没有子窗调用点就不给放宽）
+// settings_get_prefs：P2-13：UI 偏好键读写迁后端真源（settings.json）。两命令都只碰 PREF_KEYS 白名单键，
+// settings_get_prefs：不含密钥面；挂 readonly 是因为消费方横跨窗口 —— 残留副窗要读写「删除前备份」开关、
+// settings_get_prefs：模型/进程副窗的玻璃引擎要读档位偏好。写侧只改 settings.json 自身的偏好段。
+// startup_openlocation：疑点：打开资源管理器目录
 const actualReadonly = [...tiers.entries()].filter(([, v]) => v.tier === 'READONLY').map(([k]) => k).sort();
 const wantReadonly = [...MUST_READONLY].sort();
 
@@ -924,6 +974,20 @@ const GUARD_OTHER = [];
         : otherBadReason.length
           ? `登记理由为空或不足 8 字符：${JSON.stringify(otherBadReason.map((e) => e.name))}`
         : '',
+  );
+}
+
+// ---- M. 命令清单 ⇄ 生成物对拍（P4 命令清单化） ----
+// 两张 MUST 表的条目区是 tools/command-manifest.json 的生成物；B/D 组管「生成物 ⇄ 代码
+// 实况」的双向棘轮，本组管「清单 ⇄ 生成物」逐字对拍（同 gen-command-manifest --check 口径，
+// 一并对拍 lib.rs generate_handler! 与 tauri-api.js CHANNEL_MAP 两处生成区）。清单档位写错、
+// 漏跑生成器、手改生成区，都会在这里红。
+{
+  const mres = checkZones();
+  check(
+    mres.ok,
+    'M. 命令清单 ⇄ 生成物一致（command-manifest ⇄ 三处生成区：lib.rs / tauri-api.js / 本文件两张 MUST 表）',
+    mres.ok ? '' : mres.problems.join('；'),
   );
 }
 

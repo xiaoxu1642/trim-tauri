@@ -28,199 +28,90 @@
   // TAURI_ADDED 允许映射独有；两张表失效仍判红。以 `node tools/check-channel-map.mjs`
   // 计数为准（F2-L06：不写死统计数字，防过期误导）。生成规则：':' 与 '-' 统一转 '_'，
   // 显式列出、不做运行时隐式推导，防「Rust 有了、前端没接 / 拼错」静默断裂。
+  // P4：键值对由 tools/command-manifest.json 经 node tools/gen-command-manifest.mjs --write 生成，
+  // 生成区（begin/end 锚之间）勿手改；新增通道先改清单再重跑生成器。
   var CHANNEL_MAP = {
+    // ===== 行级语义注释（P4 命令清单化时自生成区迁出，语义一条不丢；方括号内为归属通道）=====
+    // [app:get-info]
     // app 域（memory:trim 事件已退役：Rust 侧从未有发射点，见 app 段注释）
-    'app:get-info': 'app_get_info',
-    'app:read-usage': 'app_read_usage',
-    'app:open-external': 'app_open_external',
-    'app:open-doc': 'app_open_doc',
+    // [updater:check]
     // updater 域（onState 是事件）
-    'updater:check': 'updater_check',
-    'updater:completion': 'updater_completion',
-    'updater:download': 'updater_download',
-    'updater:cancel-download': 'updater_cancel_download',
-    'updater:install': 'updater_install',
+    // [device:scan]
     // updater:set-mirror / updater:get-mirror 2026-10-06 随更新线路 UI 整链退役
     // （顺序固化国内源优先，无需用户选择）。
     // device / overview
     // overview:checkup 2026-10-12 随首页「体检结论」区块全链路退役
-    'device:scan': 'device_scan',
-    'overview:metrics': 'overview_metrics',
-    'overview:hardware': 'overview_hardware',
+    // [log:write]
     // log
-    'log:write': 'log_write',
-    'log:read': 'log_read',
-    'log:export': 'log_export',
+    // [cleanup:rules]
     // cleanup
-    'cleanup:rules': 'cleanup_rules',
-    'cleanup:allow-preview-assets': 'cleanup_allow_preview_assets',
-    'cleanup:reg-backup-list': 'cleanup_reg_backup_list',
-    'cleanup:reg-backup-restore': 'cleanup_reg_backup_restore',
-    'cleanup:file-backup-list': 'cleanup_file_backup_list',
-    'cleanup:file-backup-restore-batch': 'cleanup_file_backup_restore_batch',
-    'cleanup:backup-purge': 'cleanup_backup_purge',
-    'cleanup:scan': 'cleanup_scan',
-    'cleanup:scan-cancel': 'cleanup_scan_cancel',
-    'cleanup:execute': 'cleanup_execute',
-    'cleanup:check-locked': 'cleanup_check_locked',
-    'cleanup:kill-locked-processes': 'cleanup_kill_locked_processes',
-    'cleanup:query-locked': 'cleanup_query_locked',
-    'cleanup:item-detail': 'cleanup_item_detail',
-    'cleanup:age-policy': 'cleanup_age_policy',
-    'cleanup:set-age-policy': 'cleanup_set_age_policy',
+    // [cleanup:recycle-stats]
     // G-4：回收站条目数/体积查询与清空（清空不可逆；档位理由见 check-guard-tiers）
-    'cleanup:recycle-stats': 'cleanup_recycle_stats',
-    'cleanup:empty-recycle-bin': 'cleanup_empty_recycle_bin',
-    'cleanup:open-recycle-bin': 'cleanup_open_recycle_bin',
+    // [runtimes:collect]
     // runtimes
-    'runtimes:collect': 'runtimes_collect',
-    'runtimes:install': 'runtimes_install',
+    // [finder:scan]
     // finder
-    'finder:scan': 'finder_scan',
-    'finder:delete': 'finder_delete',
-    'finder:delete-manifest': 'finder_delete_manifest',
-    'finder:open-backup-dir': 'finder_open_backup_dir',
-    'finder:ignore-folder': 'finder_ignore_folder',
-    'finder:ignore-list': 'finder_ignore_list',
-    'finder:ignore-remove': 'finder_ignore_remove',
+    // [uninstall:list]
     // uninstall：卸载域。档位以命令体的 guard 第二实参为准（tools/check-guard-tiers.mjs 对
     // MAIN / MUST_READONLY 做双向棘轮，窄窗口集另登记在 MUST_WINDOWSET，改档必须两边同步）。
     // 2026-11-01 按后端逐条订正：此前注释把 report-*/appx-logo 说成只读、把 pending-*/residue-* 说成 MAIN。
     //   MAIN = list/run/modify/dir-size/reg-backup-*/batch-*/report-*/appx-logo
     //   residue 副窗独占 = residue-scan|residue-execute（RESIDUE_WINDOWS）
-    'uninstall:list': 'uninstall_list',
-    'uninstall:run': 'uninstall_run',
-    'uninstall:modify': 'uninstall_modify',
-    'uninstall:residue-scan': 'uninstall_residue_scan',
-    'uninstall:residue-execute': 'uninstall_residue_execute',
-    'uninstall:dir-size': 'uninstall_dir_size',
-    'uninstall:reg-backup-list': 'uninstall_reg_backup_list',
-    'uninstall:reg-backup-restore': 'uninstall_reg_backup_restore',
-    'uninstall:batch-list': 'uninstall_batch_list',
-    'uninstall:batch-restore': 'uninstall_batch_restore',
-    'uninstall:report-list': 'uninstall_report_list',
-    'uninstall:report-get': 'uninstall_report_get',
-    'uninstall:appx-logo': 'uninstall_appx_logo',
+    // [contextmenu:scan]
     // contextmenu（5）：backup/remove/restore 已随 D3 用户裁定整链退役（退役理由与撤除面
     // 登记在 check-channel-map 的 RETIRED 表），本页只保留启停能力。
-    'contextmenu:scan': 'contextmenu_scan',
-    'contextmenu:toggle': 'contextmenu_toggle',
-    'contextmenu:icons': 'contextmenu_icons',
-    'contextmenu:open-in-regedit': 'contextmenu_open_in_regedit',
-    'contextmenu:restart-explorer': 'contextmenu_restart_explorer',
+    // [modal:open]
     // modal（2）/ diag / settings / intro
+    // [settings:cdp-state]
+    // v4 P2-13：UI 偏好键的后端真源（防恢复三键 / 残留备份开关 / 液态动效 / 鼠标拖尾）
+    // [models:open-window]
+    // models 窗口 + models 配置（合计 5）
+    // [fonts:list]
+    // fonts（4）
+    // [appearance:get-material]
+    // appearance（10）
+    // [aidesc:get]
+    // aidesc / diskbench
+    // [realtime:adapters]
+    // realtime
+    // [bench-history:add]
+    // bench-history（4）/ elevate（1）
+    // [paths:scan]
+    // paths（6）
+    // [fileclean:scan]
+    // fileclean（条数不写死在这里：以 node tools/check-channel-map.mjs 现算为准，退役一条就漂一次）
+    // [maintenance:tasks]
+    // maintenance（2）/ netcheck（2）
+    // [memory:info]
+    // memory（6）/ processManager 窗口（2）/ peripheral（3）
+    // [residue:open-window]
+    // residue 副窗：扫描全在副窗，主窗只留入口（用户裁决 4）
+    // [quickcmds:run]
+    // quickcmds / optimizer
+    // [system:disk-type]
+    // system / startup（条数不写死在这里：同 fileclean 段，以 check-channel-map 现算为准）
+    // [syspanel:power-plan-get]
+    // syspanel：电源计划 + 虚拟内存面板（只在主窗设置页调用）
+    // ⚓ 生成区 channel-map：begin/end 之间由 tools/command-manifest.json 经
+    // node tools/gen-command-manifest.mjs --write 生成 —— 生成物勿手改，新增通道先改清单再重跑生成器。
+    // command-manifest:begin channel-map
+    // A 批：app
+    'app:get-info': 'app_get_info',
+    'app:read-usage': 'app_read_usage',
+    'app:open-external': 'app_open_external',
+    'app:open-doc': 'app_open_doc',
+    // A 批：log / diag / modal / window / shutdown / intro
+    'log:write': 'log_write',
+    'log:read': 'log_read',
+    'log:export': 'log_export',
+    'diag:dwm-conflict': 'diag_dwm_conflict',
     'modal:open': 'modal_open',
     'modal:close': 'modal_close',
-    'diag:dwm-conflict': 'diag_dwm_conflict',
-    'settings:load': 'settings_load',
-    // v4 P2-13：UI 偏好键的后端真源（防恢复三键 / 残留备份开关 / 液态动效 / 鼠标拖尾）
-    'settings:cdp-state': 'settings_cdp_state',
-    'settings:cdp-set': 'settings_cdp_set',
-    'settings:get-prefs': 'settings_get_prefs',
-    'settings:set-pref': 'settings_set_pref',
     'intro:load': 'intro_load',
-    // models 窗口 + models 配置（合计 5）
-    'models:open-window': 'models_open_window',
-    'models:close-window': 'models_close_window',
-    'models:save': 'models_save',
-    'models:set-scope': 'models_set_scope',
-    'models:test': 'models_test',
-    // fonts（4）
-    'fonts:list': 'fonts_list',
-    'fonts:import': 'fonts_import',
-    'fonts:remove-imported': 'fonts_remove_imported',
-    'fonts:save-config': 'fonts_save_config',
-    // appearance（10）
-    'appearance:get-material': 'appearance_get_material',
-    'appearance:set-material': 'appearance_set_material',
-    'appearance:set-material-enabled': 'appearance_set_material_enabled',
-    'appearance:get-env': 'appearance_get_env',
-    'appearance:bg-import': 'appearance_bg_import',
-    'appearance:bg-delete': 'appearance_bg_delete',
-    'appearance:bg-list': 'appearance_bg_list',
-    'appearance:bg-open-dir': 'appearance_bg_open_dir',
-    'appearance:get-prefs': 'appearance_get_prefs',
-    'appearance:set-pref': 'appearance_set_pref',
-    // aidesc / diskbench
-    'aidesc:get': 'aidesc_get',
-    'diskbench:run': 'diskbench_run',
-    // realtime
-    'realtime:adapters': 'realtime_adapters',
-    'realtime:sample': 'realtime_sample',
-    'realtime:loss': 'realtime_loss',
-    'realtime:report-save': 'realtime_report_save',
-    'realtime:report-list': 'realtime_report_list',
-    'realtime:report-get': 'realtime_report_get',
-    'realtime:report-delete': 'realtime_report_delete',
-    'realtime:report-clear': 'realtime_report_clear',
-    // bench-history（4）/ elevate（1）
-    'bench-history:add': 'bench_history_add',
-    'bench-history:list': 'bench_history_list',
-    'bench-history:delete': 'bench_history_delete',
-    'bench-history:clear': 'bench_history_clear',
-    'elevate:request': 'elevate_request',
-    // paths（6）
-    'paths:scan': 'paths_scan',
-    'paths:load': 'paths_load',
-    'paths:save': 'paths_save',
-    'paths:browse': 'paths_browse',
-    'paths:app-icon': 'paths_app_icon',
-    'paths:file-icon': 'paths_file_icon',
-    // fileclean（条数不写死在这里：以 node tools/check-channel-map.mjs 现算为准，退役一条就漂一次）
-    'fileclean:scan': 'fileclean_scan',
-    'fileclean:execute': 'fileclean_execute',
-    'fileclean:delete-file': 'fileclean_delete_file',
-    // maintenance（2）/ netcheck（2）
-    'maintenance:tasks': 'maintenance_tasks',
-    'maintenance:run': 'maintenance_run',
-    'netcheck:collect': 'netcheck_collect',
-    'netcheck:repair': 'netcheck_repair',
-    // memory（6）/ processManager 窗口（2）/ peripheral（3）
-    'memory:info': 'memory_info',
-    'memory:clean': 'memory_clean',
-    'memory:stubborn-kill': 'memory_stubborn_kill',
-    'memory:processes': 'memory_processes',
-    'memory:kill': 'memory_kill',
-    'processManager:open-window': 'process_manager_open_window',
-    'processManager:close-window': 'process_manager_close_window',
-    // residue 副窗：扫描全在副窗，主窗只留入口（用户裁决 4）
-    'residue:open-window': 'residue_open_window',
-    'residue:close-window': 'residue_close_window',
-    'peripheral:query': 'peripheral_query',
-    'peripheral:apply': 'peripheral_apply',
-    'peripheral:restore-backup': 'peripheral_restore_backup',
-    // quickcmds / optimizer
-    'quickcmds:run': 'quickcmds_run',
-    'optimizer:run': 'optimizer_run',
-    'optimizer:list': 'optimizer_list',
-    'optimizer:genadvice': 'optimizer_genadvice',
-    'optimizer:check-restore': 'optimizer_check_restore',
-    'optimizer:create-restore': 'optimizer_create_restore',
-    'optimizer:list-restore': 'optimizer_list_restore',
-    'optimizer:restore-frequency': 'optimizer_restore_frequency',
-    'optimizer:check-optimized': 'optimizer_check_optimized',
-    'optimizer:batch-preflight': 'optimizer_batch_preflight',
-    'optimizer:svc-mem-current': 'optimizer_svc_mem_current',
-    'optimizer:backup-reg': 'optimizer_backup_reg',
-    'optimizer:restore-reg': 'optimizer_restore_reg',
-    'optimizer:state-overview': 'optimizer_state_overview',
-    'optimizer:stale-dismiss': 'optimizer_stale_dismiss',
-    'optimizer:list-groups': 'optimizer_list_groups',
-    'optimizer:touch-recent': 'optimizer_touch_recent',
-    'optimizer:bcd-enum': 'optimizer_bcd_enum',
-    'optimizer:nara-panel': 'optimizer_nara_panel',
-    'optimizer:privacy-panel': 'optimizer_privacy_panel',
-    'optimizer:external-scan': 'optimizer_external_scan',
-    // system / startup（条数不写死在这里：同 fileclean 段，以 check-channel-map 现算为准）
+    // A 批：device / system / overview
+    'device:scan': 'device_scan',
     'system:disk-type': 'system_disk_type',
     'system:disk-list': 'system_disk_list',
-    'startup:scan': 'startup_scan',
-    'startup:toggle': 'startup_toggle',
-    'startup:delete': 'startup_delete',
-    'startup:openlocation': 'startup_openlocation',
-    'startup:open-source': 'startup_open_source',
-    'startup:add': 'startup_add',
-    // syspanel：电源计划 + 虚拟内存面板（只在主窗设置页调用）
     'syspanel:power-plan-get': 'syspanel_power_plan_get',
     'syspanel:power-plan-apply': 'syspanel_power_plan_apply',
     'syspanel:power-settings-dump': 'syspanel_power_settings_dump',
@@ -238,7 +129,164 @@
     'syspanel:power-hide-high-performance': 'syspanel_power_hide_high_performance',
     'syspanel:power-restore-high-performance': 'syspanel_power_restore_high_performance',
     'syspanel:pagefile-state': 'syspanel_pagefile_state',
-    'syspanel:pagefile-apply': 'syspanel_pagefile_apply'
+    'syspanel:pagefile-apply': 'syspanel_pagefile_apply',
+    'overview:metrics': 'overview_metrics',
+    'overview:hardware': 'overview_hardware',
+    // A 批：paths
+    'paths:load': 'paths_load',
+    'paths:save': 'paths_save',
+    'paths:browse': 'paths_browse',
+    'paths:app-icon': 'paths_app_icon',
+    'paths:file-icon': 'paths_file_icon',
+    // A 批：realtime
+    'realtime:adapters': 'realtime_adapters',
+    'realtime:sample': 'realtime_sample',
+    'realtime:loss': 'realtime_loss',
+    'realtime:report-save': 'realtime_report_save',
+    'realtime:report-list': 'realtime_report_list',
+    'realtime:report-get': 'realtime_report_get',
+    'realtime:report-delete': 'realtime_report_delete',
+    'realtime:report-clear': 'realtime_report_clear',
+    // B 批：finder（只读扫描 + 删除，走原生引擎 sink 直调）
+    'finder:scan': 'finder_scan',
+    'finder:delete': 'finder_delete',
+    'finder:delete-manifest': 'finder_delete_manifest',
+    'finder:open-backup-dir': 'finder_open_backup_dir',
+    'finder:ignore-folder': 'finder_ignore_folder',
+    'finder:ignore-list': 'finder_ignore_list',
+    'finder:ignore-remove': 'finder_ignore_remove',
+    // 卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）
+    'uninstall:list': 'uninstall_list',
+    'uninstall:run': 'uninstall_run',
+    'uninstall:modify': 'uninstall_modify',
+    'uninstall:residue-scan': 'uninstall_residue_scan',
+    'uninstall:residue-execute': 'uninstall_residue_execute',
+    'uninstall:dir-size': 'uninstall_dir_size',
+    'uninstall:reg-backup-list': 'uninstall_reg_backup_list',
+    'uninstall:reg-backup-restore': 'uninstall_reg_backup_restore',
+    'uninstall:batch-list': 'uninstall_batch_list',
+    'uninstall:batch-restore': 'uninstall_batch_restore',
+    'uninstall:report-list': 'uninstall_report_list',
+    'uninstall:report-get': 'uninstall_report_get',
+    'uninstall:appx-logo': 'uninstall_appx_logo',
+    // B 批：memory（6）+ processManager 窗口（2+send）
+    'memory:info': 'memory_info',
+    'memory:clean': 'memory_clean',
+    'memory:processes': 'memory_processes',
+    'memory:kill': 'memory_kill',
+    'memory:stubborn-kill': 'memory_stubborn_kill',
+    'processManager:open-window': 'process_manager_open_window',
+    'processManager:close-window': 'process_manager_close_window',
+    'cleanup:allow-preview-assets': 'cleanup_allow_preview_assets',
+    'residue:open-window': 'residue_open_window',
+    'residue:close-window': 'residue_close_window',
+    // B 批：runtimes / netcheck / diskbench
+    'runtimes:collect': 'runtimes_collect',
+    'runtimes:install': 'runtimes_install',
+    'netcheck:collect': 'netcheck_collect',
+    'netcheck:repair': 'netcheck_repair',
+    'diskbench:run': 'diskbench_run',
+    // C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细）
+    'cleanup:rules': 'cleanup_rules',
+    'cleanup:reg-backup-list': 'cleanup_reg_backup_list',
+    'cleanup:reg-backup-restore': 'cleanup_reg_backup_restore',
+    'cleanup:file-backup-list': 'cleanup_file_backup_list',
+    'cleanup:file-backup-restore-batch': 'cleanup_file_backup_restore_batch',
+    'cleanup:backup-purge': 'cleanup_backup_purge',
+    'cleanup:scan': 'cleanup_scan',
+    'cleanup:scan-cancel': 'cleanup_scan_cancel',
+    'cleanup:execute': 'cleanup_execute',
+    'cleanup:check-locked': 'cleanup_check_locked',
+    'cleanup:kill-locked-processes': 'cleanup_kill_locked_processes',
+    'cleanup:query-locked': 'cleanup_query_locked',
+    'cleanup:item-detail': 'cleanup_item_detail',
+    'cleanup:age-policy': 'cleanup_age_policy',
+    'cleanup:set-age-policy': 'cleanup_set_age_policy',
+    'cleanup:recycle-stats': 'cleanup_recycle_stats',
+    'cleanup:empty-recycle-bin': 'cleanup_empty_recycle_bin',
+    'cleanup:open-recycle-bin': 'cleanup_open_recycle_bin',
+    // C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan
+    'settings:load': 'settings_load',
+    'settings:get-prefs': 'settings_get_prefs',
+    'settings:set-pref': 'settings_set_pref',
+    'settings:cdp-state': 'settings_cdp_state',
+    'settings:cdp-set': 'settings_cdp_set',
+    'models:save': 'models_save',
+    'models:set-scope': 'models_set_scope',
+    'models:test': 'models_test',
+    'models:open-window': 'models_open_window',
+    'models:close-window': 'models_close_window',
+    'aidesc:get': 'aidesc_get',
+    'quickcmds:run': 'quickcmds_run',
+    'bench-history:add': 'bench_history_add',
+    'bench-history:list': 'bench_history_list',
+    'bench-history:delete': 'bench_history_delete',
+    'bench-history:clear': 'bench_history_clear',
+    'fonts:list': 'fonts_list',
+    'fonts:import': 'fonts_import',
+    'fonts:remove-imported': 'fonts_remove_imported',
+    'fonts:save-config': 'fonts_save_config',
+    'paths:scan': 'paths_scan',
+    // D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）
+    'fileclean:scan': 'fileclean_scan',
+    'fileclean:delete-file': 'fileclean_delete_file',
+    'fileclean:execute': 'fileclean_execute',
+    'maintenance:tasks': 'maintenance_tasks',
+    'maintenance:run': 'maintenance_run',
+    'contextmenu:scan': 'contextmenu_scan',
+    'contextmenu:toggle': 'contextmenu_toggle',
+    'contextmenu:icons': 'contextmenu_icons',
+    'contextmenu:open-in-regedit': 'contextmenu_open_in_regedit',
+    'contextmenu:restart-explorer': 'contextmenu_restart_explorer',
+    'startup:scan': 'startup_scan',
+    'startup:toggle': 'startup_toggle',
+    'startup:delete': 'startup_delete',
+    'startup:openlocation': 'startup_openlocation',
+    'startup:open-source': 'startup_open_source',
+    'startup:add': 'startup_add',
+    'optimizer:run': 'optimizer_run',
+    'optimizer:list': 'optimizer_list',
+    'optimizer:check-optimized': 'optimizer_check_optimized',
+    'optimizer:batch-preflight': 'optimizer_batch_preflight',
+    'optimizer:state-overview': 'optimizer_state_overview',
+    'optimizer:stale-dismiss': 'optimizer_stale_dismiss',
+    'optimizer:list-groups': 'optimizer_list_groups',
+    'optimizer:touch-recent': 'optimizer_touch_recent',
+    'optimizer:svc-mem-current': 'optimizer_svc_mem_current',
+    'optimizer:backup-reg': 'optimizer_backup_reg',
+    'optimizer:restore-reg': 'optimizer_restore_reg',
+    'optimizer:check-restore': 'optimizer_check_restore',
+    'optimizer:create-restore': 'optimizer_create_restore',
+    'optimizer:list-restore': 'optimizer_list_restore',
+    'optimizer:restore-frequency': 'optimizer_restore_frequency',
+    'optimizer:genadvice': 'optimizer_genadvice',
+    'optimizer:bcd-enum': 'optimizer_bcd_enum',
+    'optimizer:external-scan': 'optimizer_external_scan',
+    'optimizer:nara-panel': 'optimizer_nara_panel',
+    'optimizer:privacy-panel': 'optimizer_privacy_panel',
+    'peripheral:query': 'peripheral_query',
+    'peripheral:apply': 'peripheral_apply',
+    'peripheral:restore-backup': 'peripheral_restore_backup',
+    // E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好）
+    'appearance:get-material': 'appearance_get_material',
+    'appearance:set-material': 'appearance_set_material',
+    'appearance:set-material-enabled': 'appearance_set_material_enabled',
+    'appearance:get-env': 'appearance_get_env',
+    'appearance:bg-import': 'appearance_bg_import',
+    'appearance:bg-delete': 'appearance_bg_delete',
+    'appearance:bg-list': 'appearance_bg_list',
+    'appearance:bg-open-dir': 'appearance_bg_open_dir',
+    'appearance:get-prefs': 'appearance_get_prefs',
+    'appearance:set-pref': 'appearance_set_pref',
+    // E 批：elevate（UAC 自提权 + 新旧实例交接）
+    'elevate:request': 'elevate_request',
+    // E 批：updater（多线路容灾 + minisign 断代）
+    'updater:check': 'updater_check',
+    'updater:completion': 'updater_completion',
+    'updater:download': 'updater_download',
+    'updater:cancel-download': 'updater_cancel_download',
+    'updater:install': 'updater_install',
+    // command-manifest:end channel-map
   };
 
   // F2-L03：契约层自身的失败也要进用户侧日志（console 用户看不见）；写失败静默，绝不因记日志再抛错。

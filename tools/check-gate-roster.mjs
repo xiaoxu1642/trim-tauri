@@ -41,6 +41,11 @@ const MUST_RUN = [
   'check-residue-rule-contract',
   'check-cleanup-rule-contract',
   'check-scan-rule-diff',
+  // P3（2026-11-17 架构优化）：扫描器公共行为的主仓契约（重复分组/空文件时效闸/年龄
+  // 护栏/回收站原语 fail-closed）落在 src-tauri/tests/scanner_contract.rs（trim_finder
+  // 公共 API 直调）。native-scanner 非 workspace 成员，主仓 cargo test 跑不到它的自带
+  // tests/——不挂门禁就是「用例写完没人跑」（check-scan-rule-diff 头注释的前车之鉴）。
+  'check-scanner-contract',
   'check-ps-callsites',
   'check-ps-extraction',
   'check-html-contract',
@@ -151,6 +156,7 @@ if (process.argv.includes('--run')) {
 const SIDE_EFFECT = new Map([
   ['check-ps-extraction', 'spawn 真实 pwsh（--run 档）'],
   ['check-scan-rule-diff', 'spawn cargo test'],
+  ['check-scanner-contract', 'spawn cargo test（链接 trim_tauri_lib）'],
   ['check-positive-controls', 'spawn 全部 REGISTRY 门禁'],
   ['check-headless-cli', 'spawn cargo build + 真实扫描（OPTIONAL）'],
 ]);

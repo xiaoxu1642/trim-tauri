@@ -33,6 +33,9 @@ export const AUDIT_ROOTS = [
   { dir: 'src-tauri/src/engine', ext: ['.rs'], depth: 1 },
   { dir: 'src-tauri/src/engine/native', ext: ['.rs'], depth: 1 },
   { dir: 'src-tauri/src/commands', ext: ['.rs'], depth: 1 },
+  // P2（2026-11-17）：state.rs 按域拆成 state/ 子目录（panel/diagnostics/file_tools/infra），
+  // 无专属根则五个文件落在所有认领根之外（U1b/U3 判红）。
+  { dir: 'src-tauri/src/commands/state', ext: ['.rs'] },
   { dir: 'src-tauri/src/commands/uninstall', ext: ['.rs'], depth: 1 },
   { dir: 'src-tauri/src/commands/optimizer', ext: ['.rs'] },
   { dir: 'src-tauri/src/commands/cleanup', ext: ['.rs'] },
@@ -170,7 +173,7 @@ export const UNITS = [
   {
     id: 'R1a', owner: 'sub', name: 'commands 顶层·设置与更新链',
     files: [`${C}/settings.rs`, `${C}/updater.rs`, `${C}/elevate.rs`, `${C}/appearance.rs`,
-      `${C}/state.rs`, `${C}/log.rs`, `${C}/misc.rs`, `${C}/system.rs`, `${C}/syspanel.rs`,
+      `${C}/state/mod.rs`, `${C}/state/panel.rs`, `${C}/state/diagnostics.rs`, `${C}/state/file_tools.rs`, `${C}/state/infra.rs`, `${C}/log.rs`, `${C}/misc.rs`, `${C}/system.rs`, `${C}/syspanel.rs`,
       `${C}/app.rs`, `${C}/paths.rs`, `${C}/benchhistory.rs`, `${C}/residue.rs`, `${C}/overview.rs`,
       `${C}/maintenance.rs`, `${C}/device.rs`, `${C}/mod.rs`], // preview.rs 随预览子窗退役删除（2026-10-13）
     contract: 'settings 读写 / updater 验签 / 提权入口 / 状态真源',

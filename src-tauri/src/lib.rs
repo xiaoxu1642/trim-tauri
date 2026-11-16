@@ -538,10 +538,36 @@ fn run_startup_housekeeping() {
 
 // ==================== 入口 ====================
 
-/// 命令注册面（唯一真源）：生产入口与 tauri::test 集成测试共用同一份清单，
+/// 命令注册面：条目由 `tools/command-manifest.json`（唯一真源）经 `tools/gen-command-manifest.mjs`
+/// 生成（锚区内勿手改）；生产入口与 tauri::test 集成测试共用同一份注册，
 /// 避免测试里复制一份导致「新命令没被测试覆盖」的静默漂移。
 pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     builder.invoke_handler(tauri::generate_handler![
+        // ===== 行级语义注释（P4 命令清单化时自生成区迁出，语义一条不丢；方括号内为归属命令）=====
+        // ［uninstall_dir_size］
+        // 机-wide 扫描（失效残留 / 卸载遗留 / 七个深扫器报告）已整条退役：只剩
+        // `uninstall_residue_scan` 按应用维度产出四类残留（服务/驱动/注册表/文件）
+        // ［memory_info］
+        // preview 窗口（2+send）已整链退役：图片预览改主窗内嵌 LiteBox（见 cleanup/preview_assets.rs），
+        // 跨窗传 preview:data 的监听竞态根因随之消失。
+        // ［residue_open_window］
+        // v0.5.0 残留扫描副窗（label `residue`，与 guard::APP_WINDOWS / capabilities 同步）
+        // ［runtimes_collect］
+        // R1（2026-10-01）：`pwsh_status` 随整条 PowerShell 7 链退役 —— 右键图标改原生取图后
+        // 本应用不再需要用户自装 PS7，「探测候选链并回报状态」这件事失去了对象。
+        // （更早的 B11 已摘除 `pwsh_prepare`：零调用方 + 无内置解压链可准备。）
+        // ［cleanup_recycle_stats］
+        // G-4（2026-10-07）：回收站清空改 Shell API（选项 B）——查询条目数与体积 + 清空
+        // ［cleanup_open_recycle_bin］
+        // G-4 修订（2026-10-07）：回收站行「明细」= 打开系统回收站（Shell 虚拟命名空间）
+        // ［settings_load］
+        // 审查 v2-F4 彻底方案：`settings_save` 已整链摘除（零调用方的死写入通道，
+        // 摘除记录见 settings.rs 头部注释）。AI 模型配置写入由 `models_save` 承载。
+        // ［settings_get_prefs］
+        // v4 P2-13：UI 偏好键的后端真源（渲染层 localStorage 只是镜像；见 settings.rs）
+        // ⚓ 生成区 rust-handler：begin/end 之间由 tools/command-manifest.json 经
+        // node tools/gen-command-manifest.mjs --write 生成 —— 生成物勿手改，新增命令先改清单再重跑生成器。
+        // command-manifest:begin rust-handler
         // ---- A 批：app ----
         commands::app::app_get_info,
         commands::app::app_read_usage,
@@ -596,7 +622,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::realtime::realtime_report_get,
         commands::realtime::realtime_report_delete,
         commands::realtime::realtime_report_clear,
-        // ---- B 批：finder（只读扫描 + 删除，走原生引擎 sink 直调）----
+        // ---- B 批：finder（只读扫描 + 删除，走原生引擎 sink 直调） ----
         commands::finder::finder_scan,
         commands::finder::finder_delete,
         commands::finder::finder_delete_manifest,
@@ -604,14 +630,12 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::finder::finder_ignore_folder,
         commands::finder::finder_ignore_list,
         commands::finder::finder_ignore_remove,
-        // ---- 卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN）----
+        // ---- 卸载域 MVP（竞品借鉴落地方案 P0，2026-09-28；全档 MAIN） ----
         commands::uninstall::uninstall_list,
         commands::uninstall::uninstall_run,
         commands::uninstall::uninstall_modify,
         commands::uninstall::uninstall_residue_scan,
         commands::uninstall::uninstall_residue_execute,
-        // 机-wide 扫描（失效残留 / 卸载遗留 / 七个深扫器报告）已整条退役：只剩
-        // `uninstall_residue_scan` 按应用维度产出四类残留（服务/驱动/注册表/文件）
         commands::uninstall::uninstall_dir_size,
         commands::uninstall::uninstall_reg_backup_list,
         commands::uninstall::uninstall_reg_backup_restore,
@@ -620,9 +644,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::uninstall::uninstall_report_list,
         commands::uninstall::uninstall_report_get,
         commands::uninstall::uninstall_appx_logo,
-        // ---- B 批：memory（6）+ processManager 窗口（2+send）----
-        // preview 窗口（2+send）已整链退役：图片预览改主窗内嵌 LiteBox（见 cleanup/preview_assets.rs），
-        // 跨窗传 preview:data 的监听竞态根因随之消失。
+        // ---- B 批：memory（6）+ processManager 窗口（2+send） ----
         commands::memory::memory_info,
         commands::memory::memory_clean,
         commands::memory::memory_processes,
@@ -632,19 +654,15 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::processmanager::process_manager_close_window,
         commands::processmanager::process_manager_report,
         commands::cleanup::cleanup_allow_preview_assets,
-        // v0.5.0 残留扫描副窗（label `residue`，与 guard::APP_WINDOWS / capabilities 同步）
         commands::residue::residue_open_window,
         commands::residue::residue_close_window,
         // ---- B 批：runtimes / netcheck / diskbench ----
-        // R1（2026-10-01）：`pwsh_status` 随整条 PowerShell 7 链退役 —— 右键图标改原生取图后
-        // 本应用不再需要用户自装 PS7，「探测候选链并回报状态」这件事失去了对象。
-        // （更早的 B11 已摘除 `pwsh_prepare`：零调用方 + 无内置解压链可准备。）
         commands::runtimes::runtimes_collect,
         commands::runtimes::runtimes_install,
         commands::netcheck::netcheck_collect,
         commands::netcheck::netcheck_repair,
         commands::diskbench::diskbench_run,
-        // ---- C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细，16 条）----
+        // ---- C 批：cleanup（规则库验签 / 扫描 / 执行 / 占用检测 / 明细） ----
         commands::cleanup::cleanup_rules,
         commands::cleanup::cleanup_reg_backup_list,
         commands::cleanup::cleanup_reg_backup_restore,
@@ -660,16 +678,11 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::cleanup::cleanup_item_detail,
         commands::cleanup::cleanup_age_policy,
         commands::cleanup::cleanup_set_age_policy,
-        // G-4（2026-10-07）：回收站清空改 Shell API（选项 B）——查询条目数与体积 + 清空
         commands::cleanup::cleanup_recycle_stats,
         commands::cleanup::cleanup_empty_recycle_bin,
-        // G-4 修订（2026-10-07）：回收站行「明细」= 打开系统回收站（Shell 虚拟命名空间）
         commands::cleanup::cleanup_open_recycle_bin,
         // ---- C 批：settings / models / aidesc / quickcmds / bench-history / fonts / paths:scan ----
-        // 审查 v2-F4 彻底方案：`settings_save` 已整链摘除（零调用方的死写入通道，
-        // 摘除记录见 settings.rs 头部注释）。AI 模型配置写入由 `models_save` 承载。
         commands::settings::settings_load,
-        // v4 P2-13：UI 偏好键的后端真源（渲染层 localStorage 只是镜像；见 settings.rs）
         commands::settings::settings_get_prefs,
         commands::settings::settings_set_pref,
         commands::settings::settings_cdp_state,
@@ -690,7 +703,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::fonts::fonts_remove_imported,
         commands::fonts::fonts_save_config,
         commands::paths::paths_scan,
-        // ---- D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设，39 条）----
+        // ---- D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设） ----
         commands::fileclean::fileclean_scan,
         commands::fileclean::fileclean_delete_file,
         commands::fileclean::fileclean_execute,
@@ -730,7 +743,7 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::peripheral::peripheral_query,
         commands::peripheral::peripheral_apply,
         commands::peripheral::peripheral_restore_backup,
-        // ---- E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好，10 条）----
+        // ---- E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好） ----
         commands::appearance::appearance_get_material,
         commands::appearance::appearance_set_material,
         commands::appearance::appearance_set_material_enabled,
@@ -741,15 +754,15 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::appearance::appearance_bg_open_dir,
         commands::appearance::appearance_get_prefs,
         commands::appearance::appearance_set_pref,
-        // ---- E 批：elevate（UAC 自提权 + 新旧实例交接）----
+        // ---- E 批：elevate（UAC 自提权 + 新旧实例交接） ----
         commands::elevate::elevate_request,
-        // ---- E 批：updater（多线路容灾 + minisign 断代，5 条）----
+        // ---- E 批：updater（多线路容灾 + minisign 断代） ----
         commands::updater::updater_check,
         commands::updater::updater_completion,
         commands::updater::updater_download,
         commands::updater::updater_cancel_download,
         commands::updater::updater_install,
-    ])
+    ]) // command-manifest:end rust-handler
 }
 
 // ==================== asset 协议运行期放行（D1-M01） ====================
@@ -2008,7 +2021,8 @@ mod tests {
             "R1a-M01：paths_save 必须主窗专属"
         );
         assert!(
-            include_str!("commands/state.rs").contains("unwrap_or_else(|e| e.into_inner()).take()"),
+            include_str!("commands/state/infra.rs")
+                .contains("unwrap_or_else(|e| e.into_inner()).take()"),
             "R1a-L08：待编辑意图的锁中毒必须取内值，不能静默丢"
         );
         assert!(
