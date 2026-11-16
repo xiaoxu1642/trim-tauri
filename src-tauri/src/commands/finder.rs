@@ -405,6 +405,19 @@ impl<R: tauri::Runtime> Sink for FinderSink<R> {
     fn truncated(&self) {
         self.tally.truncated.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+
+    fn unreadable_files(&self, count: u64) {
+        if count == 0 {
+            return;
+        }
+        self.tally
+            .errors
+            .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+        log::write_log(
+            "warn",
+            &format!("finder 扫描有 {count} 个文件读取失败（未参与重复判定）"),
+        );
+    }
 }
 
 // ==================== finder:scan ====================

@@ -14,6 +14,7 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
 use trim_finder::scan::{duplicates, normalize_artifact_name, order_group_by_mtime, Sink};
 
@@ -159,4 +160,70 @@ fn 下载副本组命中而不同内容不命中() {
         rows.iter().any(|r| r.0 == "same.txt" && r.3 == "name"),
         "同名对必须仍按 name 组输出（改造不得破坏既有分组）；实得 {rows:?}"
     );
+}
+
+/// 读拒绝必须回到 `Sink::unreadable_files` 计数，不能静默当作「没有重复」。
+///
+/// 判红自证：把 `file_fp` 改回 `Option` + `filter_map` 丢弃 ⇒ 本用例的 `count` 变 0。
+/// `icacls` 不可用或当前会话未被 ACL 拒绝时打印 SKIP，不把环境缺失伪装成通过。
+#[ignore = "真机 ACL 探针：需要 icacls 权限，改/还原文件 ACL"]
+#[test]
+fn 读拒绝文件计入未读计数而不是静默消失() {
+    struct UnreadableSink {
+        count: Mutex<u64>,
+    }
+    impl Sink for UnreadableSink {
+        fn item(&self, _path: &Path, _line: &str) {}
+        fn progress(&self, _n: u64) {}
+        fn scanned(&self, _n: u64) {}
+        fn warn(&self, _msg: &str) {}
+        fn unreadable_files(&self, count: u64) {
+            *self.count.lock().unwrap() += count;
+        }
+    }
+
+    fn deny_read(path: &Path) -> bool {
+        Command::new("icacls")
+            .arg(path)
+            .args(["/deny", "*S-1-1-0:(R)"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    fn allow_read(path: &Path) {
+        let _ = Command::new("icacls")
+            .arg(path)
+            .args(["/remove:d", "*S-1-1-0"])
+            .output();
+    }
+
+    let root = temp_root("acl-read");
+    let a = root.join("a.bin");
+    let b = root.join("b.bin");
+    write_with_mtime(&a, b"ACL-SAME", 1_000);
+    write_with_mtime(&b, b"ACL-SAME", 1_000);
+    if !deny_read(&a) || !deny_read(&b) {
+        eprintln!("SKIP: icacls 不可用，未构造出读拒绝样本");
+        return;
+    }
+
+    struct ResetAcl(Vec<PathBuf>);
+    impl Drop for ResetAcl {
+        fn drop(&mut self) {
+            for p in &self.0 {
+                allow_read(p);
+            }
+        }
+    }
+    let _reset = ResetAcl(vec![a.clone(), b.clone()]);
+
+    if fs::read(&a).is_ok() || fs::read(&b).is_ok() {
+        eprintln!("SKIP: 当前会话未被 ACL 拒绝，读拒绝样本不成立");
+        return;
+    }
+
+    let sink = UnreadableSink { count: Mutex::new(0) };
+    duplicates(&[root.to_string_lossy().to_string()], 0, &sink);
+    let count = *sink.count.lock().unwrap();
+    assert_eq!(count, 2, "两个读拒绝文件都必须计入未读，不能静默消失");
 }

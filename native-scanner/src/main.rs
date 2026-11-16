@@ -44,6 +44,11 @@ impl Sink for StdoutSink {
     fn warn(&self, msg: &str) {
         eprintln!("[finder-warn] {}", msg);
     }
+    fn unreadable_files(&self, count: u64) {
+        if count > 0 {
+            eprintln!("[finder-warn] 有 {count} 个文件读取失败（未参与重复判定）");
+        }
+    }
 }
 
 /// v7.2-C03（N1b-M05）：畸形数值不再折成 0——CLI 是调试入口，`--count abc`

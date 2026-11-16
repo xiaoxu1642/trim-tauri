@@ -49,6 +49,9 @@ pub trait Sink: Send + Sync {
     /// Tauri 侧要把它翻成 `truncated:true` 回给渲染层 —— 「扫完了没有重复」和
     /// 「扫到上限没扫完」在 UI 上必须是两句话（审查 M8/B2：禁止把受限结果伪装成空结果）。
     fn truncated(&self) {}
+    /// 有 `count` 个候选文件因权限/IO 读不到，未能参与内容判定。
+    /// 默认空实现：CLI 靠 `warn` 文本；Tauri 侧把它并入 `errors` 计数。
+    fn unreadable_files(&self, _count: u64) {}
 }
 
 /// 审查 M7：单次扫描驻留条目上限。实测每条 `(PathBuf, u64)` 约 402 B，
@@ -1102,8 +1105,11 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
 }
 
 /// 计算完整文件的 Blake3 内容指纹；先按体积分组，只有可能重复的文件才会进入这里。
-fn file_fp(path: &Path) -> Option<[u8; 32]> {
-    let mut f = fs::File::open(path).ok()?;
+///
+/// 读拒绝/IO 失败必须回到调用侧计数；静默 `None` 会把「没读到」伪装成「没有重复」
+/// （2026-11-17 真机 ACL 实测）。
+fn file_fp(path: &Path) -> std::io::Result<[u8; 32]> {
+    let mut f = fs::File::open(path)?;
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; 256 * 1024];
     use std::io::Read;
@@ -1111,10 +1117,10 @@ fn file_fp(path: &Path) -> Option<[u8; 32]> {
         match f.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => { hasher.update(&buf[..n]); }
-            Err(_) => return None,
+            Err(e) => return Err(e),
         }
     }
-    Some(*hasher.finalize().as_bytes())
+    Ok(*hasher.finalize().as_bytes())
 }
 
 /// 重复文件检测（2026-09-28 七轮拍板重排）：
@@ -1206,11 +1212,22 @@ pub fn duplicates(roots: &[String], min_size: u64, sink: &dyn Sink) {
     progress(sink, 55);
     // ---------- 2) 内容指纹组：仅同体积文件计算 Blake3（未被同名组占用的） ----------
     // P1-①：指纹分组同样把枚举期的 mtime 一路带到输出（组内排序不再补 stat）。
+    let unreadable_files = AtomicUsize::new(0);
     let hashed: Vec<(u64, PathBuf, [u8; 32], Option<std::time::SystemTime>)> = files
         .par_iter()
         .filter(|(p, sz, _)| *sz > 0 && *sz >= min_size && !taken.contains(p))
-        .filter_map(|(p, sz, mt)| file_fp(p).map(|fp| (*sz, p.clone(), fp, *mt)))
+        .filter_map(|(p, sz, mt)| match file_fp(p) {
+            Ok(fp) => Some((*sz, p.clone(), fp, *mt)),
+            Err(_) => {
+                unreadable_files.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        })
         .collect();
+    let unreadable_files = unreadable_files.load(Ordering::Relaxed) as u64;
+    if unreadable_files > 0 {
+        sink.unreadable_files(unreadable_files);
+    }
     progress(sink, 80);
     let mut cmap: HashMap<(u64, [u8; 32]), Vec<(PathBuf, Option<std::time::SystemTime>)>> =
         HashMap::new();
