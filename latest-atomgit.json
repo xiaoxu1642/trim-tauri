@@ -1,15 +1,15 @@
 {
-  "version": "0.9.6",
-  "notes": "## 版本 0.9.6（2026-11-16 占用检测与备份清单可靠性）\n\n> 本版只做两件可靠性修复：占用检测不再因 Restart Manager 卡住清理链，删前备份不会写出无法还原的大清单。\n\n① **占用检测超时不再拖死清理** —— 症状：Restart Manager 查询极端情况下可能长时间无响应，清理前占用检测没有外层预算，界面只能干等。根因：RM 调用链缺少统一超时，取消位也没接到检测会话；超时后还可能把已查到的部分进程名单留成可结束目标。修法：给 RM 查询加 60 秒同源预算并接扫描取消位；超时/取消返回 `rmTimeout`，前端提示「占用检测超时，未执行删除」；扫描器延迟输出占用行，超时路径不交半截名单，主进程白名单保持空。\n\n② **大清单不再“备份了但还原不了”** —— 症状：单批清理文件过多时，写出的备份 manifest 可超过读取侧 8MB 上限，结果是副本存在、还原链却拒绝读取。根因：写入侧没有条目数与总字节上限，读取侧容灾只挡住了超大清单被读入，挡不住超大清单被生成。修法：清单写入前以读取侧同源上限约束条目数与申报字节；超限项不写副本与清单条目，回执记录截断条数与字节数；读取侧只保留历史超限清单容灾。\n\n③ **本版验证（如实标注）** —— `cargo check --all-targets` 0；`cargo test --lib` 1206 passed / 0 failed / 78 ignored；`cargo test -p trim-finder` 153 passed / 0 failed / 10 ignored；全量门禁 `73/73`。CDP 取证：当前 Trim 窗口 DOM 4597 节点、279 个按钮、启动日志无 error；冷启动 5 次 navigation duration 255ms、DCL 176.9ms、FP/FCP 172ms。**本版未做的验证**：PID 复用、多盘回收站、真 ACL、Explorer 重启占用变化、Shell HRESULT 失败分布、asset scope 真机同进程读图、双击时序与真实 hover 未构造可控样本；生产构建冷/热 5 次 profile 未跑，性能观察项继续按台账 SKIP，不写成优化收益。\n\n---",
-  "pub_date": "2026-11-16T15:58:49Z",
-  "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.9.6/attach_files/Trim_0.9.6_x64-setup.exe/download",
-  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaEtUZWl0VHoxWlZzTHdvenp4VENPV3FrWTE0Z3JkQklnZE5aVnp4NTlVMDMrNDA5UW93Nit0bHFMVHBiWE4vOXZjV3AxMUI2SWhhRmttY3lpMXgyaEE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0ODQzODI3CWZpbGU6VHJpbV8wLjkuNl94NjQtc2V0dXAuZXhlCXZlcnNpb246MC45LjYKdVNIVkxBeEdxYmxzKzJycEkySGw1cEp3V0FQMGtpbDN0dUdtb3BJRXgxUmJVSDRkd1ZPY1ZCeDZNTGNWRmdpVlJPSmViWURLc01FQ1NFZGNHUjBqQ1E9PQo=",
-  "sha256": "f959fafa34bfb0932602884763198fb6c5a5d0f32e7f29850c020482d8e23e42",
+  "version": "0.9.7",
+  "notes": "## 版本 0.9.7（2026-11-17 重复文件扫描读拒绝回执）\n\n> 本版只修一件事：重复文件扫描遇到读不了的文件不再静默漏报。\n\n① **读拒绝文件计入回执不再静默消失** —— 症状：重复文件扫描对 ACL 拒绝读取的文件既不进结果也不报错，回执显示「无重复」，用户无法知道有文件根本没参与判定。根因：内容指纹函数用 `Option` 返回，打开或读取失败被当成「没有指纹」直接丢弃，错误不进任何计数。修法：指纹函数改 `Result` 原样返回错误，扫描器新增未读计数回调；Tauri 侧并入既有「N 处无法读取」回执并写汇总日志，CLI 打印告警行。新增真机 ACL 探针用 icacls 拒读样本钉住行为。\n\n② **本版验证（如实标注）** —— `cargo test`（src-tauri）1206 passed / 0 failed / 78 ignored；`cargo test -p trim-finder` 173 passed / 0 failed / 10 ignored（含真机 ACL 探针单跑 1 passed）；全量门禁 `73/73`。真机端到端：ACL 拒读样本回执 `errors=2`。**本版未做的验证**：发版产物与双线清单核验在发布后补记；OS 级拖拽与真实 hover 未取证。\n\n---",
+  "pub_date": "2026-11-16T18:57:10Z",
+  "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.9.7/attach_files/Trim_0.9.7_x64-setup.exe/download",
+  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaE51UCtjWkY0RC82UGxYbzYreVB1MFp1T0p5c2NGV3BYTjY3REN3YVIzUm1oNU5Hak9QdVRtTkNhL05RTjBtTW5HT0Fyb2IyK3cwbThvemRzcWRyV3dVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0ODU1MzQzCWZpbGU6VHJpbV8wLjkuN194NjQtc2V0dXAuZXhlCXZlcnNpb246MC45LjcKeHAxbWhhNkFTMUlqZ0JzSmdjdllZUkdyTHhJMlFiMlpTaFp4S2lOOXBLbzM5UldCWlF6QzhqNmRZc2tmbU4xNjlwRnpLVVNzMHNzTUl5TWRZV0srQkE9PQo=",
+  "sha256": "b731d29b8eb7424fcd2c719dea2cf3155a8ae73edb8132251ee9d8ff90c7be68",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.9.6/attach_files/Trim_0.9.6_x64-setup.exe/download",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaEtUZWl0VHoxWlZzTHdvenp4VENPV3FrWTE0Z3JkQklnZE5aVnp4NTlVMDMrNDA5UW93Nit0bHFMVHBiWE4vOXZjV3AxMUI2SWhhRmttY3lpMXgyaEE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0ODQzODI3CWZpbGU6VHJpbV8wLjkuNl94NjQtc2V0dXAuZXhlCXZlcnNpb246MC45LjYKdVNIVkxBeEdxYmxzKzJycEkySGw1cEp3V0FQMGtpbDN0dUdtb3BJRXgxUmJVSDRkd1ZPY1ZCeDZNTGNWRmdpVlJPSmViWURLc01FQ1NFZGNHUjBqQ1E9PQo=",
-      "sha256": "f959fafa34bfb0932602884763198fb6c5a5d0f32e7f29850c020482d8e23e42"
+      "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.9.7/attach_files/Trim_0.9.7_x64-setup.exe/download",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaE51UCtjWkY0RC82UGxYbzYreVB1MFp1T0p5c2NGV3BYTjY3REN3YVIzUm1oNU5Hak9QdVRtTkNhL05RTjBtTW5HT0Fyb2IyK3cwbThvemRzcWRyV3dVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0ODU1MzQzCWZpbGU6VHJpbV8wLjkuN194NjQtc2V0dXAuZXhlCXZlcnNpb246MC45LjcKeHAxbWhhNkFTMUlqZ0JzSmdjdllZUkdyTHhJMlFiMlpTaFp4S2lOOXBLbzM5UldCWlF6QzhqNmRZc2tmbU4xNjlwRnpLVVNzMHNzTUl5TWRZV0srQkE9PQo=",
+      "sha256": "b731d29b8eb7424fcd2c719dea2cf3155a8ae73edb8132251ee9d8ff90c7be68"
     }
   }
 }
