@@ -30,12 +30,13 @@
       // 旧文案「释放量大」与本模块 freed 的口径（全系统可用内存净变化）直接矛盾。
       desc: '淘汰待机列表页（这部分本来就算作可用内存）：清完可用量几乎不变，代价是之后冷读变慢' },
     // N1（2026-09-14 重复点审查）：原「顽固软件专杀」与「电脑优化中心 - 顽固软件策略专杀」
-    // 合并为同一张「顽固软件治理」卡片，分两层：勾选 /「立即结束进程」= 一次性杀进程；
-    // 「阻止开机自启」= 常驻服务改手动 + 删 WPS 更新任务（持久，不提供自动还原）。
+    // 合并为同一张「顽固软件治理」卡片，只保留「立即结束进程」= 一次性杀进程。
+    // 2026-11-16 用户裁定：第二层「阻止开机自启」（改服务启动类型 / 删计划任务 / 清 Run 项）
+    // 持久且不可还原、副作用过大，整链退役；开机自启改由独立 run 任务处理。
     // 审查 v2-M1：风险档位由 medium 升为 high —— 这条会按进程名批量结束系统里的
     // 目标进程（含前台），未保存的文档/渲染工程会直接丢失，标中风险会误导用户。
     { id: 'stubbornKill', name: '顽固软件治理', risk: 'high', checked: false, kind: 'stubborn',
-      desc: '两层处理：①「立即结束进程」一次性结束 MuMu 模拟器 / 网易 UU 远程 / 抖音 / 剪映 / WPS 金山办公 / 微软电脑管家 的后台常驻与守护进程（含前台进程，请先保存工作）；②「阻止开机自启」把这些软件的后台服务改为手动启动（另含抖音与夸克网盘的更新服务），删除 WPS 更新与消息推送任务、抖音守护任务、夸克网盘更新任务，清理抖音托盘自启项，并关闭 WPS 自动升级（持久生效，不提供自动还原）' }
+      desc: '一次性结束 MuMu 模拟器 / 网易 UU 远程 / 抖音 / 剪映 / WPS 金山办公 / 微软电脑管家 的后台常驻与守护进程（含前台进程，请先保存工作）' }
   ];
 
   const RISK_LABELS = { low: '低风险', medium: '中风险', high: '高风险' };
@@ -185,11 +186,9 @@
     root.innerHTML = `
       <div class="mem-region-list">
         ${REGIONS.map(r => {
-          // N1（2026-09-14）：顽固软件治理卡片有两层 ——「立即结束进程」走专杀脚本（一次性），
-          // 「阻止开机自启」走后端持久策略脚本
+          // N1（2026-09-14）：顽固软件治理卡片的唯一动作「立即结束进程」走专杀脚本（一次性）
           const action = r.kind === 'stubborn'
-            ? `<button class="btn btn-secondary btn-small mem-region-clean" data-clean="${r.id}" type="button">立即结束进程</button>
-                 <button class="btn btn-secondary btn-small mem-region-block" data-block="${r.id}" type="button" data-tip="把这些软件的后台服务改为手动并删除更新任务，持久生效且不自动还原">阻止开机自启</button>`
+            ? `<button class="btn btn-secondary btn-small mem-region-clean" data-clean="${r.id}" type="button">立即结束进程</button>`
             : `<button class="btn btn-secondary btn-small mem-region-clean" data-clean="${r.id}" type="button">清理该项</button>`;
           return `
           <div class="mem-region-row row-card" data-id="${r.id}" role="group" tabindex="0" aria-label="${window.ds.escAttr(r.name)} 区域说明">
@@ -221,10 +220,6 @@
     // 单项清理
     root.querySelectorAll('.mem-region-clean').forEach(btn => {
       btn.addEventListener('click', () => withMemBusy(() => runClean([btn.dataset.clean])));
-    });
-    // N1：顽固软件治理第二层 —— 阻止开机自启（持久策略，独立确认）
-    root.querySelectorAll('.mem-region-block').forEach(btn => {
-      btn.addEventListener('click', () => withMemBusy(() => runStubbornBlock()));
     });
     // 简介入口（F4a1-L09）：行内已有勾选框与操作钮，整行若再扮 role=button 会把子件
     // 折进按钮语义（读屏只报「按钮」，里面的勾选框与操作钮失去独立身份）。行的角色降为
@@ -294,7 +289,7 @@
   }
 
   // ==================== 执行清理 ====================
-  // v5 P2：内存页三条会改系统状态的入口（整页清理 / 单项清理 / 阻止开机自启）此前没有任何
+  // v5 P2：内存页两条会改系统状态的入口（整页清理 / 单项清理）此前没有任何
   // 串行闸门 —— 高危确认弹窗 await 期间连点，会并发跑两遍 NtSetSystemInformation 链、
   // 并叠出两个确认弹窗。对照 src/scripts/sysrestore.js 里「进函数即 disabled」的既有写法。
   let memBusy = false;
@@ -459,80 +454,6 @@
       throw new Error((resp && resp.message) || '专杀失败');
     } catch (e) {
       window.app?.toast('error', '顽固软件专杀失败：' + e.message);
-    }
-  }
-
-  // N1（2026-09-14 重复点审查）：顽固软件治理第二层 —— 阻止开机自启。
-  // 把目标软件的后台服务改为「手动」并停止（2026-10-06 扩至抖音与夸克网盘的更新服务），
-  // 停止 WPS 云文档服务，删除 WPS 更新/推送任务、抖音守护任务、夸克网盘更新任务，
-  // 清理抖音托盘 Run 自启项，并关闭 WPS 自动升级。属持久策略、不提供自动还原，执行前二次确认。
-  async function runStubbornBlock() {
-    if (!window.api?.memory?.stubbornBlock) {
-      window.app?.toast('warning', '预览模式不支持该操作');
-      return;
-    }
-    // F4a1-M11：确认件必须走可选链，与本文件另两处同形。不带可选链的裸调用在
-    // app 或 confirmDanger 缺席时抛 TypeError，只能靠 withMemBusy 的 .catch 播报成
-    // 「操作未完成：…undefined…」——把内部错误当用户结论说。可选链则直接落到下面的
-    // `if (!ok) return`（fail-closed，不执行任何改系统状态的动作）。
-    // 遗留：确认件真缺席时界面仍无提示，属「withMemBusy 收成唯一执行闸门」的射程。
-    const ok = await window.app?.confirmDanger?.(
-      '阻止顽固软件开机自启',
-      '将把这些软件的后台服务启动类型改为「手动」并立即停止：MuMu 模拟器、网易 UU 远程、微软电脑管家、抖音、夸克网盘。\n' +
-      '同时停止 WPS 云文档服务，删除 WPS 更新与消息推送任务、抖音守护任务、夸克网盘更新任务，清理抖音托盘的启动项（保留注册表备份），并关闭 WPS 自动升级。\n\n' +
-      '该调整为持久化设置，不提供自动还原；相关软件需要使用时正常打开即可。',
-      '仍然执行',
-      '取消',
-      '会修改服务启动类型，并删除计划任务、清理启动项。'
-    );
-    if (!ok) return;
-    window.app?.toast('info', '正在阻止顽固软件开机自启…');
-    try {
-      const resp = await window.api.memory.stubbornBlock();
-      // 复核 N1：提权半闭环收口（同 memory:clean）
-      if (resp && resp.needAdmin) {
-        const elevated = await window.app?.requestElevation?.('阻止开机自启需要管理员权限才能修改服务启动类型。');
-        if (elevated) window.app?.toast('info', '已获得管理员权限，请重新执行本操作');
-        return;
-      }
-      // 同 stubbornKill 的回执对账修正：后端 stubborn_block 也没有 results 字段。
-      // 2026-10-06 扩链：新增 runValues（Run 自启项）一组，三组成败都要收。
-      if (resp && resp.data) {
-        const d = resp.data;
-        // A1-L06：三组成败都必须是数组；缺一组也不能用 [] 冒充「全成功」。
-        const arrays = ['services', 'tasks', 'runValues', 'failedServices', 'failedTasks', 'failedRunValues'];
-        if (!arrays.every(k => Array.isArray(d[k]))) {
-          window.app?.toast('error', '阻止开机自启回执字段不完整，未报告成功');
-          window.app?.log('warn', '阻止开机自启回执缺数组字段：' + JSON.stringify(d));
-          return;
-        }
-        const svcs = d.services;
-        const tasks = d.tasks;
-        const runVals = d.runValues;
-        const failS = d.failedServices;
-        const failT = d.failedTasks;
-        const failR = d.failedRunValues;
-        const failAll = [...failS, ...failT, ...failR];
-        const summary = `已处理 ${svcs.length} 个服务`
-          + (tasks.length ? `，删除 ${tasks.length} 个任务` : '')
-          + (runVals.length ? `，清理 ${runVals.length} 个启动项` : '');
-        if (resp.success === false) {
-          window.app?.toast('error', (resp && resp.message) || `${summary}；${failAll.length} 项失败`);
-          window.app?.log('warn', `顽固软件自启阻断命令层判负：${resp.message || '无原因'}；服务失败 ${failS.join('、') || '无'}；任务失败 ${failT.join('、') || '无'}；启动项失败 ${failR.join('、') || '无'}`);
-        } else if (failAll.length) {
-          // M-1（2026-09-15）：部分失败如实告知，不吞
-          window.app?.toast('warning', summary + `，但 ${failAll.length} 项失败：` +
-            failAll.join('、'));
-          window.app?.log('warn', `顽固软件自启阻断部分失败，服务失败 ${failS.join('、') || '无'}；任务失败 ${failT.join('、') || '无'}；启动项失败 ${failR.join('、') || '无'}`);
-        } else {
-          window.app?.toast('success', summary + (svcs.length ? `：${svcs.join('、')}` : ''));
-        }
-        window.app?.log('info', `顽固软件自启阻断：服务 ${svcs.join('、') || '无'}；任务 ${tasks.join('、') || '无'}；启动项 ${runVals.join('、') || '无'}`);
-        return;
-      }
-      throw new Error((resp && resp.message) || '执行失败');
-    } catch (e) {
-      window.app?.toast('error', '阻止开机自启失败：' + e.message);
     }
   }
 

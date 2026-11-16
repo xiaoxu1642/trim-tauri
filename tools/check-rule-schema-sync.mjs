@@ -366,6 +366,9 @@ POSITIVE_CONTROLS.push([
 // 判据 = 直接查询集（四类 query + cross） ∪ 书面 scope 登记；两边都没有 ⇒ 红。
 // 登记表达的是「谁在读、为什么不是 req_*」，新增死键不会再静默通过。
 const TOOL_CONSUMED_SCOPE = {
+  'cleanup.limits.maxRulesJsonBytes': 'engine/native/cleanup::cleanup_byte_limits（契约表真源，写入侧同源）',
+  'cleanup.limits.maxBackupManifestBytes': 'engine/native/cleanup::cleanup_byte_limits（备份清单写入上限同源）',
+  'cleanup.limits.maxFileBackupTotalBytes': 'engine/native/cleanup::cleanup_byte_limits（还原批次申报字节上限同源）',
   'cleanup.file': 'check-cleanup-rule-contract（schemaFile 读取）',
   'residue.file': 'check-residue-rule-contract（schemaFile 读取）',
   'cleanup.tokens.allowed': 'token 判定器整体读取（schemaTokens）',

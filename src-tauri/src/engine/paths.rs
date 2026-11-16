@@ -936,7 +936,25 @@ fn copy_dir_missing_only(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// 折叠，键也逐字稳定——同形态归并、绝不与普通盘符键塌并（塌并即穿闸；本机
 /// pending-delete.json 真实条目即 verbatim 形态，撤回按键匹配，归一变键 = 撤不回）。
 pub fn path_key(p: &str) -> String {
-    crate::engine::protect::normalize_lexical(p)
+    // P1-01b：先与扫描器排除键共用兼容折叠，再走已有词法归一；
+    // 保护闸仍只消费 protect::normalize_for_compare，语义不变。
+    crate::engine::protect::normalize_lexical(&trim_finder::scan::normalize_path_key_shape(p))
+}
+
+#[cfg(test)]
+mod p1_01b_tests {
+    use super::path_key;
+
+    #[test]
+    fn path_key_三形态反例与扫描器归一一致() {
+        for (odd, canonical) in [
+            (r"c:/tmp/cache/./sub\", r"C:\tmp\cache\sub"),
+            (r"C:\tmp\cache\sub. ", r"C:\tmp\cache\sub"),
+            (r"\\?\C:\tmp\cache\sub", r"C:\tmp\cache\sub"),
+        ] {
+            assert_eq!(path_key(odd), path_key(canonical));
+        }
+    }
 }
 
 /// 入参长度闸的唯一口径：**字符数**，不是字节数（v7.2 `R1d-L05`）。

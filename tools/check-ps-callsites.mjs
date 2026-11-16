@@ -90,7 +90,7 @@ const RUN_INLINE_PS_SITES = [
   // spawn_blocking，调用点的宿主函数名随之变——anchor 带函数名正是为了让这种搬动**必须留痕**，
   // 登记跟着代码走，不是放宽判据。
   { anchor: 'fn restore_check_body | let Some(out) = run_inline_ps(ps, 30, None) else', reason: 'optimizer:check-restore 最近还原点（执行体见 restore_check_body）', timeout: 30 },
-  { anchor: 'fn count_restore_points_once | let out = run_inline_ps(ps, 30, None)?;', reason: '创建前后计数（含回读轮询）。「创建前」那一次已于 v3 §3.2 并入预检，此处只剩回读轮询；绝对截止轮询拆出同名 helper 后锚点随实现更新', timeout: 30 },
+  { anchor: 'fn count_restore_points_once | let out = run_inline_ps(ps, remaining.as_secs().max(1), None)?;', reason: '创建前后计数（含回读轮询）。「创建前」那一次已于 v3 §3.2 并入预检，此处只剩回读轮询；P1-8：单次查询只拿绝对截止的剩余预算', timeout: 'remaining' },
   { anchor: 'fn create_restore_inner | let Some(out) = run_inline_ps(pre, 50, None) else', reason: '创建前系统保护预检（fail-closed 扩展版：全局开关 / 组件存在性 / 受保护卷一次探完）。2026-10-14 v3 §3.2 合批：本调用同时承担「创建前还原点计数」（原为单独一次 run_inline_ps），超时取 20+30 两段原登记值之和 ⇒ 只放宽不收紧', timeout: 50 },
   { anchor: 'fn create_restore_inner | let Some(out) = run_inline_ps(create_ps, 120', reason: '创建还原点脚本本体（2026-10-06 摘条目后内联；原经 build_script 生成）', timeout: 120 },
   { anchor: 'fn restore_list_body | let Some(out) = run_inline_ps(ps, 30, None) else', reason: 'optimizer:list-restore 列表（执行体见 restore_list_body）', timeout: 30 },
@@ -353,6 +353,13 @@ check(
 const inlineProblems = [];
 for (const e of RUN_INLINE_PS_SITES) {
   if (!e._site) continue;
+  // P1-8：计数轮询的超时来自绝对截止的剩余预算，不是固定字面量。
+  if (e.timeout === 'remaining') {
+    if (!e._site.args.includes('remaining.as_secs().max(1)')) {
+      inlineProblems.push(`${e._site.file}:${e._site.line} 登记为剩余预算，代码却没把 remaining 传进 run_inline_ps`);
+    }
+    continue;
+  }
   const secs = Number((splitArgs(e._site.args)[1] ?? '').match(/\d+/)?.[0] ?? NaN);
   if (!Number.isFinite(secs)) inlineProblems.push(`optimizer.rs:${e._site.line} 第二实参不是字面量秒数（锚 ${cut(e.anchor)}）`);
   else if (secs !== e.timeout) inlineProblems.push(`optimizer.rs:${e._site.line} 超时漂移：登记 ${e.timeout}s，代码 ${secs}s`);
@@ -373,13 +380,6 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/engine/native/cleanup.rs', anchor: '&["export", &export_path, stage_str, "/y"]', reason: 'cleanup regKeys 删除前逐键备份（R5a-M11：导出到私有中转件，落位由 land_backup 判根后 rename）' },
   { file: 'src-tauri/src/commands/uninstall/residue.rs', anchor: '&["export", &export_path, &file_str, "/y"]', reason: '残留 reg_key 删除前整键备份（B2-3：file_str 由 backup_export_path 自检后返回，故取引用）' },
   { file: 'src-tauri/src/commands/uninstall/residue.rs', anchor: '&["export", key_part, &file_str, "/y"]', reason: '残留 reg_value 删值前父键备份（B2-3：同上，导出前自检）' },
-  // 顽固软件治理的 schtasks 三点（v5 M-1）：备份不判成败就无条件 /Delete 是"删了且没凭据"，
-  // 裸 .output() 又会让挂死的 schtasks 永久锁住这条 IPC。超时对齐启动项域同类 schtasks 调用，
-  // 统一用 SCHTASKS_TIMEOUT（P3-04：此前误用 REG_EXPORT_TIMEOUT 的 15s 宽限）。
-  { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Query", "/TN", task, "/NH"],', reason: '顽固软件治理：判任务是否存在', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
-  { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Query", "/TN", task, "/XML"],', reason: '顽固软件治理：删任务前导出 XML（唯一还原凭据）', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
-  { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["/Delete", "/TN", task, "/F"],', reason: '顽固软件治理：删除计划任务', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
-  { file: 'src-tauri/src/engine/native/process.rs', anchor: '&["export", &run_reg_path, stage_str, "/y"]', reason: '顽固软件治理：删抖音托盘 Run 值前整键备份（2026-10-06 扩链；B2-2 改导出到私有中转件）' },
   // 维护任务（v2-L4P-37/F-6）：sfc/DISM/sc，30 分钟上限
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: 'exe, args, MAINT_CMD_TIMEOUT', reason: '维护任务 run_cmd：sfc/DISM/sc 长耗时子进程', timeoutConst: 'MAINT_CMD_TIMEOUT', secs: 1800 },
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '&["stop", name],', reason: 'stop_service_wait 的 sc stop（R5b-M09 收 30s 档）', timeoutConst: 'SC_CMD_TIMEOUT', secs: 30 },
@@ -412,6 +412,7 @@ const TIMEOUT_SPAWN_SITES = [
   { file: 'src-tauri/src/commands/misc.rs', anchor: '"IMAGENAME eq DWMBlurGlass.exe"', reason: 'DWM 注入工具探测：tasklist 进程痕迹', timeoutConst: 'PROBE_TIMEOUT', secs: 10 },
   { file: 'src-tauri/src/commands/misc.rs', anchor: '"/TN", "DWMBlurGlass_Extend"', reason: 'DWM 注入工具探测：schtasks 计划任务痕迹', timeoutConst: 'PROBE_TIMEOUT', secs: 10 },
   { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '"/Change", "/TN", &full, arg', reason: '维护任务启停：schtasks /Change', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
+  { file: 'src-tauri/src/engine/native/maintenance.rs', anchor: '"/Query", "/TN", &full, "/XML"', reason: '优化检测：读任务 XML 判是否已禁用（任务不存在按达标）', timeoutConst: 'SCHTASKS_TIMEOUT', secs: 30 },
   { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"interface", "set", "interface"', reason: '网络修复：启用网卡', timeoutConst: 'NETSH_TIMEOUT', secs: 30 },
   { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"interface", "ipv4", "set", "dnsservers"', reason: '网络修复：DNS 重置为自动获取', timeoutConst: 'NETSH_TIMEOUT', secs: 30 },
   { file: 'src-tauri/src/engine/native/runtimes_net.rs', anchor: '"start", "Dhcp"', reason: '网络修复：启动 DHCP 服务（sc start）', timeoutConst: 'SC_CMD_TIMEOUT', secs: 30 },

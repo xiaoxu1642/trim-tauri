@@ -245,6 +245,41 @@ pub(super) fn cmd_step_failure(outcome: std::io::Result<std::process::Output>) -
     }
 }
 
+/// `cmd_step_failure` 的命令感知版：只给「删除一个本就不存在的 BCD 元素」放行。
+///
+/// 2026-11-16 真机执行发现：`bcdedit /deletevalue {current} useplatformclock` 在元素
+/// 不存在时回退出码 1 + `Element not found.`，但目标态本来就是「不存在」——
+/// 与 BCD 面板把 `__DELETE__` 缺失判成达标是同一口径。其它非零退出仍按失败上报。
+pub(super) fn cmd_step_failure_for(
+    cmd: &str,
+    outcome: std::io::Result<std::process::Output>,
+) -> Option<String> {
+    if let Ok(out) = outcome.as_ref() {
+        if !out.status.success() {
+            let cmd_l = cmd.to_ascii_lowercase();
+            if cmd_l.contains("bcdedit") && cmd_l.contains("/deletevalue") {
+                let text = format!(
+                    "{}\n{}",
+                    crate::engine::systembin::decode_native_output(&out.stdout),
+                    crate::engine::systembin::decode_native_output(&out.stderr)
+                );
+                let text_l = text.to_ascii_lowercase();
+                if text_l.contains("element not found")
+                    || text_l.contains("找不到元素")
+                    || text_l.contains("系统找不到指定的元素")
+                {
+                    log::write_log(
+                        "warn",
+                        &format!("bcdedit 删除不存在的元素，按目标已达成处理: {cmd}"),
+                    );
+                    return None;
+                }
+            }
+        }
+    }
+    cmd_step_failure(outcome)
+}
+
 /// 这一步有没有带上四个引擎字段（reg / cmd / service / pwsh）之一。
 ///
 /// 为什么单独成函数而不是只在分发链里各写一遍：R3-L01 之后，链尾有两个**有名字**的
@@ -642,7 +677,7 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
             // R3-M04（2026-11-01）：三种成因不再折成一句「命令返回非零」——
             // 超时 / 启动失败 / 真实非零退出各有各的可用动作（放宽超时 / 查 PATH 与
             // 权限 / 看 stderr），构造器只此一份（[`cmd_step_failure`]）。
-            if let Some(why) = cmd_step_failure(run_cmd_step(cmd)) {
+            if let Some(why) = cmd_step_failure_for(cmd, run_cmd_step(cmd)) {
                 failed += 1;
                 failed_reasons.push(step_reason(i, label, &why));
             }
@@ -661,13 +696,20 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
             // D0-EXEC-SIDE: startType 执行分支（D0-COVERAGE-ANCHOR 契约表的一行）。
             let start_label = s.get("startType").and_then(|v| v.as_str());
             let want_disable = s.get("disable").and_then(|v| v.as_bool()).unwrap_or(false);
+            // P2-1：一步只计一次失败；失败原因可多条，但 step 计数不重复膨胀。
+            let mut step_failures: Vec<String> = Vec::new();
 
             // 启动类型期望值。未知取值 fail-closed（native 侧解析，绝不猜默认值）。
+            let mut unknown_start = false;
             let mut expected_start = match start_label {
                 Some(l) => match crate::engine::native::start_type_from_label(l) {
                     Ok(v) => Some(v),
                     Err(reason) => {
-                        return Err(format!("未知启动类型，未停服: {reason}"));
+                        // P1-3：预检已把未知 startType 判 unsupported；执行侧同判失败并继续，
+                        // 不许整链中止（前面步骤已落盘、后面步骤永不执行）。
+                        step_failures.push(format!("服务「{service}」: 未知启动类型，未停服: {reason}"));
+                        unknown_start = true;
+                        None
                     }
                 },
                 None => None,
@@ -680,34 +722,31 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
             // 纯停服步、`startType:"disabled"` 都要停；其余显式档位只改启动类型。
             let need_stop = service_need_stop(want_disable, expected_start);
 
-            if need_stop {
+            if !unknown_start && need_stop {
                 // 终态语义走 native 原语（v5 O-1）：1062 本就未启动 / 1060 本机没装
                 // 都等于目标达成，判 Ok。旧的 `sc stop` 直调把退出码非零一律当失败。
                 if let Err(reason) = crate::engine::native::service_stop_pub(service) {
-                    failed += 1;
-                    failed_reasons.push(step_reason(i, label, &format!("服务「{service}」: {reason}")));
+                    step_failures.push(format!("服务「{service}」: {reason}"));
                 }
             }
-            if let Some(want) = expected_start {
-                // 审查 2026-09-27 L5 的等价物：被策略拒绝不再静默，计入失败原因。
-                if let Err(reason) = crate::engine::native::service_set_start_pub(service, want) {
-                    failed += 1;
-                    failed_reasons.push(step_reason(
-                        i,
-                        label,
-                        &format!("服务「{service}」: {reason}（可能被组策略锁定）"),
-                    ));
+            if !unknown_start {
+                if let Some(want) = expected_start {
+                    // 审查 2026-09-27 L5 的等价物：被策略拒绝不再静默，计入失败原因。
+                    if let Err(reason) = crate::engine::native::service_set_start_pub(service, want) {
+                        step_failures.push(format!("服务「{service}」: {reason}（可能被组策略锁定）"));
+                    }
+                }
+                // 存在性回读。判据用「服务在不在」而不是「停没停」：startType 形态刻意
+                // 不停服，拿运行态当判据会把它误判成失败。
+                if !crate::engine::native::service_exists(service) {
+                    step_failures.push(format!("服务「{service}」不存在（可能已被卸载或精简）"));
                 }
             }
-            // 存在性回读。判据用「服务在不在」而不是「停没停」：startType 形态刻意
-            // 不停服，拿运行态当判据会把它误判成失败。
-            if !crate::engine::native::service_exists(service) {
+            if !step_failures.is_empty() {
                 failed += 1;
-                failed_reasons.push(step_reason(
-                    i,
-                    label,
-                    &format!("服务「{service}」不存在（可能已被卸载或精简）"),
-                ));
+                for why in step_failures {
+                    failed_reasons.push(step_reason(i, label, &why));
+                }
             }
         } else if let Some(pwsh) = s.get("pwsh").and_then(|v| v.as_str()) {
             // pwsh 类型：交给解释器（v3-K1）。原生可编译 → 原生执行；白名单内
@@ -840,7 +879,7 @@ pub(super) fn svc_bulk_append_store(mut base: Vec<Value>) -> Vec<Value> {
 foreach ($n in $storeSvc) {{ $p = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$n\"; if (Test-Path $p) {{ New-ItemProperty -Path $p -Name Start -Value 4 -PropertyType DWord -Force | Out-Null; Stop-Service -Name $n -Force -ErrorAction SilentlyContinue }} }}"
     );
     base.push(json!({
-        "label": "禁用商店相关服务（ClipSVC/InstallService/PushToInstall/wuauserv/DoSvc，经用户弹窗确认）",
+        "label": "禁用商店相关服务（ClipSVC/InstallService/PushToInstall/wuauserv/DoSvc，wuauserv Start=4，经用户弹窗确认）",
         "pwsh": pwsh
     }));
     base
@@ -860,8 +899,11 @@ pub(super) fn classify_step_kinds(steps: &[Value]) -> Vec<String> {
         if s.get("service").is_some() {
             push("service");
         }
-        if s.get("cmd").is_some() || s.get("pwsh").is_some() {
+        if s.get("cmd").is_some() {
             push("cmd");
+        }
+        if s.get("pwsh").is_some() {
+            push("pwsh");
         }
     }
     kinds
@@ -869,6 +911,7 @@ pub(super) fn classify_step_kinds(steps: &[Value]) -> Vec<String> {
 
 
 #[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RunParams {
     #[serde(default)]
     restore: bool,
@@ -888,6 +931,27 @@ pub struct RunParams {
     /// 批量项里用户勾选的附带开关（形状与目标不同，故分开一个字段）
     #[serde(default, rename = "pickedExtras")]
     picked_extras: Option<Vec<String>>,
+    /// 还原分层：先跑非 reg 步，值级备份回写后才允许写回推定的 reg 默认值。
+    /// `None` = 完整预置还原（仅用于无备份兜底）。
+    #[serde(default, rename = "restoreStage")]
+    restore_stage: Option<RestoreStage>,
+    /// P1-7：显式方向；与历史 `restore` 同时存在时不得矛盾。
+    #[serde(default)]
+    direction: Option<RunDirection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum RestoreStage {
+    NonReg,
+    RegOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum RunDirection {
+    Apply,
+    Restore,
 }
 
 /// optimizer:run —— 执行单个优化项（正向/还原）
@@ -1047,6 +1111,16 @@ pub(super) fn assemble_steps(
     p: &RunParams,
 ) -> Result<(Vec<Value>, Option<Vec<String>>), String> {
     let is_dynamic = opt.get("dynamic").and_then(|v| v.as_bool()).unwrap_or(false);
+    // P1-9：两项目标相反（保持更新可用 vs 禁用 wuauserv）。同时选中时拒绝，
+    // 不靠执行顺序让后者静默覆盖前者。
+    if option_id == "tf_svc_bulk"
+        && p.include_store
+        && p.picked_extras
+            .as_ref()
+            .is_some_and(|extras| extras.iter().any(|e| e == "wuau_manual"))
+    {
+        return Err("「wuauserv 改为手动」与「禁用商店相关服务」不能同时选择".into());
+    }
 
     // includeStore 与子集选择是**正交**参数：早期实现里子集分支优先，把 includeStore
     // 整个吞掉（勾了商店段却不写、回执仍成功）。把商店服务并进子集清单，让
@@ -1074,7 +1148,7 @@ pub(super) fn assemble_steps(
         if restore.is_empty() {
             return Err("该优化项暂不支持一键还原，请手动恢复或使用系统还原点".into());
         }
-        restore.clone()
+        staged_restore_steps(&restore, p.restore_stage)?
     } else if is_dynamic {
         // R3-L06：参数校验不在这里各写一份，见 [`dynamic_steps`]。
         dynamic_steps(option_id, p)?
@@ -1123,6 +1197,31 @@ pub(super) fn assemble_steps(
         opt.get("steps").and_then(|v| v.as_array()).cloned().unwrap_or_default()
     };
     Ok((steps, picked_targets_effective))
+}
+
+/// 还原分层：只取非 reg 步或只取 reg 步。空集即拒，避免「这一层什么都没跑」被当成成功。
+fn staged_restore_steps(restore: &[Value], stage: Option<RestoreStage>) -> Result<Vec<Value>, String> {
+    let Some(stage) = stage else {
+        return Ok(restore.to_vec());
+    };
+    let steps: Vec<Value> = restore
+        .iter()
+        .filter(|s| {
+            let is_reg = s.get("reg").and_then(|v| v.as_str()).is_some();
+            match stage {
+                RestoreStage::NonReg => !is_reg,
+                RestoreStage::RegOnly => is_reg,
+            }
+        })
+        .cloned()
+        .collect();
+    if steps.is_empty() {
+        return Err(match stage {
+            RestoreStage::NonReg => "该优化项没有非注册表还原步骤".into(),
+            RestoreStage::RegOnly => "该优化项没有注册表预置还原步骤".into(),
+        });
+    }
+    Ok(steps)
 }
 
 /// R3-M04（v7.2 C04）：@@RECYCLE@@ 计数的回执/记账摘要。`None` = 本轮没有回收站
@@ -1181,10 +1280,26 @@ pub(super) fn ensure_opt_backup_present(
     if option_targets(option_id).unwrap_or_default().is_empty() {
         return Ok(());
     }
+    // P1-5：前置闸与还原入口同口径 —— 台账整本摘要不 ok 时不能把条目当成可信备份。
+    backup_ledger_seal_reason()?;
     let ledger = load_opt_backups_state().map_err(|e| {
         format!("优化项备份台账读取失败，无法确认是否已备份（{e}）；请先备份再执行")
     })?;
     ensure_opt_backup_present_in(option_id, &ledger)
+}
+
+/// `optimizer-backups.json` 的整本摘要闸；`Ok(())` = 不存在或摘要 ok。
+fn backup_ledger_seal_reason() -> Result<(), String> {
+    let path = opt_backup_file();
+    if opt_backup_absent(&path) {
+        return Ok(());
+    }
+    let digest = crate::engine::hash::sha256_file(&path).ok();
+    let state = crate::engine::reg_backup::reg_backup_admin_seal_state("optimizer", &path, digest.as_deref());
+    match seal_refusal_reason(state) {
+        None => Ok(()),
+        Some(_) => Err(seal_refusal_message(state).to_string()),
+    }
 }
 
 /// 纯判定（可测）：台账里必须有这一项。
@@ -1216,9 +1331,24 @@ pub async fn optimizer_run<R: Runtime>(
     };
     let option_id = option_id.unwrap_or_default();
     let Some(opt) = find_option(&option_id) else {
+        if let Some(failure) = catalog_load_failure() {
+            return failure;
+        }
         return json!({ "success": false, "message": "未知的优化选项" });
     };
-    let p = params.unwrap_or_default();
+    let mut p = params.unwrap_or_default();
+    if let Some(direction) = p.direction {
+        match direction {
+            RunDirection::Restore => p.restore = true,
+            RunDirection::Apply if p.restore => {
+                return json!({
+                    "success": false,
+                    "message": "执行方向参数矛盾（direction=apply 但 restore=true），已拒绝执行"
+                });
+            }
+            RunDirection::Apply => p.restore = false,
+        }
+    }
 
     // M1（R1-1.3）：判据只有这一份，`optimizer_batch_preflight` 与本函数同源调用。
     // 以前这里是三段内联的 early-return，preflight 若另抄一份，漂移后单条执行仍绿、
@@ -1502,7 +1632,7 @@ pub async fn optimizer_run<R: Runtime>(
         let mut m = if failed_reasons.is_empty() {
             "部分步骤可能失败".to_string()
         } else {
-            format!("{} 项步骤失败：{}", failed_reasons.len(), failed_reasons.join("；"))
+            format!("{failed_steps} 项步骤失败：{}", failed_reasons.join("；"))
         };
         if let Some(s) = &rec_summary {
             m.push_str(&format!("；{s}"));
@@ -1534,6 +1664,18 @@ pub async fn optimizer_run<R: Runtime>(
 
     // 记账收尾 + 回读
     if is_restore_run {
+        // P0-3：分层还原的第一段只跑非 reg 步（服务/任务/目录），不得提前销账或摘灰；
+        // 真正的状态收口由随后的值级备份回写（optimizer_restore_reg）负责。
+        if p.restore_stage == Some(RestoreStage::NonReg) {
+            if !ok {
+                return json!({
+                    "success": false,
+                    "message": ok_message,
+                    "failedSteps": failed_reasons
+                });
+            }
+            return json!({ "success": true, "message": ok_message, "verify": "pass" });
+        }
         if ok {
             // 首选值级备份逐项比对（原值不存在则当前必须不存在）；无备份/读不到再走反向判据
             let verify = verify_option_restored(&option_id, opt);
@@ -1541,7 +1683,8 @@ pub async fn optimizer_run<R: Runtime>(
                 log::write_log("warn", &format!("还原后回读校验不符（可能被组策略/安全软件覆盖）: {title}"));
                 let note = ledger_note("未完成标记", opt_state::set_detected_entry(&option_id, true));
                 return json!({
-                    "success": true,
+                    "success": false,
+                    "restored": false,
                     "message": format!("还原已执行但未完全生效（回读不符），可重试{note}"),
                     "verify": verify
                 });
@@ -1552,7 +1695,8 @@ pub async fn optimizer_run<R: Runtime>(
             if verify == "unknown" {
                 log::write_log("warn", &format!("还原后无法回读校验（无备份且反向判据不适用），账本保留: {title}"));
                 return json!({
-                    "success": true,
+                    "success": false,
+                    "restored": false,
                     "message": "还原命令已执行，但无法验证是否生效，请在详情里复核（该记录已保留，可重试）",
                     "verify": verify
                 });
@@ -1562,7 +1706,7 @@ pub async fn optimizer_run<R: Runtime>(
                 ledger_note("还原销账", opt_state::remove(&option_id)),
                 ledger_note("摘灰", opt_state::set_detected_entry(&option_id, false)),
             );
-            return json!({ "success": true, "message": format!("{ok_message}{note}"), "verify": verify });
+            return json!({ "success": true, "restored": true, "message": format!("{ok_message}{note}"), "verify": verify });
         }
     } else if ok {
         let mut verify = verify_applied(&option_id, opt, &p);
@@ -1609,7 +1753,7 @@ pub async fn optimizer_run<R: Runtime>(
         );
         log::write_log(
             "warn",
-            &format!("优化项部分步骤失败（{} 项），已记账为 partial: {title}", failed_reasons.len()),
+            &format!("优化项部分步骤失败（{failed_steps} 项），已记账为 partial: {title}"),
         );
         return json!({
             "success": false,
@@ -1679,7 +1823,15 @@ pub(super) fn verify_applied(option_id: &str, opt: &Value, p: &RunParams) -> &'s
 /// got 侧此刻读不出来同样呈报 unknown，不冒充「不存在」或「不一致」。
 pub(super) fn verify_option_restored(option_id: &str, opt: &Value) -> &'static str {
     // 分支 1：值级备份
-    let map = load_opt_backups();
+    // P1-5：还原回读必须与写回路径同过摘要闸，且用三态读器；台账读不动时
+    // 不能退回反向判据给 pass。
+    if backup_ledger_seal_reason().is_err() {
+        return "unknown";
+    }
+    let map = match load_opt_backups_state() {
+        Ok(v) => v,
+        Err(_) => return "unknown",
+    };
     if let Some(entry) = map.get(option_id) {
         if let Some(want_values) = entry.get("values").and_then(|v| v.as_array()) {
             if !want_values.is_empty() {
@@ -1790,14 +1942,21 @@ pub(super) fn svc_mem_current_kb() -> Option<i64> {
 /// - 把 `one_line` 改回按字节截断 ⇒ `成功不给原因_超长stderr按字符截断` 红（多字节切片 panic）。
 #[cfg(test)]
 mod r3_m04_cmd_reason_tests {
-    use super::{cmd_step_failure, one_line, step_reason, CMD_STDERR_MAX_CHARS, CMD_TIMEOUT_STDERR_MARKER};
+    use super::{
+        cmd_step_failure, cmd_step_failure_for, one_line, step_reason, CMD_STDERR_MAX_CHARS,
+        CMD_TIMEOUT_STDERR_MARKER,
+    };
 
     /// 合成一条子进程结局（不真起进程：本组用例零副作用）。
     fn out(code: u32, stderr: &str) -> std::process::Output {
+        out_streams(code, "", stderr)
+    }
+
+    fn out_streams(code: u32, stdout: &str, stderr: &str) -> std::process::Output {
         use std::os::windows::process::ExitStatusExt;
         std::process::Output {
             status: std::process::ExitStatus::from_raw(code),
-            stdout: Vec::new(),
+            stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),
         }
     }
@@ -1841,6 +2000,29 @@ mod r3_m04_cmd_reason_tests {
         // 没有 stderr 时如实说明「无错误输出」，不编造原因
         let quiet = cmd_step_failure(Ok(out(2, ""))).expect("非零必须判失败");
         assert!(quiet.contains("退出码 2") && quiet.contains("无错误输出"), "{quiet}");
+    }
+
+    /// 2026-11-16 真机回归：删除不存在的 BCD 元素是目标态达成，不得判失败；
+    /// 其它命令/其它错误仍必须判失败。
+    #[test]
+    fn bcd删除不存在元素不判失败() {
+        let missing = cmd_step_failure_for(
+            "bcdedit /deletevalue {current} useplatformclock",
+            Ok(out_streams(1, "An error occurred while attempting to delete the specified data element.\r\nElement not found.\r\n", "")),
+        );
+        assert!(missing.is_none(), "缺失元素应视为目标已达成: {missing:?}");
+
+        let wrong_cmd = cmd_step_failure_for(
+            "bcdedit /set {current} timeout 0",
+            Ok(out_streams(1, "Element not found.\r\n", "")),
+        );
+        assert!(wrong_cmd.is_some(), "非 deletevalue 命令不得被放行");
+
+        let other_err = cmd_step_failure_for(
+            "bcdedit /deletevalue {current} useplatformclock",
+            Ok(out_streams(1, "Access is denied.\r\n", "")),
+        );
+        assert!(other_err.is_some(), "其它 BCD 失败仍必须上报");
     }
 
     /// 超时注记是引擎自己写的中文（UTF-8），而真实 cmd 的 stderr 是 OEM 代码页 ——
@@ -1925,5 +2107,70 @@ mod backup_gate_tests {
             ensure_opt_backup_present_in("tf_demo", &ledger).is_ok(),
             "台账里有这一项必须放行（正常备份链不得被闸门挡住）"
         );
+    }
+}
+
+#[cfg(test)]
+mod restore_stage_tests {
+    use super::{assemble_steps, find_option, staged_restore_steps, RestoreStage, RunDirection, RunParams};
+    use serde_json::json;
+
+    /// P0-3：预置还原必须能拆成「非 reg」与「只 reg」两段，空段显式拒绝；
+    /// 破坏形态 = 忽略 `restoreStage` 直接返回整段 ⇒ 前两条断言红。
+    #[test]
+    fn 预置还原按阶段拆分且空段拒绝() {
+        let restore = vec![
+            json!({ "label": "服务恢复", "service": "MessagingService", "startType": "automatic" }),
+            json!({ "label": "目录回收", "pwsh": "Write-Output '@@RECYCLE2@@x|{}'" }),
+            json!({ "label": "注册表默认值", "reg": "Windows Registry Editor Version 5.00\n" }),
+        ];
+        let non_reg = staged_restore_steps(&restore, Some(RestoreStage::NonReg)).expect("非 reg 段");
+        assert_eq!(non_reg.len(), 2, "非 reg 段不得带入注册表步骤: {non_reg:?}");
+        assert!(non_reg.iter().all(|s| s.get("reg").is_none()));
+
+        let reg = staged_restore_steps(&restore, Some(RestoreStage::RegOnly)).expect("reg 段");
+        assert_eq!(reg.len(), 1, "reg 段只取注册表步骤: {reg:?}");
+        assert!(reg[0].get("reg").is_some());
+
+        assert_eq!(staged_restore_steps(&restore, None).expect("完整段").len(), 3);
+        let only_reg = vec![json!({ "label": "仅注册表", "reg": "Windows Registry Editor Version 5.00\n" })];
+        assert!(
+            staged_restore_steps(&only_reg, Some(RestoreStage::NonReg)).is_err(),
+            "没有非 reg 步骤时必须拒绝，而不是跑 0 步报成功"
+        );
+        let only_non_reg = vec![json!({ "label": "仅服务", "service": "X", "disable": true })];
+        assert!(
+            staged_restore_steps(&only_non_reg, Some(RestoreStage::RegOnly)).is_err(),
+            "没有 reg 步骤时必须拒绝，而不是跑 0 步报成功"
+        );
+    }
+
+    /// P1-7：`direction` 显式可解析；未知方向与未知字段一律拒绝。
+    #[test]
+    fn 方向与未知字段都要求显式登记() {
+        let p: RunParams = serde_json::from_value(json!({"direction": "restore"})).expect("合法方向");
+        assert_eq!(p.direction, Some(RunDirection::Restore));
+        assert!(
+            serde_json::from_value::<RunParams>(json!({"direction": "sideways"})).is_err(),
+            "未知方向必须反序列化失败"
+        );
+        assert!(
+            serde_json::from_value::<RunParams>(json!({"bogus": 1})).is_err(),
+            "未知字段必须拒绝（deny_unknown_fields）"
+        );
+    }
+
+    /// P1-9：`includeStore` 与 `wuau_manual` 同时选时拒绝，不让后者被覆盖。
+    #[test]
+    fn wuau手动与商店禁用互斥() {
+        let opt = find_option("tf_svc_bulk").expect("数据层应有 tf_svc_bulk");
+        let p: RunParams = serde_json::from_value(json!({
+            "pickedTargets": ["RetailDemo"],
+            "pickedExtras": ["wuau_manual"],
+            "includeStore": true
+        }))
+        .expect("RunParams 反序列化");
+        let err = assemble_steps(opt, "tf_svc_bulk", &p).expect_err("冲突组合必须拒绝");
+        assert!(err.contains("不能同时选择"), "{err}");
     }
 }

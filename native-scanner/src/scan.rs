@@ -2537,8 +2537,9 @@ fn del_item(sink: &dyn Sink, t: &str, path: &Path, kind: &str, status: &str, fre
 /// 只做小写（verbatim 路径 OS 不做组件折叠，键必须逐字稳定），由调用方
 /// [`is_protected_path`] 对这类残留形态 fail-closed。旧实现无脑剥前缀，把
 /// `\\?\Volume{...}\dir` 剥成相对串，保护前缀比对必然不命中 ⇒ 放行删除（穿闸实锤）。
-pub(crate) fn lexically_normalize(p: &str) -> String {
-    let s = p.trim();
+pub fn lexically_normalize(p: &str) -> String {
+    let compat = normalize_path_key_shape(p);
+    let s = compat.as_str();
     if s.is_empty() {
         return String::new();
     }
@@ -2631,6 +2632,32 @@ pub(crate) fn normalize_plain(s: &str) -> String {
         format!(r"{}\{}", prefix, trimmed_comps.join("\\"))
     };
     joined.trim_end_matches([' ', '.']).to_lowercase()
+}
+
+/// P1-01b：路径比较键的兼容折叠（不改保护判据）。
+///
+/// 只处理三种用户可见但语义等价的写法：正斜杠 UNC / 分隔符、`\\?\` 可折回
+/// 形态、逐分量尾点尾空白。不可折回的 verbatim/device 形态保留字面，避免
+/// 把不同卷/命名空间塌成同一个键。
+pub fn normalize_path_key_shape(s: &str) -> String {
+    let mut text = s.trim().replace('/', "\\");
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        text = format!(r"\\{rest}");
+    } else if text.starts_with(r"\\?\") {
+        let rest = &text[4..];
+        if rest.as_bytes().get(1) == Some(&b':') {
+            text = rest.to_string();
+        }
+    }
+    let trimmed = text
+        .split('\\')
+        .map(|c| {
+            let t = c.trim_end_matches([' ', '.']);
+            if t.is_empty() && !c.is_empty() { c.to_string() } else { t.to_string() }
+        })
+        .collect::<Vec<_>>()
+        .join("\\");
+    trimmed.trim_end_matches('\\').to_lowercase()
 }
 
 /// 对应主进程 isProtectedDeletePath：拒绝磁盘根与系统关键目录。
@@ -3394,6 +3421,20 @@ mod tests {
         );
         // 裁空且原非空的组件保留原样（防塌并：不同路径不得折成同一个键）
         assert_eq!(lexically_normalize(r"C:\...\Bar"), r"c:\...\bar");
+
+    }
+
+    /// P1-01b：扫描器排除键与主进程 `path_key` 的三形态反例必须同键。
+    /// 判红自证：删掉 normalize_plain 入口的兼容折叠 ⇒ 三条断言全红。
+    #[test]
+    fn path_key_三形态反例同键() {
+        for (odd, canonical) in [
+            (r"c:/tmp/cache/./sub\", r"C:\tmp\cache\sub"),
+            (r"C:\tmp\cache\sub. ", r"C:\tmp\cache\sub"),
+            (r"\\?\C:\tmp\cache\sub", r"C:\tmp\cache\sub"),
+        ] {
+            assert_eq!(lexically_normalize(odd), lexically_normalize(canonical), "{odd} 未归一");
+        }
     }
 
     /// R4（2026-10-15）：删除结果行的 mode 字面量与共享夹具一致——本文件 ↔ src-tauri 的

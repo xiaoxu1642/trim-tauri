@@ -628,7 +628,6 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::memory::memory_processes,
         commands::memory::memory_kill,
         commands::memory::memory_stubborn_kill,
-        commands::memory::memory_stubborn_block,
         commands::processmanager::process_manager_open_window,
         commands::processmanager::process_manager_close_window,
         commands::processmanager::process_manager_report,
@@ -1512,7 +1511,7 @@ mod tests {
             "F4a2-M05：演示模式的勾选必须提示不写系统"
         );
         assert!(
-            ctx.contains("演示数据（未读写系统） · "),
+            ctx.contains("当前为演示数据，未读写系统"),
             "F4a2-M05：看板汇总必须带演示标识"
         );
         // F4a2-M05 的剩余射程（2026-10-23 复核）：横幅函数长期**零调用方**——分报告写的是
@@ -1830,8 +1829,12 @@ mod tests {
             include_str!("engine/native/contextmenu.rs").contains("已拉起 PID"),
             "A5-L04：fire-and-forget 的 explorer 重启必须留 PID/失败日志"
         );
+        // A5-L01 原锚点是 process.rs 里 stubborn_block 的 WPS UpdateMode 写入失败台账；
+        // 该命令 2026-11-16 整链退役（其写入面一并消失），判据迁到仍在用的同族出口：
+        // startup.rs 的启动项启停写值失败必须回 Err，不得静默当作已改。
         assert!(
-            include_str!("engine/native/process.rs").contains("WPS 更新注册表（UpdateMode 写入失败）"),
+            include_str!("engine/native/startup.rs")
+                .contains("回写未生效（可能需要管理员权限）"),
             "A5-L01：注册表写值失败必须进失败台账"
         );
     }
@@ -2092,10 +2095,9 @@ mod tests {
             2,
             "R1d-M01：fileclean 两条删除出口（delete-file / execute）都必须走 C01 共同判据"
         );
-        assert!(
-            memory.contains("required_count(&data, \"failedCount\")"),
-            "R1d-M10：failedCount 缺失必须判失败（A1-M07 口径，不许退回 unwrap_or(0)）"
-        );
+        // R1d-M10 的 memory 侧锚点随 memory:stubborn-block 退役（2026-11-16 用户裁定）失效：
+        // 该断言唯一命中就是那条命令体。护栏本体仍在——`required_count` 的单测与
+        // contextmenu / startup 三处消费方继续守着「缺键必须判失败」。
         assert!(
             aidesc.contains("save_baidu_usage(&u)?"),
             "R1d-L09：日限额写失败必须向上冒泡（A1-M10），不能 `let _ =` 吞掉"

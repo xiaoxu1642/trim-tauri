@@ -1,6 +1,6 @@
 //! cleanup 域（C 批）：规则库 / 扫描 / 执行 / 占用检测 / 明细。
-//! 通道清单见各文件的 `#[tauri::command]`，以 `lib.rs` 的 `generate_handler!` 为准
-//! （这里不写死条数：命令增减后注释里的数字就会变成假账）。
+//! 完整命令台账见下方 `pub use` 与 `lib.rs` 的 `generate_handler!`，定义在各子模块；
+//! 这里不写死条数，命令增减后只按现算注册表对账。
 //!
 //! 对照 Electron `main.js` 1188-2042（含规则在线更新 1560-1786）。
 //!
@@ -23,16 +23,9 @@
 //!   `log::flush_sync()`。常规清理**一律直接永久删、不经回收站**（v3.3.0 裁定；
 //!   2026-10-12 裁定移除 gameRedist 的回收站窄口径例外——逐文件 `SHFileOperationW`
 //!   是长耗时/卡死风险最大的同步 shell 路径，本次随裁定一并移除）。
-//! 需在 `lib.rs` 的 `generate_handler!` 注册：
-//! ```text
-//! // ---- C 批：cleanup ----
-//! commands::cleanup::cleanup_rules,
-//! commands::cleanup::cleanup_scan,
-//! commands::cleanup::cleanup_execute,
-//! commands::cleanup::cleanup_item_detail,
-//! commands::cleanup::cleanup_check_locked,
-//! commands::cleanup::cleanup_kill_locked_processes,
-//! ```
+//! `lib.rs` 当前注册的 cleanup 命令按职责分为：规则与年龄策略、reg/file 备份与清除、
+//! 扫描/取消/执行、占用检测与明细、预览 asset 放行、回收站统计/清空/打开。
+//! `cleanup_scan_headless` 是无头内部入口，不占通道、不进 `generate_handler!`。
 //!
 //! 与 Electron 的已知差异（如实登记，供双跑对照时豁免）：
 //! 1. **在途清理计数**：Electron 的 `activeCleanupRuns` 供「关窗后台静默退出等删除任务归零」用，

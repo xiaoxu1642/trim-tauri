@@ -59,7 +59,7 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
     DN_STARTED,
 };
 use windows::Win32::Devices::Properties::{
-    DEVPKEY_Device_DeviceDesc, DEVPKEY_Device_FriendlyName, DEVPROPTYPE,
+    DEVPKEY_Device_Class, DEVPKEY_Device_DeviceDesc, DEVPKEY_Device_FriendlyName, DEVPROPTYPE,
 };
 use windows::Win32::Foundation::DEVPROPKEY;
 
@@ -313,6 +313,45 @@ pub fn enumerate_all() -> Result<Vec<DevHit>, String> {
         }
     }
     Ok(out)
+}
+
+/// 枚举 `PCI\...` 下指定设备类的实例 ID（`tf_usb_power` 的 `Win32_USBController` 等价面）。
+///
+/// 为什么不读注册表 `Enum\PCI\...\Class`：真机执行发现该值在普通管理员令牌下全部
+/// 拒绝访问（42/42），把整步误报成「PCI 设备清单不完整」。CfgMgr 的设备属性
+/// `DEVPKEY_Device_Class` 是同一事实的系统 API 读取面，不受该 ACL 影响。
+pub fn enumerate_pci_class_ids(class: &str) -> Result<(Vec<String>, bool), String> {
+    let ids = device_ids()?;
+    let mut out = Vec::new();
+    let mut skipped = 0usize;
+    for id in ids {
+        if !id.to_ascii_uppercase().starts_with("PCI\\") {
+            continue;
+        }
+        let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut devinst = 0u32;
+        unsafe {
+            if CM_Locate_DevNodeW(&mut devinst, PCWSTR(wide.as_ptr()), CM_LOCATE_DEVNODE_FLAGS(0)).0 != 0 {
+                skipped += 1;
+                continue;
+            }
+            match devprop_string(devinst, &DEVPKEY_Device_Class) {
+                Some(c) if c.eq_ignore_ascii_case(class) => out.push(id),
+                Some(_) => {}
+                // 不是每台 PCI 设备都带 Class 属性（桥/根端口等）；缺失只表示
+                // 「不是该类」，不能把整组标成不完整。真正的开节点失败仍计 incomplete。
+                None => {}
+            }
+        }
+    }
+    if skipped > 0 {
+        crate::engine::log::write_log(
+            "warn",
+            &format!("CfgMgr 设备类枚举跳过 {skipped} 个无法定位的 PCI 设备（不影响已定位设备）"),
+        );
+    }
+    // 未定位/无 Class 的 PCI 设备不构成本组「读失败」：它们本来就不是目标类。
+    Ok((out, false))
 }
 
 // ==================== 写入面（2026-10-11：tf_dev_disable 原生化）====================

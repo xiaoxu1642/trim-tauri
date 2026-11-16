@@ -336,7 +336,20 @@ pub async fn cleanup_file_backup_list<R: tauri::Runtime>(window: WebviewWindow<R
 
 fn collect_file_backup_list() -> Value {
     let mut items: Vec<Value> = Vec::new();
+    // P1-02d：超限清单必须**留痕**（否则界面上这份备份直接消失，用户不知道它存在）。
+    // 它不是坏清单，是「太大不予读」—— 理由逐条写进回执，不静默丢。
+    let mut skipped: Vec<Value> = Vec::new();
     let mut total_bytes: i64 = 0;
+    let manifest_limit = match crate::engine::native::cleanup_byte_limits() {
+        Ok(l) => l.backup_manifest,
+        Err(reason) => {
+            log::write_log(
+                "error",
+                &format!("备份清单字节上限不可用（{reason}），本轮不读任何清单"),
+            );
+            0
+        }
+    };
     let (entries, unreadable) = crate::engine::paths::read_entries_across_roots_state(
         crate::engine::paths::backup_read_dirs(FILES_BACKUP_SUB),
     );
@@ -348,6 +361,16 @@ fn collect_file_backup_list() -> Value {
             continue;
         }
         let Ok(meta) = p.metadata() else { continue };
+        // P1-02d：清单读取前卡字节上限（契约表 cleanup.limits.maxBackupManifestBytes）——
+        // 备份根在用户可写目录里，超限文件**不读**（不整文件读入再失败）。
+        if meta.len() > manifest_limit {
+            skipped.push(json!({
+                "file": name,
+                "reason": format!("清单超出字节上限（{} > {manifest_limit} 字节），未读取", meta.len()),
+                "sizeBytes": meta.len(),
+            }));
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(&p) else { continue };
         let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
         let entries = v.get("entries").and_then(|e| e.as_array());
@@ -372,12 +395,13 @@ fn collect_file_backup_list() -> Value {
     items.truncate(crate::engine::paths::BACKUP_KEEP);
     json!({ "success": true, "data": {
         "manifests": items,
+        "skipped": skipped,
         "totalCount": total_count,
         "totalBytes": total_bytes,
         "keep": crate::engine::paths::BACKUP_KEEP,
         "unreadable": unreadable,
-        "degraded": unreadable > 0,
-        "degradedReason": if unreadable > 0 { Some("部分备份目录/清单不可读，列表可能不完整") } else { None },
+        "degraded": unreadable > 0 || !skipped.is_empty(),
+        "degradedReason": if unreadable > 0 || !skipped.is_empty() { Some("部分备份目录/清单不可读或超出字节上限，列表可能不完整") } else { None },
         "degradedSource": "cleanup.fileBackupList",
     } })
 }
@@ -395,6 +419,22 @@ fn parse_files_manifest(file: &str) -> Result<(PathBuf, Value), String> {
     let Some(mpath) = crate::engine::paths::resolve_backup_file(FILES_BACKUP_SUB, fname) else {
         return Err("备份清单不存在".into());
     };
+    // P1-02d：读清单前先卡字节上限（契约表 cleanup.limits.maxBackupManifestBytes）。
+    // 上限取不到即 fail-closed（不许「上限未知就当没有上限」）。
+    let manifest_limit = match crate::engine::native::cleanup_byte_limits() {
+        Ok(l) => l.backup_manifest,
+        Err(reason) => return Err(format!("备份清单字节上限不可用（{reason}）")),
+    };
+    match std::fs::metadata(&mpath) {
+        Ok(meta) if meta.len() > manifest_limit => {
+            return Err(format!(
+                "备份清单超出字节上限（{} > {manifest_limit} 字节），不予读取",
+                meta.len()
+            ));
+        }
+        Ok(_) => {}
+        Err(_) => return Err("备份清单不存在".into()),
+    }
     let Ok(text) = std::fs::read_to_string(&mpath) else {
         return Err("备份清单不存在".into());
     };
@@ -408,8 +448,8 @@ fn parse_files_manifest(file: &str) -> Result<(PathBuf, Value), String> {
 }
 
 /// 批量条目数上限：防 IPC 侧一次塞入超大 indexes 数组把反序列化内存打爆；
-/// 正常批次 = 单份清单条目数（备份创建侧自有批次大小上限），远低于此值。
-const FILE_RESTORE_BATCH_MAX: usize = 50_000;
+/// 写入侧 `ManifestBudget` 同源复用此值，保证新写的每份清单都能整批还原。
+pub(crate) const FILE_RESTORE_BATCH_MAX: usize = crate::engine::native::FILE_RESTORE_BATCH_MAX;
 
 /// cleanup:file-backup-restore-batch — 整批把备份条目拷回原路径（主窗专属）。
 /// 逐文件命令每条都重读并重解析整份清单（O(批次×清单)），大批次（上限内可达
@@ -444,6 +484,31 @@ fn cleanup_file_backup_restore_batch_blocking(file: String, indexes: Vec<usize>)
         Ok(pair) => pair,
         Err(msg) => return json!({ "success": false, "message": msg }),
     };
+    // P1-02d：历史超限清单的**申报总字节**容灾（契约表 cleanup.limits.maxFileBackupTotalBytes）。
+    // 新写入侧已在备份前按 cleanup_byte_limits() 同源截断，正常新清单不会触发这里；
+    // 这里只保证老的超限清单不会被一次还原拖成无底洞。
+    let total_limit = match crate::engine::native::cleanup_byte_limits() {
+        Ok(l) => l.backup_total,
+        Err(reason) => {
+            return json!({
+                "success": false,
+                "message": format!("备份字节上限不可用（{reason}）")
+            });
+        }
+    };
+    let entries_for_limit = v.get("entries").and_then(|e| e.as_array());
+    let mut declared_total: u64 = 0;
+    for index in &indexes {
+        let Some(entry) = entries_for_limit.and_then(|a| a.get(*index)) else { continue };
+        let Some(size) = entry.get("size").and_then(|s| s.as_u64()) else { continue };
+        declared_total = declared_total.saturating_add(size);
+        if declared_total > total_limit {
+            return json!({
+                "success": false,
+                "message": format!("本批还原申报总字节超上限（{total_limit} 字节）")
+            });
+        }
+    }
     // 副本必须与清单同根（老根清单的副本躺在老根），不能固定用新根拼（N1）
     let Some(root) = mpath.parent() else {
         return json!({ "success": false, "message": "备份清单路径异常" });
@@ -469,7 +534,7 @@ fn cleanup_file_backup_restore_batch_blocking(file: String, indexes: Vec<usize>)
         results.push(result);
     }
     json!({
-        "success": true,
+        "success": failed == 0,
         "data": { "results": results, "restored": restored, "skipped": skipped, "failed": failed }
     })
 }
@@ -613,6 +678,10 @@ mod tests {
         assert!(
             body.contains("restore_entry(root, entry)"),
             "逐条必须走共享 restore_entry，隔离语义与逐条版一致"
+        );
+        assert!(
+            body.contains("\"success\": failed == 0"),
+            "P1-03a：批量还原外层 success 必须由 failed 派生，全失败不得仍报成功"
         );
     }
 

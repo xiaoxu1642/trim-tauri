@@ -77,6 +77,30 @@ const WRITE_GUARD_TRANSITION = [
   },
 ];
 
+// P1-04d：发布前必跑的清理域真机探针。这里只登记「测试对象必须在盘上且仍是
+// #[ignore]」，不宣称本机已跑过；实际执行状态由发布记录在 SKIP/PASS/FAIL 中填写。
+// 本机条件不满足时用 SKIP，不计 PASS，也不能删条目把清单变绿。
+const CLEANUP_RELEASE_PROBES = [
+  {
+    rel: 'src-tauri/tests/module_smoke.rs',
+    fn: 'cleanup_scan_l1_l2_probe',
+    reason: '全量扫描与载荷计量的真机性能基线（D-08 L1/L2）',
+    skip: true,
+  },
+  {
+    rel: 'src-tauri/tests/module_smoke.rs',
+    fn: 'cleanup_query_locked_probe_names_locking_process',
+    reason: 'PowerShell 持有真实文件句柄后占用查询能报出进程名（D-08 RM 占用）',
+    skip: false,
+  },
+  {
+    rel: 'src-tauri/tests/module_smoke.rs',
+    fn: 'cleanup_reg_backup_restore_shares_the_uninstall_domain_gates',
+    reason: '清理注册表备份与卸载域共用隔离根（P0-02 数据根隔离）',
+  },
+];
+const REQUIRED_SKIP_MARKERS = ['SKIP', 'skip', '未校验', '不支持', '无权限', '缺条件'];
+
 /** 递归收集 .rs 文件，忽略 target（构建产物里也有同名测试源码）。 */
 function listRs(dir) {
   if (!existsSync(dir)) return [];
@@ -632,6 +656,30 @@ if (!x1) {
   g.fail(`X1-K01 现场判定漂了：${x1.name} 应因 Cleanup.created 闸放行，实得 ${x1.ok ? x1.reason : `红（${x1.reason}）`}`);
 } else {
   g.ok(`现场 X1-K01 已识别：${x1.rel}:${x1.line} ${x1.name}（${x1.reason}）`);
+}
+
+// 发布前清单与 SKIP 语义：缺探针等于静默摘网（红）；探针体里没有 SKIP 文案
+// 等于条件不足时可能伪装成功（红）。这里只证明清单与文案在位，不把静态检查写成 PASS。
+const cleanupProbeProblems = [];
+const ignoredByKey = new Map(ignored.map((t) => [`${t.rel}::${t.name}`, t]));
+for (const probe of CLEANUP_RELEASE_PROBES) {
+  const key = `${probe.rel}::${probe.fn}`;
+  const item = ignoredByKey.get(key);
+  if (!item) {
+    cleanupProbeProblems.push(`${key} 不在 #[ignore] 对象里（探针被删/改名/摘掉 ignore，发布清单失明）`);
+    continue;
+  }
+  const hasSkipMarker = REQUIRED_SKIP_MARKERS.some((marker) => item.bodyLit.includes(marker));
+  if (!probe.skip && hasSkipMarker) {
+    cleanupProbeProblems.push(`${key} 是必须实跑的发布探针，却存在 SKIP 分支（发布记录不得把它写成可跳过）`);
+  } else if (probe.skip && !hasSkipMarker) {
+    cleanupProbeProblems.push(`${key} 是条件探针，但没有 SKIP/未校验文案（缺条件时会退化成伪装 PASS）`);
+  }
+}
+if (cleanupProbeProblems.length > 0) {
+  for (const problem of cleanupProbeProblems) g.fail(`P1-04d 真机 SKIP 清单缺口：${problem}`);
+} else {
+  g.ok(`P1-04d 发布前真机清单：${CLEANUP_RELEASE_PROBES.length} 项探针在位（必跑项无 SKIP 分支 / 条件项保留 SKIP 文案；执行状态仍按本机条件填 SKIP/PASS/FAIL）`);
 }
 
 // 对象地板：低于地板说明属性解析或目录根失效，不是仓库变干净。

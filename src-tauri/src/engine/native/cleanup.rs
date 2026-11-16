@@ -173,7 +173,11 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
             let mut files: Vec<Value> = Vec::new();
             let mut total = 0usize;
             let mut seen = std::collections::HashSet::new();
-            enumerate_files(target_path, "*", true, guard, &mut files, &mut total, &mut seen, cap, &mut unreadable);
+            let mut depth_capped = 0i64;
+            enumerate_files(target_path, "*", true, guard, &mut files, &mut total, &mut seen, cap, &mut unreadable, &mut depth_capped);
+            if depth_capped > 0 {
+                unresolved.push(format!("{depth_capped} 个子树超过遍历深度上限，明细可能偏少"));
+            }
             return Ok(json!({"kind": "files", "total": total, "truncated": total > cap, "files": files, "unresolved": unresolved, "unreadable": unreadable, "degraded": unreadable > 0, "degradedReason": if unreadable > 0 { Some("部分目录/文件不可读，明细可能偏少") } else { None }}));
         }
     }
@@ -226,8 +230,9 @@ fn enumerate_files(
     files: &mut Vec<Value>, total: &mut usize,
     seen: &mut std::collections::HashSet<String>, cap: usize,
     unreadable: &mut i64,
+    depth_capped: &mut i64,
 ) {
-    enumerate_files_at(dir, pattern, recurse, guard, files, total, seen, cap, 0, unreadable)
+    enumerate_files_at(dir, pattern, recurse, guard, files, total, seen, cap, 0, unreadable, depth_capped)
 }
 
 fn enumerate_files_at(
@@ -236,8 +241,12 @@ fn enumerate_files_at(
     files: &mut Vec<Value>, total: &mut usize,
     seen: &mut std::collections::HashSet<String>, cap: usize,
     depth: usize, unreadable: &mut i64,
+    depth_capped: &mut i64,
 ) {
-    if depth >= ENGINE_WALK_MAX_DEPTH { return; }
+    if depth >= ENGINE_WALK_MAX_DEPTH {
+        *depth_capped += 1;
+        return;
+    }
     let Ok(rd) = std::fs::read_dir(dir) else { *unreadable += 1; return };
     for entry in rd {
         // R5a-M04-02：与扫描侧同源的总条数上限（`PLAN_CAP_TOTAL`）。目录型预览
@@ -251,7 +260,7 @@ fn enumerate_files_at(
         if crate::engine::protect::is_reparse(&meta) { continue; }
         if meta.is_dir() {
             if recurse {
-                enumerate_files_at(&path.to_string_lossy(), pattern, recurse, guard, files, total, seen, cap, depth + 1, unreadable);
+                enumerate_files_at(&path.to_string_lossy(), pattern, recurse, guard, files, total, seen, cap, depth + 1, unreadable, depth_capped);
             }
         } else if meta.is_file() {
             let name = entry.file_name().to_string_lossy().to_string();
@@ -315,6 +324,90 @@ pub struct CleanupExecuteResult {
     pub freed: i64,
     pub file_count: i64,
     pub recycle_entries: Vec<Value>,
+}
+
+/// PF-P0-03：清单写入额度以序列化后的真实字节数计，上限取自契约表的读取侧口径。
+/// 每份清单还必须落在还原批次数上限内，额度不够就不写副本，避免产生孤儿。
+const MANIFEST_OVERHEAD_PER_ENTRY: usize = 8;
+/// 整批还原的单次条目上限；写入侧清单额度与读取侧批量还原共用，防止写出还原不了的清单。
+pub(crate) const FILE_RESTORE_BATCH_MAX: usize = 50_000;
+
+/// 字节上限表：契约表是唯一取值真源，engine 作为下层持有类型供命令层与写入侧共用。
+pub(crate) struct ByteLimits {
+    pub rules_json: u64,
+    pub backup_manifest: u64,
+    pub backup_total: u64,
+}
+
+/// 取清理域字节上限（契约表缺键即 Err，不给默认值）。
+pub(crate) fn cleanup_byte_limits() -> Result<ByteLimits, String> {
+    const SCHEMA_UNAVAILABLE: &str = "规则契约表不可用（tools/rule-schema.json 解析失败），已按 fail-closed 拒绝";
+    let req = |key: &str| -> Result<usize, String> {
+        crate::engine::rule_schema::number("cleanup", key)
+            .ok_or_else(|| format!("{SCHEMA_UNAVAILABLE}（缺 cleanup.{key}）"))
+    };
+    Ok(ByteLimits {
+        rules_json: req("maxRulesJsonBytes")? as u64,
+        backup_manifest: req("maxBackupManifestBytes")? as u64,
+        backup_total: req("maxFileBackupTotalBytes")? as u64,
+    })
+}
+
+struct ManifestBudget {
+    limit: u64,
+    max_entries: usize,
+    fixed_bytes: usize,
+    entries: usize,
+    bytes: usize,
+    truncated_entries: usize,
+    truncated_bytes: u64,
+}
+
+impl ManifestBudget {
+    fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            max_entries: FILE_RESTORE_BATCH_MAX,
+            fixed_bytes: serde_json::to_string(&json!({"ts": 0i64, "entries": []}))
+                .map(|text| text.len())
+                .unwrap_or(0),
+            entries: 0,
+            bytes: 0,
+            truncated_entries: 0,
+            truncated_bytes: 0,
+        }
+    }
+
+    fn can_fit(&self, bytes: usize) -> bool {
+        let projected = self.fixed_bytes
+            + self.bytes
+            + bytes
+            + self.entries.saturating_mul(MANIFEST_OVERHEAD_PER_ENTRY);
+        self.entries < self.max_entries && projected as u64 <= self.limit
+    }
+
+    fn reserve(&mut self, entry: &Value) -> bool {
+        let Ok(bytes) = serde_json::to_string(entry).map(|text| text.len() as u64) else {
+            self.truncated_entries += 1;
+            return false;
+        };
+        if !self.can_fit(bytes as usize) {
+            self.truncated_entries += 1;
+            self.truncated_bytes = self.truncated_bytes.saturating_add(bytes);
+            return false;
+        }
+        self.entries += 1;
+        self.bytes += bytes as usize;
+        true
+    }
+
+    fn release(&mut self, entry: &Value) {
+        if let Ok(bytes) = serde_json::to_string(entry) {
+            self.entries = self.entries.saturating_sub(1);
+            self.bytes = self.bytes.saturating_sub(bytes.len());
+        }
+    }
+
 }
 
 /// 永久删副本的保留上限（N3，2026-09-29）。裁「最老批次」，但副本落在
@@ -670,6 +763,8 @@ pub(crate) fn manifest_rels(manifest: &std::path::Path) -> Option<Vec<String>> {
 struct CollectDrops {
     reparse: i64,
     unreadable: i64,
+    /// P1-01e：遍历到深度上限而放弃的子树数。
+    depth_cap: i64,
     /// R5a-L04：超出扫描快照基线的条目数。
     ///
     /// 执行侧重枚举时，若目录内容比扫描时多了（用户在这期间又下了东西），
@@ -691,6 +786,13 @@ impl CollectDrops {
         self.unreadable += 1;
         if self.samples.len() < 5 {
             self.samples.push(format!("{path}（无法读取）"));
+        }
+    }
+
+    fn note_depth(&mut self, path: &str) {
+        self.depth_cap += 1;
+        if self.samples.len() < 5 {
+            self.samples.push(format!("{path}（超过遍历深度上限，子树未处理）"));
         }
     }
 
@@ -720,6 +822,8 @@ struct OutcomeCounters {
     reparse_blocked: i64,
     /// Kudu S2（2026-10-16）：文件身份证与扫描时不符（被替换/改写）而拒（同族）
     identity_blocked: i64,
+    /// P0-07：路径不在扫描快照清单里（无基线且不可信来源）而拒删的数量
+    identity_baseline_missing: i64,
     too_new: i64,
     excluded: i64,
     /// 文件名含孤立代理项/无法无损解码（保护清单按 lossy 串比对不可靠）而拒删的数量
@@ -727,6 +831,7 @@ struct OutcomeCounters {
     /// R5a-M12：采集阶段因目标本身是链接/junction 被跳过、或读不出来的数量
     collect_reparse: i64,
     collect_unreadable: i64,
+    collect_depth_cap: i64,
     unresolved: Vec<String>,
     to_recycle: bool,
 }
@@ -751,6 +856,9 @@ fn classify_outcome(
 ) -> (&'static str, String) {
     if !c.unresolved.is_empty() && c.deleted == 0 && c.failed == 0 {
         return ("skip", format!("路径变量 {} 未解析，未执行清理", c.unresolved.join("、")));
+    }
+    if c.collect_depth_cap > 0 && c.deleted == 0 && c.failed == 0 {
+        return ("skip", format!("{} 个子树超过遍历深度上限，未执行清理", c.collect_depth_cap));
     }
     let nothing_done = c.deleted == 0 && c.failed == 0;
     if nothing_done && c.protected_blocked > 0 {
@@ -778,6 +886,17 @@ fn classify_outcome(
         return (
             "skip",
             format!("{} 个文件与扫描时不一致（已被替换/改写），已拒绝删除", c.identity_blocked),
+        );
+    }
+    // P0-07：无基线且不在扫描快照里的文件一律拒删 —— 单独成档，不许落回
+    // 「成功 0 删」，也不许混进「被占用」（关程序对不上真因）。
+    if nothing_done && c.identity_baseline_missing > 0 {
+        return (
+            "skip",
+            format!(
+                "{} 个文件不在本次扫描快照里（无身份证基线），已拒绝删除",
+                c.identity_baseline_missing
+            ),
         );
     }
     if nothing_done && c.too_new > 0 {
@@ -834,6 +953,12 @@ fn classify_outcome(
     if c.identity_blocked > 0 {
         suffix = format!("{suffix}；{} 个文件与扫描时不一致已拒绝", c.identity_blocked);
     }
+    if c.identity_baseline_missing > 0 {
+        suffix = format!(
+            "{suffix}；{} 个文件不在扫描快照里（无基线）已拒绝",
+            c.identity_baseline_missing
+        );
+    }
     if c.lossy > 0 {
         suffix = format!("{suffix}；{} 个文件名无法无损解码已跳过", c.lossy);
     }
@@ -879,11 +1004,54 @@ pub fn cleanup_execute(
     auto_rebuild: bool,
     progress: Option<&dyn Fn(usize, usize, &str)>,
 ) -> Result<CleanupExecuteResult, String> {
-    cleanup_execute_with_backup_root(items, rules, to_recycle, auto_rebuild, None, progress)
+    cleanup_execute_with_backup_root(items, rules, to_recycle, auto_rebuild, &BackupRoots::default(), progress)
 }
 
-/// [`cleanup_execute`] 的实现体。`backup_root` 允许把「删前备份」定向到调用方给定的根——
-/// 生产恒 None（= 数据目录新根，行为不变）；三个端到端用例传私有 tmp 沙箱。
+/// 删前备份的**注入根**（方案 P0-02 / 决策 D-03：拆成两个根）。
+///
+/// 为什么必须拆两个：原先只有一个 `backup_root`，而它**只作用于文件备份**——
+/// 注册表备份链（`reg.exe export` 产物、裁剪、封条读根）始终从用户数据目录的
+/// `cleanup-reg-backup` 解析。测试里带 `regKeys` 的端到端用例因此会写真实用户备份
+/// 目录，并参与真实裁剪与封条对账（用户自己的备份会被测试件顶掉/裁掉）。
+///
+/// `None` = 生产语义（数据目录新根，行为不变）；测试入口**两个根都要注入**，
+/// 少注入一个就等于把测试件写进真实备份目录。
+#[derive(Debug, Clone, Default)]
+struct BackupRoots {
+    /// 文件备份根（删前副本）。
+    files: Option<std::path::PathBuf>,
+    /// 注册表备份根（`.reg` 产物 + 封条）。
+    reg: Option<std::path::PathBuf>,
+}
+
+/// 解析后的备份根（单一真源：执行链里所有备份落点都从这里取）。
+struct ResolvedBackupRoots {
+    /// 文件备份根。
+    files: std::path::PathBuf,
+    /// 注册表备份**写**根（export 产物落位处）。
+    reg_write: std::path::PathBuf,
+    /// 注册表备份**读**根（封条对账扫的根）。注入时只认注入根，
+    /// 免得测试的去对账读到用户真备份。
+    reg_read: Vec<std::path::PathBuf>,
+}
+
+fn resolve_backup_roots(roots: &BackupRoots) -> ResolvedBackupRoots {
+    let files = roots
+        .files
+        .clone()
+        .unwrap_or_else(|| crate::engine::paths::backup_write_dir("cleanup-files-backup"));
+    let (reg_write, reg_read) = match &roots.reg {
+        Some(r) => (r.clone(), vec![r.clone()]),
+        None => (
+            crate::engine::paths::backup_write_dir("cleanup-reg-backup"),
+            crate::engine::paths::backup_read_dirs("cleanup-reg-backup"),
+        ),
+    };
+    ResolvedBackupRoots { files, reg_write, reg_read }
+}
+
+/// [`cleanup_execute`] 的实现体。`roots` 允许把「删前备份」定向到调用方给定的根——
+/// 生产恒默认（= 数据目录新根，行为不变）；端到端用例传私有 tmp 沙箱。
 ///
 /// X1-K01（v4-K09，2026-10-09）：那三个用例（单文件 fileKey / 带点目录排除 / 大小写去重）
 /// 真跑删除链时，临时探针的备份副本会被写进**用户真实数据目录**的 `cleanup-files-backup\`
@@ -953,12 +1121,45 @@ fn dism_note_text(err: &str, out: &str) -> String {
     pick(err).or_else(|| pick(out)).unwrap_or_default()
 }
 
+/// hive 的短名（导出路径与判重键共用一份映射，避免两处各写一遍）。
+fn hive_short_name(hive: HKEY) -> &'static str {
+    if hive == HKEY_LOCAL_MACHINE {
+        "HKLM"
+    } else if hive == HKEY_CURRENT_USER {
+        "HKCU"
+    } else if hive == windows::Win32::System::Registry::HKEY_CLASSES_ROOT {
+        "HKCR"
+    } else if hive == windows::Win32::System::Registry::HKEY_USERS {
+        "HKU"
+    } else {
+        "HKCC"
+    }
+}
+
+/// 注册表目标判重键（P2-06 / RUC04）：注册表的**键路径与值名都大小写不敏感**
+/// （Windows 注册表语义）——`Value` 与 `value` 指同一个值名。
+///
+/// 旧口径按原样拼值名 ⇒ 同一个目标被判成两个：删前备份会重复 export 一次，
+/// 删除时第二次必然「值已不存在」⇒ 规则被误判成失败。
+///
+/// 口径边界：装载侧（`commands/cleanup/rules.rs` 的 `seen_targets`）目前仍按原样
+/// 拼值名，那是另一处口径（不在本包范围）；本函数是**执行侧**（备份 + 删除）的
+/// 唯一判重口径。
+fn reg_target_key(hive: HKEY, rest: &str, value: Option<&str>) -> String {
+    format!(
+        "{}|{}|{}",
+        hive_short_name(hive),
+        rest.to_lowercase(),
+        value.map(|v| v.to_lowercase()).unwrap_or_default()
+    )
+}
+
 fn cleanup_execute_with_backup_root(
     items: &[Value],
     rules: &Value,
     to_recycle: bool,
     auto_rebuild: bool,
-    backup_root: Option<&std::path::Path>,
+    roots: &BackupRoots,
     progress: Option<&dyn Fn(usize, usize, &str)>,
 ) -> Result<CleanupExecuteResult, String> {
     let mut details = Vec::new();
@@ -971,6 +1172,12 @@ fn cleanup_execute_with_backup_root(
     let is_path_protected =
         |p: &str| crate::engine::protect::is_path_protected_with(p, &protect_roots);
     let mut recycle_entries = Vec::new();
+    // P2-06：注册表目标判重（大小写不敏感口径）——备份键与删除目标各一份，
+    // 都只在**处理成功后**入册 ⇒ 失败的目标不会被后来的规则误判成「已处理」。
+    let mut reg_backup_keys_done: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut reg_targets_done: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     // C-4（2026-09-28 拍板）：永久删除链删前备份。批次目录懒创建，仅 to_recycle=false
     // 时生效（回收站模式可还原，无需副本）。上限护栏：单文件 64MB / 批次 256MB，
@@ -983,36 +1190,64 @@ fn cleanup_execute_with_backup_root(
     // 撑爆（前端还要按 32/批切）。超出部分只计数（failedFilesTotal），不静默——
     // 前端 toast 照实说登记了几个。
     const FAILED_FILES_CAP: usize = 500;
-    let files_backup_root = backup_root
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| crate::engine::paths::backup_write_dir("cleanup-files-backup"));
+    // P0-02：所有备份落点只从注入根解析（文件根与注册表根分开）。
+    let resolved_roots = resolve_backup_roots(roots);
+    let files_backup_root = resolved_roots.files.clone();
+    let reg_backup_dir = resolved_roots.reg_write.clone();
+    let reg_backup_read_dirs = resolved_roots.reg_read.clone();
     let backup_batch_ts = crate::engine::now_ms();
     let backup_batch_id = next_backup_batch_id(backup_batch_ts);
     let mut backup_entries: Vec<Value> = Vec::new();
     let mut backup_total: u64 = 0;
+    let manifest_limit = match cleanup_byte_limits() {
+        Ok(limits) => limits.backup_manifest,
+        Err(reason) => return Err(format!("备份清单写入上限不可用（{reason}）")),
+    };
+    let mut manifest_budget = ManifestBudget::new(manifest_limit);
 
     // Kudu S2（2026-10-16）：扫描时记的「文件身份证」基线（路径小写 → (大小, birthtimeNs)）。
     // 执行侧重新遍历删文件，但比对基线只此一份：快照 items 的 files 条目（由扫描器
-    // @@PLANFILE@@ 的 birthtimeNs 落地）。缺字段/0 = 无基线不拦（父链重解析复检仍兜底）。
+    // @@PLANFILE@@ 的 birthtimeNs 落地）。
+    //
+    // P0-07（决策 D-05）：基线拆成两档，不再是「缺了也放行」——
+    //   · `identity`：路径在快照里**且**有出生时间（可完整比对大小+出生时间）。
+    //   · `identity_no_birth`：路径**在快照里**但明确没有出生时间（`birthtimeNs` 缺失
+    //     或为 0 —— gameRedist 回填形状、扫描侧读不到出生时间的卷）。可信来源：这条
+    //     路径是扫描侧登记给用户看过的，用户已对它点过确认 ⇒ 允许继续，但**大小仍对照**。
+    //   · 两张表都查不到 = 路径根本不在本次扫描快照里（扫描后新增、清单被 CAP 截断、
+    //     键形态不同源）⇒ 用户没确认过它 ⇒ 拒绝删除（`identityBaselineMissing`）。
+    // 旧形态两类缺基线混在一个 `identityUnbaselined` 计数里且**方向是放行**：
+    // 「扫描后被替换的文件」恰好落在这一档，护栏静默失效。
     // 快照槽按 label 即可：本表（commands/cleanup/state.rs）是 cleanup 域私表、无双域共用
     // （§5.25 的槽键事故前提不成立），identity 存进该表内层，不引入第二套分桶。
     let mut identity: std::collections::HashMap<String, (u64, u64)> = std::collections::HashMap::new();
+    // 路径在快照里、但明确没有出生时间的条目（大小可对照时记 Some）。
+    let mut identity_no_birth: std::collections::HashMap<String, Option<u64>> =
+        std::collections::HashMap::new();
     for it in items {
         let Some(files) = it.get("files").and_then(Value::as_array) else {
             continue;
         };
         for f in files {
-            let (Some(p), Some(sz), Some(bt)) = (
-                f.get("path").and_then(Value::as_str),
-                f.get("size").and_then(Value::as_i64),
-                f.get("birthtimeNs").and_then(Value::as_i64),
-            ) else {
+            let Some(p) = f.get("path").and_then(Value::as_str) else {
                 continue;
             };
-            if p.is_empty() || bt <= 0 {
+            if p.is_empty() {
                 continue;
             }
-            identity.entry(crate::engine::paths::path_key(p)).or_insert((sz.max(0) as u64, bt as u64));
+            let sz = f.get("size").and_then(Value::as_i64).map(|v| v.max(0) as u64);
+            let bt = f.get("birthtimeNs").and_then(Value::as_i64).unwrap_or(0);
+            let key = crate::engine::paths::path_key(p);
+            if bt > 0 {
+                if let Some(sz) = sz {
+                    identity.entry(key).or_insert((sz, bt as u64));
+                } else {
+                    identity_no_birth.entry(key).or_insert(None);
+                }
+            } else {
+                // 明确无出生时间（可信来源：路径在快照清单内）。
+                identity_no_birth.entry(key).or_insert(sz);
+            }
         }
     }
 
@@ -1039,7 +1274,10 @@ fn cleanup_execute_with_backup_root(
         // 注册表不进回收站，to_recycle 两种模式同径（对齐 PS）。
         if let Some(reg_keys) = rule.get("regKeys").and_then(|v| v.as_array()) {
             if !reg_keys.is_empty() {
-                let backup_dir = crate::engine::paths::backup_write_dir("cleanup-reg-backup");
+                // P0-02：注册表备份的写根只从注入根解析（生产=数据目录新根，
+                // 测试=私有沙箱）。旧实现恒从用户数据目录拼路径 ⇒ 测试的注册表
+                // 备份件会落进用户真备份目录，并参与真实裁剪与封条对账。
+                let backup_dir = reg_backup_dir.clone();
                 // R5a-M11：备份根被换成 junction 时直写会落在链接另一头（提权态落点不受控）。
                 // 根不可信 ⇒ 本批不留副本，也就不执行删除（注册表备份是删除前提）。
                 if !backup_root_ready(&backup_dir) {
@@ -1153,12 +1391,14 @@ fn cleanup_execute_with_backup_root(
                 let stamp = crate::engine::now_ms();
                 let mut backup_failed = false;
                 for (i, (hive, rest, _)) in parsed.iter().enumerate() {
+                    // P2-06：同一键本批已备份过就不重复 export（键路径大小写不敏感口径）。
+                    // 重复 export 只是多一份 .reg，真正的问题是后面那次删除会被记成失败。
+                    let backup_key = reg_target_key(*hive, rest, None);
+                    if reg_backup_keys_done.contains(&backup_key) {
+                        continue;
+                    }
                     let file = backup_dir.join(format!("{stamp}_reg_{id}_{}.reg", i + 1));
-                    let hive_short = if *hive == HKEY_LOCAL_MACHINE { "HKLM" }
-                        else if *hive == HKEY_CURRENT_USER { "HKCU" }
-                        else if *hive == windows::Win32::System::Registry::HKEY_CLASSES_ROOT { "HKCR" }
-                        else if *hive == windows::Win32::System::Registry::HKEY_USERS { "HKU" }
-                        else { "HKCC" };
+                    let hive_short = hive_short_name(*hive);
                     let export_path = format!("{hive_short}\\{rest}");
                     // v2-L4P-29（B-7）：备份类子进程统一走带超时入口
                     // v6-K01（P0-2）：解析失败并进 backup_failed 分支（备份不完整绝不删）
@@ -1184,6 +1424,7 @@ fn cleanup_execute_with_backup_root(
                     });
                     match landed {
                         Ok(_) => {
+                            reg_backup_keys_done.insert(backup_key);
                             // N9：清理域此前**根本不产封条**，于是还原链那道"封条核对"对本域
                             // 永远只能走 missing 分支（等于没闸）。与卸载域同口径落一份，
                             // 半截写入与手工误改才有可发现性。写封条失败不阻断删除（增强而非前提）。
@@ -1214,14 +1455,24 @@ fn cleanup_execute_with_backup_root(
                 // P1-03：对账读根 = 候选读根（新根 + 老根兜底），不再只扫写根；
                 // 读根出错则整轮放弃（零删除），不把「读不到」当成空集。
                 {
-                    let dirs = crate::engine::paths::backup_read_dirs("cleanup-reg-backup");
+                    // P0-02：读根同样只从注入根解析（注入时只认注入根）。
+                    let dirs = reg_backup_read_dirs.clone();
                     let roots = crate::engine::reg_backup::seal_read_roots(&dirs);
                     crate::engine::reg_backup::reconcile_admin_seals("cleanup", &roots);
                 }
                 let mut removed = 0i64;
                 let mut reg_failed = 0i64;
+                // P2-06：本批已删过的同一目标（大小写不敏感口径）不再删第二次 ——
+                // 第二次必然「值已不存在」，旧口径把它记成失败。
+                let mut reg_dup = 0i64;
                 let mut skipped_lossy = 0usize;
                 for (hive, rest, value) in &parsed {
+                    let target_key = reg_target_key(*hive, rest, value.as_deref());
+                    if reg_targets_done.contains(&target_key) {
+                        reg_dup += 1;
+                        continue;
+                    }
+                    let failed_before = reg_failed;
                     match value.as_deref() {
                         // F-1（2026-09-28 用户拍板）：value="*" = 清空该键全部值
                         // （shellMuiCache 等「清值不删键」规则的既定语义）。此前把 "*"
@@ -1268,6 +1519,10 @@ fn cleanup_execute_with_backup_root(
                             }
                         }
                     }
+                    // 只在**整条目标处理成功**后入册：失败的目标留给后一条规则再试。
+                    if reg_failed == failed_before {
+                        reg_targets_done.insert(target_key);
+                    }
                 }
                 total_files += removed;
                 // 命中禁删面 = 规则缺陷，即使同规则别的键清成功也一律判 fail（v5 C-3 起
@@ -1296,10 +1551,15 @@ fn cleanup_execute_with_backup_root(
                 } else {
                     String::new()
                 };
-                let message = if reg_failed == 0 {
-                    format!("已清理 {} 项注册表记录{excl_note}{block_note}{lossy_note}", removed)
+                let dup_note = if reg_dup > 0 {
+                    format!("；{reg_dup} 项与本批已处理目标重复（按大小写不敏感口径判重，未重复删除）")
                 } else {
-                    format!("已清理 {} 项注册表记录，{} 项失败{excl_note}{block_note}{lossy_note}", removed, reg_failed)
+                    String::new()
+                };
+                let message = if reg_failed == 0 {
+                    format!("已清理 {} 项注册表记录{excl_note}{block_note}{lossy_note}{dup_note}", removed)
+                } else {
+                    format!("已清理 {} 项注册表记录，{} 项失败{excl_note}{block_note}{lossy_note}{dup_note}", removed, reg_failed)
                 };
                 details.push(json!({
                     "id": id, "name": name, "status": status,
@@ -1621,11 +1881,15 @@ let mut freed = 0i64;
     // Kudu S2（2026-10-16）：身份证比对不通过的拒绝（同 protected/reparse 口径：独立计数、留痕）
     let mut identity_blocked = 0i64;
     let mut identity_samples: Vec<String> = Vec::new();
-    // A6-M02（v7.2 C07）：本规则里「快照没有该路径基线」的文件数。键已归一（paths::path_key），
-    // 所以 miss 只剩两种真实来源：条目被 CAP 截断、或扫描侧没给 birthtimeNs。这一档语义仍是
-    // 「不拦」（W2：无基线不拦），但必须计数外发 —— 否则「键形态不同源」与「本来就没基线」
-    // 在回执里长得一模一样，Kudu S2 的护栏一旦静默失效就再也无从察觉。
-    let mut identity_unbaselined = 0i64;
+    // P0-07（D-05）：原来这一个 `identity_unbaselined` 混了两类「没得比」的情形，且
+    // 方向是放行。现在拆成两档，语义相反：
+    //   · `identity_no_birth_baseline`：路径**在**快照清单里，只是明确没有出生时间
+    //     （gameRedist 回填 / 扫描侧读不到出生时间的卷）⇒ 可信来源，允许继续（大小仍对照）。
+    //   · `identity_baseline_missing`：路径**不在**快照清单里（扫描后新增、清单被 CAP 截断、
+    //     键形态不同源）⇒ 用户没确认过它 ⇒ 拒绝删除并单独计数外发。
+    let mut identity_no_birth_baseline = 0i64;
+    let mut identity_baseline_missing = 0i64;
+    let mut identity_missing_samples: Vec<String> = Vec::new();
     // K12（v6）：本规则逐文件失败明细（{path, reason}，reason = occupied/denied）——
     // 只收可重试两档：被占用与权限不足；gone（删时已不存在）无可删，
     // protected/reparse/identity 是安全闸门的拒绝，都不进失败明细。
@@ -1636,8 +1900,9 @@ let mut freed = 0i64;
     // R5a-L01 取舍声明：两条 memo（final_memo / ancestor_memo）按**父目录**缓存某一时刻的
     // 判定，同目录后续文件复用首个结果 ⇒「删除瞬间父链复检」对批内第 2..N 个文件退化为
     // 「批内一次」而非逐文件。这是性能换实时性的刻意取舍（逐文件 canonicalize 是批量
-    // 清理的大头），接受的前提：① 批内时间窗极短；② identity 基线缺项（identity_unbaselined）
-    // 没有第二道兜底，靠 C07 的计数外发保证失守可见——改并发/跨进程写同目录时必须重估。
+    // 清理的大头），接受的前提：① 批内时间窗极短；② identity 基线缺项
+    // （identity_no_birth_baseline）没有第二道兜底，靠计数外发保证失守可见——改并发/跨进程
+    // 写同目录时必须重估。
     let mut final_memo: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
         let mut backup_skipped = 0usize;
         // 未留副本有两个成因，必须分开：① 超单文件/整批体积上限（本来就不打算留）；
@@ -1701,15 +1966,21 @@ let mut freed = 0i64;
             } else {
                 // Kudu S2（2026-10-16）：身份证比对守卫——路径在扫描后指向了**另一个**文件
                 //（被替换/重定向）时拒绝；size 一并对照（内容长大同样算不一致，fail-closed，
-                // 用户看到的是明确计数而非不明所以的删除）。birthtimeNs=0 = 无基线不拦。
+                // 用户看到的是明确计数而非不明所以的删除）。
                 //
                 // A6-M02（v7.2 C07）：记账与查找必须走**同一份归一键**。记账侧（快照 JSON 的
                 // items[].files[].path）与查找侧（执行侧重新遍历的 files）在旧实现里都只做
                 // 裸 `to_lowercase()`，与全仓声明的 `paths::path_key`（折分隔符 / 折 `.`/`..` /
                 // 去尾点尾空格 / verbatim 折回）不同源 ⇒ 尾分隔符、正斜杠、`..` 段、`\\?\`
                 // 任一写法差异都让 get 落 None，然后**直落删除支**：Kudu S2「扫描后被替换」
-                // 的护栏在该形态下静默失效且方向是放行。miss 一律计一档（见 identity_unbaselined）。
-                match identity.get(&crate::engine::paths::path_key(path)) {
+                // 的护栏在该形态下静默失效且方向是放行。
+                //
+                // P0-07（D-05）：miss 不再一律放行，按「这条路径用户确认过没有」拆两档：
+                //   · 路径在快照清单里、只是没有出生时间 ⇒ 可信来源，允许继续（大小仍对照）。
+                //   · 路径压根不在快照清单里 ⇒ 用户没确认过它（扫描后新增 / 清单被 CAP 截断 /
+                //     键形态不同源）⇒ 拒绝删除。
+                let identity_key = crate::engine::paths::path_key(path);
+                match identity.get(&identity_key) {
                     Some((base_size, base_bt)) => {
                         if let Ok(md) = std::fs::symlink_metadata(path) {
                             let now_bt = birthtime_ns_of(&md);
@@ -1726,7 +1997,36 @@ let mut freed = 0i64;
                         }
                         // 元数据读不到（已不存在等）：交给删除原语的 gone/失败档，不在守卫里吞
                     }
-                    None => identity_unbaselined += 1,
+                    None => match identity_no_birth.get(&identity_key) {
+                        Some(base_size) => {
+                            // 明确无出生时间（可信来源：路径在快照清单内、用户确认过）。
+                            // 出生时间没法比，大小还能比 —— 大小对不上照样拒绝。
+                            identity_no_birth_baseline += 1;
+                            if let (Some(base_size), Ok(md)) =
+                                (base_size, std::fs::symlink_metadata(path))
+                            {
+                                let now_size = md.len();
+                                if now_size != *base_size {
+                                    identity_blocked += 1;
+                                    if identity_samples.len() < 5 {
+                                        identity_samples.push(format!(
+                                            "{path}（扫描时 {base_size} 字节，现状 {now_size} 字节）"
+                                        ));
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                        None => {
+                            // 无基线且不可信来源：拒绝删除。这是安全闸门动作，
+                            // 不进失败明细（不是「被占用」，用户关程序也没用）。
+                            identity_baseline_missing += 1;
+                            if identity_missing_samples.len() < 5 {
+                                identity_missing_samples.push(path.clone());
+                            }
+                            continue;
+                        }
+                    },
                 }
                 // C-4：删前备份（只对将真正删除的文件；复制失败不阻塞删除）
                 if *size <= FILE_BACKUP_MAX_FILE
@@ -1749,6 +2049,9 @@ let mut freed = 0i64;
                     // rel 必须同时带**批次段**和**序号段**（N10），见 `backup_rel_name`
                     let rel = backup_rel_name(id, &backup_batch_id, seq, &fname);
                     let dst = files_backup_root.join(&rel);
+                    let entry = json!({
+                        "file": rel, "path": path.clone(), "size": size, "rule": id,
+                    });
                     // R5a-M11：副本先落私有 tmp，由 land_backup 判根后 rename 落位——
                     // 旧实现 std::fs::copy 直写目标，备份根被换成 junction 时内容写到链接另一头。
                     let copied = rule_backup_ready
@@ -1761,10 +2064,14 @@ let mut freed = 0i64;
                         })
                         .is_ok();
                     if copied {
-                        backup_total += size;
-                        backup_entries.push(json!({
-                            "file": rel, "path": path.clone(), "size": size, "rule": id,
-                        }));
+                        if manifest_budget.reserve(&entry) {
+                            backup_total += size;
+                            backup_entries.push(entry);
+                        } else {
+                            let _ = std::fs::remove_file(&dst);
+                            backup_skipped += 1;
+                            backup_over_cap += 1;
+                        }
                     } else {
                         // 落位失败时 land_backup 已自行清理中转件；目标侧可能留下跨卷复制的半截件。
                         // 根不可信时**不得**对 dst 做任何删除：那正是链接另一头的路径，删的是别人的文件。
@@ -1772,6 +2079,7 @@ let mut freed = 0i64;
                             let _ = std::fs::remove_file(&dst);
                         }
                         backup_skipped += 1;
+                        manifest_budget.release(&entry);
                     }
                 } else {
                     backup_skipped += 1;
@@ -1824,11 +2132,13 @@ let mut freed = 0i64;
             name_shape_blocked,
             reparse_blocked,
             identity_blocked,
+            identity_baseline_missing,
             too_new,
             excluded,
             lossy,
             collect_reparse: drops.reparse,
             collect_unreadable: drops.unreadable,
+            collect_depth_cap: drops.depth_cap,
             unresolved: unresolved.clone(),
             to_recycle,
         };
@@ -1914,6 +2224,15 @@ let mut freed = 0i64;
                 ),
             );
         }
+        if identity_baseline_missing > 0 {
+            crate::engine::log::write_log(
+                "warn",
+                &format!(
+                    "规则 {id}：{identity_baseline_missing} 个文件不在本次扫描快照里（无身份证基线），已拒绝删除。样本：{}",
+                    identity_missing_samples.join("；")
+                ),
+            );
+        }
 
         details.push(json!({
             "id": id, "name": name, "status": status,
@@ -1934,9 +2253,13 @@ let mut freed = 0i64;
             "reparseBlocked": reparse_blocked,
             // Kudu S2：身份证不符的拒绝，同样独立外发。
             "identityChanged": identity_blocked,
-            // A6-M02（v7.2 C07）：本次有多少文件**查不到快照基线**（无基线不拦，但要看得见）。
-            // 与 identityChanged 成对：前者是「比对了且不一致」，本字段是「压根没得比」。
-            "identityUnbaselined": identity_unbaselined,
+            // P0-07（D-05）：「压根没得比」拆两档，语义相反 ——
+            //   · identityNoBirthBaseline：路径在快照清单里、只是明确没有出生时间
+            //     （可信来源，允许继续删除；大小仍对照）。
+            //   · identityBaselineMissing：路径不在快照清单里（用户没确认过）⇒ 已拒删。
+            // 与 identityChanged 三件套成对：比对了且不一致 / 比不了但可信 / 比不了且不可信。
+            "identityNoBirthBaseline": identity_no_birth_baseline,
+            "identityBaselineMissing": identity_baseline_missing,
             // R4（2026-10-15）：两个新档同样独立外发、不进 residual（denied 的出路是
             // 提权、gone 无需处理，都不是「重试」）；渲染层按字段分档提示。
             "denied": denied,
@@ -1946,9 +2269,12 @@ let mut freed = 0i64;
             // 否则「扫描命中、执行 0 删」与「本来就没有东西」在回执里长得一样。
             "collectReparseSkipped": drops.reparse,
             "collectUnreadableSkipped": drops.unreadable,
+            "collectDepthCapSkipped": drops.depth_cap,
             // R5a-L04：超出快照基线的条目数（执行侧收集中触顶被拒的）。
             "collectUnbaselinedSkipped": drops.unbaselined,
             "tooNew": too_new, "ruleVer": rule_ver,
+            "backupManifestTruncated": manifest_budget.truncated_entries,
+            "backupManifestTruncatedBytes": manifest_budget.truncated_bytes,
         }));
 
         // auto_rebuild：重建目录
@@ -2014,6 +2340,16 @@ let mut freed = 0i64;
                 mpath.file_name().and_then(|n| n.to_str()),
             );
         }
+    }
+
+    if manifest_budget.truncated_entries > 0 {
+        crate::engine::log::write_log(
+            "warn",
+            &format!(
+                "files 备份清单写入上限生效：本轮截断 {} 条、{} 字节申报量；这些文件仍按计划清理，但未写副本与清单条目",
+                manifest_budget.truncated_entries, manifest_budget.truncated_bytes
+            ),
+        );
     }
 
     Ok(CleanupExecuteResult { details, freed: total_freed, file_count: total_files, recycle_entries })
@@ -2105,17 +2441,13 @@ fn backup_root_ready(root: &std::path::Path) -> bool {
     }
 }
 
-/// Kudu S2（2026-10-16）：删除瞬间父链复检的 memo 包装——判据本体在
-/// `trim_finder::scan::reparse_ancestor`（finder 删除链与常规清理链共用，§5.16/N6 一份实现）。
-/// 按**父目录**记忆：同一目录下成千上万个文件只走一次祖先链。
+/// P1-01f：按文件路径记忆。此前按父目录缓存会让批内第 2..N 个文件复用
+/// 第一个文件的父链判定；批内父目录变成 junction 时会漏过删除前复检。
 fn reparse_ancestor_memoized(
     path: &str,
     memo: &mut std::collections::HashMap<String, Option<String>>,
 ) -> Option<String> {
-    let parent = std::path::Path::new(path)
-        .parent()
-        .map(|d| d.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
+    let parent = crate::engine::paths::path_key(path);
     if let Some(cached) = memo.get(&parent) {
         return cached.clone();
     }
@@ -2124,16 +2456,12 @@ fn reparse_ancestor_memoized(
     hit
 }
 
-/// Kudu S2（2026-10-16）：别名解析复检的 memo 包装（判据本体
-/// `protect::final_path_protected`，解析的是父目录 ⇒ 按父目录 memo 恰好在正确的粒度上）。
+/// P1-01f：别名解析复检同样按文件路径记忆，避免批内第 2..N 个文件复用首个结论。
 fn final_path_protected_memoized(
     path: &str,
     memo: &mut std::collections::HashMap<String, bool>,
 ) -> bool {
-    let parent = std::path::Path::new(path)
-        .parent()
-        .map(|d| d.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
+    let parent = crate::engine::paths::path_key(path);
     if let Some(hit) = memo.get(&parent) {
         return *hit;
     }
@@ -2166,7 +2494,10 @@ fn collect_files_at(
     drops: &mut CollectDrops,
     depth: usize,
 ) {
-    if depth >= ENGINE_WALK_MAX_DEPTH { return; }
+    if depth >= ENGINE_WALK_MAX_DEPTH {
+        drops.note_depth(dir);
+        return;
+    }
     let Ok(rd) = std::fs::read_dir(dir) else {
         drops.note_unreadable(dir);
         return;
@@ -2229,23 +2560,80 @@ mod cleanup_engine_contract_tests {
 
     /// X1-K01（v4-K09）：端到端删除用例的「删前备份」重定向根——私有 tmp 下的 per-test
     /// 沙箱。构造先清残、Drop 清垃圾（断言 panic 也不留）；不进用户备份根。
-    struct BackupSandbox(std::path::PathBuf);
+    ///
+    /// P0-02：沙箱从「一个根」拆成**文件根 + 注册表根**两个。旧形态只有一个根，
+    /// 而注册表备份链压根不看注入根（恒写用户数据目录）⇒ 端到端用例的注册表
+    /// 备份件会落进用户真备份目录。
+    struct BackupSandbox {
+        base: std::path::PathBuf,
+        files: std::path::PathBuf,
+        reg: std::path::PathBuf,
+    }
     impl BackupSandbox {
         fn new(tag: &str) -> Self {
             let dir = crate::engine::paths::temp_script_dir()
                 .expect("私有 tmp 应可用")
                 .join(format!("test-cleanup-backup-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
-            Self(dir)
+            Self {
+                files: dir.join("files"),
+                reg: dir.join("reg"),
+                base: dir,
+            }
         }
+        /// 文件备份根。
         fn path(&self) -> &std::path::Path {
-            &self.0
+            &self.files
+        }
+        /// 注册表备份根。
+        fn reg_path(&self) -> &std::path::Path {
+            &self.reg
+        }
+        /// 两个根一起注入（漏注入一个 = 把测试件写进真实备份目录）。
+        fn roots(&self) -> BackupRoots {
+            BackupRoots {
+                files: Some(self.path().to_path_buf()),
+                reg: Some(self.reg_path().to_path_buf()),
+            }
         }
     }
     impl Drop for BackupSandbox {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            let _ = std::fs::remove_dir_all(&self.base);
         }
+    }
+
+    /// 造一条与真实扫描快照同形的基线条目（路径 + 真实字节数 + 真实出生时间）。
+    ///
+    /// P0-07 之后，执行侧只删「用户在扫描快照里确认过」的文件（路径在快照 `files`
+    /// 清单内）。端到端用例原先不带 `files`（= 用户没确认过任何文件），现在必须
+    /// 像真实扫描那样带上清单，否则这些用例会被新闸门整批拒删。
+    fn scan_baseline(path: &std::path::Path) -> serde_json::Value {
+        let md = std::fs::symlink_metadata(path).expect("基线样本应存在");
+        serde_json::json!({
+            "path": path.to_string_lossy(),
+            "size": md.len() as i64,
+            "birthtimeNs": birthtime_ns_of(&md) as i64,
+        })
+    }
+
+    /// 递归列出目录下全部文件的基线（目录型规则的扫描清单同形）。
+    fn scan_baselines(dir: &std::path::Path) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                let Ok(md) = e.metadata() else { continue };
+                if md.is_dir() {
+                    stack.push(p);
+                } else if md.is_file() {
+                    out.push(scan_baseline(&p));
+                }
+            }
+        }
+        out
     }
 
     /// 执行侧展开必须与扫描侧同源且大小写不敏感：`%WINDIR%`（大写）在旧白名单
@@ -2356,12 +2744,12 @@ mod cleanup_engine_contract_tests {
                 {"path": eb.join("*cache*").to_string_lossy(), "pattern":"*", "recurse":true}]}
         ]}]});
         let items = vec![
-            serde_json::json!({"id":"a2slack","name":"段内多星探测","path":""}),
-            serde_json::json!({"id":"a2intel","name":"小写多星段探测","path":""}),
+            serde_json::json!({"id":"a2slack","name":"段内多星探测","path":"","files": scan_baselines(&base)}),
+            serde_json::json!({"id":"a2intel","name":"小写多星段探测","path":"","files": scan_baselines(&base)}),
         ];
 
         let bk = BackupSandbox::new("a2multistar");
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &bk.roots(), None)
             .expect("不应 Err");
         let expect: [(usize, i64); 2] = [(0, 2), (1, 1)];
         for (idx, n) in expect {
@@ -2582,6 +2970,42 @@ mod cleanup_engine_contract_tests {
             "深度超过上限的文件不得进删除清单: {}",
             files.len()
         );
+        assert!(drops.depth_cap > 0, "超深子树必须计入 drops.depthCap，不能静默返回");
+    }
+
+    /// P1-01e：execution 侧详情必须携带深度上限计数，超深时 outcome 不再是纯 ok。
+    #[test]
+    fn depth_cap_is_reported_in_details() {
+        let dir = std::env::temp_dir().join(format!("trim-depth-details-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut deep = dir.clone();
+        for i in 0..70 { deep = deep.join(format!("d{i}")); }
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("deep.txt"), b"x").unwrap();
+        let mut files = Vec::new();
+        let mut drops = CollectDrops::default();
+        collect_files(&dir.to_string_lossy(), "*.txt", true, trim_finder::cleanup_scan::AgeGuard::Off,
+            &mut files, &mut 0, &mut 0, &mut drops);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(drops.depth_cap > 0);
+        let outcome = classify_outcome(&OutcomeCounters {
+            deleted: 0, failed: 0, denied: 0, gone: 0, protected_blocked: 0,
+            name_shape_blocked: 0, reparse_blocked: 0, identity_blocked: 0,
+            identity_baseline_missing: 0, too_new: 0, excluded: 0, lossy: 0,
+            collect_reparse: 0, collect_unreadable: 0,
+            collect_depth_cap: drops.depth_cap,
+            unresolved: Vec::new(), to_recycle: false,
+        }, "", "", "");
+        assert_eq!(outcome.0, "skip", "超深子树不得落成 ok: {outcome:?}");
+    }
+
+    /// P1-01f：同父目录下不同文件必须各自走 memo，不复用首个文件的父链结论。
+    #[test]
+    fn memo_key_is_per_file_path() {
+        let mut memo: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+        final_path_protected_memoized(r"C:\tmp\a.txt", &mut memo);
+        final_path_protected_memoized(r"C:\tmp\b.txt", &mut memo);
+        assert_eq!(memo.len(), 2, "memo 必须按文件路径分别建键");
     }
 
     /// P0-M5 时效护栏：测试辅助——把文件时间戳拨回 days 天前（SetFileTime，真实文件系统）。
@@ -2807,11 +3231,13 @@ mod cleanup_engine_contract_tests {
             name_shape_blocked: 0,
             reparse_blocked: 0,
             identity_blocked: 0,
+            identity_baseline_missing: 0,
             too_new: 0,
             excluded: 0,
             lossy: 0,
             collect_reparse: 0,
             collect_unreadable: 0,
+            collect_depth_cap: 0,
             unresolved: Vec::new(),
             to_recycle: false,
         };
@@ -2872,11 +3298,13 @@ mod cleanup_engine_contract_tests {
             name_shape_blocked: 0,
             reparse_blocked: 0,
             identity_blocked: 0,
+            identity_baseline_missing: 0,
             too_new: 0,
             excluded: 0,
             lossy: 0,
             collect_reparse: 0,
             collect_unreadable: 0,
+            collect_depth_cap: 0,
             unresolved: Vec::new(),
             to_recycle: false,
         };
@@ -2918,11 +3346,13 @@ mod cleanup_engine_contract_tests {
             name_shape_blocked: 0,
             reparse_blocked: reparse,
             identity_blocked: identity,
+            identity_baseline_missing: 0,
             too_new: 0,
             excluded: 0,
             lossy: 0,
             collect_reparse: 0,
             collect_unreadable: 0,
+            collect_depth_cap: 0,
             unresolved: Vec::new(),
             to_recycle: false,
         };
@@ -2985,7 +3415,7 @@ mod cleanup_engine_contract_tests {
         })];
 
         let bk = BackupSandbox::new("s2identity");
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &bk.roots(), None)
             .expect("执行应返回结果而不是 Err");
         let d = &res.details[0];
         assert_eq!(d["identityChanged"].as_i64(), Some(1), "被换文件必须计入身份证不符: {d}");
@@ -3042,7 +3472,7 @@ mod cleanup_engine_contract_tests {
         })];
 
         let bk = BackupSandbox::new("s2e2e");
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &bk.roots(), None)
             .expect("不应 Err");
         let d = &res.details[0];
         assert!(
@@ -3083,10 +3513,13 @@ mod cleanup_engine_contract_tests {
             "id":"singlefile","name":"单文件探测",
             "fileKeys":[{"path": target.to_string_lossy(), "pattern":"*", "recurse":true}]
         }]}]});
-        let items = vec![serde_json::json!({"id":"singlefile","name":"单文件探测","path": target.to_string_lossy()})];
+        let items = vec![serde_json::json!({
+            "id":"singlefile","name":"单文件探测","path": target.to_string_lossy(),
+            "files": [scan_baseline(&target)]
+        })];
 
         let bk = BackupSandbox::new("singlefile");
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &bk.roots(), None)
             .expect("执行应返回结果而不是 Err");
         let d = &res.details[0];
 
@@ -3159,10 +3592,13 @@ mod cleanup_engine_contract_tests {
             "id":"k12ff","name":"K12 明细探测",
             "fileKeys":[{"path": dir.to_string_lossy(), "pattern":"*.log", "recurse":true}]
         }]}]});
-        let items = vec![serde_json::json!({"id":"k12ff","name":"K12 明细探测","path": dir.to_string_lossy()})];
+        let items = vec![serde_json::json!({
+            "id":"k12ff","name":"K12 明细探测","path": dir.to_string_lossy(),
+            "files": scan_baselines(&dir)
+        })];
 
         let bk = BackupSandbox::new("k12ff");
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &bk.roots(), None)
             .expect("执行应返回结果而不是 Err");
         let d = &res.details[0].clone();
         drop(hold);
@@ -3228,9 +3664,12 @@ mod cleanup_engine_contract_tests {
             "id":"ro1","name":"只读探测",
             "fileKeys":[{"path": target.to_string_lossy(), "pattern":"*", "recurse":true}]
         }]}]});
-        let items = vec![serde_json::json!({"id":"ro1","name":"只读探测","path": target.to_string_lossy()})];
+        let items = vec![serde_json::json!({
+            "id":"ro1","name":"只读探测","path": target.to_string_lossy(),
+            "files": [scan_baseline(&target)]
+        })];
         let bk = BackupSandbox::new("readonly");
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &bk.roots(), None)
             .expect("执行应返回结果而不是 Err");
         let d = &res.details[0];
 
@@ -3259,9 +3698,12 @@ mod cleanup_engine_contract_tests {
             "id":"m10","name":"单文件重建探测",
             "fileKeys":[{"path": target.to_string_lossy(), "pattern":"*", "recurse":true}]
         }]}]});
-        let items = vec![serde_json::json!({"id":"m10","name":"单文件重建探测","path": target.to_string_lossy()})];
+        let items = vec![serde_json::json!({
+            "id":"m10","name":"单文件重建探测","path": target.to_string_lossy(),
+            "files": [scan_baseline(&target)]
+        })];
         let bk = BackupSandbox::new("m10");
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, true, Some(bk.path()), None)
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, true, &bk.roots(), None)
             .expect("执行应返回结果");
         assert!(!target.exists(), "单文件目标应被删除");
         assert!(!target.is_dir(), "auto_rebuild 不得把已删文件补建成同名目录");
@@ -3300,8 +3742,13 @@ mod cleanup_engine_contract_tests {
             "id":"m11","name":"备份根链接探测",
             "fileKeys":[{"path": target.to_string_lossy(), "pattern":"*", "recurse":true}]
         }]}]});
-        let items = vec![serde_json::json!({"id":"m11","name":"备份根链接探测","path": target.to_string_lossy()})];
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(&root), None)
+        let items = vec![serde_json::json!({
+            "id":"m11","name":"备份根链接探测","path": target.to_string_lossy(),
+            "files": [scan_baseline(&target)]
+        })];
+        // 文件根故意指向 junction；注册表根照样注入沙箱（P0-02：两个根都要注入）。
+        let roots = BackupRoots { files: Some(root.clone()), reg: Some(sb.reg_path().to_path_buf()) };
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &roots, None)
             .expect("执行应返回结果");
         assert!(!target.exists(), "备份是增强：根不可信时删除照常");
         let leftover: Vec<String> = std::fs::read_dir(&other)
@@ -3346,7 +3793,7 @@ mod cleanup_engine_contract_tests {
         }]}]});
         let items = vec![serde_json::json!({"id":"m12","name":"采集丢弃探测","path": dir.to_string_lossy()})];
         let bk = BackupSandbox::new("m12");
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &bk.roots(), None)
             .expect("执行应返回结果");
         let d = &res.details[0];
         assert_eq!(d["status"].as_str(), Some("skip"), "唯一目标被跳过时必须 skip: {d}");
@@ -3369,11 +3816,13 @@ mod cleanup_engine_contract_tests {
             name_shape_blocked: 0,
             reparse_blocked: 0,
             identity_blocked: 0,
+            identity_baseline_missing: 0,
             too_new: 0,
             excluded: 0,
             lossy: 0,
             collect_reparse: 0,
             collect_unreadable: 0,
+            collect_depth_cap: 0,
             unresolved: Vec::new(),
             to_recycle: false,
         };
@@ -3443,9 +3892,12 @@ mod cleanup_engine_contract_tests {
                 {"path": b.to_string_lossy(), "pattern":"*", "recurse":true}
             ]
         }]}]});
-        let items = vec![serde_json::json!({"id":"probe","name":"删除链探针","path": dir.to_string_lossy()})];
+        let items = vec![serde_json::json!({
+            "id":"probe","name":"删除链探针","path": dir.to_string_lossy(),
+            "files": scan_baselines(&dir)
+        })];
         let bk = BackupSandbox::new("delprobe");
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &bk.roots(), None)
             .expect("执行应返回结果而不是 Err");
         let d = &res.details[0];
         drop(held); // 句柄保活到链跑完
@@ -3512,10 +3964,13 @@ mod cleanup_engine_contract_tests {
             "fileKeys":[{"path": dir.to_string_lossy(), "pattern":"*.log", "recurse":true}],
             "excludePaths":[dir.join("Vendor.Tool").to_string_lossy()]
         }]}]});
-        let items = vec![serde_json::json!({"id":"dotdir","name":"带点目录排除探测","path": dir.to_string_lossy()})];
+        let items = vec![serde_json::json!({
+            "id":"dotdir","name":"带点目录排除探测","path": dir.to_string_lossy(),
+            "files": scan_baselines(&dir)
+        })];
 
         let bk = BackupSandbox::new("dotdir");
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &bk.roots(), None)
             .expect("不应 Err");
         assert!(
             dir.join("Vendor.Tool").join("inside.log").exists(),
@@ -3617,10 +4072,13 @@ mod cleanup_engine_contract_tests {
                 {"path": upper, "pattern":"*.log", "recurse":true}
             ]
         }]}]});
-        let items = vec![serde_json::json!({"id":"dedup","name":"大小写去重探测","path": lower})];
+        let items = vec![serde_json::json!({
+            "id":"dedup","name":"大小写去重探测","path": lower,
+            "files": scan_baselines(&dir)
+        })];
 
         let bk = BackupSandbox::new("dedup");
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &bk.roots(), None)
             .expect("不应 Err");
         let d = &res.details[0];
         assert_eq!(d["fileCount"].as_i64(), Some(1), "同一文件必须只删/只算一次: {d}");
@@ -3679,7 +4137,7 @@ mod cleanup_engine_contract_tests {
         })];
 
         let bk = BackupSandbox::new("identity-alias");
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(bk.path()), None)
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &bk.roots(), None)
             .expect("不应 Err");
         let d = &res.details[0];
         assert!(f.exists(), "基线 size 不符（99 vs 10）必须拒绝删除: {d}");
@@ -3689,11 +4147,280 @@ mod cleanup_engine_contract_tests {
             "别名写法必须命中同一条基线并判不一致: {d}"
         );
         assert_eq!(
-            d["identityUnbaselined"].as_i64(),
+            d["identityBaselineMissing"].as_i64(),
             Some(0),
-            "归一后不得落「无基线」档（落了说明键仍不同源）: {d}"
+            "归一后不得落「无基线且不可信」档（落了说明键仍不同源）: {d}"
+        );
+        assert_eq!(
+            d["identityNoBirthBaseline"].as_i64(),
+            Some(0),
+            "本样本有出生时间基线，不得落「无出生时间」档: {d}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P0-02（D-03）：文件备份根与注册表备份根**分开注入**，且两个根都落沙箱。
+    ///
+    /// 修前只有一个 `backup_root`，它只作用于文件备份；注册表备份链恒从用户数据
+    /// 目录解析 ⇒ 测试的注册表备份件会落进真实备份目录并参与真实裁剪/封条对账。
+    /// 判红自证：把 `resolve_backup_roots` 的 `reg` 分支改回恒用
+    /// `backup_write_dir("cleanup-reg-backup")`，本条红。
+    #[test]
+    fn 备份根注入_文件与注册表都落沙箱_数据目录不出现() {
+        let bk = BackupSandbox::new("roots");
+        let roots = bk.roots();
+        let resolved = resolve_backup_roots(&roots);
+
+        assert_eq!(resolved.files, bk.path(), "文件备份根必须来自注入");
+        assert_eq!(resolved.reg_write, bk.reg_path(), "注册表备份写根必须来自注入");
+        assert_eq!(
+            resolved.reg_read,
+            vec![bk.reg_path().to_path_buf()],
+            "注入时封条对账只认注入根（不得顺带扫用户真备份）"
+        );
+
+        // 备份落点不得是「数据目录下的备份目录」（那正是用户真备份所在）。
+        let data_root = crate::engine::paths::app_data_dir();
+        let prod_files_dir = data_root.join("cleanup-files-backup");
+        let prod_reg_dir = data_root.join("cleanup-reg-backup");
+        assert!(
+            !resolved.files.starts_with(&prod_files_dir),
+            "文件备份根不得落在真实备份目录内: {}",
+            resolved.files.display()
+        );
+        assert!(
+            !resolved.reg_write.starts_with(&prod_reg_dir),
+            "注册表备份根不得落在真实备份目录内: {}",
+            resolved.reg_write.display()
+        );
+        // 反向对照：默认（生产）解析**必须**落在那两个目录里 —— 证明上面的断言
+        // 不是恒真的假判据。
+        let prod = resolve_backup_roots(&BackupRoots::default());
+        assert!(
+            prod.reg_write.starts_with(&prod_reg_dir),
+            "默认注册表备份根必须落真实备份目录（否则上面的断言是恒真的假判据）: {}",
+            prod.reg_write.display()
+        );
+        assert!(
+            prod.files.starts_with(&prod_files_dir),
+            "默认文件备份根必须落真实备份目录: {}",
+            prod.files.display()
+        );
+        // 注入根落在私有 tmp 沙箱里（测试件的归宿）。
+        let tmp_root = crate::engine::paths::temp_script_dir().expect("私有 tmp 应可用");
+        assert!(
+            resolved.files.starts_with(&tmp_root) && resolved.reg_write.starts_with(&tmp_root),
+            "注入的两个根都必须在私有 tmp 沙箱内: {} / {}",
+            resolved.files.display(),
+            resolved.reg_write.display()
+        );
+    }
+
+    /// P0-02 真机探针：注册表备份（`reg.exe export` 产物）必须落进**注入的注册表根**，
+    /// 用户真实数据目录不得出现测试件。
+    ///
+    /// 触真实注册表（HKCU 下的一次性键）⇒ 归真机档，禁进快速组。
+    /// 跑法：`cargo test --lib -- --ignored`。
+    #[test]
+    #[ignore = "真机探针：真跑 reg.exe export 备份并落位"]
+    fn 注册表备份落注入根_真机探针() {
+        use windows::Win32::System::Registry::{REG_SZ, REG_VALUE_TYPE};
+
+        let bk = BackupSandbox::new("regroot");
+        // 自有命名空间（门禁 check-ignored-isolation 的「真机写注册表」判据）：
+        // 键与值名都带 TrimProbe 标记，探针只碰自己建的那一个键。
+        let subkey = format!("Software\\TrimProbeCleanupRegRoot\\{}", std::process::id());
+        let value = "TrimProbeValue";
+        assert!(
+            super::super::registry::reg_key_ensure(HKEY_CURRENT_USER, &subkey),
+            "建探针键失败（前提不成立）"
+        );
+        assert!(
+            super::super::registry::reg_restore_write(
+                HKEY_CURRENT_USER,
+                &subkey,
+                value,
+                REG_VALUE_TYPE(REG_SZ.0),
+                b"x",
+            ),
+            "写探针值失败（前提不成立）"
+        );
+        let key = format!(r"HKEY_CURRENT_USER\{subkey}");
+
+        // 规则不带 `value` = 删整棵子树：删键这一步由**生产链**的既有出口完成
+        // （本探针自己不再新增删除调用点，免得给删除原语台账添新条目）。
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"regrootprobe","name":"注册表备份根探测",
+            "regKeys":[{"path": key}]
+        }]}]});
+        let items = vec![serde_json::json!({"id":"regrootprobe","name":"注册表备份根探测","path":""})];
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &bk.roots(), None)
+            .expect("不应 Err");
+
+        let backup_count = std::fs::read_dir(bk.reg_path())
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "reg"))
+                    .count()
+            })
+            .unwrap_or(0);
+        assert!(
+            backup_count > 0,
+            "注册表备份必须落进注入的注册表根: {}",
+            res.details.first().map(|d| d.to_string()).unwrap_or_default()
+        );
+
+        // 用户真实数据目录不得出现本探针的备份件。
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let real = std::path::PathBuf::from(appdata)
+                .join("com.xiaoxu.trim")
+                .join("cleanup-reg-backup");
+            if real.exists() {
+                let hit = std::fs::read_dir(&real)
+                    .map(|rd| {
+                        rd.flatten().any(|e| {
+                            e.file_name()
+                                .to_string_lossy()
+                                .contains("regrootprobe")
+                        })
+                    })
+                    .unwrap_or(false);
+                assert!(!hit, "真实数据目录不得出现测试的注册表备份件: {}", real.display());
+            }
+        }
+        assert!(
+            !super::super::registry::reg_key_exists(HKEY_CURRENT_USER, &subkey),
+            "探针键必须被生产链删掉（不许留垃圾键）"
+        );
+    }
+
+    /// P0-07（D-05）：路径**不在**扫描快照清单里（用户没确认过）⇒ 拒绝删除。
+    ///
+    /// 修前这类文件走 `identityUnbaselined` 计数后**照删** —— 「扫描后新增/被替换」
+    /// 的文件正是落在这一档，护栏方向是放行。本条钉住新语义：拒删 + 单独计数 +
+    /// 回执说清原因（不许落回「成功 0 删」）。
+    #[test]
+    fn 路径不在扫描快照_执行期出现的文件被拒删并记账() {
+        let sb = crate::testutil::Sandbox::new("idmiss");
+        let dir = sb.path().to_path_buf();
+        let scanned = dir.join("scanned.log");
+        let latecomer = dir.join("latecomer.log");
+        std::fs::write(&scanned, b"0123456789").unwrap();
+        std::fs::write(&latecomer, b"late").unwrap();
+
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"idmiss","name":"缺基线探测",
+            "fileKeys":[{"path": dir.to_string_lossy(), "pattern":"*.log", "recurse":true}]
+        }]}]});
+        // 快照只登记了 scanned.log —— latecomer.log 是「扫描之后才出现」的文件。
+        let items = vec![serde_json::json!({
+            "id":"idmiss","name":"缺基线探测","path": dir.to_string_lossy(),
+            "files": [scan_baseline(&scanned)]
+        })];
+
+        let bk = BackupSandbox::new("idmiss");
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &bk.roots(), None)
+            .expect("不应 Err");
+        let d = &res.details[0];
+        assert!(
+            latecomer.exists(),
+            "不在扫描快照里的文件必须幸存（用户没确认过它）: {d}"
+        );
+        assert!(!scanned.exists(), "快照内的文件照常删: {d}");
+        assert_eq!(
+            d["identityBaselineMissing"].as_i64(),
+            Some(1),
+            "缺基线必须单独计数外发: {d}"
+        );
+        assert_eq!(d["identityNoBirthBaseline"].as_i64(), Some(0), "本样本不是「无出生时间」档: {d}");
+        assert_eq!(d["fileCount"].as_i64(), Some(1), "只应删快照内那一个: {d}");
+        let msg = d["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("快照") || msg.contains("基线"),
+            "回执必须说清为什么没删: {msg}"
+        );
+        assert!(!msg.contains("已清理 0 个文件"), "不得伪装成功零删: {msg}");
+    }
+
+    /// P0-07：路径在快照清单里、但**明确没有出生时间**（gameRedist 回填形状），
+    /// 而文件在执行前被替换（大小变了）⇒ 仍必须拒绝删除。
+    ///
+    /// 「无出生时间」是可信来源（用户确认过这条路径），但出生时间没法比的时候
+    /// **大小还能比** —— 这一条就是那道兜底。
+    #[test]
+    fn 明确无出生时间但文件被替换_按大小不符拒绝并记账() {
+        let sb = crate::testutil::Sandbox::new("idnobirth");
+        let dir = sb.path().to_path_buf();
+        // 规则目标只指向 target 子目录：替换用的旧件落在 target 之外，
+        // 不然它会混进枚举、变成「不在快照」的另一档。
+        let target_dir = dir.join("target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let f = target_dir.join("redist.bin");
+        std::fs::write(&f, b"0123456789").unwrap();
+
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"idnobirth","name":"无出生时间探测",
+            "fileKeys":[{"path": target_dir.to_string_lossy(), "pattern":"*", "recurse":true}]
+        }]}]});
+        // 快照条目只有 path + size，没有 birthtimeNs（回填形状）。
+        let items = vec![serde_json::json!({
+            "id":"idnobirth","name":"无出生时间探测","path": dir.to_string_lossy(),
+            "files": [{"path": f.to_string_lossy(), "size": 10}]
+        })];
+
+        // 执行前替换文件：把原件改名留底，再写一个同名新件 ⇒ 出生时间与大小双双变化。
+        // 用 rename 而不是「删了再写」，是为了不改 `remove_file` 的调用点台账（门禁棘轮）。
+        std::fs::rename(&f, dir.join("redist.old")).unwrap();
+        std::fs::write(&f, b"replaced-content-longer").unwrap();
+
+        let bk = BackupSandbox::new("idnobirth");
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &bk.roots(), None)
+            .expect("不应 Err");
+        let d = &res.details[0];
+        assert!(f.exists(), "被替换的文件必须幸存: {d}");
+        assert_eq!(
+            d["identityChanged"].as_i64(),
+            Some(1),
+            "无出生时间时大小不符必须记「与扫描时不一致」: {d}"
+        );
+        assert_eq!(
+            d["identityNoBirthBaseline"].as_i64(),
+            Some(1),
+            "无出生时间档必须单独计数: {d}"
+        );
+        assert_eq!(d["identityBaselineMissing"].as_i64(), Some(0), "路径在快照内，不是缺基线档: {d}");
+    }
+
+    /// P0-07：路径在快照清单里、明确无出生时间、且内容未变 ⇒ 允许删除，
+    /// 但必须单独计数（可信来源的「不拦」要看得见，不能混进别的档）。
+    #[test]
+    fn 明确无出生时间的可信来源_允许删除并单独计数() {
+        let sb = crate::testutil::Sandbox::new("idnobirth2");
+        let dir = sb.path().to_path_buf();
+        let f = dir.join("redist.bin");
+        std::fs::write(&f, b"0123456789").unwrap();
+
+        let rules = serde_json::json!({"groups":[{"items":[{
+            "id":"idnobirth2","name":"无出生时间放行探测",
+            "fileKeys":[{"path": dir.to_string_lossy(), "pattern":"*", "recurse":true}]
+        }]}]});
+        let items = vec![serde_json::json!({
+            "id":"idnobirth2","name":"无出生时间放行探测","path": dir.to_string_lossy(),
+            "files": [{"path": f.to_string_lossy(), "size": 10}]
+        })];
+
+        let bk = BackupSandbox::new("idnobirth2");
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &bk.roots(), None)
+            .expect("不应 Err");
+        let d = &res.details[0];
+        assert!(!f.exists(), "可信来源（路径在快照内、无出生时间）必须照删: {d}");
+        assert_eq!(d["fileCount"].as_i64(), Some(1), "删除计数必须对得上: {d}");
+        assert_eq!(
+            d["identityNoBirthBaseline"].as_i64(),
+            Some(1),
+            "「不拦」必须单独计数外发（否则失守看不见）: {d}"
+        );
+        assert_eq!(d["identityBaselineMissing"].as_i64(), Some(0), "不得混进缺基线档: {d}");
     }
 
     /// R5a-M04-09：明细预览与执行侧必须同一时效护栏（pathPs 目录型 + fileKeys 型
@@ -3797,6 +4524,28 @@ mod cleanup_engine_contract_tests {
                 && base.join("fresh.txt").exists(),
             "预览与收集不得真删"
         );
+    }
+
+    /// P2-06（RUC04）：注册表目标判重键必须按**大小写不敏感**口径小写化 ——
+    /// `Value` 与 `value` 指同一个值名（Windows 注册表语义），键路径同理。
+    ///
+    /// 缺陷形态：旧口径按原样拼值名 ⇒ 同一个目标被判成两个 ⇒ 删前备份重复 export
+    /// 一次、删除时第二次必然「值已不存在」⇒ 规则被误判成失败。
+    ///
+    /// 判红自证：把 `reg_target_key` 里的值名小写化去掉 ⇒ 本条红。
+    #[test]
+    fn 注册表目标判重键_键路径与值名都大小写不敏感() {
+        let a = super::reg_target_key(HKEY_CURRENT_USER, r"Software\TrimProbe", Some("Value"));
+        let b = super::reg_target_key(HKEY_CURRENT_USER, r"software\trimprobe", Some("value"));
+        assert_eq!(a, b, "键路径与值名都必须小写化后判重: {a} vs {b}");
+        let other_value =
+            super::reg_target_key(HKEY_CURRENT_USER, r"Software\TrimProbe", Some("Other"));
+        assert_ne!(a, other_value, "不同值名不得被判成同一目标");
+        let tree = super::reg_target_key(HKEY_CURRENT_USER, r"Software\TrimProbe", None);
+        assert_ne!(a, tree, "删树（无值名）与具名值不是同一目标");
+        let other_hive =
+            super::reg_target_key(HKEY_LOCAL_MACHINE, r"Software\TrimProbe", Some("value"));
+        assert_ne!(a, other_hive, "不同 hive 不是同一目标");
     }
 }
 
@@ -4320,9 +5069,24 @@ mod phase_probe_tests {
             {"id":"phaseProd","name":"生产相位","fileKeys":[
                 {"path": root.to_string_lossy(), "pattern":"*", "recurse":true}]}
         ]}]});
-        let items = vec![json!({"id":"phaseProd","name":"生产相位","path":""})];
+        // P0-07：执行侧只删「扫描快照清单内」的文件 ⇒ 探针必须带真实基线清单。
+        let mut baselines: Vec<Value> = Vec::with_capacity(FILES);
+        for d in 0..(FILES / PER_DIR) {
+            let dir = root.join(format!("d{d:02}"));
+            for f in 0..PER_DIR {
+                let p = dir.join(format!("f{f:04}.tmp"));
+                let md = std::fs::symlink_metadata(&p).unwrap();
+                baselines.push(json!({
+                    "path": p.to_string_lossy(),
+                    "size": md.len() as i64,
+                    "birthtimeNs": birthtime_ns_of(&md) as i64,
+                }));
+            }
+        }
+        let items = vec![json!({"id":"phaseProd","name":"生产相位","path":"","files": baselines})];
         let t0 = Instant::now();
-        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, Some(&backup), None)
+        let roots = BackupRoots { files: Some(backup.clone()), reg: Some(backup.join("reg")) };
+        let res = cleanup_execute_with_backup_root(&items, &rules, false, false, &roots, None)
             .expect("执行链不应 Err");
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1e3;
         let file_count = res
@@ -4359,6 +5123,46 @@ mod phase_probe_tests {
 #[cfg(test)]
 mod review_shape_tests {
     use super::*;
+
+    /// PF-P0-03：写入侧必须调用读取侧同源上限，超限项不写副本也不落清单。
+    /// 判红自证：删掉 cleanup_byte_limits 调用、跳过 reserve，或把回执计数写死 ⇒ 本用例红。
+    #[test]
+    fn 大清单写入上限与读取侧同源且不产生不可还原副本() {
+        let src = include_str!("cleanup.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        assert!(
+            src.contains("match cleanup_byte_limits()"),
+            "写入侧上限必须来自同源函数"
+        );
+        assert!(
+            src.contains("if manifest_budget.reserve(&entry)"),
+            "只有清单额度内的副本才允许登记"
+        );
+        assert!(
+            src.contains("\"backupManifestTruncated\": manifest_budget.truncated_entries"),
+            "截断条数必须进回执"
+        );
+        assert!(
+            src.contains("\"backupManifestTruncatedBytes\": manifest_budget.truncated_bytes"),
+            "截断字节数必须进回执"
+        );
+
+        let mut budget = ManifestBudget::new(180);
+        let small = json!({"file": "r\\1_a", "path": "C:\\a", "size": 1, "rule": "r"});
+        let large = json!({"file": "r\\2_b", "path": "C:\\b", "size": 99999, "rule": "r".repeat(200)});
+        assert!(budget.reserve(&small), "小条目应在额度内");
+        assert!(
+            !budget.reserve(&large),
+            "超过清单额度的大条目不得预留副本名额"
+        );
+        assert_eq!(budget.truncated_entries, 1, "截断条数必须准确");
+        assert!(
+            budget.truncated_bytes > 0,
+            "截断申报字节数必须进入回执计数"
+        );
+    }
 
     /// R5a-L12：永久删热循环不得逐文件走全局保护入口（每文件一次全局锁 + `ProtectRoots`
     /// 整表 clone）。判红自证：把循环里的 `is_path_protected(path)` 换成带路径的全局调用

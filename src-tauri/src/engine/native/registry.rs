@@ -1056,13 +1056,19 @@ pub fn decode_reg_value_bytes(
         REG_MULTI_SZ => {
             let u = units(buf);
             let text = decode_utf16_strict(&u)?;
-            // R5c-M02：只剥掉**终止** NUL，**不过滤空元素**。`a\0\0b\0\0` 是 `["a","","b"]`；
-            // 旧写法 `.filter(|s| !s.is_empty())` 把它解成 `["a","b"]`，写侧按元素重新编码
-            // 就写回 `a\0b\0\0` —— 那是**另一个值**，而回读自比对走同一个解码器 ⇒ 恒相等，
-            // 用户拿到「已还原」但内容已变形。元素内不可能含 NUL，所以「按 NUL 拆」在保留
-            // 空元素时才真的可逆（末尾的空元素与终止符同形，那是本表示法的固有边界，
-            // 彻底解法是 faithful 分支不走字符串往返）。
-            let elements: Vec<&str> = text.trim_end_matches('\0').split('\0').collect();
+            // R5c-M02：只剥掉**末尾双 NUL 终止符**，不过滤空元素。`a\0\0b\0\0` 是
+            // `["a","","b"]`；旧写法 `.trim_end_matches('\0')` 会把末尾空元素一起吃掉，
+            // 写侧按元素重新编码就写回另一个值。元素内不可能含 NUL，所以按 NUL 拆可逆。
+            let body = if text == "\0" || text == "\0\0" {
+                ""
+            } else {
+                text.strip_suffix("\0\0").unwrap_or(&text)
+            };
+            let elements: Vec<&str> = if body.is_empty() {
+                Vec::new()
+            } else {
+                body.split('\0').collect()
+            };
             if flatten {
                 // PS `[string]$v` 对字符串数组是空格连接：空元素照样占位（连写两个空格），
                 // 否则「有元素被吞」在显示链上也看不出来
@@ -2001,6 +2007,16 @@ mod tests {
             Some(("REG_MULTI_SZ", String::new())),
             "空 MULTI_SZ 必须解成空串"
         );
+
+        // ⑥ P2-3：末尾空元素不得被终止符吃掉（`["a",""]`）。
+        let trail = encode(&["a", ""]);
+        let (_, trail_data) = decode_reg_value_bytes(REG_MULTI_SZ, &trail, false).unwrap();
+        assert_eq!(
+            trail_data.split('\0').collect::<Vec<_>>(),
+            vec!["a", ""],
+            "末尾空元素被吞 ⇒ 还原写回另一个值（实得 {trail_data:?}）"
+        );
+        assert_eq!(encode(&trail_data.split('\0').collect::<Vec<_>>()), trail);
     }
 
     /// R5c-M03 回归钉（纯逻辑侧）：**值名枚举层不得过滤空名**。

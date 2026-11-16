@@ -1761,6 +1761,16 @@ mod tests {
         );
         // verbatim 不可折回形态仍按字面键口径（P0-1 的既有契约，不能被本改动带偏）
         assert_eq!(normalize_lexical(r"\\.\C:\Windows."), r"\\.\c:\windows.");
+
+        // P1-01b：主进程 path_key 与扫描器排除键的三形态反例必须同键。
+        // 判红自证：从 normalize_lexical 移除共享兼容折叠后，三条断言红。
+        for (odd, canonical) in [
+            (r"c:/tmp/cache/./sub\", r"C:\tmp\cache\sub"),
+            (r"C:\tmp\cache\sub. ", r"C:\tmp\cache\sub"),
+            (r"\\?\C:\tmp\cache\sub", r"C:\tmp\cache\sub"),
+        ] {
+            assert_eq!(normalize_lexical(odd), normalize_lexical(canonical), "{odd} 未与主进程同键");
+        }
     }
 
     /// R5a-M01：删除前的名字形态闸必须能判红尾点/尾空格/保留名/相对段。

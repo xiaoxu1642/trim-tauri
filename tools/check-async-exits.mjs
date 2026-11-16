@@ -61,7 +61,6 @@ const RETIRED_ON = [];
 // 唯一的形状命中而非 reject 源：cleanup.js 的固定延时 Promise（见该条理由，保留可见而非静默豁免）。
 const TRANSITION = [
   { file: 'src/scripts/cleanup.js', kind: 'bare-handler', where: '|killBtn.disabled=true|killBtn.textContent=', batch: '门禁假绿#4', unit: 'F4a1', reason: '固定延时 Promise（setTimeout 包在 Promise 里，executor 无 reject 源）；判据按逐 await 收口，形状与真违例同形，保留登记' },
-  { file: 'src/scripts/cleanup.js', kind: 'bare-handler', where: '|constok=awaitwindow.app.confirmWarning(|', batch: '门禁假绿#4', unit: 'F4a1', reason: '重启资源管理器确认件、延时等待、await clean() 三处都在 try 外：确认组件或 clean() reject 即「点了没反应」' },
   { file: 'src/scripts/cleanup.js', kind: 'bare-handler', where: '|constp=packsbtn.getAttribute()|if(p)return', batch: '门禁假绿#4', unit: 'F4a1', reason: '跳转「安装包备份」页前的 confirmDanger 确认件在 try 外，确认组件 reject 时按钮无反馈' },
   { file: 'src/scripts/cleanup.js', kind: 'bare-handler', where: '|constb=uninstbtn.getAttribute()|if(b)return', batch: '门禁假绿#4', unit: 'F4a1', reason: '跳转「卸载残留」页前的 confirmDanger 确认件在 try 外，确认组件 reject 时按钮无反馈' },
   { file: 'src/scripts/cleanup.js', kind: 'bare-handler', where: '|constb=backupsbtn.getAttribute()|if(b)return', batch: '门禁假绿#4', unit: 'F4a1', reason: '跳转「备份还原」页前的 confirmDanger 确认件在 try 外，确认组件 reject 时按钮无反馈' },

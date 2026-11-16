@@ -80,9 +80,10 @@ function qosDscpValues(exe) {
 const OOSU_CFG_B64 = 'IyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIw0KIyBUaGlzIGZpbGUgd2FzIGNyZWF0ZWQgd2l0aCBPJk8gU2h1dFVwMTArKyBWMS45LjE0MzYNCiMgYW5kIGNhbiBiZSBpbXBvcnRlZCBvbnRvIGFub3RoZXIgY29tcHV0ZXIuIA0KIw0KIyBEb3dubG9hZCB0aGUgYXBwbGljYXRpb24gYXQgaHR0cHM6Ly93d3cub28tc29mdHdhcmUuY29tL3NodXR1cDEwDQojIFlvdSBjYW4gdGhlbiBpbXBvcnQgdGhlIGZpbGUgZnJvbSB3aXRoaW4gdGhlIHByb2dyYW0uIA0KIw0KIyBBbHRlcm5hdGl2ZWx5IHlvdSBjYW4gaW1wb3J0IGl0IGF1dG9tYXRpY2FsbHkgb3ZlciBhIGNvbW1hbmQgbGluZS4NCiMgU2ltcGx5IHVzZSB0aGUgZm9sbG93aW5nIHBhcmFtZXRlcjogDQojIE9PU1UxMC5leGUgPHBhdGggdG8gZmlsZT4NCiMgDQojIFNlbGVjdGluZyB0aGUgT3B0aW9uIC9xdWlldCBlbmRzIHRoZSBhcHAgcmlnaHQgYWZ0ZXIgdGhlIGltcG9ydCBhbmQgdGhlDQojIHVzZXIgZG9lcyBub3QgZ2V0IGFueSBmZWVkYmFjayBhYm91dCB0aGUgaW1wb3J0Lg0KIw0KIyBXZSBhcmUgYWx3YXlzIGhhcHB5IHRvIGFuc3dlciBhbnkgcXVlc3Rpb25zIHlvdSBtYXkgaGF2ZSENCiMgwqkgMjAxNS0yMDIzIE8mTyBTb2Z0d2FyZSBHbWJILCBCZXJsaW4uIEFsbCByaWdodHMgcmVzZXJ2ZWQuDQojIGh0dHBzOi8vd3d3Lm9vLXNvZnR3YXJlLmNvbS8NCiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMNCg0KUDAwMQkrDQpQMDAyCSsNClAwMDMJKw0KUDAwNAktDQpQMDA1CSsNClAwMDYJKw0KUDAwOAkrDQpQMDI2CS0NClAwMjcJKw0KUDAyOAktDQpQMDY0CSsNClAwNjUJKw0KUDA2NgkrDQpQMDY3CSsNClAwNzAJKw0KUDA2OQktDQpQMDA5CSsNClAwMTAJKw0KUDAxNQkrDQpQMDY4CSsNClAwMTYJKw0KQTAwMQkrDQpBMDAyCSsNCkEwMDMJKw0KQTAwNAktDQpBMDA2CSsNCkEwMDUJLQ0KUDAwNwktDQpQMDM2CSsNClAwMjUJKw0KUDAzMwktDQpQMDIzCSsNClAwNTYJKw0KUDA1NwkrDQpQMDEyCS0NClAwMzQJLQ0KUDAxMwktDQpQMDM1CS0NClAwNjIJKw0KUDA2MwkrDQpQMDgxCSsNClAwNDcJKw0KUDAxOQkrDQpQMDQ4CS0NClAwNDkJKw0KUDAyMAktDQpQMDM3CSsNClAwMTEJLQ0KUDAzOAkrDQpQMDUwCS0NClAwNTEJKw0KUDAxOAktDQpQMDM5CSsNClAwMjEJLQ0KUDA0MAkrDQpQMDIyCS0NClAwNDEJKw0KUDAxNAktDQpQMDQyCSsNClAwNTIJLQ0KUDA1MwkrDQpQMDU0CS0NClAwNTUJKw0KUDAyOQktDQpQMDQzCSsNClAwMzAJLQ0KUDA0NAkrDQpQMDMxCS0NClAwNDUJKw0KUDAzMgktDQpQMDQ2CSsNClAwNTgJLQ0KUDA1OQkrDQpQMDYwCS0NClAwNjEJKw0KUDAyNAkrDQpTMDAxCS0NClMwMDIJKw0KUzAwMwkrDQpTMDA4CS0NCkUxMDEJKw0KRTIwMQktDQpFMTE1CSsNCkUyMTUJLQ0KRTExOAkrDQpFMjE4CS0NCkUxMDcJKw0KRTIwNwktDQpFMTExCSsNCkUyMTEJLQ0KRTExMgkrDQpFMjEyCS0NCkUxMDkJKw0KRTIwOQktDQpFMTIxCSsNCkUyMjEJLQ0KRTEwMwkrDQpFMjAzCS0NCkUxMjMJKw0KRTIyMwktDQpFMTI0CSsNCkUyMjQJLQ0KRTEyOAkrDQpFMjI4CS0NCkUxMTkJKw0KRTIxOQktDQpFMTIwCSsNCkUyMjAJLQ0KRTEyMgkrDQpFMjIyCS0NCkUxMjUJKw0KRTIyNQktDQpFMTI2CSsNCkUyMjYJLQ0KRTEwNgkrDQpFMjA2CS0NCkUxMjcJKw0KRTIyNwktDQpFMDAxCSsNCkUwMDIJKw0KRTAwMwkrDQpFMDA4CSsNCkUwMDcJLQ0KRTAxMAkrDQpFMDExCS0NCkUwMTIJLQ0KRTAwOQkrDQpFMDA0CSsNCkUwMDUJKw0KRTAxMwkrDQpFMDE0CSsNCkUwMDYJKw0KWTAwMQkrDQpZMDAyCSsNClkwMDMJKw0KWTAwNAkrDQpZMDA1CSsNClkwMDYJKw0KWTAwNwkrDQpDMDEyCSsNCkMwMDIJKw0KQzAxMwktDQpDMDA3CSsNCkMwMDgJLQ0KQzAwOQkrDQpDMDEwCS0NCkMwMTEJKw0KQzAxNAkrDQpDMDE1CS0NCkwwMDEJKw0KTDAwMwkrDQpMMDA0CSsNCkwwMDUJKw0KVTAwMQkrDQpVMDA0CSsNClUwMDUJKw0KVTAwNgktDQpVMDA3CS0NClcwMDEJLQ0KVzAxMQktDQpXMDA0CS0NClcwMDUJKw0KVzAxMAkrDQpXMDA5CS0NClAwMTcJKw0KVzAwNgktDQpXMDA4CS0NCk0wMDYJKw0KTTAxMQkrDQpNMDEwCSsNCk8wMDMJLQ0KTzAwMQkrDQpTMDEyCSsNClMwMTMJKw0KUzAxNAkrDQpLMDAxCSsNCkswMDIJKw0KSzAwNQkrDQpNMDAzCSsNCk0wMTUJKw0KTTAxNgkrDQpNMDE3CS0NCk0wMTgJKw0KTTAxOQktDQpNMDIwCSsNCk0wMjIJKw0KTTAwMQkrDQpNMDA0CSsNCk0wMDUJKw0KTTAyNAkrDQpNMDEyCS0NCk0wMTMJLQ0KTTAxNAktDQpNMDIzCS0NCk4wMDEJLQ0K';
 
 // P1-02：tf_svc_bulk 服务名单单一来源（基础步骤与「跳过项报告」步骤共用，防漂移）。
-const SVC_BULK_NAMES = ["TapiSrv","FontCache3.0.0.0","WpcMonSvc","SEMgrSvc","PNRPsvc","LanmanWorkstation","WEPHOSTSVC","p2psvc","p2pimsvc","PhoneSvc","Wecsvc","perceptionsimulation","StiSvc","WMPNetworkSvc","autotimesvc","edgeupdatem","MicrosoftEdgeElevationService","ALG","QWAVE","IpxlatCfgSvc","icssvc","DusmSvc","MapsBroker","edgeupdate","SensorService","shpamsvc","svsvc","SysMain","MSiSCSI","Netlogon","CscService","ssh-agent","AppReadiness","tzautoupdate","NfsClnt","wisvc","defragsvc","SharedRealitySvc","RetailDemo","lltdsvc","TrkWks","CryptSvc","DiagTrack","diagsvc","DPS","WdiServiceHost","WdiSystemHost","dmwappushservice","TroubleshootingSvc","DsSvc","FrameServer","FontCache","OSRSS","sedsvc","SENS","TabletInputService","Themes","BcastDVRUserService","CaptureService","diagnosticshub.standardcollector.service","XblAuthManager","XblGameSave","XboxNetApiSvc","WpnService","lfsvc"];
+const SVC_BULK_NAMES = ["FontCache3.0.0.0","WpcMonSvc","SEMgrSvc","LanmanWorkstation","WEPHOSTSVC","Wecsvc","StiSvc","autotimesvc","edgeupdatem","MicrosoftEdgeElevationService","ALG","QWAVE","IpxlatCfgSvc","icssvc","DusmSvc","MapsBroker","edgeupdate","SensorService","svsvc","SysMain","MSiSCSI","Netlogon","CscService","AppReadiness","tzautoupdate","defragsvc","lltdsvc","TrkWks","diagsvc","DPS","WdiServiceHost","WdiSystemHost","dmwappushservice","TroubleshootingSvc","DsSvc","FrameServer","FontCache","SENS","Themes","BcastDVRUserService","CaptureService","XblAuthManager","XblGameSave","XboxNetApiSvc","WpnService","lfsvc"];
+const SVC_MANUAL_NAMES = ["CryptSvc"];
 // P1-02：tf_drv_disable 驱动名单单一来源（同上）。
-const DRV_NAMES = ["acpipagr","AcpiPmi","Beep","CAD","GpuEnergyDrv","CLFS","CSC","luafv","RasAcd","Rasl2tp","RasPppoe","RasSstp","tcpipreg","dam","PEAUTH","QWAVEdrv","cdrom","fileinfo","FileCrypt"];
+const DRV_NAMES = ["acpipagr","AcpiPmi","Beep","CAD","CLFS","CSC","luafv","Rasl2tp","RasPppoe","RasSstp","tcpipreg","dam","PEAUTH","QWAVEdrv","cdrom","fileinfo","FileCrypt"];
 
 const OPTIONS = [
   // ---------- 启动与响应 ----------
@@ -242,25 +243,6 @@ const OPTIONS = [
     ]
   },
   {
-    id: 'tf_gamebar', group: '游戏与多媒体', title: '关闭游戏栏后台捕获', risk: 'low',
-    desc: 'Trim：PresenceWriter ActivationType=0 并停止 PresenceWriter 服务，关闭游戏栏后台捕获与游戏状态写入器；AppCaptureEnabled 由「关闭游戏 DVR 录制」负责，本项不再重复写入。',
-    steps: [
-      {
-        label: 'PresenceWriter 捕获写入器', reg: regBlock({
-          // 第六大点-B（2026-09-14）：AppCaptureEnabled 归「关闭游戏 DVR 录制」(game_dvr)，
-          // 本项不再重复写入该键。
-          'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\WindowsRuntime\\ActivatableClassId\\Windows.Media.Capture.AppCaptureBroadcastContract\\PresenceWriter': {
-            'ActivationType': 'dword:00000000'
-          },
-          'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\PresenceWriter': {
-            'Start': 'dword:00000004'
-          }
-        })
-      }
-    ]
-  },
-  
-  {
     id: 'tf_gpu_latency', group: '游戏与多媒体', title: '显示器延迟容忍度调优', risk: 'medium',
     desc: 'Trim Latency Tolerance：DXGKrnl MonitorLatencyTolerance/MonitorRefreshLatencyTolerance=1，下调显示管线的延迟容忍度。',
     steps: [
@@ -299,6 +281,8 @@ const OPTIONS = [
       { label: '批量禁用非必要服务（wuauserv 改手动，商店服务保持默认）', pwsh: [
         '$disabled = @("' + SVC_BULK_NAMES.join('","') + '")',
         'foreach ($n in $disabled) { $p = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$n"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 4 -PropertyType DWord -Force | Out-Null; Stop-Service -Name $n -Force -ErrorAction SilentlyContinue } }',
+        '$manual = @("' + SVC_MANUAL_NAMES.join('","') + '")',
+        'foreach ($n in $manual) { $p = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$n"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 3 -PropertyType DWord -Force | Out-Null } }',
         '$p = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\wuauserv"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 3 -PropertyType DWord -Force | Out-Null }',
         '$p = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\lfsvc\\Service\\Configuration"; New-Item -Path $p -Force | Out-Null; New-ItemProperty -Path $p -Name Status -Value 0 -PropertyType DWord -Force | Out-Null',
         'New-Item -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\MicrosoftEdge\\Main" -Force | Out-Null; New-ItemProperty -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\MicrosoftEdge\\Main" -Name AllowPrelaunch -Value 0 -PropertyType DWord -Force | Out-Null',
@@ -334,70 +318,6 @@ const OPTIONS = [
       }) }
     ]
   },
-  {
-    id: 'telemetry_optimize', group: '安全与隐私', title: '遥测优化', risk: 'medium',
-    desc: '合并原「关闭系统遥测」与「停用遥测计划任务/日志」：策略层关闭 AllowTelemetry、广告 ID、传递优化上传与网页内容评估；任务层禁用 30+ 个遥测/兼容性/客户体验计划任务（含 Office、Application Experience、Media Center 等）并将 35 个 AutoLogger 会话 Start=0；服务层停止并禁用 DiagTrack/dmwappushservice/diagnosticshub。策略+任务+日志+服务四层一体掐断遥测采集与上传。',
-    steps: [
-      { label: '遥测与广告策略', reg: regBlock({
-        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\DataCollection': { 'AllowTelemetry': 'dword:00000000' },
-        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\DataCollection': { 'AllowTelemetry': 'dword:00000000' },
-        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Policies\\DataCollection': { 'AllowTelemetry': 'dword:00000000' },
-        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\AdvertisingInfo': { 'DisabledByGroupPolicy': 'dword:00000001' },
-        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\DeliveryOptimization\\Config': { 'DownloadMode': 'dword:00000000' },
-        'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\AdvertisingInfo': { 'Enabled': 'dword:00000000' },
-        'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\AppHost': { 'EnableWebContentEvaluation': 'dword:00000000' },
-        'HKEY_CURRENT_USER\\Control Panel\\International\\User Profile': { 'HttpAcceptLanguageOptOut': 'dword:00000001' }
-      }) },
-      { label: '禁用遥测计划任务', pwsh: [
-        '$tasks = @(',
-        '"\\Microsoft\\Windows\\Application Experience\\Microsoft Compatibility Appraiser",',
-        '"\\Microsoft\\Windows\\Application Experience\\ProgramDataUpdater",',
-        '"\\Microsoft\\Windows\\Application Experience\\StartupAppTask",',
-        '"\\Microsoft\\Windows\\Autochk\\Proxy",',
-        '"\\Microsoft\\Windows\\Customer Experience Improvement Program\\Consolidator",',
-        '"\\Microsoft\\Windows\\Customer Experience Improvement Program\\UsbCeip",',
-        '"\\Microsoft\\Windows\\Customer Experience Improvement Program\\KernelCeipTask",',
-        '"\\Microsoft\\Windows\\Customer Experience Improvement Program\\HypervisorFlightingTask",',
-        '"\\Microsoft\\Windows\\DiskDiagnostic\\Microsoft-Windows-DiskDiagnosticDataCollector",',
-        '"\\Microsoft\\Windows\\DiskFootprint\\Diagnostics",',
-        '"\\Microsoft\\Windows\\Feedback\\Siuf\\DmClient",',
-        '"\\Microsoft\\Windows\\Feedback\\Siuf\\DmClientOnScenarioDownload",',
-        '"\\Microsoft\\Windows\\Maps\\MapsToastTask",',
-        '"\\Microsoft\\Windows\\Maps\\MapsUpdateTask",',
-        '"\\Microsoft\\Windows\\PI\\Sqm-Tasks",',
-        '"\\Microsoft\\Windows\\Power Efficiency Diagnostics\\AnalyzeSystem",',
-        '"\\Microsoft\\Windows\\Windows Error Reporting\\QueueReporting",',
-        '"\\Microsoft\\Windows\\Media Center\\ActivateWindowsSearch",',
-        '"\\Microsoft\\Windows\\Media Center\\ConfigureInternetTimeService",',
-        '"\\Microsoft\\Windows\\Media Center\\DispatchRecoveryTasks",',
-        '"\\Microsoft\\Windows\\Media Center\\ehDRMInit",',
-        '"\\Microsoft\\Windows\\Media Center\\InstallPlayReady",',
-        '"\\Microsoft\\Windows\\Media Center\\mcupdate",',
-        '"\\Microsoft\\Windows\\Media Center\\MediaCenterRecoveryTask",',
-        '"\\Microsoft\\Windows\\Media Center\\ObjectStoreRecoveryTask",',
-        '"\\Microsoft\\Windows\\Media Center\\PvrScheduleTask",',
-        '"\\Microsoft\\Windows\\Media Center\\RegisterSearch",',
-        '"\\Microsoft\\Windows\\Media Center\\ReindexSearchRoot",',
-        '"\\Microsoft\\Office\\OfficeTelemetryAgentFallBack",',
-        '"\\Microsoft\\Office\\OfficeTelemetryAgentLogOn",',
-        '"\\Microsoft\\Office\\OfficeTelemetryAgentFallBack2016",',
-        '"\\Microsoft\\Office\\OfficeTelemetryAgentLogOn2016",',
-        '"\\Microsoft\\Windows\\CloudExperienceHost\\CreateObjectTask",',
-        '"\\Microsoft\\Windows\\AppxDeploymentClient\\Pre-staged app cleanup",',
-        '"\\Microsoft\\Windows\\ApplicationData\\DsSvcCleanup"',
-        ')',
-        'foreach ($t in $tasks) { schtasks /change /tn $t /disable 2>$null | Out-Null }'
-      ].join('\n') },
-      { label: 'AutoLogger Start=0', pwsh: [
-        '$root = "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\WMI\\Autologger"',
-        'if (Test-Path $root) { Get-ChildItem $root | ForEach-Object { New-ItemProperty -Path $_.PSPath -Name Start -Value 0 -PropertyType DWord -Force | Out-Null } }'
-      ].join('\n') },
-      { label: '停止遥测服务', pwsh: [
-        'foreach ($s in @("DiagTrack","dmwappushservice","diagnosticshub.standardcollector.service")) { Stop-Service -Name $s -Force -ErrorAction SilentlyContinue; sc.exe config $s start= disabled 2>$null | Out-Null }'
-      ].join('\n') }
-    ]
-  },
-  
   {
     id: 'tf_defender', group: '安全与隐私', title: '关闭 Defender 与 SmartScreen', risk: 'high',
     desc: 'Trim：禁用 Microsoft Defender 反间谍/实时保护/云上报/SmartScreen/Edge 钓鱼过滤，并停用 Sense、WinDefend、WdNisSvc、SecurityHealthService、wscsvc（高风险，系统将无杀毒防护）。',
@@ -477,7 +397,7 @@ const OPTIONS = [
   },
   {
     id: 'tf_privacy', group: '安全与隐私', title: '系统隐私设置', risk: 'medium',
-    desc: 'Trim 隐私大项：关闭开始菜单建议、操作中心通知、跨设备同步(CDP)、搜索建议与 Cortana 同意项、实验性体验、TaggedEnergy，并停用 GpuEnergyDrv（麦克风/摄像头权限保留允许）。\n\n归属划分：内容推荐/商店推广类键归「禁用商店自动更新与推广内容」，云推荐与锁屏聚焦类键归「云推荐内容排查」，广告 ID 归「广告 ID 个性化排查」，遥测策略归「遥测优化」，错误报告归「Windows Error Reporting 策略排查」。本项不再重复写入上述键，只想单项处理时请用对应专项项。',
+    desc: 'Trim 隐私大项：关闭开始菜单建议、操作中心通知、跨设备同步(CDP)、搜索建议与 Cortana 同意项、实验性体验、TaggedEnergy，并停用 GpuEnergyDrv（麦克风/摄像头权限保留允许）。\n\n归属划分：内容推荐/商店推广类键归「禁用商店自动更新与推广内容」，云推荐与锁屏聚焦类键归「云推荐内容排查」，广告 ID 归「广告 ID 个性化排查」，遥测策略由「隐私自护」面板统一提供，错误报告归「Windows Error Reporting 策略排查」。本项不再重复写入上述键，只想单项处理时请用对应专项项。',
     steps: [
       { label: '隐私注册表键', reg: regBlock({
         // 第六大点-B（2026-09-14 重复点审查）：ContentDeliveryManager 的全部键已移出本项，
@@ -578,9 +498,9 @@ const OPTIONS = [
     desc: 'Trim KBM：StickyKeys Flags="506"、Keyboard Response(筛选键) Flags="122"、ToggleKeys Flags="58"，连按 Shift 8 秒等误触发快捷键全部失效。',
     steps: [
       { label: '辅助功能热键 Flags', reg: regBlock({
-        'HKEY_CURRENT_USER\\Control Panel\\Accessibility\\StickyKeys': { 'Flags': '506' },
-        'HKEY_CURRENT_USER\\Control Panel\\Accessibility\\Keyboard Response': { 'Flags': '122' },
-        'HKEY_CURRENT_USER\\Control Panel\\Accessibility\\ToggleKeys': { 'Flags': '58' }
+        'HKEY_CURRENT_USER\\Control Panel\\Accessibility\\StickyKeys': { 'Flags': '"506"' },
+        'HKEY_CURRENT_USER\\Control Panel\\Accessibility\\Keyboard Response': { 'Flags': '"122"' },
+        'HKEY_CURRENT_USER\\Control Panel\\Accessibility\\ToggleKeys': { 'Flags': '"58"' }
       }) }
     ]
   },
@@ -986,21 +906,6 @@ const OPTIONS = [
     ]
   },
   {
-    id: 'peripheral_winkey_off', group: '外设调优', title: '禁用 Win 键误触', risk: 'medium',
-    desc: '写入 Scancode Map 屏蔽左右 Win 键，避免游戏中误触 Windows 键切出；会禁用 Win+快捷键。',
-    steps: [
-      { label: 'Scancode Map 屏蔽 Win 键', pwsh: [
-        '$p = "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Keyboard Layout"',
-        '$map = [byte[]](0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x5b,0xe0,0x00,0x00,0x5c,0xe0,0x00,0x00,0x00,0x00)',
-        'New-Item -Path $p -Force | Out-Null',
-        'New-ItemProperty -Path $p -Name "Scancode Map" -Value $map -PropertyType Binary -Force | Out-Null'
-      ].join('\n') }
-    ],
-    restore: [
-      { label: '还原 Scancode Map', pwsh: 'Remove-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Keyboard Layout" -Name "Scancode Map" -ErrorAction SilentlyContinue' }
-    ]
-  },
-  {
     id: 'peripheral_mouse_trails', group: '外设调优', title: '关闭硬件鼠标轨迹', risk: 'medium',
     desc: 'MouseTrails=0，关闭鼠标拖尾效果，让指针显示更干净，减少视觉干扰。',
     steps: [
@@ -1210,13 +1115,6 @@ const OPTIONS = [
           'foreach ($n in $svcs) { $p = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$n"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 2 -PropertyType DWord -Force | Out-Null } }'
         ].join('\n')
       }
-    ]
-  },
-    {
-    id: 'svc_remote_registry_disable', group: '系统服务', title: 'RemoteRegistry 远程管理排查', risk: 'medium',
-    desc: 'RemoteRegistry 服务 Start=4 并停止；仅在确认不依赖远程注册表管理、资产盘点、运维工具或企业策略时请求关闭，并保留恢复路径。',
-    steps: [
-      { label: 'RemoteRegistry Start=4', pwsh: '$p = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\RemoteRegistry"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 4 -PropertyType DWord -Force | Out-Null; Stop-Service -Name RemoteRegistry -Force -ErrorAction SilentlyContinue }' }
     ]
   },
   {
@@ -1484,34 +1382,12 @@ const OPTIONS = [
   // 「none 档不进 optimizer-scope.json」是 A6 判据（表 ⇄ 重算必须完全相等）；
   // 只有 explorer / reboot 档才登记。
   {
-    id: 'sys_minanimate_off', group: '桌面体验', title: '关闭窗口开合动画', risk: 'low',
-    desc: 'HKCU Control Panel\\Desktop 的 MinAnimate=0，最小化/最大化窗口时不再播放缩放动画，视觉响应更"直接"。低配机与远程桌面上感知更明显。',
-    steps: [
-      { label: 'MinAnimate=0', reg: regBlock({
-        'HKEY_CURRENT_USER\\Control Panel\\Desktop': {
-          'MinAnimate': 'dword:00000000'
-        }
-      }) }
-    ]
-  },
-  {
     id: 'sys_taskbar_anim_off', group: '桌面体验', title: '关闭任务栏按钮动画', risk: 'low',
     desc: 'HKCU Explorer\\Advanced 的 TaskbarAnimations=0，任务栏按钮在窗口切换/最小化时不再播放滑动动画。属偏好设置。',
     steps: [
       { label: 'TaskbarAnimations=0', reg: regBlock({
         'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced': {
           'TaskbarAnimations': 'dword:00000000'
-        }
-      }) }
-    ]
-  },
-  {
-    id: 'sys_thumb_cache_off', group: '桌面体验', title: '禁用缩略图缓存（thumbcache）', risk: 'low',
-    desc: 'HKCU Explorer\\Advanced 的 DisableThumbnailCache=1，资源管理器不再把缩略图写入 thumbcache_*.db。隐私向：U 盘/多人共用机器上避免缩略图残留；代价是每次进同一目录要重算缩略图，SSD 上开销可忽略。',
-    steps: [
-      { label: 'DisableThumbnailCache=1', reg: regBlock({
-        'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced': {
-          'DisableThumbnailCache': 'dword:00000001'
         }
       }) }
     ]
@@ -1573,17 +1449,6 @@ const OPTIONS = [
     ]
   },
   {
-    id: 'sys_transparency_off', group: '桌面体验', title: '关闭系统透明效果', risk: 'low',
-    desc: 'HKCU Themes\\Personalize 的 EnableTransparency=0，开始菜单/任务栏/窗口边框不再叠加透明材质。低配机与远程桌面上能减少 DWM 合成开销；Win11 主题视觉会变"实"一些。与 Trim 窗材质设置（`data-material`）不同层，本项管的是 Windows 系统级透明。',
-    steps: [
-      { label: 'EnableTransparency=0', reg: regBlock({
-        'HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize': {
-          'EnableTransparency': 'dword:00000000'
-        }
-      }) }
-    ]
-  },
-  {
     id: 'devmgr_show_hidden_default', group: '系统调校', title: '设备管理器默认显示隐藏设备', risk: 'low',
     desc: 'HKLM DeviceManager 的 ShowHiddenDevices=1，打开设备管理器时默认展开"显示隐藏设备"（灰色显示未插着的旧驱动、断开的历史设备）。便于排查残留驱动，不改变任何硬件行为。',
     steps: [
@@ -1621,26 +1486,6 @@ const OPTIONS = [
     ],
     restore: [
       { label: '还原：FDResPub 改回 Automatic', service: 'FDResPub', startType: 'automatic' }
-    ]
-  },
-  {
-    id: 'svc_storsvc_manual', group: '系统服务', title: 'Storage Service 改手动启动', risk: 'low',
-    desc: 'StorSvc 启动类型改 Manual，下次开机不再常驻。不用 Windows 存储空间（Storage Spaces）与便携设备镜像的机器无影响；用了的请先手动启动再操作。当前运行不受影响。',
-    steps: [
-      { label: 'StorSvc → Manual（不立即停止）', service: 'StorSvc', startType: 'manual' }
-    ],
-    restore: [
-      { label: '还原：StorSvc 改回 Automatic', service: 'StorSvc', startType: 'automatic' }
-    ]
-  },
-  {
-    id: 'svc_xblauthmgr_manual', group: '系统服务', title: 'Xbox Live Auth Manager 改手动启动', risk: 'low',
-    desc: 'XblAuthManager 启动类型改 Manual，下次开机不再常驻。不用 Xbox App / Xbox Game Pass / Microsoft Store 游戏登录的机器无损；用到时首次启动会多一次登录。当前运行不受影响。',
-    steps: [
-      { label: 'XblAuthManager → Manual（不立即停止）', service: 'XblAuthManager', startType: 'manual' }
-    ],
-    restore: [
-      { label: '还原：XblAuthManager 改回 Automatic', service: 'XblAuthManager', startType: 'automatic' }
     ]
   },
   // ---------- 浏览器优化（EDGE 专优拆分为 16 个独立项） ----------
@@ -1857,28 +1702,6 @@ const OPTIONS = [
     ]
   },
 
-  // 磁盘与文件系统补漏（总表 108/109/110，3 项）
-  {
-    // M6（2026-09-14 重复点审查）：全项目有三处 DISM 入口，标题统一带「DISM + 具体参数」
-    // 以便用户区分——本项为 /Set-ReservedStorageState（释放保留存储），
-    // 系统维护 dism 为 /RestoreHealth（修复），磁盘清理 dismComponentCleanup 为 /ResetBase（清理）。
-    id: 'tf_disk_extra3', group: '系统调校', title: 'NTFS 加密与保留存储精简 (DISM /Set-ReservedStorageState)', risk: 'low',
-    desc: '禁用 NTFS 文件系统级加密（NtfsDisableEncryption，不影响 BitLocker/BitLocker To Go）、开始菜单搜索仅限索引位置（Start_SearchFiles=0，减少全盘扫描）、禁用更新保留存储（DISM 释放约 7 GB 保留空间）。',
-    steps: [
-      { label: '禁用 NTFS 加密 + 搜索仅限索引位置', reg: regBlock({
-        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\FileSystem': { 'NtfsDisableEncryption': 'dword:00000001' },
-        'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced': { 'Start_SearchFiles': 'dword:00000000' }
-      }) },
-      { label: '禁用更新保留存储（DISM）', cmd: 'DISM /Online /Set-ReservedStorageState /State:Disabled /Quiet' }
-    ],
-    restore: [
-      { label: '还原：恢复 NTFS 加密与搜索范围', reg: regBlock({
-        'HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\FileSystem': { 'NtfsDisableEncryption': 'dword:00000000' },
-        'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced': { 'Start_SearchFiles': 'dword:00000002' }
-      }) },
-      { label: '还原：重新启用更新保留存储', cmd: 'DISM /Online /Set-ReservedStorageState /State:Enabled /Quiet' }
-    ]
-  },
 
   // 应用与界面（总表 117，商店自动更新与推广内容）
   {
@@ -2166,13 +1989,13 @@ const OPTIONS = [
     id: 'nara_bcd_boot', group: '启动与响应', title: '启动菜单/开机画面条件对齐', risk: 'high',
     desc: '仅当本机已存在 timeout/bootmenupolicy/bootux/quietboot 时对齐：timeout=0, bootmenupolicy=standard, bootux=disabled（展开 nobootuxtext+nobootuxprogress）, quietboot=yes。不主动创建启动菜单元素。',
     steps: [
-      { label: 'timeout 0', cmd: 'bcdedit /set {current} timeout 0' },
+      { label: 'timeout 0', cmd: 'bcdedit /set {bootmgr} timeout 0' },
       { label: 'bootmenupolicy standard', cmd: 'bcdedit /set {current} bootmenupolicy standard' },
       { label: 'bootux disabled', cmd: 'bcdedit /set {current} bootux disabled' },
       { label: 'quietboot yes', cmd: 'bcdedit /set {current} quietboot yes' }
     ],
     restore: [
-      { label: 'timeout 删除（默认 30）', cmd: 'bcdedit /deletevalue {current} timeout' },
+      { label: 'timeout 删除（默认 30）', cmd: 'bcdedit /deletevalue {bootmgr} timeout' },
       { label: 'bootmenupolicy 删除（默认 Legacy）', cmd: 'bcdedit /deletevalue {current} bootmenupolicy' },
       { label: 'bootux 删除', cmd: 'bcdedit /deletevalue {current} bootux' },
       { label: 'quietboot 删除', cmd: 'bcdedit /deletevalue {current} quietboot' }
@@ -2569,7 +2392,6 @@ const EFFECT_MAP = {
   privacy_permissions_tune: '一般',
   svc_connected_devices_manual: '一般',
   svc_fax_disable: '微小',
-  svc_remote_registry_disable: '一般',
   svc_remote_connectivity_manual: '微小',
   svc_bluetooth_disable: '微小',
   power_aspm_off: '一般',
@@ -2625,8 +2447,6 @@ const EFFECT_MAP = {
   // ===== v0.4.9 D 批 3 =====
   svc_w32time_manual: '微小',
   svc_fdrespum_manual: '微小',
-  svc_storsvc_manual: '微小',
-  svc_xblauthmgr_manual: '微小',
   // ===== v0.4.9 D 批 收尾 =====
   wu_au_options_notify: '一般',
   wu_no_auto_reboot: '一般',

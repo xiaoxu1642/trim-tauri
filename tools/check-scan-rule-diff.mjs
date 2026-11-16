@@ -108,25 +108,52 @@ const DIFF_TEST = join(CRATE, 'tests', 'cleanup_scan_rule_diff.rs');
   );
 }
 
+// A5-M02：无超时的子进程会永久挂住门禁；5 分钟覆盖本仓全 crate 测试的实测上限。
+const CARGO_TIMEOUT_MS = 5 * 60 * 1000;
 const r = spawnSync('cargo', ['test'], {
   cwd: CRATE,
   stdio: 'inherit',
-  // A5-M02：无超时的子进程会永久挂住门禁；5 分钟覆盖本仓全 crate 测试的实测上限。
-  timeout: 5 * 60 * 1000,
+  timeout: CARGO_TIMEOUT_MS,
 });
 
 // v6-K21：cargo 失败**不再提前 exit**——静态留痕断言（R1-2/E9/E10/E11）照样跑完，
 // 最后统一聚合退出。旧形态「cargo 一红就 return」会把静态结论整批吞掉，
 // 修一处代码要跑两轮门禁才知道全貌。
-if (r.error) {
-  check(false, '1. cargo test 可执行（fail-closed：cargo 不可用即判红，不把「跑不起来」当「没发现问题」）', r.error.message);
-} else if (r.status !== 0) {
-  check(false, `1. 行为差分用例通过（cargo test 退出码 ${r.status}）—— 规则逻辑改动改变了命中集，或钉桩失效`, '');
+// P0-08：cargo 判定改成**显式三元组**，判据只有一条 —— `!r.error && r.status === 0`。
+// 旧形态分三支写：`r.error` 一支说「跑不起来」、`r.status !== 0` 一支把
+// 「被信号杀死」（status=null）与「非零退出码」混成同一句「退出码 null」，
+// 判红原因被掩盖；超时（spawnSync 置 error.code=ETIMEDOUT）也会被读成「跑不起来」。
+// 现在三种失败形态（超时 / 信号 / 非零码）统一判红，并把 status/signal/error 全打出来。
+const CARGO = {
+  status: r.status,
+  signal: r.signal ?? null,
+  error: r.error ? { code: r.error.code ?? null, message: r.error.message } : null,
+};
+const CARGO_OK = !CARGO.error && CARGO.status === 0;
+const CARGO_OUTCOME =
+  `status=${CARGO.status === null ? 'null' : CARGO.status} ` +
+  `signal=${CARGO.signal ?? 'none'} ` +
+  `error=${CARGO.error ? `${CARGO.error.code ?? 'ERR'}: ${CARGO.error.message}` : 'none'}`;
+const CARGO_WHY = (() => {
+  if (CARGO.error) {
+    return CARGO.error.code === 'ETIMEDOUT'
+      ? `cargo test 超时（${Math.round(CARGO_TIMEOUT_MS / 60000)} 分钟上限内没跑完）`
+      : 'cargo test 跑不起来（fail-closed：跑不起来不等于没发现问题）';
+  }
+  if (CARGO.signal) return `cargo test 被信号 ${CARGO.signal} 终止`;
+  return 'cargo test 退出码非零 —— 规则逻辑改动改变了命中集，或钉桩失效';
+})();
+check(
+  CARGO_OK,
+  '1. 行为差分用例通过（cargo test 全 crate：tests/ 集成用例 + src/ 单测；判据 = !error && status === 0）',
+  CARGO_OK ? '' : `${CARGO_WHY}｜${CARGO_OUTCOME}`,
+);
+console.log(`  cargo test 结局三元组：${CARGO_OUTCOME}`);
+if (!CARGO_OK) {
   console.error('  ↳ 若是有意改扫描行为：先确认用例断言该不该同步改，再核对契约表');
   console.error('    `tools/rule-schema.json` 的 crossTrack 登记表与 `tools/fixtures/rule-coverage-baseline.json`。');
   console.error('  ↳ 静态留痕断言仍会继续跑完并在末尾聚合退出（v6-K21）。');
 } else {
-  check(true, '1. 行为差分用例通过（cargo test 全 crate：tests/ 集成用例 + src/ 单测）');
   console.log('  ✓ 差分断言 / D19 死键双向桩 / 扫描只读前提');
 }
 
@@ -294,12 +321,11 @@ check(
 // 展开结果后静默按原文处理——「配置了却永远 0 命中」没有任何对账依据。修复后统一
 // 走 report_unexpanded_token（只留痕不改判定）。这里钉两点：① 出口存在且走 err_line
 // ② 7 处字段接线一个不少（少一处 = 那个字段的 0 命中重新失明）。
-// v7.2-C03（N1a-L02）：excludeKeys[].path 接线随读取点整组摘除（字段已进
-// itemBannedKeys 单一真源、门禁 A2 禁回潮），接线数 8 → 7。
+// P1-01a：pathPs 未解析 token 也走统一留痕出口，接线数 8 → 9（含定义）。
 const e10calls = (cleanCode.match(/report_unexpanded_token\(/g) || []).length;
 check(
-  /fn report_unexpanded_token\(/.test(cleanCode) && e10calls === 8,
-  'E10a. 未解析 token 统一留痕出口存在，7 处字段接线全部在位（含定义共 8 处）',
+  /fn report_unexpanded_token\(/.test(cleanCode) && e10calls === 9,
+  'E10a. 未解析 token 统一留痕出口存在，8 处字段接线全部在位（含定义共 9 处）',
   `实际 ${e10calls} 处`,
 );
 for (const field of [
@@ -309,6 +335,7 @@ for (const field of [
   'regKeys[0].path(detect回退)',
   'regKeys[].path',
   'excludePaths[]',
+  'pathPs',
   'configured',
 ]) {
   check(

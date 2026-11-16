@@ -353,13 +353,14 @@ fn subwindow_cannot_request_elevation() {
     }
 }
 
-/// 审查 v2-H2：顽固软件治理的两条命令此前挂 `guard_readonly`（放行全部五个应用窗口），
-/// 而 `tauri-api.js` 在所有窗口加载 —— 子窗一旦被注入就能直接结束系统进程 / 改服务启动类型，
+/// 审查 v2-H2：顽固软件治理的命令此前挂 `guard_readonly`（放行全部五个应用窗口），
+/// 而 `tauri-api.js` 在所有窗口加载 —— 子窗一旦被注入就能直接结束系统进程，
 /// 且后端不校验任何前端确认值（stubborn_kill 前端原本连确认都没有）。档位必须是主窗专属。
+/// 同族的 `memory_stubborn_block` 已于 2026-11-16 整链退役，本测试只剩一条命令。
 #[test]
 fn subwindow_cannot_call_stubborn_commands() {
     for label in sub_windows() {
-        for cmd in ["memory_stubborn_kill", "memory_stubborn_block"] {
+        for cmd in ["memory_stubborn_kill"] {
             let w = window_with_label(label);
             let text = invoke_text(&w, cmd, json!({}));
             assert_guard_rejected(
@@ -377,7 +378,7 @@ fn subwindow_cannot_call_stubborn_commands() {
 /// 主 agent 报的 686 passed 里这条从来没断过任何东西（本机恒提权态 ⇒ 恒空跑）。
 /// 修法 = 「任何权限态都有断言对象」：
 /// - 非管理员腿（原样）：正向调用 + needAdmin/结果回执断言；
-/// - 提权态：正向调用会**真实**结束进程/改服务启动类型/删计划任务，不执行；
+/// - 提权态：正向调用会**真实**结束进程，不执行；
 ///   改跑同族反向腿——档位层判定（`guard` 先于命令体）在任何权限态下都安全，
 ///   且可判红（档位放错即红）。这样两种环境各有一条能红的断言，
 ///   「静默跳过计 passed」不再可能。
@@ -389,7 +390,7 @@ fn main_window_reaches_stubborn_commands() {
             "⚠ main_window_reaches_stubborn_commands：提权态，正向腿不执行（真实系统变更），改跑反向腿"
         );
     }
-    for cmd in ["memory_stubborn_kill", "memory_stubborn_block"] {
+    for cmd in ["memory_stubborn_kill"] {
         if !admin {
             let w = main_window();
             let text = invoke_text(&w, cmd, json!({}));

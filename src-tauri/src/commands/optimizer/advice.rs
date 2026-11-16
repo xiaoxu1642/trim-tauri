@@ -10,6 +10,21 @@ use super::catalog::*;
 // ==================== AI 优缺点生成（optimizer:genadvice） ====================
 
 pub(super) const ADVICE_SYSTEM: &str = "你是专业的 Windows 系统优化助手。请用简洁客观的中文，针对给定优化项分别说明优点与缺点，语言精炼、不说空话和营销话术，不要输出思考过程，只输出最终结果。";
+const ITEM_INTRO_JSON: &str = include_str!("../../../data/item-intro.json");
+
+/// 用户可见简介（item-intro.json 的 optimizer.byId[id].desc）；取不到返回 None。
+fn intro_desc(option_id: &str) -> Option<String> {
+    static INTRO: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let parsed = INTRO.get_or_init(|| serde_json::from_str(ITEM_INTRO_JSON).unwrap_or(Value::Null));
+    parsed
+        .get("scopes")?
+        .get("optimizer")?
+        .get("byId")?
+        .get(option_id)?
+        .get("desc")?
+        .as_str()
+        .map(str::to_string)
+}
 
 /// optimizer:genadvice —— 按作用域首选模型生成优缺点，失败按已启用模型依次尝试
 #[tauri::command]
@@ -29,7 +44,10 @@ pub async fn optimizer_genadvice<R: Runtime>(
         return json!({ "success": false, "message": "未知的优化选项" });
     };
     let title = opt.get("title").and_then(|v| v.as_str()).unwrap_or(&option_id);
-    let desc = opt.get("desc").and_then(|v| v.as_str()).unwrap_or("");
+    // P1-24：优先用用户可见简介；runtime desc 含内部实现术语（Start=4 / deletevalue /
+    // 原始服务名），不该进入提示词。简介缺失时才回落。
+    let desc = intro_desc(&option_id)
+        .unwrap_or_else(|| opt.get("desc").and_then(|v| v.as_str()).unwrap_or("").to_string());
 
     let models = crate::commands::settings::models_config();
     let scopes = crate::commands::settings::scope_engines();
@@ -107,6 +125,24 @@ pub async fn optimizer_genadvice<R: Runtime>(
     let source = crate::commands::settings::model_display_name(&used_engine, cfg);
     log::write_log("info", &format!("优化项优缺点生成成功 ({source}): {title}"));
     json!({ "success": true, "data": { "pros": pros, "cons": cons, "raw": text, "source": source } })
+}
+
+#[cfg(test)]
+mod advice_prompt_tests {
+    use super::*;
+
+    /// P1-24：提示词来源必须是 item-intro，且代表作不得含内部实现 token。
+    #[test]
+    fn 提示词描述取简介库且不含内部token() {
+        let bcd = intro_desc("nara_bcd_timer").expect("nara_bcd_timer 应有简介");
+        assert!(bcd.contains("计时器"), "简介取到的不是用户文案: {bcd}");
+        for bad in ["deletevalue", "Start=", "HKEY_"] {
+            assert!(!bcd.contains(bad), "简介仍含内部 token {bad}: {bcd}");
+        }
+        let svc = intro_desc("tf_svc_bulk").expect("tf_svc_bulk 应有简介");
+        assert!(svc.contains("服务"), "简介取到的不是用户文案: {svc}");
+        assert!(!svc.contains("Start=4"), "tf_svc_bulk 简介仍含 Start=4: {svc}");
+    }
 }
 
 /// 解析「优点：…/缺点：…」两行格式（对照 parseProsCons）

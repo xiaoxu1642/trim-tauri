@@ -14,6 +14,7 @@
 //
 // 用法：node tools/check-delete-callsites.mjs [--write]
 'use strict';
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,13 +22,47 @@ import { fileURLToPath } from 'node:url';
 import { walkRs } from './lib/fs-walk.mjs';
 import { gate } from './lib/gate.mjs';
 import { DELETE_APIS } from './lib/delete-apis.mjs';
-import { blankNonCode } from './lib/src-scan.mjs';
+import { blankNonCode, splitFunctions } from './lib/src-scan.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const BASELINE_PATH = join(ROOT, 'tools', 'fixtures', 'delete-callsites-baseline.json');
 const SCAN_ROOTS = [join(ROOT, 'src-tauri', 'src'), join(ROOT, 'native-scanner', 'src')];
 // T1a-M07：名单唯一真源见 tools/lib/delete-apis.mjs（与 check-delete-exits 共用）。
 const APIS = DELETE_APIS;
+const GENERATOR_VERSION = 'p1-04e-v1';
+const CLEANUP_OVERLAP_GENERATOR = 'p1-04e-overlap-v1';
+const CLEANUP_OVERLAP_FIXTURE = join(ROOT, 'tools', 'fixtures', 'cleanup-overlaps.json');
+
+const callKey = (call) => `${call.api}\n${call.file}\n${call.fn}\n${call.anchor}`;
+const inputHash = (calls) => createHash('sha256').update(JSON.stringify(calls)).digest('hex').slice(0, 16);
+
+/** 文件+函数+API+行锚点的现算台账；按稳定键排序后才算输入哈希。 */
+function collectCallDetails(file) {
+  const clean = blankNonCode(readFileSync(file, 'utf8'));
+  const rel = relative(ROOT, file).replace(/\\/g, '/');
+  const aliases = deleteAliases(clean);
+  const fns = splitFunctions(clean.replace(/[^\x00-\x7F]/g, 'x'), 'rs');
+  const records = [];
+  for (const api of APIS) {
+    const names = [api, ...[...aliases.entries()].filter(([, target]) => target === api).map(([alias]) => alias)];
+    for (const name of names) {
+      for (const found of clean.matchAll(new RegExp(`\\b${name}\\s*\\(`, 'g'))) {
+        const fn = [...fns].reverse().find((candidate) => candidate.start <= found.index && found.index < candidate.end);
+        const fnMatch = fn ? /fn\s+([^\s(<{]+)/u.exec(clean.slice(fn.start, fn.bodyStart)) : null;
+        const lineStart = clean.lastIndexOf('\n', found.index) + 1;
+        let lineEnd = clean.indexOf('\n', found.index);
+        if (lineEnd < 0) lineEnd = clean.length;
+        records.push({
+          api,
+          file: rel,
+          fn: fnMatch ? fnMatch[1] : '(top-level)',
+          anchor: clean.slice(lineStart, lineEnd).trim().replace(/\s+/g, ' '),
+        });
+      }
+    }
+  }
+  return records;
+}
 
 function deleteAliases(clean) {
   const aliases = new Map();
@@ -42,6 +77,7 @@ function deleteAliases(clean) {
 
 // ---- 现算调用点：api → { "rel/path.rs": count } ----
 const current = {};
+const currentDetails = [];
 let scanned = 0;
 for (const root of SCAN_ROOTS) {
   for (const f of walkRs(root)) {
@@ -61,12 +97,19 @@ for (const root of SCAN_ROOTS) {
         current[api][rel] = (current[api][rel] ?? 0) + hits;
       }
     }
+    currentDetails.push(...collectCallDetails(f));
   }
 }
+currentDetails.sort((a, b) => callKey(a).localeCompare(callKey(b)));
 
 const aliasBad = deleteAliases('use std::fs::remove_file as rm; let f = std::fs::remove_file; rm(p); f(q);');
 if (aliasBad.get('rm') !== 'remove_file' || aliasBad.get('f') !== 'remove_file') {
   console.error('✗ 正向对照失败：删除 API 别名表没有抓到 use-as / let 绑定');
+  process.exit(1);
+}
+const detailControl = collectCallDetails(join(ROOT, 'src-tauri', 'src', 'commands', 'appearance.rs'));
+if (detailControl.length === 0 || detailControl.some((call) => !call.file || !call.fn || !call.api || !call.anchor)) {
+  console.error('✗ 正向对照失败：调用点明细未记录文件+函数+API+行锚点');
   process.exit(1);
 }
 console.log('对照: 删除原语别名两类样本必被现算调用点捕获');
@@ -124,8 +167,19 @@ if (process.argv.includes('--write')) {
     for (const r of removed) console.error(`    · ${r}`);
     process.exit(1);
   }
-  writeFileSync(BASELINE_PATH, JSON.stringify(current, null, 2) + '\n', 'utf8');
-  console.log(`✓ 基线已重算落盘：${BASELINE_PATH}（删除 API 调用点共 ${total} 处，文件 ${scanned} 个）`);
+  const body = {
+    _说明: '删除原语调用点棘轮基线：由 `node tools/check-delete-callsites.mjs --write` 现算回填，禁止手抄。顶层 api→file→count 保留棘轮口径，details 记录文件/函数/API/行锚点，meta 记录生成器版本与输入哈希。',
+    meta: {
+      generatorVersion: GENERATOR_VERSION,
+      inputHash: inputHash(currentDetails),
+      callCount: currentDetails.length,
+      cleanupCallCount: currentDetails.filter((call) => call.file.includes('cleanup')).length,
+    },
+    details: currentDetails,
+    ...current,
+  };
+  writeFileSync(BASELINE_PATH, JSON.stringify(body, null, 2) + '\n', 'utf8');
+  console.log(`✓ 基线已重算落盘：${BASELINE_PATH}（删除 API 调用点共 ${total} 处，文件 ${scanned} 个，明细 ${currentDetails.length} 条）`);
   if (removed.length) {
     console.log(`  本次收紧移除 ${removed.length} 条：`);
     for (const r of removed) console.log(`    · ${r}`);
@@ -138,6 +192,44 @@ if (!existsSync(BASELINE_PATH)) {
   g.finish();
 }
 const baseline = oldBaseline;
+
+const detailProblems = [];
+if (!baseline.meta || baseline.meta.generatorVersion !== GENERATOR_VERSION) {
+  detailProblems.push(`生成器版本缺失或不一致（应为 ${GENERATOR_VERSION}）——重跑 --write 登记本次调用点明细`);
+}
+if (!baseline.meta || !Number.isInteger(baseline.meta.callCount) || baseline.meta.callCount !== currentDetails.length) {
+  detailProblems.push(`明细条数元数据与现算不一致（登记 ${baseline.meta?.callCount ?? '缺失'} / 现算 ${currentDetails.length}）——重跑 --write`);
+}
+if (!Array.isArray(baseline.details)) {
+  detailProblems.push('details 明细缺失——重跑 --write 记录文件+函数+API+行锚点');
+} else {
+  const baselineDetails = [...baseline.details].sort((a, b) => callKey(a).localeCompare(callKey(b)));
+  if (inputHash(baselineDetails) !== inputHash(currentDetails)) {
+    detailProblems.push(`details 输入哈希与现算不一致（登记 ${baseline.meta?.inputHash ?? '缺失'} / 现算 ${inputHash(currentDetails)}）——API 替换、改函数或挪锚点都必须 --write 重新登记`);
+  }
+  const nowKeys = new Set(currentDetails.map(callKey));
+  for (const call of baselineDetails) {
+    if (!nowKeys.has(callKey(call))) {
+      detailProblems.push(`登记明细已漂移：${call.file}::${call.fn} ${call.api}「${call.anchor}」`);
+    }
+  }
+}
+if (detailProblems.length > 0) {
+  g.fail(`删除调用点台账失真：\n  ${detailProblems.join('\n  ')}`);
+}
+
+const overlapProblems = [];
+if (!existsSync(CLEANUP_OVERLAP_FIXTURE)) {
+  overlapProblems.push(`${relative(ROOT, CLEANUP_OVERLAP_FIXTURE).replace(/\\/g, '/')} 不存在（fixture 被删，覆盖台账失明）`);
+} else {
+  const overlap = JSON.parse(readFileSync(CLEANUP_OVERLAP_FIXTURE, 'utf8'));
+  if (overlap.meta?.generatorVersion !== CLEANUP_OVERLAP_GENERATOR || !/^[0-9a-f]{16}$/.test(overlap.meta?.inputHash ?? '')) {
+    overlapProblems.push(`cleanup-overlaps fixture 缺生成器版本或输入哈希（应为 ${CLEANUP_OVERLAP_GENERATOR} + 16 位 hex）——重跑 --emit-overlaps 现算回填`);
+  }
+}
+if (overlapProblems.length > 0) {
+  g.fail(`派生 fixture 元数据缺口：\n  ${overlapProblems.join('\n  ')}`);
+}
 
 const problems = [];
 const shrinkHints = [];
@@ -156,7 +248,11 @@ for (const api of APIS) {
   }
 }
 
-const baseTotal = totalOf(baseline);
+const baseCount = APIS.reduce((sum, api) => {
+  const group = baseline[api];
+  if (!group || typeof group !== 'object' || Array.isArray(group)) return sum;
+  return sum + Object.values(group).reduce((inner, count) => inner + count, 0);
+}, 0);
 if (problems.length > 0) {
   g.fail(`删除原语调用点出现未登记变化：\n  ${problems.join('\n  ')}`);
 }
@@ -165,7 +261,7 @@ if (floor) {
   g.fail(`扫描面地板判红：${floor} —— 先人工核对是真实退役还是扫描器失明，再决定是否 --write`);
 }
 if (problems.length === 0 && !floor) {
-  console.log(`✓ 删除原语调用点 ${total} 处（基线 ${baseTotal}），扫描 Rust 文件 ${scanned} 个，无未登记新增`);
+  console.log(`✓ 删除原语调用点 ${total} 处（基线 ${baseCount}），扫描 Rust 文件 ${scanned} 个，明细 ${currentDetails.length} 条，无未登记新增`);
 }
 if (shrinkHints.length) {
   console.log(`ℹ 有 ${shrinkHints.length} 处收敛（${shrinkHints.slice(0, 5).join('；')}${shrinkHints.length > 5 ? '…' : ''}）——确认无误后跑 --write 收紧基线（只减不增的棘轮方向）`);

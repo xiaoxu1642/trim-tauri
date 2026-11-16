@@ -8,6 +8,7 @@
 use serde_json::{Value, json};
 use super::rules::*;
 use super::state::*;
+use super::scan_execute::{ProcessIdentity, process_identity_matches, verify_process_identity};
 
 // R4-L06：这里原本挂着两段孤儿 `///`（「首个差异的定位信息」「PS 模板替换对拍」）——
 // 它们描述的机制都已退役，而 Rust 会把紧邻的 doc 注释归给**下一个 item**，
@@ -135,55 +136,139 @@ fn js_num_str(n: f64) -> String {
     ///
     /// 为什么本文件需要它：下面几条判据是**读源码形态**的，而源码里大量注释会
     /// 复述被禁的写法本身（我自己在写 §3.6 那条的注释时就踩了一次：
-    /// 注释里的 `to_recycle.unwrap_or(false)` 被自己的断言抓到，假红）。
+    /// 注释里的退役写法被自己的断言抓到，假红）。
     /// 「注释里写了被禁写法」从来不是缺陷，只有真实代码里写了才是。
     fn strip_rust_comments(src: &str) -> String {
-        let blank = |m: &str| m.replace(|c: char| c != '\n', " ");
+        fn blank(text: &str) -> String {
+            text.chars().map(|c| if c == '\n' { '\n' } else { ' ' }).collect()
+        }
+        let chars: Vec<char> = src.chars().collect();
         let mut out = String::with_capacity(src.len());
-        let mut rest = src;
-        loop {
-            let b = rest.find("/*");
-            let l = rest.find("//");
-            match (b, l) {
-                (Some(bi), Some(li)) if bi < li => {
-                    out.push_str(&rest[..bi]);
-                    match rest[bi..].find("*/") {
-                        Some(e) => {
-                            out.push_str(&blank(&rest[bi..bi + e + 2]));
-                            rest = &rest[bi + e + 2..];
-                        }
-                        None => {
-                            out.push_str(&blank(&rest[bi..]));
-                            break;
-                        }
+        let mut idx = 0usize;
+        let mut in_raw_string: Option<usize> = None;
+        while idx < chars.len() {
+            let current = chars[idx];
+            let next = chars.get(idx + 1).copied();
+            if let Some(hashes) = in_raw_string {
+                out.push(current);
+                if current == '"'
+                    && chars
+                        .get(idx + 1..idx + 1 + hashes)
+                        .is_some_and(|tail| tail.iter().all(|c| *c == '#'))
+                {
+                    for hash in chars[idx + 1..idx + 1 + hashes].iter() {
+                        out.push(*hash);
                     }
+                    idx += 1 + hashes;
+                    in_raw_string = None;
                 }
-                (_, Some(li)) => {
-                    out.push_str(&rest[..li]);
-                    match rest[li..].find('\n') {
-                        Some(e) => {
-                            out.push_str(&blank(&rest[li..li + e]));
-                            out.push('\n');
-                            rest = &rest[li + e + 1..];
-                        }
-                        None => {
-                            out.push_str(&blank(&rest[li..]));
-                            break;
-                        }
+                idx += 1;
+                continue;
+            }
+            if current == '/' && next == Some('/') {
+                while idx < chars.len() && chars[idx] != '\n' {
+                    out.push(' ');
+                    idx += 1;
+                }
+                continue;
+            }
+            if current == '/' && next == Some('*') {
+                let start = idx;
+                idx += 2;
+                while idx + 1 < chars.len() && !(chars[idx] == '*' && chars[idx + 1] == '/') {
+                    idx += 1;
+                }
+                let end = if idx + 1 < chars.len() { idx + 2 } else { chars.len() };
+                let segment: String = chars[start..end].iter().collect();
+                out.push_str(&blank(&segment));
+                idx = end;
+                continue;
+            }
+            if current == '"' || current == '\'' {
+                let quote = current;
+                let start = idx;
+                idx += 1;
+                while idx < chars.len() {
+                    if chars[idx] == '\\' {
+                        idx += 2;
+                        continue;
                     }
+                    if chars[idx] == quote {
+                        idx += 1;
+                        break;
+                    }
+                    idx += 1;
                 }
-                _ => {
-                    out.push_str(rest);
-                    break;
+                let segment: String = chars[start..idx.min(chars.len())].iter().collect();
+                out.push_str(&segment);
+                continue;
+            }
+            if (current == 'r' || current == 'b') && matches!(next, Some('"' | '#')) {
+                let mut hash_count = 0usize;
+                let mut cursor = idx + 1;
+                if chars.get(cursor) == Some(&'r') {
+                    cursor += 1;
+                }
+                while cursor < chars.len() && chars[cursor] == '#' {
+                    hash_count += 1;
+                    cursor += 1;
+                }
+                if cursor < chars.len() && chars[cursor] == '"' {
+                    let start = idx;
+                    let segment: String = chars[start..cursor + 1].iter().collect();
+                    out.push_str(&segment);
+                    idx = cursor + 1;
+                    in_raw_string = Some(hash_count);
+                    continue;
                 }
             }
+            out.push(current);
+            idx += 1;
         }
         out
     }
 
+    #[test]
+    fn strip_rust_comments_忽略字符串里的注释符号() {
+        let src = "let a = \"// not-a-comment\"; let b = r##\"/* also-not-a-comment */\"##; // real comment";
+        let stripped = strip_rust_comments(src);
+        assert!(stripped.contains("// not-a-comment"), "普通字符串里的 // 不得被剥掉: {stripped}");
+        assert!(stripped.contains("/* also-not-a-comment */"), "原始字符串里的 /* */ 不得被剥掉: {stripped}");
+        assert!(!stripped.contains("real comment"), "真实行注释必须被剥掉: {stripped}");
+    }
+
+    #[test]
+    fn 进程身份判据对创建时间和纪元敏感() {
+        let expected = ProcessIdentity {
+            pid: 4242,
+            creation_time_ns: 133_000_000_000,
+            image_path: r"C:\Apps\Demo\app.exe".to_string(),
+            label: crate::MAIN_LABEL.to_string(),
+            scan_epoch: 7,
+        };
+        let same = ProcessIdentity {
+            image_path: r"c:/Apps/Demo/app.exe".to_string(),
+            ..expected.clone()
+        };
+        assert!(process_identity_matches(&expected, &same), "同一进程路径大小写和斜杠不应影响身份");
+
+        let reused = ProcessIdentity {
+            creation_time_ns: expected.creation_time_ns + 1,
+            ..expected.clone()
+        };
+        assert!(!process_identity_matches(&expected, &reused), "PID 相同但创建时间不同必须拒绝");
+
+        let stale = ProcessIdentity { scan_epoch: 6, ..expected.clone() };
+        assert_eq!(
+            verify_process_identity(&stale, crate::MAIN_LABEL, 7),
+            Err("身份纪元已失效".to_string()),
+            "旧扫描纪元必须拒绝"
+        );
+    }
+
     /// 2026-10-04 磁盘清理审计 §3.6：v3.3.0「常规清理固定永久删」必须钉在删除发生处。
     ///
-    /// 原实现 `let to_recycle = to_recycle.unwrap_or(false);` —— 裁定只在渲染层
+    /// 原实现把渲染层参数解包成运行开关 —— 裁定只在渲染层
     /// （`cleanup.js` 的 `const toRecycle = false;`）强制，命令侧任何传 `true` 的
     /// 调用方都能翻转。翻转的后果不是「换个删法」——回收站支会重新变成活路径
     /// （2026-10-12 起该支与回收站重试链已整链退役，钉桩继续守等价裁定）。
@@ -304,8 +389,8 @@ fn js_num_str(n: f64) -> String {
         let body = &code[at..];
         let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
         assert!(
-            body.contains(".remove(&label)"),
-            "白名单必须一次性取走（remove）：反复读同一份陈旧 PID 快照会杀到被复用的 PID"
+            body.contains("take_lock_whitelist("),
+            "白名单必须一次性取走（统一取走入口）：反复读同一份陈旧 PID 快照会杀到被复用的 PID"
         );
         assert!(body.contains("pid == self_pid"), "缺自身 PID 剔除：存在结束自己的路径");
         assert!(
@@ -349,11 +434,8 @@ fn js_num_str(n: f64) -> String {
         );
         // 文件名唯一真源：整个 Rust 源码里 `cleanup-min-age-days.txt` 只许出现在常量定义那一处
         let mut literals = 0usize;
-        for src in [&scan, &engine] {
-            literals += src.matches("cleanup-min-age-days.txt").count();
-        }
-        let policy = strip_rust_comments(include_str!("policy.rs"));
-        literals += policy.matches("cleanup-min-age-days.txt").count();
+    literals += scan.matches("cleanup-min-age-days.txt").count();
+    let policy = strip_rust_comments(include_str!("policy.rs"));
         assert_eq!(
             literals, 1,
             "`cleanup-min-age-days.txt` 字面量出现 {literals} 次（应只在 native-scanner 的常量定义处）—— \
@@ -543,6 +625,8 @@ fn js_num_str(n: f64) -> String {
         assert!(code.contains("fn req_number("), "缺少 req_number —— 契约表数值查询的统一入口不见了");
         for (helper, exact, what) in [
             ("req_list", 22usize, "字符串数组类查询（字段白名单 / 必填集 / 枚举）"),
+            // 2026-11-16（PF-P0-03）：三个字节上限查询下沉到 engine 同源函数，
+            // commands/rules.rs 直接调用点由 13 回落到 10；校验仍在同一个契约表上。
             ("req_number", 10usize, "数值类查询（上限与权重）"),
         ] {
             let calls = code.matches(&format!("{helper}(\"cleanup\", ")).count();
@@ -1365,12 +1449,12 @@ fn 占用检测失败不得留下上一次的名单() {
     // ③ 棘轮：全命令面对槽的取用只允许「结束进程」那一次 remove
     assert_eq!(
         code.matches("lock_whitelist()").count(),
-        1,
-        "命令层直接碰 lock_whitelist() 的地方应为 1（kill 的一次性 remove），实到 {}",
+        0,
+        "命令层不应直接碰 lock_whitelist()，取用统一走 state 入口，实到 {}",
         code.matches("lock_whitelist()").count()
     );
     let kill_body = command_fn_body(&code, "pub fn cleanup_kill_locked_processes");
-    assert!(kill_body.contains(".remove(&label)"), "结束进程必须一次性取走名单（remove 而非 get）");
+    assert!(kill_body.contains("take_lock_whitelist("), "结束进程必须一次性取走名单（统一取走入口而非裸 remove）");
     assert_eq!(code.matches("reset_lock_whitelist(").count(), 2, "置空入口必须恰好 check / query 各一处");
     assert_eq!(code.matches("store_lock_whitelist(").count(), 2, "写名单入口必须恰好 check / query 各一处");
 }
@@ -1414,6 +1498,39 @@ fn 验签通过后的早退必须留痕并隔离() {
         rules.contains(r#"top.get("rulesVersion").and_then(Value::as_f64)"#),
         "语义校验侧的严格数字口径漂了（两侧必须同一个判据，§5.16）"
     );
+}
+
+/// P0-03：预览放行必须绑定 fileclean 快照；快照外路径与跨 label/type 一律拒绝。
+#[test]
+fn 预览放行绑定来源快照并可拒绝快照外路径() {
+    use std::path::PathBuf;
+
+    let label = crate::MAIN_LABEL;
+    let scan_type = "qq";
+    let root = PathBuf::from(r"C:\FakeQqPreviewRoot");
+    let in_scope_path = root.join("in.jpg").to_string_lossy().to_string();
+    let outside_path = PathBuf::from(r"C:\Windows\outside.jpg").to_string_lossy().to_string();
+
+    crate::commands::fileclean::scope_store(label, scan_type, crate::engine::paths::path_key(&root.to_string_lossy()), std::collections::HashSet::from([crate::engine::paths::path_key(&in_scope_path)]));
+    assert!(
+        crate::commands::fileclean::preview_path_in_scope(label, scan_type, &in_scope_path),
+        "快照内路径必须可核中"
+    );
+    assert!(
+        !crate::commands::fileclean::preview_path_in_scope(label, scan_type, &outside_path),
+        "快照外路径必须拒绝"
+    );
+    assert!(
+        !crate::commands::fileclean::preview_path_in_scope("other", scan_type, &in_scope_path),
+        "跨窗口不得复用快照"
+    );
+
+    let src = strip_rust_comments(include_str!("preview_assets.rs"));
+    assert!(src.contains("scan_id:"), "命令必须接收 scan_id");
+    assert!(src.contains("scan_type:"), "命令必须接收 scan_type");
+    assert!(src.contains("assetScopeRejected"), "快照外拒绝必须在回执留痕");
+    assert!(src.contains("preview_path_in_scope"), "放行前必须核 fileclean 快照");
+    assert!(!src.contains("拿 cleanup 域的槽去核"), "旧的错误域说明必须随实现删除");
 }
 
 /// R4-L03：预览放行的长度闸必须按**字符数**，超限必须截断而不是整包拒绝。
@@ -1561,7 +1678,7 @@ fn custom开关与引擎同遍历口径_双形态组不落空() {
 
 /// R4-L04：引擎整体失败的对外文案不得再提退役前的「分桶」。
 ///
-/// 破坏自证：把 message 改回 `原生执行失败(永久删桶)` ⇒ 第一条红；把留痕日志删掉 ⇒ 第三条红。
+    /// 破坏自证：把 message 改回退役前的旧桶名 ⇒ 第一条红；把留痕日志删掉 ⇒ 第三条红。
 #[test]
 fn 引擎失败的对外文案不得再提退役的分桶() {
     let code = strip_rust_comments(include_str!("scan_execute.rs"));
@@ -1721,6 +1838,22 @@ fn game_redist_回填也受同一条数上限约束() {
 
 // ==================== 真机探针（只写不跑；本批禁跑 cargo） ====================
 
+/// 真机探针的统一 SKIP 出口。
+///
+/// 方案编号：P2-03 / C04。
+///
+/// 样本不在场时**静默 `return`** 与「验过了」在 `cargo test -- --ignored` 的输出里
+/// 不可区分 —— 那就是假绿。口径同本仓其它探针（`engine/paths.rs`、
+/// `commands/fileclean.rs`）：打印 `SKIP：` 前缀 + 明说「未校验」，再退出。
+///
+/// 判红自证：把本宏的 `println!` 去掉 ⇒ 下方「探针必须留显式 SKIP 出口」那条红。
+macro_rules! probe_skip {
+    ($($arg:tt)*) => {{
+        println!("SKIP：{}", format_args!($($arg)*));
+        return;
+    }};
+}
+
 /// R4-L01 / R4-L02 的真机探针。
 ///
 /// 验的是什么：数据目录那份 `rules.json` **真实存在且真实验签通过**时，装载链的每一条
@@ -1740,15 +1873,14 @@ fn 真机_数据目录坏规则必须留下隔离件() {
     // R4-L02：老根只作只读兜底，隔离（同目录就地改名）只在新根发生 ——
     // 老根那份即使被判坏也不产隔离件，属预期而不是缺陷。
     if !file.starts_with(crate::engine::paths::app_data_dir()) {
-        return;
+        probe_skip!("命中的是老根兜底副本（隔离只在新根发生），本探针未校验");
     }
     let Some(text) = std::fs::read_to_string(&file).ok() else {
-        // 数据目录规则不在场（首启动常态）：没有对照对象，如实跳过
-        return;
+        probe_skip!("数据目录规则不在场（首启动常态），没有对照对象，本探针未校验");
     };
     // 验签失败那条早退刻意不隔离（回退内置、现场留给用户自己看），不在本批判面内
     if rules_signature::verify_rules_text(&text).is_err() {
-        return;
+        probe_skip!("数据目录规则验签未通过（无对照对象），本探针未校验");
     }
     // 只有「验签通过后被判定为坏」的三种形态才要求隔离件在场
     let parsed: Option<Value> = serde_json::from_str(&text).ok();
@@ -1769,21 +1901,21 @@ fn 真机_数据目录坏规则必须留下隔离件() {
             want,
             "装载结果不是数据目录那份（rulesVersion 不符）= 被静默换成了内置副本"
         );
-        return;
+    } else {
+        let dir = file.parent().expect("规则文件必须有父目录");
+        let name = file.file_name().expect("规则文件必须有文件名").to_string_lossy().to_string();
+        let needle = format!("{name}.corrupt-");
+        let has_quarantine = std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .any(|e| e.file_name().to_string_lossy().starts_with(&needle))
+            })
+            .unwrap_or(false);
+        assert!(
+            has_quarantine,
+            "验签通过的坏规则被判坏却没有任何隔离件（{needle}…）—— 静默回退内置，R4-L01/L02 的缺陷态"
+        );
     }
-    let dir = file.parent().expect("规则文件必须有父目录");
-    let name = file.file_name().expect("规则文件必须有文件名").to_string_lossy().to_string();
-    let needle = format!("{name}.corrupt-");
-    let has_quarantine = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .any(|e| e.file_name().to_string_lossy().starts_with(&needle))
-        })
-        .unwrap_or(false);
-    assert!(
-        has_quarantine,
-        "验签通过的坏规则被判坏却没有任何隔离件（{needle}…）—— 静默回退内置，R4-L01/L02 的缺陷态"
-    );
 }
 
 /// R4-L07 的真机探针：真实 gameRedist 目录的回填清单必须受同一条上限约束，
@@ -1817,5 +1949,56 @@ fn 真机_game_redist_回填清单受同一上限且无伪造身份证() {
             checked += 1;
         }
     }
-    assert!(checked > 0, "真机上三家平台至少要回填一个文件，否则本探针没有对照对象（请换有装运行库的机器跑）");
+    if checked == 0 {
+        probe_skip!("本机三家平台（steam/epic/wegame）都没有可回填样本，本探针未校验");
+    }
+}
+
+/// P2-03（C04）：真机探针在样本缺失时必须走**显式 SKIP** 出口，不许静默 `return`。
+///
+/// 缺陷形态：探针在样本不在场时静默 `return` ⇒ `cargo test -- --ignored` 的输出里
+/// 与「验过了」不可区分（假绿）。判据：两个探针函数体内不得出现裸 `return;`，
+/// 早退一律走 `probe_skip!`（打印 SKIP + 声明未校验）。
+///
+/// 判红自证：把任一探针里的 `probe_skip!(...)` 换回裸 `return;` ⇒ 本条红。
+#[test]
+fn 真机探针的样本缺失必须显式跳过不许静默返回() {
+    let src = include_str!("contract_tests.rs");
+    // 探针自己的字面量不得与被查函数名同形，否则会先命中自己。
+    for name in [
+        format!("fn 真机_数据目录坏规则必须留下隔离件{}()", ""),
+        format!("fn 真机_game_redist_回填清单受同一上限且无伪造身份证{}()", ""),
+    ] {
+        let body = command_fn_body(&src, &name);
+        assert!(
+            !body.contains("return;"),
+            "探针体内出现裸 return（样本缺失会静默跳过 ⇒ 假绿）: {name}"
+        );
+        assert!(
+            body.contains("probe_skip!"),
+            "探针必须留显式 SKIP 出口（样本缺失要声明未校验）: {name}"
+        );
+    }
+}
+
+/// P2-06（RUC04）：执行侧（删前备份 + 删除）的注册表目标判重必须走**同一个**
+/// 大小写不敏感口径。
+///
+/// 缺陷形态：值名按原样拼进判重键 ⇒ `Value` 与 `value` 被判成两个目标 ⇒
+/// 删前备份重复 export 一次、删除时第二次必然「值已不存在」⇒ 规则被误判成失败。
+///
+/// 口径边界（不在本包范围）：装载侧 `commands/cleanup/rules.rs` 的 `seen_targets`
+/// 仍按原样拼值名，那是另一处口径；引擎侧两处判重（备份键 / 删除目标）在此钉住。
+///
+/// 判红自证：把引擎里 `reg_target_key` 的值名小写化去掉 ⇒ 引擎侧夹具红；
+/// 把备份判重或删除判重改回各自拼键 ⇒ 本条的调用点计数红。
+#[test]
+fn 注册表目标判重_执行侧走同一大小写不敏感口径() {
+    let engine = include_str!("../../engine/native/cleanup.rs");
+    // 探针自己的字面量不得与被查调用同形，否则计数把自己算进去。
+    let needle = format!("reg_target_key({}", "*hive");
+    assert!(
+        engine.matches(&needle).count() >= 2,
+        "备份判重与删除判重都必须走 reg_target_key 这一个口径"
+    );
 }

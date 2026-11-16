@@ -1,14 +1,12 @@
-//! memory 域（B 批）：memory:info / clean / processes / kill / stubborn-kill / stubborn-block
+//! memory 域（B 批）：memory:info / clean / processes / kill / stubborn-kill
 //!
 //! 语义对照 main.js 6094-6288（逐条复刻，踩过的坑不改）：
 //! - 进程快照按**调用窗口 label 分槽**（Electron 的 `event.sender.id` 等价物）：
 //!   `memory:kill` 的白名单只认本窗口最近一次 `memory:processes` 那一槽，多窗口并发不串台（M-4）；
 //! - `memory:kill` 三重防线（PM-1 / N2）：自我防护（本进程 PID + **同 exe 路径**一律拒绝）
 //!   → 快照命中 → 系统关键进程黑名单（前端只读态之外的最终防线）；
-//! - `memory:clean` / `memory:stubborn-kill` / `memory:stubborn-block` 未提权一律
+//! - `memory:clean` / `memory:stubborn-kill` 未提权一律
 //!   `{ success:false, needAdmin:true }`（M-3），静默 no-op 会误导用户；
-//! - `memory:stubborn-block` 单项失败（failedCount>0）不再无条件报绿，如实降级
-//!   `{ success:false, partial:true, data }`（M-1）；
 //! - `memory:clean` 的入参只收字符串项，**被丢掉的条数进回执**（v7.2 `R1d-M05`：
 //!   静默丢输入等于偷偷缩小清理范围）；
 //! - 进程列表来自原生 `Vec<NativeProcess>`（v7.2 `R1d-L01` 校正：旧注释写的
@@ -23,7 +21,6 @@
 //!   commands::memory::memory_processes,
 //!   commands::memory::memory_kill,
 //!   commands::memory::memory_stubborn_kill,
-//!   commands::memory::memory_stubborn_block,
 
 use std::collections::HashMap;
 
@@ -437,39 +434,5 @@ pub async fn memory_stubborn_kill<R: tauri::Runtime>(window: WebviewWindow<R>) -
         }
         Ok(Err(e)) => Ok(json!({ "success": false, "message": format!("原生专杀失败: {e}") })),
         Err(e) => Ok(json!({ "success": false, "message": format!("专杀任务异常: {e}") })),
-    }
-}
-
-// ==================== memory:stubborn-block ====================
-
-/// memory:stubborn-block — 顽固软件阻止开机自启（需管理员；阻塞池执行，无整条命令超时；
-/// 原生实现内部的等待/超时以此为准）
-///
-/// 持久化策略（改服务启动类型 / 删更新任务），不提供自动还原。
-///
-/// 审查 v2-H2：与 `memory_stubborn_kill` 同为高危且仅主窗使用，档位升为 `MAIN`。
-#[tauri::command]
-pub async fn memory_stubborn_block<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
-    guard::guard(&window, guard::MAIN)?;
-    if !sysinfo::is_admin() {
-        return Ok(json!({
-            "success": false,
-            "needAdmin": true,
-            "message": "顽固软件自启阻断需要管理员权限，请先提权"
-        }));
-    }
-    // S3：纯 Rust 原生
-    match tauri::async_runtime::spawn_blocking(native::stubborn_block).await {
-        Ok(Ok(data)) => match super::required_count(&data, "failedCount") {
-            Some(failed) => Ok(json!({ "success": failed == 0.0, "partial": failed > 0.0, "data": data })),
-            None => Ok(json!({
-                "success": false,
-                "partial": false,
-                "data": data,
-                "message": "原生回执缺少 failedCount，无法判定是否全部成功"
-            })),
-        },
-        Ok(Err(e)) => Ok(json!({ "success": false, "message": format!("原生执行失败: {e}") })),
-        Err(e) => Ok(json!({ "success": false, "message": format!("原生任务异常: {e}") })),
     }
 }

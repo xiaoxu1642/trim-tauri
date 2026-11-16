@@ -47,8 +47,10 @@ const TARGETS = [
   'src-tauri/data/cleanup-rules.json',
   'src-tauri/data/uninstall-residue-rules.json',
   'src-tauri/data/optimizer-runtime.json',
+  'src-tauri/data/optimizer-subitems.json',
   'src-tauri/data/optimizer-nara-panel.json',
   'src-tauri/data/optimizer-privacy-panel.json',
+  'src-tauri/data/retired-optimizations.json',
 ];
 
 // ---------- 1. 双向对账：现算签名面 ⇄ 本门禁登记面 ----------

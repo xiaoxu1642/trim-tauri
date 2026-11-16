@@ -273,11 +273,19 @@ export const UNITS = [
     gates: ['check-optimizer-write-contract'],
   },
   {
-    id: 'R4', owner: 'sub', name: 'commands/cleanup',
-    dirs: [{ dir: `${C}/cleanup` }],
-    contract: 'rules / scan_execute / backup / recycle_bin',
+    id: 'R4', owner: 'sub', name: 'commands/cleanup·规则与备份',
+    files: ['backup.rs', 'contract_tests.rs', 'mod.rs', 'policy.rs', 'preview_assets.rs', 'recycle_bin.rs', 'rules.rs', 'state.rs']
+      .map(f => `${C}/cleanup/${f}`),
+    contract: 'rules / backup / state / recycle_bin / preview_assets 与其契约回归网',
     boundary: '「常规清理固定永久删」是唯一受控例外，核五道约束别核存在性',
     gates: ['check-data-parity', 'check-scan-rule-diff'],
+  },
+  {
+    id: 'R4b', owner: 'sub', name: 'commands/cleanup·扫描执行链',
+    files: [`${C}/cleanup/scan_execute.rs`],
+    contract: 'scan_execute / 快照槽接线 / 行协议累积器 / 占用检测与结束进程',
+    boundary: '扫描执行链单独成单元：P1 后本文件与 R4 其余源码合计越过 8000 行上限',
+    gates: ['check-scan-rule-diff'],
   },
   {
     id: 'R7', owner: 'sub', name: 'PS 执行层与安全基元',
@@ -604,7 +612,7 @@ export const MODULES = [
   { id: 'M-05', name: 'commands·顶层', units: ['R1a', 'R1b', 'R1d'] },
   { id: 'M-06', name: 'uninstall', units: ['R2a', 'R2b', 'R2c', 'R2d'] },
   { id: 'M-07', name: 'optimizer', units: ['R3', 'R3b'] },
-  { id: 'M-08', name: 'cleanup', units: ['R4'] },
+  { id: 'M-08', name: 'cleanup', units: ['R4', 'R4b'] },
   { id: 'M-09', name: 'native-scanner', units: ['N1a', 'N1b', 'N1c'] },
   { id: 'M-10', name: '门禁·安全与契约面', units: ['T1a', 'T1e', 'T1i', 'T1j', 'T1k'] },
   { id: 'M-11', name: '门禁·数据与前端面', units: ['T1b', 'T1c', 'T1d', 'T1f', 'T1g', 'T1h'] },

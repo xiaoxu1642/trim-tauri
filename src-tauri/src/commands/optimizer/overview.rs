@@ -69,7 +69,7 @@ pub(super) fn reg_hive(root: &str) -> Option<windows::Win32::System::Registry::H
 
 #[derive(Clone)]
 pub(super) struct Check {
-    /// "reg" | "svc" | "svcStart" | "regBinary" | "regAbsent"
+    /// "reg" | "svc" | "svcStart" | "regBinary" | "regAbsent" | "taskDisabled"
     ///
     /// `svcStart` 与 `svc` 必须分开：`svc` 判「是不是 disabled」，`svcStart` 判
     /// 「启动类型是不是某个具体值」。合成一个 kind 就得把期望值塞进 `data` 再在
@@ -81,6 +81,9 @@ pub(super) struct Check {
     ///   加第三种类型要么多一个标志位、要么在判定处按值猜类型 —— 两种都更容易判错。
     /// - `regAbsent`：**键必须不存在**才算已生效。`perf_wu_enable` 是删除语义
     ///   （`Remove-ItemProperty`），判「值等于某个数」永远不可能满足。
+    /// - `taskDisabled`：计划任务必须处于禁用态；**任务不存在也算已生效**
+    ///   （与执行侧 `task_op_result` 的静默跳过同口径）。此前这类步骤一条断言都产不出，
+    ///   账本被清后界面把「已经达标」显示成「未完成还原」。
     kind: &'static str,
     // reg（B11：检测改原生，直接带 hive + 子键，不再经 PS 路径字符串）
     hive: windows::Win32::System::Registry::HKEY,
@@ -167,6 +170,57 @@ pub(super) fn parse_reg_expected(raw: &str) -> Option<(bool, String)> {
     Some((false, raw.to_string()))
 }
 
+/// 从 `pwsh` 步骤文本里取出「要禁用的计划任务」全名（路径 + 名称）。
+///
+/// 只认两种数据层实际使用的形态：`Disable-ScheduledTask -TaskName "X" -TaskPath "Y"`
+/// （含 `Get-ScheduledTask … | Disable-ScheduledTask` 管道）与
+/// `schtasks /change /tn <full> /disable`。任务名由变量拼接（如 NVIDIA 的
+/// `$t + $sfx`）时静态取不到，按「不产断言」处理 —— 那类项仍有注册表断言兜底，
+/// 绝不猜一个名字去读。
+///
+/// 为什么只抽这一个信号：`taskDisabled` 的判据是「任务处于禁用态或已不存在」，
+/// 与执行侧 `task_op_result` 对不存在任务的静默跳过同口径；把整个 pwsh 文本搬进
+/// 检测侧会再造一套解释器。
+fn collect_task_disables(pwsh: &str) -> Vec<String> {
+    fn param_value<'a>(line: &'a str, flag: &str) -> Option<&'a str> {
+        let at = line.find(flag)? + flag.len();
+        let rest = line[at..].trim_start_matches([':', ' ']);
+        let rest = rest.strip_prefix('"').or_else(|| rest.strip_prefix('\''))?;
+        let close = rest.find(['"', '\''])?;
+        Some(&rest[..close])
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    for raw in pwsh.split(['\n', ';']) {
+        let line = raw.trim();
+        let mut found: Option<String> = None;
+        if line.contains("Disable-ScheduledTask") {
+            if let Some(name) = param_value(line, "-TaskName") {
+                let path = param_value(line, "-TaskPath").unwrap_or("");
+                found = Some(format!("{path}{name}"));
+            }
+        } else if line.to_ascii_lowercase().contains("/change")
+            && line.to_ascii_lowercase().contains("/disable")
+        {
+            if let Some(tn) = line.split_whitespace().position(|t| t.eq_ignore_ascii_case("/tn")) {
+                if let Some(name) = line.split_whitespace().nth(tn + 1) {
+                    found = Some(name.trim_matches(['"', '\'']).to_string());
+                }
+            }
+        }
+        // 变量拼接（`($t + $sfx)`）静态取不到真名：这类项不产断言，交回其它断言兜底，
+        // 绝不拿一个残缺 token 去查任务（查询失败会被判成「任务不存在 = 达标」，那是假绿）。
+        if let Some(full) = found.filter(|f| {
+            !f.is_empty() && !f.contains('$') && !f.contains('(') && !f.contains(')')
+        }) {
+            if !out.iter().any(|x| x == &full) {
+                out.push(full);
+            }
+        }
+    }
+    out
+}
+
 /// 解析 option.steps 中全部 reg 期望值 + service.disable
 pub(super) fn collect_checks(opt: &Value) -> Vec<Check> {
     let mut checks = Vec::new();
@@ -192,6 +246,30 @@ pub(super) fn collect_checks(opt: &Value) -> Vec<Check> {
                 for (key, raw) in parse_reg_value_lines(&body) {
                     if raw.trim() == "-" {
                         continue; // 还原占位不参与检测
+                    }
+                    // 合成/新增的 `.reg` binary 值（`hex:00,00,...`）也要能产出逐字节断言；
+                    // 退役项曾靠 write_spec 的 binary 断言覆盖，本条把覆盖留在检测器本身。
+                    if let Some(hex) = raw.trim().strip_prefix("hex:") {
+                        let data = hex
+                            .split(',')
+                            .map(str::trim)
+                            .collect::<String>()
+                            .to_ascii_lowercase();
+                        if !data.is_empty()
+                            && data.len() % 2 == 0
+                            && data.chars().all(|c| c.is_ascii_hexdigit())
+                        {
+                            checks.push(Check {
+                                kind: "regBinary",
+                                hive,
+                                subkey: subkey.clone(),
+                                key,
+                                is_dword: false,
+                                data,
+                                name: String::new(),
+                            });
+                        }
+                        continue;
                     }
                     if let Some((is_dword, data)) = parse_reg_expected(&raw) {
                         checks.push(Check {
@@ -253,6 +331,30 @@ pub(super) fn collect_checks(opt: &Value) -> Vec<Check> {
                 data,
                 name: name.to_string(),
             });
+        }
+        // 计划任务分支：任务禁用（D0-CHECK-SIDE: taskDisabled）。
+        //
+        // 为什么需要：`tasks_disable_*` / `edge_update_task_disable` 等项的步骤全是
+        // `Disable-ScheduledTask` 或 `schtasks /change /disable`，旧 `collect_checks`
+        // 一条断言都产不出 ⇒ 账本被清掉后，界面把「任务已禁用」显示成「未完成还原」。
+        // 判定口径与执行侧 `task_op_result` 一致：**任务不存在也算已达标**。
+        if let Some(pwsh) = s.get("pwsh").and_then(|v| v.as_str()) {
+            for full in collect_task_disables(pwsh) {
+                let (path, name) = match full.rfind('\\') {
+                    Some(i) => (Some(full[..=i].to_string()), full[i + 1..].to_string()),
+                    None => (None, full),
+                };
+                let Some(hive) = reg_hive("HKEY_LOCAL_MACHINE") else { continue };
+                checks.push(Check {
+                    kind: "taskDisabled",
+                    hive,
+                    subkey: String::new(),
+                    key: String::new(),
+                    is_dword: false,
+                    data: path.unwrap_or_default(),
+                    name,
+                });
+            }
         }
     }
 
@@ -520,6 +622,24 @@ pub(super) fn reg_targets(o: &Value) -> Value {
 /// - 六个分支的顺序是契约：`svc` / `svcStart` / `regBinary` / `regAbsent` /
 ///   `regEnum` / `regTimeWindow` 都必须在 `c.is_dword` 那个二分**之前**判掉，
 ///   落下去会被当成 dword 或 string 比，症状是「恒判未生效」。
+///
+/// 计划任务断言的判定单独抽成 [`task_verdict`]：采集要起 `schtasks`，判定是纯函数，
+/// 这样「任务不存在算达标、查询失败不算达标」这条口径能在没有真实任务的环境里判红。
+pub(super) fn task_verdict(result: Result<Option<bool>, String>) -> bool {
+    match result {
+        Ok(Some(disabled)) => disabled,
+        // 任务不存在 = 目标状态已达成（执行侧对不存在任务是静默跳过）
+        Ok(None) => true,
+        Err(reason) => {
+            crate::engine::log::write_log(
+                "warn",
+                &format!("计划任务检测失败，按未生效处理: {reason}"),
+            );
+            false
+        }
+    }
+}
+
 pub(super) fn judge_check(c: &Check) -> bool {
     use crate::engine::native;
             if c.kind == "svc" {
@@ -605,9 +725,21 @@ pub(super) fn judge_check(c: &Check) -> bool {
                 // `data` 是 collect_checks 存进去的十进制期望值。解析失败即判 false：
                 // 宁可说「未生效」也不给假阳性（与整条链的既有口径一致）。
                 match c.data.parse::<u32>() {
-                    Ok(want) => native::service_start_type_is(&c.name, want),
+                    // 与执行侧 `service_set_start_pub` 同口径：服务本机不存在（1060）=
+                    // 目标已达成（它不会自己起来）。读失败仍判未生效，不冒充成功。
+                    Ok(want) => match native::service_start_type_state(&c.name, want) {
+                        Ok(Some(ok)) => ok,
+                        Ok(None) => true,
+                        Err(_) => false,
+                    },
                     Err(_) => false,
                 }
+            } else if c.kind == "taskDisabled" {
+                // 判据与执行侧同口径：任务已禁用 = 达标，**任务不存在也 = 达标**
+                // （执行侧对不存在的任务按源脚本静默语义跳过）。只有「任务存在但
+                // 读不出来」这种真异常才判未生效，绝不把查询失败冒充成功。
+                let path = if c.data.is_empty() { None } else { Some(c.data.as_str()) };
+                task_verdict(native::task_disabled(path, &c.name))
             } else if c.is_dword {
                 match c.data.parse::<i64>() {
                     Ok(want) => native::read_reg_dword_u32_as_i64(c.hive, &c.subkey, &c.key) == Some(want),
@@ -636,6 +768,59 @@ pub(super) fn special_item_verdict(id: &str) -> Option<bool> {
             "WinDefend",
             native::SVC_START_DISABLED,
         )),
+        // 用户裁定：Windows 更新若已被延期超过一年，等同于“彻底禁用”已达成。
+        // 这里读取 Windows Update 的 UX Settings（REG_SZ），不是策略键的 DWORD
+        // 时间窗口；读到无法解析的值时 fail-closed，不冒充已禁用。
+        "perf_windows_update_off" => {
+            let ends = [
+                ("PauseFeatureUpdatesEndTime", "PauseFeatureUpdatesStartTime"),
+                ("PauseQualityUpdatesEndTime", "PauseQualityUpdatesStartTime"),
+                ("PauseUpdatesExpiryTime", "PauseUpdatesStartTime"),
+            ];
+            let now = crate::engine::now_ms();
+            let year_ms: i64 = 365 * 24 * 60 * 60 * 1000;
+            let long_paused = ends.iter().any(|(end_key, start_key)| {
+                let end = native::read_reg_string(
+                    native::hive_hklm(),
+                    r"SOFTWARE\Microsoft\WindowsUpdate\UX\Settings",
+                    end_key,
+                );
+                let start = native::read_reg_string(
+                    native::hive_hklm(),
+                    r"SOFTWARE\Microsoft\WindowsUpdate\UX\Settings",
+                    start_key,
+                );
+                let (Some(end), Some(start)) = (end, start) else {
+                    return false;
+                };
+                let parse = |s: &str| -> Option<i64> {
+                    // Windows Update 写的是 RFC3339 / ISO-8601 UTC（`Z` 结尾）；
+                    // 只处理这个真实形态，不引入日期库。
+                    let rest = s.strip_suffix('Z').unwrap_or(s);
+                    let mut parts = rest.split(&['-', 'T', ':'][..]);
+                    let year = parts.next()?.parse::<i64>().ok()?;
+                    let month = parts.next()?.parse::<i64>().ok()?;
+                    let day = parts.next()?.parse::<i64>().ok()?;
+                    let hour = parts.next()?.parse::<i64>().ok()?;
+                    let minute = parts.next()?.parse::<i64>().ok()?;
+                    let second = parts.next()?.parse::<i64>().ok()?;
+                    // 简化日历换算足够：这里只比较“距现在是否超过一年”，不暴露日期。
+                    // 用 PROLEPTIC Gregorian 天数公式，结果与 Unix 日期语义一致。
+                    let a = (14 - month) / 12;
+                    let y = year + 4800 - a;
+                    let m = month + 12 * a - 3;
+                    let days = day + (153 * m + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32045;
+                    Some((days * 86400 + hour * 3600 + minute * 60 + second) * 1000)
+                };
+                match (parse(&end), parse(&start)) {
+                    (Some(end_ms), Some(start_ms)) => {
+                        end_ms > now && end_ms - start_ms >= year_ms
+                    }
+                    _ => false,
+                }
+            });
+            Some(long_paused)
+        }
         _ => None,
     }
 }
@@ -751,7 +936,16 @@ pub(super) fn step_exec_mode(s: &Value) -> &'static str {
     if s.get("cmd").is_some() {
         return "proc";
     }
-    if s.get("reg").is_some() || s.get("service").is_some() {
+    if s.get("service").is_some() {
+        // P1-3：未知 startType 在预检就要判不可执行，不能等到执行侧才暴露。
+        if let Some(label) = s.get("startType").and_then(Value::as_str) {
+            if crate::engine::native::start_type_from_label(label).is_err() {
+                return "unsupported";
+            }
+        }
+        return "native";
+    }
+    if s.get("reg").is_some() {
         return "native";
     }
     "unsupported"
@@ -901,7 +1095,16 @@ pub async fn optimizer_list_groups<R: Runtime>(window: WebviewWindow<R>) -> Valu
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
-    json!({ "success": true, "data": groups_sidecar() })
+    let data = groups_sidecar();
+    if data.is_null() {
+        return json!({
+            "success": false,
+            "degraded": true,
+            "code": "optimizer-groups-sidecar-invalid",
+            "message": "分类侧表不可用（编译期内嵌 JSON 解析失败或缺少 groups）"
+        });
+    }
+    json!({ "success": true, "data": data })
 }
 
 /// optimizer:nara-panel —— 永劫无间优化专项面板侧表下发（C3）
@@ -1065,7 +1268,6 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
     let mut drop_pending_ids: Vec<String> = Vec::new();
     // B4：备份表与可还原清单各读一次（原来同一份备份表 JSON 要解三次）
     let backups_mig = load_opt_backups();
-    let restorable_mig = restorable_items(&backups_mig);
     let mut items: Vec<Value> = Vec::new();
     let mut pending_ids: Vec<String> = Vec::new();
     let mut check_ids: Vec<String> = Vec::new();
@@ -1121,7 +1323,7 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
     // 它之后会让「窗口内刚写入的动态项 pending」被这批陈旧清单误删。放在这里，窗口只剩
     // 「快照读 → 本条纯内存循环」，与旧实现逐条删除时的窗口同量级。
     if !drop_pending_ids.is_empty() {
-        opt_state::remove_many(&drop_pending_ids);
+        opt_state::remove_many_pending(&drop_pending_ids);
     }
 
     let mut stale_ids = pending_ids;
@@ -1148,14 +1350,15 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
         // v2-M14：这里原先是 `{ "restored": [], "failed": [] }` 的字面空桩，渲染层据此弹
         // 「已自动还原 N 项」——那件事从没发生过。空桩删除后字段改成**待还原清单**：
         // 退役项在本机留有注册表备份的才出现，由用户点「按原值还原」走已提权的还原通道。
-        // B4：可逐项还原的清单。改写前只有 `pending`（**只**含退役项），
-        // 而本机实测 34 项备份里绝大多数是在用项 —— 能力在、入口找不到。
-        // 两个字段分开返回：active= 在用项的，retired= 退役待还原（概览既有位置）。
+        // P2-5：只保留前端真正消费的 `pending`。`restorableActive/restorableRetired`
+        // 曾是同一事实的第二、第三份字段，前端零消费；删除以免后续只改一份。
         "migration": {
             "pending": retired_pending_backups(&backups_mig),
-            "restorableActive": restorable_mig.0,
-            "restorableRetired": restorable_mig.1,
         },
+        // P1-14：退役清单是签名面；解析失败时还原通道与横幅会同时失效，不能静默。
+        "retiredLoadError": retired_load_failure()
+            .and_then(|v| v.get("message").cloned())
+            .unwrap_or(Value::Null),
         "detected": Value::Object(snap.detected().clone())
     })
 }

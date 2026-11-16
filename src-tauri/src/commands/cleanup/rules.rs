@@ -100,6 +100,24 @@ pub(super) fn safe_read_json(file: &Path) -> Result<Value, String> {
     }
 }
 
+/// 带字节上限的 [`safe_read_json`]（P1-02d）。
+///
+/// 上限在**读之前**卡：超限文件直接拒，不整文件读入再失败 —— custom 目录与数据目录
+/// 都在用户可写范围里，一个几百 MB 的 JSON 会先把内存吃满才谈得上「解析失败」。
+pub(super) fn safe_read_json_limited(file: &Path, max_bytes: u64) -> Result<Value, String> {
+    match std::fs::metadata(file) {
+        Ok(meta) if meta.len() > max_bytes => {
+            return Err(format!(
+                "文件超出字节上限（{} > {max_bytes} 字节），已拒读",
+                meta.len()
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => return Err(format!("读文件失败: {e}")),
+    }
+    safe_read_json(file)
+}
+
 /// 组内条目（**超集口径**：先看 `subGroups` 各 items，再看组自有 `items`，两者都收）
 ///
 /// R4-M05：旧形态是「有 `subGroups` 就不再看 `g.items`」的互斥 else，与引擎唯一真源
@@ -562,6 +580,11 @@ fn req_number(domain: &str, key: &str) -> Result<usize, String> {
     rule_schema::number(domain, key).ok_or_else(|| format!("{SCHEMA_UNAVAILABLE}（缺 {domain}.{key}）"))
 }
 
+/// 清理域字节上限（契约表真源 = `tools/rule-schema.json` 的 `cleanup.limits`）。
+///
+/// P1-02d：读入**外部可写**的 JSON（数据目录规则 / custom 开关 / 备份清单）前先卡
+use crate::engine::native::{cleanup_byte_limits, ByteLimits};
+
 /// 一条规则的检查参数（避免 20 个位置参数）
 pub(super) struct Ctx<'a> {
     item_fields: &'a Vec<String>,
@@ -846,7 +869,19 @@ pub(super) fn check_cleanup_item(
         if !fk.get("recurse").map(|v| v.is_boolean()).unwrap_or(false) {
             return Err(format!("规则 {id}: fileKeys.path「{path}」缺显式布尔 recurse"));
         }
-        let pat = fk.get("pattern").and_then(Value::as_str).unwrap_or("*");
+        // P1-02a：pattern 的**类型**闸必须显式存在，且报错语义与 Node 侧同口径
+        // （与 `tools/cleanup-contract.mjs` 的 A2 判据文案逐字对齐）。
+        // 此前 Rust 是 `and_then(Value::as_str).unwrap_or("*")`：非字符串被**静默当成
+        // "*"**，于是拒绝理由变成「超出 glob 单星能力」——两端都判红但理由不同，
+        // 排查会被引到 glob 实现上，找不到真正的防线（类型契约缺失）。
+        // 缺省与 `null` 都按「未声明」处理（Node 的 `?? '*'` 同款），其余非字符串判红。
+        let pat = match fk.get("pattern") {
+            None | Some(Value::Null) => "*".to_string(),
+            Some(v) if v.is_string() => v.as_str().unwrap_or_default().to_string(),
+            Some(v) => {
+                return Err(format!("规则 {id}: pattern 必须是字符串（当前 {}）", json_text(v)));
+            }
+        };
         let stars = pat.matches('*').count();
         if pat != "*" && (stars != 1 || pat.contains('?')) {
             return Err(format!(
@@ -878,12 +913,32 @@ pub(super) fn check_cleanup_item(
             }
         }
         let path = rk.get("path").and_then(Value::as_str).unwrap_or_default();
-        let value = rk.get("value").and_then(Value::as_str).unwrap_or("");
+        // P1-02b：value 的类型契约是「**字符串或缺失**」。
+        // 此前 Rust 是 `and_then(Value::as_str).unwrap_or("")`：`value: 5` 被静默当成空串
+        // （= 删整棵树），删除面比作者意图大得多；Node 侧则完全不判（非字符串也不报）。
+        // 两端现在同口径：非字符串整包拒；空串/空白也拒（未批准放宽前保持拒绝 ——
+        // 「删一个名叫空串的值」不是任何规则的真意）。缺失与 `null` 都按删树形态处理。
+        let value = match rk.get("value") {
+            None | Some(Value::Null) => None,
+            Some(v) if v.is_string() => {
+                let s = v.as_str().unwrap_or_default();
+                if s.trim().is_empty() {
+                    return Err(format!("规则 {id}: regKeys.value 不能为空"));
+                }
+                Some(s.to_string())
+            }
+            Some(v) => {
+                return Err(format!(
+                    "规则 {id}: regKeys.value 必须是字符串（当前 {}）",
+                    json_text(v)
+                ));
+            }
+        };
         // v5 C-1：删树（无 `value`）与通配清值（`value:"*"`）过注册表禁删面 —— 两者都是
         // 「该键下全部没掉」，爆炸半径同族（本文件 excludePaths 那段就把两者并称原子操作）。
         // 具名单值删除不在 `reg_target_block_reason` 的管辖语义内，不套。
         // 带 `%TOKEN%` 的目标装载侧判不出落点，一并拒 —— 展开后落在哪棵树是审核看不见的盲区。
-        let wipe_form = match rk.get("value").and_then(Value::as_str) {
+        let wipe_form = match value.as_deref() {
             None => Some(false),
             Some("*") => Some(true),
             Some(_) => None,
@@ -903,7 +958,11 @@ pub(super) fn check_cleanup_item(
                 ));
             }
         }
-        let fp = format!("reg|{}|{}", path.to_lowercase(), value);
+        let fp = format!(
+            "reg|{}|{}",
+            path.to_lowercase(),
+            value.as_deref().unwrap_or("").to_lowercase()
+        );
         if let Some(prev) = seen_targets.get(&fp) {
             return Err(format!("规则 {id}: 与 {prev} 精确重复（{fp}）"));
         }
@@ -1052,6 +1111,35 @@ pub(super) fn read_verified_data_rules() -> Option<Value> {
     let file = data_rules_file();
     if !file.is_file() {
         return None;
+    }
+    // P1-02d：读入前先卡字节上限（契约表 cleanup.limits.maxRulesJsonBytes）。
+    // 数据目录里的规则文件虽要过验签，但**验签之前**的整文件读入照样能被一个超大文件
+    // 拖垮；超限直接按「不可用」处理（回退内置副本）并留痕。
+    let limits = match cleanup_byte_limits() {
+        Ok(l) => l,
+        Err(reason) => {
+            log::write_log(
+                "warn",
+                &format!("清理域字节上限不可用（{reason}），数据目录规则不予读取"),
+            );
+            return None;
+        }
+    };
+    match std::fs::metadata(&file) {
+        Ok(meta) if meta.len() > limits.rules_json => {
+            log::write_log(
+                "warn",
+                &format!(
+                    "数据目录规则文件超出字节上限（{} > {} 字节），已按不可用处理: {}",
+                    meta.len(),
+                    limits.rules_json,
+                    file.display()
+                ),
+            );
+            return None;
+        }
+        Ok(_) => {}
+        Err(_) => return None,
     }
     let Ok(text) = std::fs::read_to_string(&file) else {
         return None;
@@ -1255,8 +1343,58 @@ pub fn rules_value_arc() -> Result<Arc<Value>, String> {
 ///
 /// 单独成函数是为了让「顺序无关」这条判据有可直接构造的反例（打乱输入 → 输出必同），
 /// 而不用等某个真实文件系统的枚举顺序恰好变化。
-fn sort_custom_paths(custom: &mut [(PathBuf, u64, f64)]) {
+fn sort_custom_paths<T>(custom: &mut Vec<(PathBuf, T)>) {
     custom.sort_by(|a, b| a.0.cmp(&b.0));
+}
+
+/// 缓存签名条目：文件名 + 大小 + mtime 毫秒 + **内容指纹**。
+///
+/// P1-02c：只看 mtime/size 的签名**不描述内容** —— 保留时间戳的替换（同步/还原工具、
+/// `COPY /B`、FAT32 的 2 秒粒度）能让两者完全一致，于是「用户刚改的开关」静默不生效。
+/// 内容指纹进签名后，同 mtime/size 不同内容必然换签名。
+type CachePart = (String, u64, f64, Option<u128>);
+
+/// 内容指纹（FNV-1a 128 位）。
+///
+/// 为什么不用加密哈希：契约表不放行新增依赖，而这里的对手是「同机本地进程顺手改一下
+/// 开关文件」；128 位非加密指纹的抗碰撞已经够用（真要防伪造，规则库本身还有验签链）。
+fn content_fingerprint(bytes: &[u8]) -> u128 {
+    const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
+    const PRIME: u128 = 0x0000000001000000000000000000013b;
+    let mut hash = OFFSET;
+    for byte in bytes {
+        hash ^= *byte as u128;
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
+/// 读文件内容指纹；读不到或超限一律 `None`。
+///
+/// `None` **不等于**「内容没变」：它在签名里是独立取值（与任何指纹都不同），
+/// 所以「文件从读得到变成读不到」同样会让缓存失效。
+fn file_fingerprint(path: &Path, max_bytes: u64) -> Option<u128> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.len() > max_bytes {
+        return None;
+    }
+    Some(content_fingerprint(&std::fs::read(path).ok()?))
+}
+
+/// 缓存签名文本（纯函数：便于直接构造「同 mtime/size 不同内容」的反例）。
+fn cache_sig_text(data: &CachePart, custom: &[CachePart]) -> String {
+    let render = |(name, size, mtime, hash): &CachePart| {
+        format!(
+            "{name}|{size}|{mtime}|{}",
+            hash.map(|h| format!("{h:032x}")).unwrap_or_else(|| "none".to_string())
+        )
+    };
+    format!(
+        "{}|{}|{}",
+        render(data),
+        custom.len(),
+        custom.iter().map(render).collect::<Vec<_>>().join(",")
+    )
 }
 
 /// 缓存签名 + 本次目录快照里的 custom 文件清单。
@@ -1266,10 +1404,23 @@ fn sort_custom_paths(custom: &mut [(PathBuf, u64, f64)]) {
 /// 签名没变 ⇒ 那份合并结果被当成合法缓存一直用。返回清单而不是让装载侧再读一次目录，
 /// 既保住这个口径也少触一次盘。
 fn rules_cache_sig() -> (String, Vec<PathBuf>) {
-    // 每项 = (路径, 大小, mtime 毫秒)。R4-L01：文件名与大小必须进签名 —— 只算个数 + mtime
-    // 时，「内容被替换但时间戳保持不变」（同步/还原工具保留时间戳、COPY /B 类操作，
+    // 契约表不可用 ⇒ 上限取 0，指纹读不到（签名退化为 mtime/size）。装载侧此时同样
+    // 拿不到上限、按 fail-closed 拒读，两处同向，不会出现「签名说有、装载侧没读」的错位。
+    let limits = match cleanup_byte_limits() {
+        Ok(l) => l,
+        Err(reason) => {
+            log::write_log(
+                "warn",
+                &format!("[cleanup] 字节上限不可用（{reason}），本轮缓存签名不含内容指纹"),
+            );
+            ByteLimits { rules_json: 0, backup_manifest: 0, backup_total: 0 }
+        }
+    };
+    // 每项 = (路径, 大小, mtime 毫秒, 内容指纹)。R4-L01：文件名与大小必须进签名；
+    // P1-02c：内容指纹也必须进签名 —— 只算个数 + mtime + size 时，
+    // 「内容被替换但时间戳保持不变」（同步/还原工具保留时间戳、COPY /B 类操作，
     // 以及 FAT32 2 秒粒度）会命中旧缓存，新开关要到进程重启才生效且全程无日志。
-    let mut custom: Vec<(PathBuf, u64, f64)> = Vec::new();
+    let mut custom: Vec<(PathBuf, CachePart)> = Vec::new();
     match std::fs::read_dir(custom_rules_dir()) {
         Ok(rd) => {
             for e in rd.flatten() {
@@ -1285,7 +1436,8 @@ fn rules_cache_sig() -> (String, Vec<PathBuf>) {
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_millis() as f64)
                     .unwrap_or(0.0);
-                custom.push((e.path(), size, mtime));
+                let hash = file_fingerprint(&e.path(), limits.rules_json);
+                custom.push((e.path(), (name, size, mtime, hash)));
             }
         }
         // 目录不存在 = 没有自定义规则，正常态；其余读失败 = 开关静默全失效，必须留痕
@@ -1301,30 +1453,24 @@ fn rules_cache_sig() -> (String, Vec<PathBuf>) {
     // custom 文件时「谁后应用谁赢」直接取决于这个顺序；签名里的逐项信息也按同一顺序
     // 拼接，顺序抖动会让同一份内容算出两个签名、白掉一次缓存。文件路径是不可变键。
     sort_custom_paths(&mut custom);
-    let (data_mtime, data_size) = std::fs::metadata(data_rules_file())
-        .map(|m| {
-            let mt = m
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as f64)
-                .unwrap_or(0.0);
-            (mt, m.len())
-        })
-        .unwrap_or((0.0, 0));
-    let sig = format!(
-        "{data_mtime}|{data_size}|{}|{}",
-        custom.len(),
-        custom
-            .iter()
-            .map(|(p, size, m)| format!(
-                "{}|{size}|{m}",
-                p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
-            ))
-            .collect::<Vec<_>>()
-            .join(",")
+    let data_file = data_rules_file();
+    let data_meta = std::fs::metadata(&data_file).ok();
+    let data_size = data_meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    let data_mtime = data_meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as f64)
+        .unwrap_or(0.0);
+    let data_part: CachePart = (
+        data_file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        data_size,
+        data_mtime,
+        file_fingerprint(&data_file, limits.rules_json),
     );
-    (sig, custom.into_iter().map(|(p, _, _)| p).collect())
+    let custom_parts: Vec<CachePart> = custom.iter().map(|(_, part)| part.clone()).collect();
+    let sig = cache_sig_text(&data_part, &custom_parts);
+    (sig, custom.into_iter().map(|(p, _)| p).collect())
 }
 
 /// 未命中时的装载：验签数据目录 > 内置副本 > 空集，再逐个套 custom 开关。
@@ -1365,8 +1511,20 @@ pub(super) fn load_merged_rules_uncached(custom: Vec<PathBuf>) -> Value {
         },
     };
     let mut skipped_custom = Vec::new();
+    // P1-02d：custom 开关文件读入前的字节上限（契约表 cleanup.limits.maxRulesJsonBytes）。
+    // 超限文件不读入，直接进 skippedCustomRules 回执（用户看得见「这份开关没生效」）。
+    let custom_limit = match cleanup_byte_limits() {
+        Ok(l) => l.rules_json,
+        Err(reason) => {
+            log::write_log(
+                "error",
+                &format!("清理域字节上限不可用（{reason}），自定义开关本轮全部跳过"),
+            );
+            0
+        }
+    };
     for path in &custom {
-        let parsed = match safe_read_json(path) {
+        let parsed = match safe_read_json_limited(path, custom_limit) {
             Ok(v) => v,
             Err(reason) => {
                 let label = path
@@ -1507,20 +1665,51 @@ pub(super) fn post_action_of(id: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    /// 最小合法条目（与 `contract_tests.rs` 的 `ok_item` 同形，字段集同契约表 A1–A15）。
+    fn ok_item() -> Value {
+        json!({
+            "id": "t-ok",
+            "ver": 20260928,
+            "name": "测试项",
+            "risk": "low",
+            "evidence": "只作用于测试目录",
+            "recommended": true,
+            "domain": "system",
+            "group": "g1",
+            "nature": "log",
+            "regenerable": true,
+            "prov": {
+                "source": "builtin",
+                "sourceClass": "independent",
+                "ref": "tests/cleanup",
+                "reviewedAt": "2026-09-30"
+            },
+            "fileKeys": [{ "path": "%LOCALAPPDATA%\\TrimTest", "pattern": "*", "recurse": true }]
+        })
+    }
+
+    fn ok_pkg(item: Value) -> Value {
+        json!({
+            "version": 2,
+            "rulesVersion": 20260928,
+            "groups": [{ "key": "g1", "title": "测试组", "items": [item] }]
+        })
+    }
+
     #[test]
     fn 自定义规则文件顺序与目录枚举顺序无关() {
         let mut first = vec![
-            (PathBuf::from(r"C:\rules\b.json"), 2u64, 2.0),
-            (PathBuf::from(r"C:\rules\a.json"), 1u64, 1.0),
+            (PathBuf::from(r"C:\rules\b.json"), 2u64),
+            (PathBuf::from(r"C:\rules\a.json"), 1u64),
         ];
         let mut second = vec![
-            (PathBuf::from(r"C:\rules\a.json"), 1u64, 1.0),
-            (PathBuf::from(r"C:\rules\b.json"), 2u64, 2.0),
+            (PathBuf::from(r"C:\rules\a.json"), 1u64),
+            (PathBuf::from(r"C:\rules\b.json"), 2u64),
         ];
         sort_custom_paths(&mut first);
         sort_custom_paths(&mut second);
-        let names = |v: &[(PathBuf, u64, f64)]| -> Vec<String> {
-            v.iter().map(|(p, _, _)| p.to_string_lossy().to_string()).collect()
+        let names = |v: &[(PathBuf, u64)]| -> Vec<String> {
+            v.iter().map(|(p, _)| p.to_string_lossy().to_string()).collect()
         };
         assert_eq!(names(&first), names(&second), "枚举顺序不同的两次收集必须给出同一顺序");
         assert_eq!(names(&first), vec![r"C:\rules\a.json", r"C:\rules\b.json"]);
@@ -1548,6 +1737,140 @@ mod tests {
         assert!(
             second.get("groups").map(|g| g.is_array()).unwrap_or(false),
             "命中的规则树缺 groups 数组 —— 装载链或缓存被改坏"
+        );
+    }
+
+    /// P1-02a：`pattern` 非字符串必须**显式判类型**，且错误语义与 Node 侧同口径
+    /// （与 `tools/cleanup-contract.mjs` 的 A2 判据文案逐字对齐）。
+    ///
+    /// 此前 Rust 用 `and_then(Value::as_str).unwrap_or("*")`：非字符串被静默当成 "*"，
+    /// 拒绝理由变成「超出 glob 单星能力」——两端都判红但理由不同。
+    #[test]
+    fn pattern非字符串显式判红且文案与node同口径() {
+        let mut item = ok_item();
+        item["fileKeys"][0]["pattern"] = json!(5);
+        let err = validate_cleanup_package(&ok_pkg(item)).expect_err("非字符串 pattern 必须判红");
+        assert!(
+            err.contains("pattern 必须是字符串（当前 5）"),
+            "拒绝理由必须是类型闸（与 Node 侧同文案）: {err}"
+        );
+        // 正向对照：缺省与 null 都按「未声明」处理（Node 的 `?? '*'` 同款）
+        let mut item = ok_item();
+        item["fileKeys"][0]["pattern"] = json!(null);
+        validate_cleanup_package(&ok_pkg(item)).expect("pattern 为 null 必须按未声明放行");
+    }
+
+    /// P1-02b：`regKeys.value` 的类型契约是「字符串或缺失」。
+    ///
+    /// 此前 Rust 把 `value: 5` 静默当成空串（= 删整棵树），Node 侧则完全不判；
+    /// 两端现在同口径：非字符串与空串都判红，缺失与 "*" 放行。
+    #[test]
+    fn reg_keys_value非字符串与空串判红() {
+        let mut item = ok_item();
+        item["regKeys"] = json!([{ "path": "HKCU\\Software\\TrimTest", "value": 5 }]);
+        let err = validate_cleanup_package(&ok_pkg(item)).expect_err("非字符串 value 必须判红");
+        assert!(
+            err.contains("regKeys.value 必须是字符串（当前 5）"),
+            "非字符串 value 必须显式判类型: {err}"
+        );
+
+        let mut item = ok_item();
+        item["regKeys"] = json!([{ "path": "HKCU\\Software\\TrimTest", "value": "" }]);
+        let err = validate_cleanup_package(&ok_pkg(item)).expect_err("空串 value 必须判红");
+        assert!(
+            err.contains("regKeys.value 不能为空"),
+            "空串 value 必须判红（未批准放宽前保持拒绝）: {err}"
+        );
+
+        // 正向对照：缺失（删树形态）与 "*"（通配清值）必须放行 ——
+        // 现库的 regKeys 全是 "*"，判据过严会把真实规则库打死。
+        let mut item = ok_item();
+        item["regKeys"] = json!([{ "path": "HKCU\\Software\\TrimTest" }]);
+        validate_cleanup_package(&ok_pkg(item)).expect("缺失 value（删树形态）必须放行");
+        let mut item = ok_item();
+        item["regKeys"] = json!([{ "path": "HKCU\\Software\\TrimTest", "value": "*" }]);
+        validate_cleanup_package(&ok_pkg(item)).expect("value=\"*\"（通配清值）必须放行");
+    }
+
+    /// P1-02c：缓存签名必须含**内容指纹** —— 同 mtime/size 不同内容必须换签名。
+    ///
+    /// 这条是「保留时间戳的替换」的唯一机器拦截点：只算 mtime/size 时，
+    /// 用户刚改的 custom 开关会静默不生效，直到进程重启。
+    #[test]
+    fn 缓存签名同大小同时间戳不同内容必不同() {
+        let same_meta = |bytes: &[u8]| {
+            (
+                "rules.json".to_string(),
+                12u64,
+                1_700_000_000_000.0f64,
+                Some(content_fingerprint(bytes)),
+            )
+        };
+        let a = same_meta(b"aaaaaaaaaaaa");
+        let b = same_meta(b"bbbbbbbbbbbb");
+        assert_ne!(
+            cache_sig_text(&a, &[]),
+            cache_sig_text(&b, &[]),
+            "同 mtime/size 不同内容必须换签名（否则缓存不失效，开关静默不生效）"
+        );
+        // 正向对照：同内容必须同签名（否则缓存永远失效，每轮都重载）
+        assert_eq!(
+            cache_sig_text(&a, &[]),
+            cache_sig_text(&same_meta(b"aaaaaaaaaaaa"), &[]),
+            "同内容必须算出同一签名"
+        );
+    }
+
+    /// P1-02c（文件面）：同长度、不同内容的两个文件必须算出不同指纹。
+    #[test]
+    fn 内容指纹能分辨同长度不同内容() {
+        let sb = crate::testutil::Sandbox::new(&format!("rules-fingerprint-{}", std::process::id()));
+        let p1 = sb.join("a.json");
+        let p2 = sb.join("b.json");
+        std::fs::write(&p1, b"aaaaaaaaaaaa").expect("写样本");
+        std::fs::write(&p2, b"bbbbbbbbbbbb").expect("写样本");
+        assert_ne!(
+            file_fingerprint(&p1, 1024),
+            file_fingerprint(&p2, 1024),
+            "同长度不同内容必须算出不同指纹"
+        );
+        assert_eq!(
+            file_fingerprint(&p1, 1024),
+            file_fingerprint(&p1, 1024),
+            "同一文件两次取指纹必须一致"
+        );
+        // 超限文件不参与指纹（装载侧同样按超限拒读，两处同向）
+        assert_eq!(file_fingerprint(&p1, 4), None, "超限文件必须取不到指纹");
+    }
+
+    /// P1-02d：字节上限在**读入之前**生效，超限文件不整文件读入。
+    #[test]
+    fn 超字节上限的文件读前被拒() {
+        let sb = crate::testutil::Sandbox::new(&format!("rules-bytecap-{}", std::process::id()));
+        let big = sb.join("big.json");
+        std::fs::write(&big, b"x".repeat(64)).expect("写样本");
+        let err = safe_read_json_limited(&big, 16).expect_err("超限文件必须被拒");
+        assert!(err.contains("超出字节上限"), "拒绝理由必须点名字节上限: {err}");
+        let small = sb.join("small.json");
+        std::fs::write(&small, br#"{"groups":[]}"#).expect("写样本");
+        assert!(
+            safe_read_json_limited(&small, 16).is_ok(),
+            "未超限的文件必须照常读（判据不许过严）"
+        );
+    }
+
+    /// P1-02d：字节上限的单一真源是契约表 —— 上限取不到即 fail-closed（不给默认值）。
+    #[test]
+    fn 字节上限走契约表且三键齐备() {
+        let limits = cleanup_byte_limits().expect("契约表必须给出清理域字节上限");
+        assert!(
+            limits.rules_json > 0 && limits.backup_manifest > 0 && limits.backup_total > 0,
+            "字节上限不得为 0（0 = 一切文件都被拒）"
+        );
+        // 现算：内置规则库体积必须远小于 JSON 上限（否则真实规则库会被自己拒掉）
+        assert!(
+            (BUILTIN_RULES_JSON.len() as u64) < limits.rules_json,
+            "内置规则库体积必须小于 JSON 字节上限"
         );
     }
 }

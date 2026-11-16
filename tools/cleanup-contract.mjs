@@ -422,6 +422,19 @@ export function validateCleanupPackage(pkg) {
         const v = rk[f];
         if (typeof v !== 'string' || !v.trim()) say('A2', `规则 ${id}: regKeys.${f} 缺失或为空白`);
       }
+      // P1-02b：value 的类型契约是「**字符串或缺失**」，与 Rust 侧同口径
+      // （`src-tauri/src/commands/cleanup/rules.rs` 的 regKeys 段，文案逐字对齐）。
+      // 此前 Node 完全不判（非字符串也不报），Rust 则把非字符串静默当成空串（= 删树）——
+      // 两端都会让 `value: 5` 变成「删整棵子树」，比作者意图大得多。
+      // 空串/空白同样拒绝：未批准放宽前，「删一个名叫空串的值」不是任何规则的真意。
+      // 缺失与 null 都按删树形态处理（Rust 侧 `None | Some(Value::Null)` 同款）。
+      if ('value' in rk && rk.value !== null) {
+        if (typeof rk.value !== 'string') {
+          say('A2', `规则 ${id}: regKeys.value 必须是字符串（当前 ${JSON.stringify(rk.value)}）`);
+        } else if (!rk.value.trim()) {
+          say('A2', `规则 ${id}: regKeys.value 不能为空`);
+        }
+      }
     }
     // A2 excludePaths（C-2 开门的字段；:: 具名值排除只能配具名值 regKeys —— F-2）
     if ('excludePaths' in it) {
@@ -645,6 +658,35 @@ export function selfTest(validate) {
   }
   if (badPatternErrs && !badPatternErrs.some((e) => e.startsWith('[A2]'))) {
     problems.push('非字符串 pattern 未被 A2 判红（类型闸失明）');
+  }
+  // P1-02a：非字符串 pattern 的**拒绝理由**必须与 Rust 侧同文案 —— 两端都判红但
+  // 理由不同（Rust 曾报「超出 glob 单星能力」）时，排查会被引到 glob 实现上，
+  // 找不到真正的防线（类型契约缺失）。
+  if (badPatternErrs && !badPatternErrs.some((e) => e.includes('pattern 必须是字符串（当前 5）'))) {
+    problems.push('非字符串 pattern 的拒绝理由不是类型闸（与 Rust 侧文案不同口径）');
+  }
+  // P1-02b：regKeys.value 的类型与空值闸（双端夹具的 Node 一端）。
+  // 反例两则：非字符串（5）与空串；正向对照两则：缺失（删树）与 "*"（通配清值）——
+  // 现库的 regKeys 全是 "*"，判据过严会把真实规则库打死。
+  const badValue = JSON.parse(JSON.stringify(goodPkg));
+  badValue.groups[0].items[0].regKeys = [{ path: 'HKCU\\Software\\TrimTest', value: 5 }];
+  if (!validate(badValue).some((e) => e.includes('regKeys.value 必须是字符串（当前 5）'))) {
+    problems.push('非字符串 regKeys.value 未被 A2 判红（类型闸失明）');
+  }
+  const blankValue = JSON.parse(JSON.stringify(goodPkg));
+  blankValue.groups[0].items[0].regKeys = [{ path: 'HKCU\\Software\\TrimTest', value: '' }];
+  if (!validate(blankValue).some((e) => e.includes('regKeys.value 不能为空'))) {
+    problems.push('空串 regKeys.value 未被 A2 判红');
+  }
+  const missingValue = JSON.parse(JSON.stringify(goodPkg));
+  missingValue.groups[0].items[0].regKeys = [{ path: 'HKCU\\Software\\TrimTest' }];
+  if (validate(missingValue).some((e) => e.includes('regKeys.value'))) {
+    problems.push('缺失的 regKeys.value 被判红（缺失是删树形态，合法）');
+  }
+  const starValue = JSON.parse(JSON.stringify(goodPkg));
+  starValue.groups[0].items[0].regKeys = [{ path: 'HKCU\\Software\\TrimTest', value: '*' }];
+  if (validate(starValue).some((e) => e.includes('regKeys.value'))) {
+    problems.push('regKeys.value="*" 被判红（通配清值是真实库形态）');
   }
   // T1c-M02：空串路径来源必须被 A13 判红（旧判据把 `pathPs: ""` 算「有来源」）。
   const blankSource = JSON.parse(JSON.stringify(goodPkg));

@@ -144,3 +144,13 @@ node tools/check-gate-roster.mjs --run --jobs=1        # serial (same verdicts, 
 - Multi-agent review: §10
 
 **The sign that these rules are working**: unrelated changes in the diff shrink, rework shrinks, and ambiguities get asked about before the work starts instead of after it breaks.
+
+## 收口基线与开工检查
+
+- baseline 路径：`.agent/baseline.json`；校验脚本路径：`scripts/verify-baseline.sh`。
+- 开工：实质性代码/配置任务开始时先用 Git Bash 运行 `scripts/verify-baseline.sh`；通过则复用收口基线开工，不无脑跑 `cargo check` / 全量编译 / 全量测试，不重算基线。
+- 允许重新验证/重算：校验失败、基线缺失或损坏、任务将修改依赖/构建配置/工具链、用户明确要求。
+- 收口：任务验证通过、无 pending 后更新 `.agent/baseline.json`，记录本次已完成的轻量验证结果；基线只记录验证结果，不替代验证。
+- 不得以「保险起见/确认环境」为由违反上述规则。
+- 本段服从 `C:\KaiFa\youyong\skill\agent.md修改\AGENTS.md` 的当前全局规则；项目级验收与全局规则冲突时，说明冲突并按全局规则 §7 处理。
+- 脚本只验证基线，不代替项目级验收；项目级规则另有强制验收时仍从其规定。

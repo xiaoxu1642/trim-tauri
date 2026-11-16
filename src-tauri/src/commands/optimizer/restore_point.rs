@@ -186,11 +186,7 @@ try {\n\
     }
 }
 
-pub(super) fn count_restore_points() -> Option<i64> {
-    poll_restore_points(std::time::Instant::now() + std::time::Duration::from_secs(15), count_restore_points_once, None).ok().flatten()
-}
-
-fn count_restore_points_once(_remaining: std::time::Duration) -> Option<i64> {
+fn count_restore_points_once(remaining: std::time::Duration) -> Option<i64> {
     let ps = "$ErrorActionPreference = \"Stop\"\n\
 try {\n\
   $rp = @(Get-ComputerRestorePoint)\n\
@@ -198,7 +194,8 @@ try {\n\
 } catch {\n\
   Write-Output (\"RPERROR|\" + $_.Exception.Message)\n\
 }";
-    let out = run_inline_ps(ps, 30, None)?;
+    // P1-8：单次计数只拿剩余预算，不能再用固定 30s 把 15s 的绝对截止拖长。
+    let out = run_inline_ps(ps, remaining.as_secs().max(1), None)?;
     out.stdout
         .lines()
         .map(str::trim)
@@ -229,7 +226,7 @@ pub(super) fn poll_restore_points(
         } else {
             return Ok(last);
         }
-        std::thread::sleep(std::time::Duration::from_millis(1).min(remaining));
+        std::thread::sleep(std::time::Duration::from_millis(1500).min(remaining));
     }
 }
 
@@ -406,17 +403,18 @@ pub(super) fn create_restore_inner() -> Value {
     // 旧实现是三层 fail-open（脚本没跑成 / 标记缺失 / JSON 坏 —— 任一层落空都跳过预检
     // 继续创建）；本机日志里「protectedVolumes=0 却仍走到 Invoke-CimMethod」与它一致。
     let pre = "$ErrorActionPreference = \"SilentlyContinue\"\n\
-$out = @{ globalDisabled = $false; protectedVolumes = 0; srDriver = $false; srService = $false; providerOk = $false }\n\
+$out = @{ globalDisabled = $false; protectedVolumes = 0; protectedVolumesKnown = $false; vssOk = $false; volsnapOk = $false; swprvOk = $false; providerOk = $false }\n\
 $srKey = Get-ItemProperty \"HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore\"\n\
 if ($srKey -and $null -ne $srKey.DisableSR -and [int]$srKey.DisableSR -eq 1) { $out.globalDisabled = $true }\n\
-$out.protectedVolumes = @(Get-CimInstance Win32_ShadowStorage).Count\n\
-$out.srDriver = Test-Path \"$env:SystemRoot\\System32\\drivers\\sr.sys\"\n\
-$out.srService = ($null -ne (Get-Service -Name SRService -ErrorAction SilentlyContinue))\n\
-try { $null = Get-CimInstance -Namespace 'root/default' -ClassName SystemRestore -ErrorAction Stop; $out.providerOk = $true } catch { $out.providerOk = $false }\n\
+try { $storage = @(Get-CimInstance Win32_ShadowStorage -ErrorAction Stop); $out.protectedVolumesKnown = $true; $out.protectedVolumes = $storage.Count } catch { $out.protectedVolumesKnown = $false }\n\
+$out.vssOk = ($null -ne (Get-Service -Name VSS -ErrorAction SilentlyContinue))\n\
+$out.volsnapOk = ($null -ne (Get-Service -Name volsnap -ErrorAction SilentlyContinue))\n\
+$out.swprvOk = ($null -ne (Get-Service -Name swprv -ErrorAction SilentlyContinue))\n\
+try { $cls = Get-CimClass -Namespace 'root/default' -ClassName SystemRestore -ErrorAction Stop; $out.providerOk = ($null -ne ($cls.CimClassMethods | Where-Object {{ $_.Name -eq 'CreateRestorePoint' }})) } catch { $out.providerOk = $false }\n\
 Write-Output ('@@SRPRE@@' + ($out | ConvertTo-Json -Compress))\n\
 try { $rpPre = @(Get-ComputerRestorePoint -ErrorAction Stop); Write-Output ('RPCOUNT|' + $rpPre.Count) } catch { Write-Output ('RPERROR|' + $_.Exception.Message) }";
     // 性能优化 P1-A（v3 §3.2 合批之一）：前计数原先单独起一个 powershell.exe 跑
-    // Get-ComputerRestorePoint（`count_restore_points()` 每次调用一个新进程，登记 30s），
+    // Get-ComputerRestorePoint（`count_restore_points_once()` 每次调用一个新进程，登记 30s），
     // 纯为拿「创建前有几个还原点」。预检本来就要跑一次 CIM，把计数搭进同一进程同一批输出，
     // 省掉一次冷启动——本仓注释记录 PS 冷启动在 2~9s 之间飘（`src-tauri/src/pwsh/mod.rs` 的
     // M6 作业对象用例注释里有这条实测）。
@@ -429,7 +427,7 @@ try { $rpPre = @(Get-ComputerRestorePoint -ErrorAction Stop); Write-Output ('RPC
         log::write_log("warn", "还原点预检未能完成：预检脚本未跑成");
         return json!({ "success": false, "message": "预检未能完成（查询脚本未执行），已中止创建；可稍后重试，或到「系统 → 关于 → 系统保护」手动创建还原点" });
     };
-    // 与原 count_restore_points() 逐字同口径：只认 RPCOUNT| 行，拿不到即 None（读失败）。
+    // 与 count_restore_points_once() 逐字同口径：只认 RPCOUNT| 行，拿不到即 None（读失败）。
     let before = out
         .stdout
         .lines()
@@ -443,24 +441,9 @@ try { $rpPre = @(Get-ComputerRestorePoint -ErrorAction Stop); Write-Output ('RPC
         log::write_log("warn", "还原点预检未能完成：输出不是合法 JSON");
         return json!({ "success": false, "message": "预检未能完成（输出解析失败），已中止创建；可稍后重试，或到「系统 → 关于 → 系统保护」手动创建还原点" });
     };
-    // 分级报因，判定顺序：全局关闭 → 组件缺失 → 无受保护卷。
-    // 「组件缺失」必须先于「0 个受保护卷」判 —— 组件缺失时 0 卷是伪因，照实报到
-    // 「需修复系统组件」才对得上本机实况（sr.sys / SRService / 提供程序三者任一缺）。
-    if v.get("globalDisabled").and_then(|x| x.as_bool()).unwrap_or(false) {
-        return json!({ "success": false, "message": "系统保护已被全局关闭（DisableSR=1），请先在「系统 → 关于 → 系统保护」中开启后再创建还原点" });
-    }
-    let provider_ok = v.get("providerOk").and_then(|x| x.as_bool()).unwrap_or(false);
-    let sr_driver = v.get("srDriver").and_then(|x| x.as_bool()).unwrap_or(false);
-    let sr_service = v.get("srService").and_then(|x| x.as_bool()).unwrap_or(false);
-    if !provider_ok || !sr_driver || !sr_service {
-        log::write_log(
-            "warn",
-            &format!("还原点预检：系统还原组件缺失（provider={provider_ok} driver={sr_driver} service={sr_service}）"),
-        );
-        return json!({ "success": false, "message": "系统还原组件缺失或未安装（还原驱动 / 服务 / 还原点提供程序不可用）。可在「系统 → 关于 → 系统保护」查看状态；或用 sfc /scannow 与 DISM /Online /Cleanup-Image /RestoreHealth 尝试修复系统组件（不保证修复成功），修复后再回来创建" });
-    }
-    if v.get("protectedVolumes").and_then(|x| x.as_i64()).unwrap_or(0) == 0 {
-        return json!({ "success": false, "message": "没有任何卷开启系统保护，请先在「系统 → 关于 → 系统保护」中为系统盘开启保护" });
+    if let Some(message) = restore_precheck_rejection(&v) {
+        log::write_log("warn", &format!("还原点预检未通过: {message}"));
+        return json!({ "success": false, "message": message });
     }
 
     // 频率覆写值的原值备份（**必须在写入前**读）。两条失败路径都中止创建：
@@ -479,7 +462,7 @@ try { $rpPre = @(Get-ComputerRestorePoint -ErrorAction Stop); Write-Output ('RPC
         let res = update_opt_backups(|map| {
             if matches!(
                 insert_backup_baseline(map, "tf_restore_point", values.clone()),
-                BackupInsert::KeptExisting(_)
+            BackupInsert::KeptExisting
             ) {
                 // 基线已存在：内容不变，落盘等价；只在日志说明（与旧行为同口径）
                 log::write_log("warn", "还原点频率覆写值级备份未写入（基线已存在）");
@@ -513,7 +496,7 @@ New-ItemProperty -Path \"HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\
 $null = Invoke-CimMethod -Namespace 'root/default' -ClassName 'SystemRestore' -MethodName 'CreateRestorePoint' -Arguments @{ Description = 'Trim 优化前还原点'; EventType = [uint32]100; RestorePointType = [uint32]0 }\n\
 Write-Output \"@@DONE@@\"";
     // `before` 已并入上面预检那一次调用（v3 §3.2 合批），不再为它单独起一个 powershell.exe。
-    // 轮询侧仍走 count_restore_points()：把「等待还原点可见」改成脚本内 while 需要重定超时预算，
+    // 轮询侧仍走 count_restore_points_once()：把「等待还原点可见」改成脚本内 while 需要重定超时预算，
     // 属需小旭裁定的那一半，本轮不动。
     let Some(out) = run_inline_ps(create_ps, 120, Some("optimizer.create-restore")) else {
         let note = ledger_note("撤销 pending", opt_state::remove("tf_restore_point"));
@@ -540,7 +523,7 @@ Write-Output \"@@DONE@@\"";
     let mut read_failed = false;
     let mut last = before;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    match poll_restore_points(deadline, |_remaining| count_restore_points(), before) {
+    match poll_restore_points(deadline, count_restore_points_once, before) {
         Ok(n) => last = n,
         Err(()) => read_failed = true,
     }
@@ -586,6 +569,94 @@ Write-Output \"@@DONE@@\"";
     };
     log::write_log("info", &format!("已创建系统还原点 ({btxt} -> {atxt}) verify={verify}{tail}"));
     json!({ "success": true, "message": format!("{msg}{tail}{note}"), "verify": verify })
+}
+
+/// 还原点预检的分级判据（纯函数，可测）。
+///
+/// 判定顺序：全局关闭 → 组件缺失 → 受保护卷未知 → 无受保护卷。
+/// Vista 起系统还原由 VSS / volsnap / swprv + `root/default:SystemRestore` 提供；
+/// `sr.sys` / `SRService` 是 XP 时代组件，在 Win10/11 上恒不存在，不能作为判据。
+fn restore_precheck_rejection(v: &Value) -> Option<&'static str> {
+    if v.get("globalDisabled").and_then(|x| x.as_bool()).unwrap_or(false) {
+        return Some("系统保护已被全局关闭（DisableSR=1），请先在「系统 → 关于 → 系统保护」中开启后再创建还原点");
+    }
+    let provider_ok = v.get("providerOk").and_then(|x| x.as_bool()).unwrap_or(false);
+    let vss_ok = v.get("vssOk").and_then(|x| x.as_bool()).unwrap_or(false);
+    let volsnap_ok = v.get("volsnapOk").and_then(|x| x.as_bool()).unwrap_or(false);
+    let swprv_ok = v.get("swprvOk").and_then(|x| x.as_bool()).unwrap_or(false);
+    if !provider_ok {
+        return Some("系统还原提供程序不可用（root/default:SystemRestore）。可在「系统 → 关于 → 系统保护」查看状态；或用 sfc /scannow 与 DISM /Online /Cleanup-Image /RestoreHealth 尝试修复系统组件（不保证修复成功），修复后再回来创建");
+    }
+    if !vss_ok || !volsnap_ok || !swprv_ok {
+        return Some("系统还原点创建失败，因为 VSS / volsnap / swprv 中某个服务已被关闭");
+    }
+    if !v.get("protectedVolumesKnown").and_then(|x| x.as_bool()).unwrap_or(false) {
+        return Some("无法读取受保护卷状态（WMI 查询失败），不能确认系统保护是否已开启；请稍后重试，或到「系统 → 关于 → 系统保护」手动创建还原点");
+    }
+    if v.get("protectedVolumes").and_then(|x| x.as_i64()).unwrap_or(0) == 0 {
+        return Some("没有任何卷开启系统保护，请先在「系统 → 关于 → 系统保护」中为系统盘开启保护");
+    }
+    None
+}
+
+#[cfg(test)]
+mod restore_precheck_tests {
+    use super::*;
+
+    fn healthy() -> Value {
+        json!({
+            "globalDisabled": false,
+            "providerOk": true,
+            "vssOk": true,
+            "volsnapOk": true,
+            "swprvOk": true,
+            "protectedVolumesKnown": true,
+            "protectedVolumes": 1
+        })
+    }
+
+    /// P0-2：Win10/11 上真实组件齐全时必须放行；旧的 sr.sys / SRService
+    /// 形态不再出现在判据里。
+    #[test]
+    fn 真实组件齐全放行() {
+        assert!(restore_precheck_rejection(&healthy()).is_none());
+        let src = include_str!("restore_point.rs");
+        let prod = src.split("#[cfg(test)]\nmod restore_precheck_tests").next().unwrap_or_default();
+        let script = prod
+            .split("let pre =")
+            .nth(1)
+            .and_then(|s| s.split("let Some(out)").next())
+            .expect("找不到预检脚本");
+        assert!(!script.contains(concat!("SR", "Service")), "预检仍在用 XP 时代服务名");
+        assert!(!script.contains(concat!("sr", ".sys")), "预检仍在用 XP 时代驱动名");
+    }
+
+    /// 组件缺失优先于「0 个受保护卷」；读失败与确认 0 卷必须分开报因。
+    #[test]
+    fn 分级报因_组件缺失优先且读失败不冒充零卷() {
+        let mut v = healthy();
+        v["volsnapOk"] = json!(false);
+        v["protectedVolumes"] = json!(0);
+        v["protectedVolumesKnown"] = json!(true);
+        let m = restore_precheck_rejection(&v).expect("服务关闭必须拒绝");
+        assert!(m.contains("服务已被关闭"), "服务关闭时不得落到 0 卷报因: {m}");
+
+        let mut v = healthy();
+        v["protectedVolumesKnown"] = json!(false);
+        v["protectedVolumes"] = json!(0);
+        let m = restore_precheck_rejection(&v).expect("读失败必须拒绝");
+        assert!(m.contains("无法读取"), "读失败不得说成没有卷开启保护: {m}");
+
+        let mut v = healthy();
+        v["protectedVolumes"] = json!(0);
+        let m = restore_precheck_rejection(&v).expect("确认 0 卷必须拒绝");
+        assert!(m.contains("没有任何卷"), "确认 0 卷应给出开保护提示: {m}");
+
+        let mut v = healthy();
+        v["globalDisabled"] = json!(true);
+        let m = restore_precheck_rejection(&v).expect("全局关闭必须拒绝");
+        assert!(m.contains("全局关闭"), "{m}");
+    }
 }
 
 /// optimizer:list-restore —— 还原点列表 + 各卷保护状态

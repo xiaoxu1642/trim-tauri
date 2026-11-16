@@ -13,7 +13,8 @@
     "消费者有两个且必须同源：tools/check-cleanup-rule-contract.mjs + tools/check-residue-rule-contract.mjs（发布前门禁）",
     "与 src-tauri/src/engine/rule_schema.rs（运行期装载侧，含内置副本）。两侧对同一坏包必须给同一结论。",
     "条目级 ver（cleanup 每条 / residue 每条规则）= 「该包这一版」，必须等于顶层 rulesVersion；不是该条目的引入版本。抬 rulesVersion 后跑 node tools/stamp-rule-ver.mjs 重刷再重签。要的是「上次报这次没报是哪一版判的」可回答，不是变更记录。",
-    "ver 不挂 itemRequired：它有自己的断言（缺失/不等/非数字三个方向，Node A12 与 Rust 同文案），挂进通用必填会让同一问题报两个原因。"
+    "ver 不挂 itemRequired：它有自己的断言（缺失/不等/非数字三个方向，Node A12 与 Rust 同文案），挂进通用必填会让同一问题报两个原因。",
+    "cleanup.limits 里的字节上限（maxRulesJsonBytes / maxBackupManifestBytes / maxFileBackupTotalBytes）是**读入前**的闸：数据目录规则、custom 开关、备份清单都是用户可写目录里的文件，不卡上限的话一个几百 MB 的 JSON 会先把主进程内存吃满才谈得上「解析失败」。取值由 Rust 侧 req_number(\"cleanup\", …) 查表消费，Rust 不落字面量；方案 D-07 给的默认是 8 MB / 4 GB，执行前已按现库与写入侧实际体量复核（内置规则库约 300 KB，引擎单批备份字节上限 256 MB，故 8 MB 清单上限不会误伤正常批次）。"
   ],
   "cleanup": {
     "file": "src-tauri/data/cleanup-rules.json",
@@ -179,7 +180,10 @@
       "maxRegKeysPerItem": 32,
       "maxExcludePathsPerItem": 32,
       "maxTargetLen": 260,
-      "maxTextLen": 200
+      "maxTextLen": 200,
+      "maxRulesJsonBytes": 8388608,
+      "maxBackupManifestBytes": 8388608,
+      "maxFileBackupTotalBytes": 4294967296
     },
     "itemBannedKeys": [
       "deleteMode",
@@ -328,6 +332,17 @@
         "impact": "含正斜杠的路径扫描侧可展开、执行侧展不开；A2 装载端（file_path_form_problem）继续拒 / 与 ? 形态，两侧差异由契约兜住而非靠实现相同",
         "status": "live-divergence",
         "note": "执行侧展开为空时记 unresolved 显式 skip（P0-A2 同批补的假绿记账），不落 ok/0 文件"
+      },
+      {
+        "id": "cleanup-excludepaths-named-value-same-item",
+        "key": "excludePaths:: 具名值排除",
+        "consumer": "src-tauri/src/commands/cleanup/rules.rs",
+        "anchor": "规则 {id}: excludePaths 含具名值排除（::），但 regKeys 存在删树/通配形态（无法保留个别值）",
+        "fact": "excludePaths 里的「键路径::值名」是**注册表面**：它与 regKeys 的冲突判据**只在同一条目内**成立 —— 判据是「本条目自己的 regKeys 里有没有删树（无 value）或通配清值（value=\"*\"）」。跨条目之间没有任何关联：一个条目的具名值排除不会去读别的条目的 regKeys",
+        "impact": "若将来把这条判据扩成跨条目（拿全库的 regKeys 来判），「A 条目排除自己 regKeys 的某个具名值」这一假设会被打破 —— 别的条目只要有删树形态，A 的具名值排除就会被误判为非法（或反过来该拦的没拦）",
+        "status": "live-by-design",
+        "note": "这是**刻意设计**（扫描侧同口径），不是缺陷；本条只做说明性登记，把假设写进契约表，防止日后有人以为它是跨条目语义。要扩成跨条目排除必须另建独立约束面，不能复用本条目判据。Node 侧同款判据在 tools/cleanup-contract.mjs（文案逐字对齐，共享夹具双向核对）",
+        "affectedItems": []
       }
     ],
     "deadSourceKeys": [],

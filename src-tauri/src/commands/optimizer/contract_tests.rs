@@ -18,7 +18,8 @@ use super::restore_point::*;
 #[test]
 fn 全量体检覆盖每一个产得出断言的项() {
     let full = check_optimized(None);
-    assert!(full.len() > 50, "全量体检结果异常少（{} 项），不可能只检了零头", full.len());
+    // 地板按 2026-11-16 三项真机失败项退役后的现值锁定（四项性能项退役后 113，再退三项后 110）。
+    assert!(full.len() >= 105, "全量体检结果异常少（{} 项），可检测面塌缩", full.len());
 
     let mut detectable = 0usize;
     let mut missing = Vec::new();
@@ -110,8 +111,6 @@ fn strip_js_comments(src: &str) -> String {
         for opt_id in [
             "svc_w32time_manual",
             "svc_fdrespum_manual",
-            "svc_storsvc_manual",
-            "svc_xblauthmgr_manual",
         ] {
             let targets: Vec<String> = option_targets(opt_id)
                 .unwrap_or_default()
@@ -144,8 +143,6 @@ fn strip_js_comments(src: &str) -> String {
         for opt_id in [
             "svc_w32time_manual",
             "svc_fdrespum_manual",
-            "svc_storsvc_manual",
-            "svc_xblauthmgr_manual",
         ] {
             let opt = find_option(opt_id).expect("选项应存在");
             let steps = opt
@@ -245,8 +242,8 @@ fn strip_js_comments(src: &str) -> String {
             .nth(2)
             .unwrap_or_default();
         assert!(
-            native.contains("return Err(format!(\"未知启动类型，未停服: {reason}\"))"),
-            "native 轨未知启动类型必须提前拒掉，不得继续停服"
+            native.contains("未知启动类型，未停服") && native.contains("unknown_start = true"),
+            "native 轨未知启动类型必须拒绝停服并继续后续步骤"
         );
     }
 
@@ -327,8 +324,6 @@ fn strip_js_comments(src: &str) -> String {
         for opt_id in [
             "svc_w32time_manual",
             "svc_fdrespum_manual",
-            "svc_storsvc_manual",
-            "svc_xblauthmgr_manual",
         ] {
             let opt = find_option(opt_id).expect("选项应存在");
             let checks = collect_checks(opt);
@@ -381,7 +376,7 @@ fn strip_js_comments(src: &str) -> String {
             "disable 形态不该产出 svcStart 断言（期望值语义不同：disabled vs manual）"
         );
         // 4 个 startType 项不应产出 kind=svc（它们没有 disable:true）
-        for opt_id in ["svc_w32time_manual", "svc_storsvc_manual"] {
+        for opt_id in ["svc_w32time_manual"] {
             let o = find_option(opt_id).expect("选项应存在");
             let kinds: Vec<&'static str> = collect_checks(o).iter().map(|c| c.probe().0).collect();
             assert!(
@@ -389,6 +384,45 @@ fn strip_js_comments(src: &str) -> String {
                 "{opt_id} 无 disable:true，不该产出 kind=svc 断言；实得 {kinds:?}"
             );
         }
+    }
+
+    /// 计划任务禁用项必须产得出断言：旧版一条都没有，账本一清就把「已达标」
+    /// 显示成「未完成还原」。判据同时覆盖「已禁用」与「任务不存在」两种达标形态。
+    #[test]
+    fn 计划任务禁用项产出断言且不存在算达标() {
+        for opt_id in [
+            "tasks_disable_defrag",
+            "tasks_disable_silent_cleanup",
+            "tasks_disable_winbackup",
+            "tasks_disable_settingsync",
+        ] {
+            let opt = find_option(opt_id).expect("选项应存在");
+            let checks = collect_checks(opt);
+            let tasks: Vec<_> = checks.iter().filter(|c| c.probe().0 == "taskDisabled").collect();
+            assert_eq!(
+                tasks.len(),
+                1,
+                "{opt_id} 应恰好产出 1 条 taskDisabled 断言；实得 {:?}",
+                checks.iter().map(|c| c.probe().0).collect::<Vec<_>>()
+            );
+            let (_, path, name) = tasks[0].probe();
+            assert!(path.ends_with('\\'), "{opt_id} 的任务路径必须以反斜杠结尾: {path:?}");
+            assert!(!name.is_empty(), "{opt_id} 的任务名不能为空");
+        }
+
+        // 判红自证：把「任务不存在」改回 false，本条立刻红。
+        assert!(task_verdict(Ok(None)), "任务不存在必须算达标（与执行侧静默跳过同口径）");
+        assert!(task_verdict(Ok(Some(true))), "任务已禁用必须算达标");
+        assert!(!task_verdict(Ok(Some(false))), "任务仍在启用必须判未生效");
+        assert!(!task_verdict(Err("查询失败".into())), "查询失败不得冒充达标");
+
+        // 同类口径：服务本机不存在也必须算达标（`RasAuto` 这类已卸载服务曾让整项恒报未完成）。
+        // 用必然不存在的名字取三态，证明「不存在」与「读失败」在接口上是可分的。
+        assert_eq!(
+            crate::engine::native::service_start_type_state("TrimNoSuchServiceXYZ", 3),
+            Ok(None),
+            "服务不存在必须返回 Ok(None)（达标），不能折成读失败"
+        );
     }
 
     /// R0-b 判据 8：未知 startType 必须记成「判未生效」而不是「跳过」。
@@ -631,7 +665,7 @@ fn strip_js_comments(src: &str) -> String {
         let id0 = retired_items()[0]["id"].as_str().unwrap();
         let id1 = retired_items()[1]["id"].as_str().unwrap();
         let map = json!({
-            id0: { "values": [ { "hive": "CurrentUser", "sub": "Software\\X", "key": "a" } ] },
+            id0: { "values": [ { "hive": "CurrentUser", "sub": "Software\\X", "key": "a", "presence": "value", "exists": true, "type": "REG_SZ", "data": "x" } ] },
             id1: { "values": [] },
             "not-a-retired-id": { "values": [ { "hive": "CurrentUser" } ] },
         });
@@ -748,6 +782,12 @@ fn strip_js_comments(src: &str) -> String {
         let bad = json!({"label": "四字段全缺的畸形步骤", "reg2": "HKLM\\\\X"});
         assert!(!step_has_engine_field(&bad), "四字段全缺却被判为有引擎字段");
         assert_eq!(step_exec_mode(&bad), "unsupported", "预检侧判据与执行链不同结论");
+        // P1-3：未知 startType 在预检面也必须判不可执行。
+        assert_eq!(
+            step_exec_mode(&json!({"label": "未知启动类型", "service": "X", "startType": "sometimes"})),
+            "unsupported",
+            "未知 startType 被预检放行"
+        );
         let reason = unrecognized_step_reason(
             0,
             bad.get("label").and_then(Value::as_str).unwrap_or_default(),
@@ -784,7 +824,7 @@ fn strip_js_comments(src: &str) -> String {
                 }
             }
         }
-        assert!(checked >= 300, "步骤总数异常（现算 {checked}），这条对照已经测不到东西");
+        assert!(checked >= 278, "步骤总数异常（现算 {checked}），这条对照已经测不到东西");
     }
 
     /// R3-L07：`"path": ""` 与「缺 path」「解析失败」同归畸形；重复行只去重不计畸形。
@@ -946,12 +986,12 @@ fn strip_js_comments(src: &str) -> String {
         out
     }
 
-    /// R3-L05：`bcd.rs` 的注释与实现必须同结论，且不养「无人消费的第二个外呼进程」。
+    /// R3-L05：`bcd.rs` 的注释与实现必须同结论，且每个外呼都必须有消费判据。
     ///
     /// 旧注释写「任一枚举失败 → 对应 map 为空、整体不报错」，实现是 `?` 直接 `Err` 上抛、
     /// 整条命令 `success:false`；`{globalsettings}` 那次 bcdedit 的结果传到 `_globals`
-    /// 就没人读了。这里钉两件事：注释不许再写成「不报错」，生产面不许再为 globalsettings
-    /// 起第二个进程（要起就得同时给出消费它的判据）。
+    /// 就没人读了。这里钉：注释不许再写成「不报错」；`{bootmgr}` 的 timeout 必须由
+    /// 启动面板消费；`{globalsettings}` 仍然不许无消费地起进程。
     #[test]
     fn r3_l05_bcd注释与外呼进程口径() {
         let src = include_str!("bcd.rs");
@@ -967,8 +1007,8 @@ fn strip_js_comments(src: &str) -> String {
         );
         assert_eq!(
             prod.matches("run_bcd_enum(").count(),
-            2,
-            "run_bcd_enum 生产侧调用点数变了（应为 1 定义 + 1 调用）——globalsettings 那次外呼被加回来了？"
+            3,
+            "run_bcd_enum 生产侧调用点数变了（应为 1 定义 + {{current}} + {{bootmgr}}）"
         );
         assert!(
             !prod.contains("{globalsettings}"),
@@ -976,6 +1016,10 @@ fn strip_js_comments(src: &str) -> String {
         );
         // 正向对照：`{current}` 这条唯一外呼仍在，且失败姿势是上抛
         assert!(prod.contains("run_bcd_enum(\"{current}\")"), "{{current}} 枚举不见了");
+        assert!(
+            prod.contains("run_bcd_enum(\"{bootmgr}\")"),
+            "{{bootmgr}} 枚举不见了 —— 启动面板的 timeout 将无法判定"
+        );
         assert!(
             prod.contains("enum_current_map() -> Result<BcdMap, String>"),
             "枚举函数签名变了，fail-closed 口径需要重新核对"
@@ -1059,13 +1103,13 @@ fn strip_js_comments(src: &str) -> String {
 
     #[test]
     fn runtime_options_load() {
-        assert!(options().len() >= 100);
+        assert!(options().len() >= 122, "目录项数异常少（{}）", options().len());
         assert!(find_option("tf_defender").is_some());
         assert!(find_option("not_exist").is_none());
-        // 78 项带还原步骤
+        // 2026-11-16 退役后带 restore 段的项为 105（四项性能项退役后再退三项，其中 telemetry_optimize 无 restore）。
         assert!(options().iter().filter(|o| {
             o.get("restore").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty())
-        }).count() >= 70);
+        }).count() >= 103);
     }
 
     /// v2-K2（B11 重写）：还原方向原先生成「交给 pwsh 执行的脚本正文」，不可信值必须锁在
@@ -1386,7 +1430,7 @@ fn strip_js_comments(src: &str) -> String {
 
         let optimized = vec![json!({ "key": "X", "data": "已优化值" })];
         let again = insert_backup_baseline(&mut map, "svc_mem_gb", optimized);
-        assert!(matches!(again, BackupInsert::KeptExisting(1)), "{again:?}");
+        assert!(matches!(again, BackupInsert::KeptExisting), "{again:?}");
         let stored = map["svc_mem_gb"]["values"].as_array().cloned().unwrap_or_default();
         assert_eq!(stored.len(), 1);
         assert_eq!(
@@ -1447,7 +1491,7 @@ fn strip_js_comments(src: &str) -> String {
             let id = o.get("id").and_then(|v| v.as_str()).unwrap_or("");
             assert!(needs_high_risk_confirm(o, id), "risk=high 的 {id} 未被高危闸门覆盖");
         }
-        assert!(n_high >= 5, "数据层 high 项数异常（{n_high}）——是否被批量降级");
+        assert!(n_high >= 9, "数据层 high 项数异常（{n_high}）——是否被批量降级");
 
         // 2026-10-11 随退役/降级收窄：tf_ifeo_perf/tf_ifeo_wipe/tf_dev_audio/tf_dev_printer/
         // tf_onedrive/perf_exploit_protection_off 已退役（find_option 应为 None），
@@ -1766,11 +1810,10 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
     fn m2_服务类盲区项现在能产出断言() {
         // (id, 期望的服务断言条数下限)
         for (id, min_checks) in [
-            ("tf_svc_bulk", 65), // 仅 65 个基础服务；wuauserv 与商店 5 项期望值取决于运行期选项，静态不可断言
-            ("tf_drv_disable", 19),
+            ("tf_svc_bulk", 47), // 仅 65 个基础服务；wuauserv 与商店 5 项期望值取决于运行期选项，静态不可断言
+            ("tf_drv_disable", 17),
             ("svc_connected_devices_manual", 2),
             ("svc_remote_connectivity_manual", 6),
-            ("svc_remote_registry_disable", 1),
             ("svc_bluetooth_disable", 1),
         ] {
             let opt = find_option(id).unwrap_or_else(|| panic!("{id} 应存在于数据层"));
@@ -1807,7 +1850,7 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
         let opt = find_option("tf_svc_bulk").expect("tf_svc_bulk 在目录里");
         let spec = write_spec_of("tf_svc_bulk").expect("tf_svc_bulk 应在写入坐标侧表里");
         let checks = collect_checks(opt);
-        assert!(checks.len() >= 60, "服务清单断言数异常：{}", checks.len());
+        assert!(checks.len() >= 47, "服务清单断言数异常：{}", checks.len());
 
         let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
         for c in &checks {
@@ -1838,7 +1881,6 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
             "tf_drv_disable",
             "svc_connected_devices_manual",
             "svc_remote_connectivity_manual",
-            "svc_remote_registry_disable",
             "svc_bluetooth_disable",
         ] {
             assert!(find_option(id).is_some(), "侧表登记了 {id} 但数据层没有它（退役了？）");
@@ -1930,7 +1972,6 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
     #[test]
     fn m2_a类盲区项现在能产出断言() {
         for (id, min_checks, want_kinds) in [
-            ("peripheral_winkey_off", 1, &["regBinary"][..]),
             ("audio_disable_comm_ducking", 3, &["reg"][..]),
             ("audio_disable_narrator_ducking", 2, &["reg"][..]),
             ("audio_disable_service_restart", 1, &["reg"][..]),
@@ -1978,15 +2019,20 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
                 }
             }
         }
-        // 反向护栏：binary 断言的 hive/subkey 必须真的指向侧表声明的键，
-        // 否则「键名写错」会表现为「恒判未生效」而不是报错。
-        // （2026-10-11 前用 perf_exploit_protection_off 的 MitigationOptions，
-        // 该项随「乱序内存」退役后改用 peripheral_winkey_off 的 Scancode Map。）
-        let opt = find_option("peripheral_winkey_off").unwrap();
-        let checks = collect_checks(opt);
+        // 反向护栏：binary 断言的 hive/subkey 必须真的指向写面。
+        // P0-4/§5-2：peripheral_winkey_off 退役后，用测试内合成 option 保覆盖。
+        let synthetic = json!({
+            "id": "synthetic_regbinary",
+            "steps": [{
+                "label": "Scancode Map",
+                "reg": "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Keyboard Layout]\r\n\"Scancode Map\"=hex:00,00,00,00,00,00,00,00,03,00,00,00,00,00,5b,e0,00,00,5c,e0,00,00,00,00\r\n"
+            }]
+        });
+        let checks = collect_checks(&synthetic);
         let c = checks.iter().find(|c| c.probe().0 == "regBinary").unwrap();
         assert_eq!(c.probe_reg().0, "SYSTEM\\CurrentControlSet\\Control\\Keyboard Layout");
         assert_eq!(c.probe_reg().1, "Scancode Map");
+        assert!(!c.probe_reg().2, "binary 断言不得标成 dword");
     }
 
     /// M2-B：`regAbsent` 判据的**方向**必须对（这是本批最容易被写反的一处）。
@@ -2110,18 +2156,6 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
             Some(expect),
             "写入的 6 字节应读回成 12 个 hex 字符"
         );
-        // 侧表里 peripheral_winkey_off 的 Scancode Map 用的正是同一套 binary 格式。
-        // （2026-10-11 前对照 perf_exploit_protection_off 的 MitigationOptions，该项已退役。）
-        let spec = write_spec_of("peripheral_winkey_off").unwrap();
-        let ra = spec
-            .reg_writes
-            .iter()
-            .find(|r| r.value == "Scancode Map")
-            .expect("侧表里应有 Scancode Map");
-        assert!(ra.expect.len() >= 32, "侧表期望值应是非空 hex 连写: {}", ra.expect);
-        assert!(ra.expect.chars().all(|c| c.is_ascii_hexdigit()), "侧表期望值必须全是 hex 字符");
-        // 键路径对照（防止侧表写错键名，那会表现为恒判未生效而不是报错）
-        assert_eq!(ra.subkey, "SYSTEM\\CurrentControlSet\\Control\\Keyboard Layout");
         let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, probe_sub, value);
     }
 
@@ -2946,9 +2980,9 @@ let ov = include_str!("overview.rs");
     fn 子集作用域只收窄服务断言() {
         let bulk = find_option("tf_svc_bulk").expect("tf_svc_bulk 在目录里");
         let checks = collect_checks(bulk);
-        assert!(checks.len() >= 60, "服务清单断言数异常：{}", checks.len());
+        assert!(checks.len() >= 47, "服务清单断言数异常：{}", checks.len());
 
-        let picked = vec!["RetailDemo".to_string(), "lltdsvc".to_string()];
+        let picked = vec!["FontCache".to_string(), "lltdsvc".to_string()];
         let scoped = scope_checks(&checks, Some(&picked));
         let names: Vec<&str> = scoped
             .iter()
@@ -2962,7 +2996,7 @@ let ov = include_str!("overview.rs");
             picked.len(),
             "收窄后应只剩勾中的服务，实际：{names:?}"
         );
-        assert!(names.contains(&"RetailDemo") && names.contains(&"lltdsvc"), "{names:?}");
+        assert!(names.contains(&"FontCache") && names.contains(&"lltdsvc"), "{names:?}");
         assert!(!names.contains(&"CryptSvc"), "未勾中的服务混进了断言范围");
 
         // 全选（None / 空 vec）⇒ 一条不动，与既有行为一致
@@ -3060,7 +3094,7 @@ let ov = include_str!("overview.rs");
         b.dedup();
         assert_eq!(a.len(), section_items.len(), "分区 items 内有重复 id");
         assert_eq!(b.len(), hidden.len(), "hiddenFromOptimizer 内有重复 id");
-        assert_eq!(a.len(), 21, "隐私面板成员固定 21 项，实际 {}", a.len());
+        assert_eq!(a.len(), 20, "隐私面板成员固定 20 项（telemetry_optimize 退役后），实际 {}", a.len());
         assert_eq!(a, b, "分区成员与 hiddenFromOptimizer 必须同集合（移动不是复制）");
 
         // 每个 id 在 runtime 目录命中

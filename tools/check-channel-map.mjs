@@ -2,7 +2,7 @@
 //
 // 迁移方案 D2 的硬要求：**映射表键集合必须等于 preload.js 的通道集合**，
 // 且新增通道必须同表登记，防止「Rust 有了、前端没接」或反向的静默断裂
-// （R18：当前迁移通道共 177 条（node tools/check-channel-map.mjs --strict 现算：176 invoke + 1 send），
+// （R18：当前迁移通道共 176 条（node tools/check-channel-map.mjs --strict 现算：175 invoke + 1 send），
 // 任一漏迁表现为按钮没反应而非报错，最难发现）。
 //
 // 五组断言：
@@ -61,6 +61,9 @@ const PROBES = ['debug_data_dirs'];
  * 每条必须写明退役理由与日期，否则这条豁免会变成随意删通道的后门。
  */
 const RETIRED = {
+  // 2026-11-16（用户裁定）：第二层「阻止开机自启」（改服务启动类型 / 删计划任务 / 清 Run 项）
+  // 持久且不可还原、副作用过大，整链退役；开机自启改由独立 run 任务处理。
+  'memory:stubborn-block': '2026-11-16（用户裁定）：改服务启动类型 / 删计划任务 / 清 Run 项属持久且不可还原，副作用过大；开机自启改由独立 run 任务处理，命令 + 注册 + CHANNEL_MAP + api 包装 + 前端按钮整链退役',
   // 2026-10-13（用户裁定）：图片预览从「独立子窗 + base64 dataURL」改「主窗内嵌 LiteBox +
   // asset 协议磁盘直连」，preview 子窗整链退役（根因：on_page_load(Finished) 立即 emit
   // preview:data，前端异步 listen 几乎必然晚于 emit → 事件丢失，子窗恒停「正在加载图片…」）。

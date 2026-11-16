@@ -146,14 +146,14 @@ if (psClaims.length === 0) {
   console.log(`   ↳ 真源分账：正向 ${psTruth.applyItems} 项/${psTruth.applySteps} 步，恢复 ${psTruth.restoreItems} 项/${psTruth.restoreSteps} 步，合计 ${psTruth.applySteps + psTruth.restoreSteps} 步`);
 }
 
-// 8b（T1b-M05，v7.2 C09）：同一句承诺里的另外三个数（38/40 步 Rust 原生、只剩 2 步
+// 8b（T1b-M05，v7.2 C09）：同一句承诺里的另外三个数（36/38 步 Rust 原生、只剩 2 步
 // AppX）属**命令层/原生执行账**——第二真源在 check-ps-callsites 的三张登记表，
 // 本门禁不 import 它（两账不许互相代表，也不许在这里复刻第二份现算）。但「同句
 // 只钉一本」等于后两个数零覆盖：这里把它们钉成**声明形态**——数字或措辞一改，
 // 下面的 0 命中判红会立刻把这句拖回审查视野，谁改谁同步来钉。
 {
   const pins = [
-    { label: '8b-1. 「38/40 步由 Rust 原生引擎完成」声明在场', re: /执行时\s*38\/40\s*步由 Rust 原生引擎完成/g },
+    { label: '8b-1. 「36/38 步由 Rust 原生引擎完成」声明在场', re: /执行时\s*36\/38\s*步由 Rust 原生引擎完成/g },
     { label: '8b-2. 「真正起 PowerShell 5.1 的只剩 2 步（两个 AppX 移除项）」声明在场', re: /只剩\s*2\s*步（两个 AppX 移除项）/g },
   ];
   for (const { label, re } of pins) {
@@ -168,18 +168,18 @@ if (psClaims.length === 0) {
   }
 }
 
-// 8c（T1b-M02）：38/40 与「只剩两步」此前只有在场钉——两个数不自洽也不会红。
+// 8c（T1b-M02）：36/38 与「只剩两步」此前只有在场钉——两个数不自洽也不会红。
 // 编译报告不是机读真源，能机检的是**同句自洽**与「两个 AppX 项」的锚点存在性：
 // 句子里的三个数必须满足 原生 + PS = 总数，且 tf_appx / tf_cortana 仍在数据层。
 {
   const claimRe = /执行时\s*(\d+)\/(\d+)\s*步由 Rust 原生引擎完成[^。]*?只剩\s*(\d+)\s*步（两个 AppX 移除项）/g;
   const claims = [...readme.matchAll(claimRe)];
   if (claims.length !== 1) {
-    check(false, '8c. 「38/40 步」同句自洽（恰好 1 处）',
+    check(false, '8c. 「36/38 步」同句自洽（恰好 1 处）',
       `实得 ${claims.length} 处——句子结构变了，必须同步复核命令层账`);
   } else {
     const [, native, total, ps] = claims[0].map(Number);
-    check(native + ps === total, '8c. 「38/40 步」同句自洽（原生 + PowerShell = 总步数）',
+    check(native + ps === total, '8c. 「36/38 步」同句自洽（原生 + PowerShell = 总步数）',
       `${native} + ${ps} = ${native + ps} vs 声明总数 ${total}`);
     const optIds = new Set(optItems.map((o) => o.id));
     const missing = ['tf_appx', 'tf_cortana'].filter((id) => !optIds.has(id));

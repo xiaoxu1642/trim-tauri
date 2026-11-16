@@ -245,9 +245,38 @@ pub(super) fn read_reg_values(targets: &[RegTarget]) -> Option<Vec<Value>> {
     for t in targets {
         let Some(hive) = reg_hive(&t.root) else { return None };
         let state = native::read_reg_value_state(hive, &t.sub, &t.key, false);
-        out.push(backup_entry_from_state(dotnet_hive(&t.root), &t.sub, &t.key, state));
+        let mut entry = backup_entry_from_state(dotnet_hive(&t.root), &t.sub, &t.key, state);
+        // P1-4：服务启动类型还原后是否需要把服务重新拉起来，取决于执行前它在不在运行。
+        // 查询失败不写字段（呈现为「运行态未知」），还原侧不会据此猜一个 Start-Service。
+        if let Some(name) = service_name_from_start_target(t) {
+            if let Some(running) = native::service_running(name) {
+                entry["wasRunning"] = json!(running);
+            }
+        }
+        out.push(entry);
     }
     Some(out)
+}
+
+/// `HKLM\SYSTEM\CurrentControlSet\Services\<name>::Start` → `<name>`；其它坐标返回 None。
+fn service_name_from_start_target(t: &RegTarget) -> Option<&str> {
+    service_name_from_coord(&t.root, &t.sub, &t.key)
+}
+
+fn service_name_from_coord<'a>(root: &str, sub: &'a str, key: &str) -> Option<&'a str> {
+    if !root.eq_ignore_ascii_case("HKEY_LOCAL_MACHINE") || !key.eq_ignore_ascii_case("Start") {
+        return None;
+    }
+    const PREFIX: &str = "system\\currentcontrolset\\services\\";
+    let lower = sub.to_ascii_lowercase();
+    if !lower.starts_with(PREFIX) {
+        return None;
+    }
+    let name = &sub[PREFIX.len()..];
+    if name.is_empty() || name.contains('\\') {
+        return None;
+    }
+    Some(name)
 }
 
 /// 值级备份条目的**唯一构造处**：`presence` 是真源，兼容字段 `exists` 由它派生 ——
@@ -295,6 +324,19 @@ pub(super) fn backup_presence(entry: &Value) -> Option<&str> {
         Some(p @ ("absent" | "value" | "unknown")) => Some(p),
         _ => None,
     }
+}
+
+/// 备份值的可还原 / 存疑计数。`unknown` 与 legacyUnknown 都不计可还原。
+pub(super) fn backup_counts(values: &[Value]) -> (usize, usize) {
+    let restorable = values
+        .iter()
+        .filter(|v| match backup_presence(v) {
+            Some("value" | "absent") => true,
+            Some(_) => false,
+            None => v.get("exists").and_then(|x| x.as_bool()).unwrap_or(false),
+        })
+        .count();
+    (restorable, values.len().saturating_sub(restorable))
 }
 
 /// `perf_wu_pause` 的写入面（R3-M03，2026-11-01）：动态项的步骤由
@@ -420,6 +462,10 @@ const RETIRED_RESTORE_STEPS_JSON: &str = r##"{
   "tf_onedrive": [{"label":"OneDrive 入口 / 策略","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CLASSES_ROOT\\CLSID\\{018D5C66-4533-4307-9B53-224DE2ED1FE6}\\ShellFolder]\r\n\"Attributes\"=dword:00000000\r\n\r\n[HKEY_CLASSES_ROOT\\Wow6432Node\\CLSID\\{018D5C66-4533-4307-9B53-224DE2ED1FE6}\\ShellFolder]\r\n\"Attributes\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\OneDrive]\r\n\"DisableFileSync\"=dword:00000001\r\n\"DisableFileSyncNGSC\"=dword:00000001\r\n\"DisableMeteredNetworkFileSync\"=dword:00000000\r\n\"DisableLibrariesDefaultSaveToOneDrive\"=dword:00000000\r\n"}],
   "tf_hibern_off": [{"label":"快速启动 / 休眠 / 睡眠诊断注册表","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power]\r\n\"HiberbootEnabled\"=dword:00000000\r\n\"HibernateEnabled\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SleepReliability]\r\n\"SleepReliabilityDetailedDiagnostics\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SleepStudy]\r\n\"SleepStudyDisabled\"=dword:00000001\r\n"}],
   "power_off": [{"label":"关闭节能与休眠默认值","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Power]\r\n\"HibernateEnabledDefault\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Power\\PowerThrottling]\r\n\"PowerThrottlingOff\"=dword:00000001\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\DriverSearching]\r\n\"SearchOrderConfig\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\Power\\PowerSettings\\54533251-82be-4824-96c1-47b60b740d00\\943c8cb6-6f93-4227-ad87-e9a3feec08d1]\r\n\"Attributes\"=dword:00000002\r\n"}],
+  "peripheral_winkey_off": [{"label":"Scancode Map 屏蔽 Win 键","pwsh":"$p = \"HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Keyboard Layout\"\n$map = [byte[]](0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0x00,0x00,0x00,0x00,0x00,0x5b,0xe0,0x00,0x00,0x5c,0xe0,0x00,0x00,0x00,0x00)\nNew-Item -Path $p -Force | Out-Null\nNew-ItemProperty -Path $p -Name \"Scancode Map\" -Value $map -PropertyType Binary -Force | Out-Null"}],
+  "sys_minanimate_off": [{"label":"MinAnimate=0","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\Control Panel\\Desktop]\r\n\"MinAnimate\"=dword:00000000\r\n"}],
+  "sys_thumb_cache_off": [{"label":"DisableThumbnailCache=1","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced]\r\n\"DisableThumbnailCache\"=dword:00000001\r\n"}],
+  "sys_transparency_off": [{"label":"EnableTransparency=0","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize]\r\n\"EnableTransparency\"=dword:00000000\r\n"}],
   "tf_oosu": [],
   "tf_gpu_msi": [],
   "tf_usb_msi": [],
@@ -432,7 +478,13 @@ const RETIRED_RESTORE_STEPS_JSON: &str = r##"{
   "tf_mmagent": [],
   "power_aspm_off": [],
   "nara_throttle_off": [],
-  "nara_usb3_lpm_off": []
+  "nara_usb3_lpm_off": [],
+  "svc_remote_registry_disable": [],
+  "svc_storsvc_manual": [],
+  "svc_xblauthmgr_manual": [],
+  "tf_gamebar": [{"label":"PresenceWriter 捕获写入器","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\WindowsRuntime\\ActivatableClassId\\Windows.Media.Capture.AppCaptureBroadcastContract\\PresenceWriter]\r\n\"ActivationType\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\PresenceWriter]\r\n\"Start\"=dword:00000004\r\n"}],
+  "telemetry_optimize": [{"label":"遥测与广告策略","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\DataCollection]\r\n\"AllowTelemetry\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\DataCollection]\r\n\"AllowTelemetry\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Policies\\DataCollection]\r\n\"AllowTelemetry\"=dword:00000000\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Policies\\Microsoft\\Windows\\AdvertisingInfo]\r\n\"DisabledByGroupPolicy\"=dword:00000001\r\n\r\n[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\DeliveryOptimization\\Config]\r\n\"DownloadMode\"=dword:00000000\r\n\r\n[HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\AdvertisingInfo]\r\n\"Enabled\"=dword:00000000\r\n\r\n[HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\AppHost]\r\n\"EnableWebContentEvaluation\"=dword:00000000\r\n\r\n[HKEY_CURRENT_USER\\Control Panel\\International\\User Profile]\r\n\"HttpAcceptLanguageOptOut\"=dword:00000001\r\n"}],
+  "tf_disk_extra3": [{"label":"禁用 NTFS 加密 + 搜索仅限索引位置","reg":"Windows Registry Editor Version 5.00\r\n\r\n[HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\FileSystem]\r\n\"NtfsDisableEncryption\"=dword:00000001\r\n\r\n[HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced]\r\n\"Start_SearchFiles\"=dword:00000000\r\n"}]
 }"##;
 
 /// 历史定义**不可恢复**的退役 id（早于 git 基线，仓内已无当年 steps）。
@@ -599,6 +651,12 @@ fn walk_ps_ops_for_start(ops: &[crate::engine::pssteps::PsOp], out: &mut Vec<Reg
             PsOp::ValueWrite { hive, subkey, name, .. } => {
                 out.push(RegTarget { root: root_of(*hive).into(), sub: subkey.clone(), key: name.clone() });
             }
+            // P0-4：删除型写面也要进基线。备份时按当时状态记 presence
+            // （value = 原值存在并已记录；absent = 原本不存在），还原时据此
+            // 写回原值或保持删除，不得只记「删过」而不记原值。
+            PsOp::ValueRemove { hive, subkey, name } => {
+                out.push(RegTarget { root: root_of(*hive).into(), sub: subkey.clone(), key: name.clone() });
+            }
             PsOp::SvcSetStart { name, .. } => out.push(svc_start_target(name)),
             PsOp::GuardedKeyExists { ops, .. } => walk_ps_ops_for_start(ops, out),
             _ => {}
@@ -684,7 +742,7 @@ pub(super) fn svc_names_writing_start(cmd: &str) -> Vec<String> {
 #[derive(Debug)]
 pub(super) enum BackupInsert {
     Inserted,
-    KeptExisting(usize),
+    KeptExisting,
     MapNotObject,
 }
 
@@ -699,17 +757,18 @@ pub(super) fn insert_backup_baseline(map: &mut Value, option_id: &str, values: V
     let Some(o) = map.as_object_mut() else {
         return BackupInsert::MapNotObject;
     };
-    if let Some(existing) = o.get(option_id) {
-        let n = existing
-            .get("values")
-            .and_then(|v| v.as_array())
-            .map(|a| a.len())
-            .unwrap_or(0);
-        return BackupInsert::KeptExisting(n);
+    if o.contains_key(option_id) {
+        return BackupInsert::KeptExisting;
     }
+    let (restorable, uncertain) = backup_counts(&values);
     o.insert(
         option_id.to_string(),
-        json!({ "at": crate::engine::delete_manifest::iso_now(), "values": values }),
+        json!({
+            "at": crate::engine::delete_manifest::iso_now(),
+            "values": values,
+            "restorable": restorable,
+            "uncertain": uncertain,
+        }),
     );
     BackupInsert::Inserted
 }
@@ -728,6 +787,9 @@ pub async fn optimizer_backup_reg<R: Runtime>(
     };
     let option_id = option_id.unwrap_or_default();
     if find_option(&option_id).is_none() {
+        if let Some(failure) = catalog_load_failure() {
+            return failure;
+        }
         return json!({ "success": false, "message": "未知的优化选项" });
     }
     let Some(targets) = option_targets(&option_id) else {
@@ -747,14 +809,21 @@ pub async fn optimizer_backup_reg<R: Runtime>(
     // 拒写并如实回执，不再把基于空表的「新基线」覆写出去。KeptExisting 时内容不变，
     // update_json 落盘的是等价内容（旧链此分支刻意不落盘，语义等价）。
     let mut count = 0usize;
+    let mut uncertain = 0usize;
     let mut kept = false;
     let res = update_opt_backups(|map| match insert_backup_baseline(map, &option_id, values.clone()) {
         BackupInsert::Inserted => {
-            count = values.len();
+            (count, uncertain) = backup_counts(&values);
             Ok(())
         }
-        BackupInsert::KeptExisting(n) => {
-            count = n;
+        BackupInsert::KeptExisting => {
+            let existing = map
+                .get(&option_id)
+                .and_then(|e| e.get("values"))
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            (count, uncertain) = backup_counts(&existing);
             kept = true;
             Ok(())
         }
@@ -771,7 +840,7 @@ pub async fn optimizer_backup_reg<R: Runtime>(
             if kept { "已保留首份基线，未覆盖" } else { "备份完成" }
         ),
     );
-    json!({ "success": true, "count": count, "baselineKept": kept })
+    json!({ "success": true, "count": count, "uncertain": uncertain, "baselineKept": kept })
 }
 
 /// 台账管理员摘要的拒因码（R3-K01）：`None` = `ok` 放行。
@@ -843,8 +912,16 @@ pub async fn optimizer_restore_reg<R: Runtime>(
     };
     let option_id = option_id.unwrap_or_default();
     // 退役项已不在目录里，但它们的备份必须还能还原（v2-M14）；两份清单都不认的 id 仍然拒。
-    if find_option(&option_id).is_none() && !is_retired_id(&option_id) {
-        return json!({ "success": false, "message": "未知的优化选项" });
+    if find_option(&option_id).is_none() {
+        if let Some(failure) = catalog_load_failure() {
+            return failure;
+        }
+        if !is_retired_id(&option_id) {
+            if let Some(failure) = retired_load_failure() {
+                return failure;
+            }
+            return json!({ "success": false, "message": "未知的优化选项" });
+        }
     }
     // 审查 2026-09-27 M3：值级还原要写回 HKLM/HKCU 备份值，非管理员必然写失败且
     // 此前无任何提示（与 optimizer_run 的提权门槛对齐，needAdmin 走前端提权链）。
@@ -936,7 +1013,10 @@ pub async fn optimizer_restore_reg<R: Runtime>(
     // R3-M02（v7.2 C04，AGENTS §3）：值级还原马上要写回 HKLM/HKCU 备份值——
     // 动手前把日志强制落盘，防尾部日志丢失（与 optimizer_run 执行链同口径）。
     log::flush_sync();
-    let restore_failures = restore_backup_values_with_report(&ops);
+    // P2-3：只重写与备份值不同的坐标，避免把备份后用户/系统又改过的值静默回退。
+    let (needed, skipped_unchanged) = needed_restore_ops(ops.as_slice());
+    let write_ops = AdmittedRestoreOps(needed);
+    let restore_failures = restore_backup_values_with_report(&write_ops);
     if !restore_failures.is_empty() {
         let first = &restore_failures[0];
         return json!({
@@ -966,6 +1046,41 @@ pub async fn optimizer_restore_reg<R: Runtime>(
             "message": format!("还原后回读校验不一致（{mismatched}/{checked} 条），已保留备份记录，可重试或查看日志"),
         });
     }
+    // P1-4：值已写回后，把执行前本就在运行的服务重新拉起来。失败时保留备份并如实回执，
+    // 不把「原值已恢复、服务仍未启动」报成绿色成功。
+    let restart_targets: Vec<String> = values
+        .iter()
+        .filter(|v| v.get("wasRunning").and_then(|x| x.as_bool()).unwrap_or(false))
+        .filter_map(|v| {
+            let root = v.get("hive").and_then(|x| x.as_str()).unwrap_or("");
+            let sub = v.get("sub").and_then(|x| x.as_str()).unwrap_or("");
+            let key = v.get("key").and_then(|x| x.as_str()).unwrap_or("");
+            let root = match root {
+                "LocalMachine" | "HKEY_LOCAL_MACHINE" => "HKEY_LOCAL_MACHINE",
+                _ => return None,
+            };
+            service_name_from_coord(root, sub, key).map(String::from)
+        })
+        .collect();
+    let mut restart_failed: Vec<String> = Vec::new();
+    for name in &restart_targets {
+        if let Err(e) = crate::engine::native::service_start_pub(name) {
+            log::write_log("warn", &format!("值级还原后重启服务失败: {name}: {e}"));
+            restart_failed.push(name.clone());
+        }
+    }
+    if !restart_failed.is_empty() {
+        return json!({
+            "success": false,
+            "restored": restored,
+            "restartFailed": restart_failed.len(),
+            "message": format!(
+                "注册表原值已恢复，但 {} 个服务未能重新启动（{}）；备份记录已保留，可重试",
+                restart_failed.len(),
+                restart_failed.join("、")
+            ),
+        });
+    }
     // v5-K01 批次 4（R7-M05）：清理备份记录走 update_opt_backups——回读校验已通过，
     // 台账清理失败必须如实回执（记录留下可重试），不许静默。
     if let Err(e) = update_opt_backups(|m| {
@@ -974,8 +1089,20 @@ pub async fn optimizer_restore_reg<R: Runtime>(
         }
         Ok(())
     }) {
+        // P3-01：值已写回且回读通过，只有台账清理失败 —— 不能把已完成的还原
+        // 退化成 success:false，否则前端会再跑预置还原并覆盖真实原值。
         log::write_log("error", &format!("优化项还原后清理备份记录失败: {option_id} {e}"));
-        return json!({ "success": false, "message": format!("还原完成但备份记录清理失败: {e}") });
+        let note = format!(
+            "{}{}",
+            ledger_note("还原销账", opt_state::remove(&option_id)),
+            ledger_note("摘灰", opt_state::set_detected_entry(&option_id, false)),
+        );
+        return json!({
+            "success": true,
+            "restored": restored,
+            "ledgerCleanupFailed": true,
+            "message": format!("已按备份还原{note}；但备份记录清理失败（{e}），记录已保留供下次清理")
+        });
     }
     // R3-L07：销账与摘灰写不进去时不静默 —— 成功回执里点名「界面状态可能滞后」。
     let note = format!(
@@ -984,12 +1111,20 @@ pub async fn optimizer_restore_reg<R: Runtime>(
         ledger_note("摘灰", opt_state::set_detected_entry(&option_id, false)),
     );
     log::write_log("info", &format!("优化项注册表已按备份还原: {option_id}（{restored} 项）"));
-    json!({ "success": true, "restored": restored, "message": format!("已按备份还原{note}") })
+    let restarted = restart_targets.len();
+    let restart_note = if restarted > 0 { format!("，并重新启动 {restarted} 个服务") } else { String::new() };
+    json!({
+        "success": true,
+        "restored": restored,
+        "restarted": restarted,
+        "skippedUnchanged": skipped_unchanged,
+        "message": format!("已按备份还原{restart_note}{note}")
+    })
 }
 
 /// 还原操作（B11：不再生成「交给 pwsh 的脚本正文」，而是生成结构化操作，
 /// 由 Rust 直接调注册表 API —— 原先 v2-K2 防的那类注入在**没有 shell** 时不成立）
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub(super) enum RestoreOp {
     /// 回写值：data 已编码为 API 就绪字节
     Write { hive: String, sub: String, key: String, typ: String, bytes: Vec<u8> },
@@ -1171,7 +1306,7 @@ fn encode_restore_ops(values: &[Value], declared: Option<&[RegTarget]>) -> Resul
         if let Some(declared) = declared {
             if !coord_in_surface(declared, &hive, &sub, &key) {
                 refusals.push(format!(
-                    "第 {idx} 项：还原目标 {hive}\\{sub}::{key} 不在本项声明的还原面内（拒绝写入/删除）"
+                    "第 {idx} 项：还原目标 {hive}\\{sub}::{key} 不在本项声明的还原面内（软件更新可能改了该项的写入目标；备份已保留，请勿重复优化，可查日志后按需手动回退）"
                 ));
                 continue;
             }
@@ -1320,8 +1455,10 @@ pub(super) fn verify_restore_ops(ops: &[RestoreOp]) -> (usize, usize) {
                     continue;
                 };
                 checked += 1;
-                if native::read_reg_value_faithful(h, sub, key).is_some() {
-                    mismatched += 1; // 该删的还在
+                // P2-2：Unknown（存在但读不出）不能算「已删除」。
+                match native::read_reg_value_state(h, sub, key, false) {
+                    crate::engine::native::RegReadState::Absent => {}
+                    _ => mismatched += 1,
                 }
             }
         }
@@ -1416,6 +1553,50 @@ pub(super) fn restore_backup_values_with_report(ops: &AdmittedRestoreOps) -> Vec
 
 pub(super) fn restore_backup_values(ops: &AdmittedRestoreOps) -> bool {
     restore_backup_values_with_report(ops).is_empty()
+}
+
+/// P2-3：只保留与当前值不同的操作；已处于目标态的记录跳过并返回跳过数。
+/// 这样还原不会把「备份后用户/系统又改过的值」静默回退。
+pub(super) fn needed_restore_ops(ops: &[RestoreOp]) -> (Vec<RestoreOp>, usize) {
+    use crate::engine::native;
+    let mut keep = Vec::new();
+    let mut skipped = 0usize;
+    for op in ops {
+        let satisfied = match op {
+            RestoreOp::Write { hive, sub, key, typ, bytes } => {
+                let Some(h) = restore_hive(hive) else {
+                    keep.push(op.clone());
+                    continue;
+                };
+                let want_kind = restore_reg_kind(typ);
+                match native::read_reg_value_faithful(h, sub, key) {
+                    Some((got_type, got_data)) if got_type == canonical_type_label(want_kind) => {
+                        let want_data = native::decode_reg_value_bytes(want_kind, bytes, false)
+                            .map(|(_, d)| d)
+                            .unwrap_or_default();
+                        got_data == want_data
+                    }
+                    _ => false,
+                }
+            }
+            RestoreOp::Delete { hive, sub, key } => {
+                let Some(h) = restore_hive(hive) else {
+                    keep.push(op.clone());
+                    continue;
+                };
+                matches!(
+                    native::read_reg_value_state(h, sub, key, false),
+                    crate::engine::native::RegReadState::Absent
+                )
+            }
+        };
+        if satisfied {
+            skipped += 1;
+        } else {
+            keep.push(op.clone());
+        }
+    }
+    (keep, skipped)
 }
 
 #[derive(Debug, Clone)]
@@ -1639,6 +1820,39 @@ mod p0_3_presence_tests {
         assert_eq!(e["exists"], true);
         assert_eq!(e["type"], "REG_DWORD");
         assert_eq!(e["data"], "7");
+    }
+
+    /// P1-12：备份回执的可还原数不包含 presence=unknown / legacyUnknown。
+    #[test]
+    fn 可还原计数排除存疑条目() {
+        let values = vec![
+            json!({"presence":"value","exists":true,"type":"REG_DWORD","data":"1"}),
+            json!({"presence":"absent","exists":false}),
+            json!({"presence":"unknown","exists":false,"unknownReason":"ERROR_ACCESS_DENIED"}),
+            json!({"exists":false}),
+        ];
+        assert_eq!(backup_counts(&values), (2, 2));
+    }
+
+    /// P1-4：只从服务 Start 坐标推导服务名；其它坐标不得误认。
+    #[test]
+    fn 服务启动坐标解析() {
+        assert_eq!(
+            service_name_from_coord(
+                "HKEY_LOCAL_MACHINE",
+                "SYSTEM\\CurrentControlSet\\Services\\MessagingService",
+                "Start"
+            ),
+            Some("MessagingService")
+        );
+        assert_eq!(
+            service_name_from_coord("HKEY_LOCAL_MACHINE", "SYSTEM\\CurrentControlSet\\Control", "Start"),
+            None
+        );
+        assert_eq!(
+            service_name_from_coord("HKEY_CURRENT_USER", "SYSTEM\\CurrentControlSet\\Services\\X", "Start"),
+            None
+        );
     }
 
     /// 无法识别的 presence 取值按旧记录处理（fail-closed 进 legacyUnknown 拒删分支），
@@ -1947,13 +2161,35 @@ mod r3_k01_gate_tests {
             assert!(is_retired_id(id), "历史步骤表里的 {id} 不在退役账本里 —— 表与账本漂移");
         }
         // 正向对照：能恢复的、不能恢复的都在预期状态（防整表被误删/误清空）
-        for id in ["tf_fso", "power_off", "tf_hibern_off", "svc_fax_disable"] {
+        for id in [
+            "tf_fso",
+            "power_off",
+            "tf_hibern_off",
+            "svc_fax_disable",
+            "peripheral_winkey_off",
+            "sys_minanimate_off",
+            "sys_thumb_cache_off",
+            "sys_transparency_off",
+        ] {
             assert!(retired_restore_steps(id).is_some(), "{id} 的历史定义必须可恢复");
             assert!(retired_restore_surface(id).is_some(), "{id} 必须产出声明面函数");
         }
         for id in ["maps_off", "clear_recent_docs_on_exit"] {
             assert!(retired_restore_steps(id).is_none(), "{id} 不该有历史定义（当年早于 git 基线）");
         }
+        // 2026-11-16 退役四项的历史声明面必须真的解析出坐标（Some(空表) 不算可还原）。
+        let winkey = retired_restore_surface("peripheral_winkey_off").expect("winkey 声明面");
+        assert!(
+            winkey.iter().any(|t| t.key == "Scancode Map"),
+            "peripheral_winkey_off 的历史 pwsh 没解析出 Scancode Map: {:?}",
+            winkey.iter().map(|t| &t.key).collect::<Vec<_>>()
+        );
+        let thumbs = retired_restore_surface("sys_thumb_cache_off").expect("thumb 声明面");
+        assert!(
+            thumbs.iter().any(|t| t.key == "DisableThumbnailCache"),
+            "sys_thumb_cache_off 的历史 reg 没解析出 DisableThumbnailCache: {:?}",
+            thumbs.iter().map(|t| &t.key).collect::<Vec<_>>()
+        );
     }
 
     /// 退役账本里的**每个** id 都必须有结论：要么有历史表，要么在不可恢复清单里。
@@ -2130,10 +2366,6 @@ mod r3_m01_m03_baseline_tests {
                 r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\USB::DisableSelectiveSuspend",
             ),
             (
-                "peripheral_winkey_off",
-                r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Keyboard Layout::Scancode Map",
-            ),
-            (
                 "audio_disable_comm_ducking",
                 r"HKEY_CURRENT_USER\Software\Microsoft\Multimedia\Audio::CommDucking",
             ),
@@ -2167,6 +2399,28 @@ mod r3_m01_m03_baseline_tests {
             Some(0),
             "纯 cmd 项不该凭空多出基线目标（收的不是值写入 → 会写出没动过的值）"
         );
+    }
+
+    /// P0-4：pwsh 的删除型写面（`Remove-ItemProperty`）也必须进基线。
+    /// 破坏形态 = 把 `walk_ps_ops_for_start` 的 `ValueRemove` 分支删掉 ⇒ 本用例红。
+    #[test]
+    fn pwsh删除型写面进基线且可还原() {
+        assert_target_in_surface_and_admitted(
+            "tf_nvidia_telemetry",
+            r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Run::NvBackend",
+        );
+        for (id, coord) in [
+            (
+                "perf_wu_enable",
+                r"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate::PauseFeatureUpdatesStartTime",
+            ),
+            (
+                "perf_wu_enable",
+                r"HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU::NoAutoUpdate",
+            ),
+        ] {
+            assert_target_in_surface_and_admitted(id, coord);
+        }
     }
 
     /// R3-M02：子项**附带开关**（extras）的写面必须与主清单一起进基线、可准入。

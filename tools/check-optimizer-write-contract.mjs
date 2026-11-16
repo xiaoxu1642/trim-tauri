@@ -56,7 +56,7 @@ function parseGroups(o) {
   const marks = [];
   // T1a-M23：数组名白名单扩到现算全集（apps/keys/names/paths/tasks 曾在判据外）（apps/keys/names/paths/tasks 曾在判据外，
   // telemetry_optimize 的 $tasks 整段不进 want ⇒ 侧表对拍空转）。
-  for (const m of blob.matchAll(/\$(?:disabled|svcs|drv|services|storeSvc|apps|keys|names|paths|tasks)\s*=\s*@\(/g)) {
+  for (const m of blob.matchAll(/\$(?:disabled|manual|svcs|drv|services|storeSvc|apps|keys|names|paths|tasks)\s*=\s*@\(/g)) {
     marks.push({ at: m.index, kind: 'array' });
   }
   for (const m of blob.matchAll(/\$p\d*\s*=\s*"[^"]*Services\\([A-Za-z0-9_.\-]+)"/g)) {
@@ -385,11 +385,19 @@ for (const [id, spec] of Object.entries(items)) {
       }
     }
     if (r.kind === 'dword' && !r.absent) {
-      // 原文里该值名附近的 -Value N（N 与侧表 expect 相同）
-      const near = blob.slice(Math.max(0, blob.indexOf(r.value) - 200), blob.indexOf(r.value) + 300);
-      const vals = [...near.matchAll(/-Value\s+(\d+)/g)].map((m) => m[1]);
-      if (vals.length && !vals.includes(r.expect)) {
-        regDrift.push(`${at}: dword 期望值 ${r.expect} 不在原文该值名附近的 -Value 列表（${vals.join(',')}）`);
+      // P1-19：按 `-Name <值名>` 锚点向后取该语句的 `-Value N`；抓不到也判红，
+      // 不能因为窗口里恰好没有 -Value 就放行。
+      const esc = r.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const nameRx = new RegExp(`-Name\\s+["']?${esc}["']?`, 'gi');
+      const vals = [];
+      for (const hit of blob.matchAll(nameRx)) {
+        const tail = blob.slice(hit.index, hit.index + 400);
+        for (const m of tail.matchAll(/-Value\s+(\d+)/g)) vals.push(m[1]);
+      }
+      if (vals.length === 0) {
+        regDrift.push(`${at}: 找不到 -Name ${r.value} 对应的 -Value 字面量（判据不能放行未对拍的值）`);
+      } else if (!vals.includes(r.expect)) {
+        regDrift.push(`${at}: dword 期望值 ${r.expect} 不在 -Name ${r.value} 的 -Value 列表（${vals.join(',')}）`);
       }
     }
     if (r.absent) {
@@ -657,12 +665,24 @@ check(
 );
 
 // ---- E. 覆盖率棘轮（只增不减）----
-const BASELINE = 5; // 首版 6；2026-10-11 perf_exploit_protection_off 随「乱序内存」退役，显式降为 5
+const BASELINE = 11; // 2026-11-16 四项性能项退役后 12；同日 RemoteRegistry 不存在项退役后 11；首版 6，2026-10-11 降为 5
 const n = Object.keys(items).length;
 check(
   n >= BASELINE,
   `E. 覆盖率棘轮（登记 ${n} 项 / 基线 ${BASELINE} 项，只增不减）`,
   n < BASELINE ? `缩水 ${BASELINE - n} 项 —— 若确有项退役，请在提交信息里说明并显式下调本基线` : '',
+);
+const REG_WRITES_BASELINE = 17; // 2026-11-16 四项性能项退役后现算 17（原 18）
+const regWriteCount = Object.values(items).reduce(
+  (sum, spec) => sum + (Array.isArray(spec.regWrites) ? spec.regWrites.length : 0),
+  0,
+);
+check(
+  regWriteCount >= REG_WRITES_BASELINE,
+  `E2. regWrites 覆盖率棘轮（登记 ${regWriteCount} 条 / 基线 ${REG_WRITES_BASELINE} 条，只增不减）`,
+  regWriteCount < REG_WRITES_BASELINE
+    ? `缩水 ${REG_WRITES_BASELINE - regWriteCount} 条 —— 若确有项退役，请显式下调本基线并说明理由`
+    : '',
 );
 
 // ---- F. _comment 必须写明「不进双源体系」 ----
@@ -809,8 +829,9 @@ for (const [id, d] of Object.entries(defItems)) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(d.reviewedAt || '')) a7Problems.push(`${id}: reviewedAt 不是 YYYY-MM-DD`);
 }
 // 覆盖率棘轮：登记项数只增不减（确有项退役时显式下调并注明）
-const DEF_BASELINE = 115; // 2026-10-03 首版 126；tf_restore_point 降 125；2026-10-11 6 项退役降 119；
-// tf_mmagent（内存压缩/页合并）退役降 118；2026-10-16 P0-1 电源写面收敛 3 项退役（tf_hibern_off/power_off/power_aspm_off）降 115
+const DEF_BASELINE = 105; // 2026-10-03 首版 126；tf_restore_point 降 125；2026-10-11 6 项退役降 119；
+// tf_mmagent（内存压缩/页合并）退役降 118；2026-10-16 P0-1 电源写面收敛降 115；2026-11-16 四项性能项退役降 111；
+// 同日三项真机失败项（tf_gamebar / telemetry_optimize / tf_disk_extra3）退役降 108
 if (Object.keys(defItems).length < DEF_BASELINE) {
   a7Problems.push(
     `defaults 覆盖缩水：${Object.keys(defItems).length} < 基线 ${DEF_BASELINE} —— `
@@ -820,7 +841,8 @@ if (Object.keys(defItems).length < DEF_BASELINE) {
 // known 项数棘轮：**只增不减**。判红实验 2 抓到的缺口：把一个 `defaultKnown=true`
 // 改成 `false` + `"unknown"` 完全合规（每条规则都过），于是「机械可复核的项」可以
 // 被静默降级成 unknown —— 覆盖率只登记不升级，几个月后这张表就全是 unknown 而没人察觉。
-const DEF_KNOWN_BASELINE = 7; // 2026-10-03 首版 10；2026-10-11 tf_onedrive（随 OneDrive 并入 tf_appx 退役）显式降为 9；
+const DEF_KNOWN_BASELINE = 6; // 2026-10-03 首版 10；2026-10-11 tf_onedrive（随 OneDrive 并入 tf_appx 退役）显式降为 9；
+// 2026-11-16 telemetry_optimize 真机失败退役（唯一一条 defaultKnown=true）显式降为 6；
 // 2026-10-16 P0-1：tf_hibern_off 退役、tf_gpu_latency 收窄为纯 reg 项后「键本应不存在」不再可机械复核，降为 7
 const knownCount = Object.values(defItems).filter((x) => x.defaultKnown).length;
 if (knownCount < DEF_KNOWN_BASELINE) {

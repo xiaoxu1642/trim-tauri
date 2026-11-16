@@ -101,6 +101,11 @@ const TABLE = [
   { file: 'src-tauri/src/commands/optimizer/overview.rs', fn: 'catalog_response', status: 'exempt',
     batch: 'P2/A-09', via: 'optimizer_list',
     reason: 'optimizer:list 的验签拒因 helper 与 catalog_load_failure 共用 success:false + 稳定错误码；degraded 不作为独立渲染层状态' },
+  { file: 'src-tauri/src/commands/optimizer/catalog.rs', fn: 'retired_load_failure', status: 'consumed',
+    via: 'optimizer_state_overview',
+    anchor: { file: 'src/scripts/optimizer.js', fn: 'loadStateOverview', text: 'resp.retiredLoadError' } },
+  { file: 'src-tauri/src/commands/optimizer/overview.rs', fn: 'optimizer_list_groups', status: 'consumed',
+    anchor: { file: 'src/scripts/optimizer.js', fn: 'init', text: "gs.success === false" } },
   { file: 'src-tauri/src/commands/overview.rs', fn: 'overview_hardware', status: 'consumed',
     anchor: { file: 'src/scripts/overview.js', fn: 'loadHardware', text: 'resp.degraded === true' } },
   { file: 'src-tauri/src/engine/native/syspanel.rs', fn: 'power_plan_state', status: 'consumed',
@@ -311,6 +316,14 @@ const anchorJudge = (anchor) => {
 };
 
 /**
+ * 判定对象缺失检测（真仓与合成对照共用）。
+ * @param {string} abs 绝对路径
+ * @param {string} rel 仓库相对路径（写进判红信息）
+ * @returns {string|null} 缺失描述；对象在位返回 null
+ */
+export const missingObject = (abs, rel) => (existsSync(abs) ? null : `${rel} 不存在（判定对象缺失）`);
+
+/**
  * 纯判据：发射面 ⇄ 过渡表双向对账（T1e-M01 / 假绿 #5）。
  * 真仓与合成样本共用同一实现 —— 「新增发射不登记」「消费点被删」「pending 修好不回收」
  * 三条腿都必须能被样本驱动，不再对字面量数组做同义反复。
@@ -378,10 +391,17 @@ export function judgeReconciliation(emitterMap, tableMap, anchorJudgeFn, knownCo
 
 const g = gate(import.meta.url);
 
-// T1e-L09：SKIP 必须**短路** —— `g.finish()` 在 0 失败时不退出，继续 walk 会抛 ENOENT
-// 栈，把「显式 SKIP」退化成崩溃（AGENTS §5 要求缺输入给 SKIP，不许 ENOENT 崩）。
-if (!g.skipUnlessPresent(SRC_RS, 'src-tauri/src（本门禁的判定对象）')
-  || !g.skipUnlessPresent(SRC_JS, 'src/scripts（前端消费面）')) { g.finish(); process.exit(0); }
+// P0-08：判定对象（src-tauri/src 与 src/scripts）是**仓库跟踪目录**，不是本机可选输入。
+// 旧形态按「缺输入 SKIP」处理（exit 0）：目录被搬走或仓库残缺时，本门禁会安静地
+// 什么都不校验并以 0 退出 ⇒ 把「守不住」读成「守住了」（普通绿）。
+// 现在按 fail-closed 判红；并**短路**退出，避免继续 walk 抛 ENOENT 栈（AGENTS §5）。
+for (const [abs, rel] of [[SRC_RS, 'src-tauri/src'], [SRC_JS, 'src/scripts']]) {
+  const miss = missingObject(abs, rel);
+  if (miss) {
+    g.fail(`判定对象缺失：${miss} —— 仓库被破坏或路径搬走，本门禁此刻什么都守不住，判红`);
+    g.finish();
+  }
+}
 
 // ── 盘上现算：Rust 发射面 + 命令名集合 ──────────────────────────────────────────────
 const emitters = new Map();
@@ -498,6 +518,36 @@ g.ok(`degraded 契约对账（双视图 / 函数级）：发射 ${commandCount} 
   else g.ok(`对账判据对照 ${cases.length} 组：新增发射 / 消费点缺失 / pending 未回收 / consumed 锚点缺 fn / 缺理由 / 缺 via / 失效 via / 非法 status / 表多出 全部必红，干净样本放行`);
 }
 
+// ── 合成对照：判据**真身**（真读盘上文件 / 真查对象存在性）也必须能被样本驱动 ──────
+// 为什么要补这一组：上一组用 neverHit/alwaysHit **桩**驱动，判据真身从没被样本走过 ——
+// anchorJudge 真去读盘上文件、existsSync 真去查对象存在性；真身一旦失真（路径拼错、
+// 文件读不到、存在性判定恒 true），桩驱动的对照组照样全绿 ⇒ 门禁失明而无人发现。
+{
+  const emitOf = (file, fn, kind = 'command') => new Map([[keyOf(file, fn), { file, fn, line: 1, kind }]]);
+  const tblOf = (row) => new Map([[keyOf(row.file, row.fn), row]]);
+  const MISSING_JS = 'src/scripts/__no_such_degraded_probe__.js';
+  const cases = [
+    ['锚点文件缺失必红（消费点缺失）',
+      judgeReconciliation(emitOf('a.rs', 'c_cmd'), tblOf({ file: 'a.rs', fn: 'c_cmd', status: 'consumed', anchor: { file: MISSING_JS, fn: 'load', text: 'resp.degraded === true' } }), anchorJudge, new Set(['c_cmd'])).length, 1],
+    ['锚点命中但不在登记消费函数内必红',
+      judgeReconciliation(emitOf('a.rs', 'c_cmd'), tblOf({ file: 'a.rs', fn: 'c_cmd', status: 'consumed', anchor: { file: 'src/scripts/cleanup.js', fn: '__no_such_fn__', text: 'degraded' } }), anchorJudge, new Set(['c_cmd'])).length, 1],
+    ['干净样本放行（真实锚点命中）',
+      judgeReconciliation(emitOf('src-tauri/src/commands/paths.rs', 'paths_load'), tblOf({ file: 'src-tauri/src/commands/paths.rs', fn: 'paths_load', status: 'consumed', anchor: { file: 'src/scripts/pathbinding.js', fn: 'load', text: 'resp.degraded === true' } }), anchorJudge, new Set(['paths_load'])).length, 0],
+  ];
+  const bad = cases.filter(([, got, want]) => got !== want).map(([label, got, want]) => `${label}（期望 ${want}，实得 ${got}）`);
+  if (bad.length) g.fail(`判据真身对照失败：${bad.join('；')}`);
+  else g.ok(`判据真身对照 ${cases.length} 组：锚点文件缺失 / 锚点不在登记消费函数 必红，真实锚点命中放行`);
+
+  // 判定对象缺失检测器：缺失必须被发现、在位不得误报（正反对照）
+  const missProbe = missingObject(join(ROOT, MISSING_JS), MISSING_JS);
+  const hitProbe = missingObject(join(ROOT, 'src', 'scripts', 'cleanup.js'), 'src/scripts/cleanup.js');
+  if (!missProbe || hitProbe !== null) {
+    g.fail(`判定对象缺失检测器对照失败：缺失=${JSON.stringify(missProbe)} 在位=${JSON.stringify(hitProbe)}`);
+  } else {
+    g.ok('判定对象缺失检测器对照：缺失能发现、在位不误报');
+  }
+}
+
 // ---------- B3-4（2026-10-27）：时序前提 ——「还没读到配置」不得与「配置就绪」同形 ----------
 // 病根：`pathConfigState` 初值是 'ok'，于是 load 未完成时也自称就绪；补扫定时器窗口内点
 // 「重新扫描」会拿空 pathConfig 逐键 paths.save，把真源重建成扫描所见 —— 与本门禁主判据
@@ -515,8 +565,9 @@ g.ok(`degraded 契约对账（双视图 / 函数级）：发射 ${commandCount} 
     g.fail('B3-4 正向对照失败：pathConfigState 初值判定器失真');
   }
   const pb = join(ROOT, 'src', 'scripts', 'pathbinding.js');
-  if (!existsSync(pb)) {
-    g.fail('B3-4：src/scripts/pathbinding.js 不存在（判定对象缺失）');
+  const pbMiss = missingObject(pb, 'src/scripts/pathbinding.js');
+  if (pbMiss) {
+    g.fail(`B3-4：${pbMiss}`);
   } else {
     const pbsrc = readFileSync(pb, 'utf8');
     // T1e-M03：判据必须跑注释抹白视图。用 blankJs 会把 `'ok'` 字符串一起抹掉，
@@ -564,7 +615,8 @@ g.ok(`degraded 契约对账（双视图 / 函数级）：发射 ${commandCount} 
   let bad = 0;
   for (const c of consumersToCheck) {
     const abs = join(ROOT, c.file);
-    if (!existsSync(abs)) { g.fail(`F4b-M13：${c.file} 不存在（判定对象缺失）`); bad++; continue; }
+    const miss = missingObject(abs, c.file);
+    if (miss) { g.fail(`F4b-M13：${miss}`); bad++; continue; }
     if (!probe(readFileSync(abs, 'utf8'), c.hint)) {
       g.fail(`F4b-M13：${c.file} 未同时具备 degraded 判定与可见提示 ⇒ 配置损坏会被画成「还没配」`);
       bad++;
@@ -594,7 +646,8 @@ g.ok(`degraded 契约对账（双视图 / 函数级）：发射 ${commandCount} 
     g.fail('A1-L04 正向对照失败：侧表失败可见性判定器失真（必须能区分 degraded 状态与静默 catch(null)）');
   }
   const optAbs = join(ROOT, 'src', 'scripts', 'optimizer.js');
-  if (!existsSync(optAbs)) g.fail('A1-L04：src/scripts/optimizer.js 不存在（判定对象缺失）');
+  const optMiss = missingObject(optAbs, 'src/scripts/optimizer.js');
+  if (optMiss) g.fail(`A1-L04：${optMiss}`);
   else if (!sideProbe(readFileSync(optAbs, 'utf8'))) {
     g.fail('A1-L04：optimizer.js 未同时具备侧表失败状态、日志与「专项数据暂不可用」入口卡文案 ⇒ 失败仍会被静默清空隐藏集合');
   } else {
@@ -615,7 +668,8 @@ g.ok(`degraded 契约对账（双视图 / 函数级）：发射 ${commandCount} 
     g.fail('A1-M05 正向对照失败：规则来源回退可见性判定器失真');
   }
   const cleanupAbs = join(ROOT, 'src', 'scripts', 'cleanup.js');
-  if (!existsSync(cleanupAbs)) g.fail('A1-M05：src/scripts/cleanup.js 不存在（判定对象缺失）');
+  const cleanupMiss = missingObject(cleanupAbs, 'src/scripts/cleanup.js');
+  if (cleanupMiss) g.fail(`A1-M05：${cleanupMiss}`);
   else if (!rulesProbe(readFileSync(cleanupAbs, 'utf8'))) {
     g.fail('A1-M05：cleanup.js 未消费 rulesSource/degraded 或没有可见回退横幅 ⇒ 自定义规则失效仍静默');
   } else {
@@ -623,5 +677,5 @@ g.ok(`degraded 契约对账（双视图 / 函数级）：发射 ${commandCount} 
   }
 }
 
-console.log('对照: 发射判定器 / 消费锚点 / 对账判据三组带可执行正反样本');
+console.log('对照: 发射判定器 / 消费锚点 / 对账判据 / 判据真身四组带可执行正反样本');
 g.finish(`check-degraded-consumption: 全部通过（双视图发射 ${emitters.size} 条；过渡表 pending ${pending} 条，只减不增）`);

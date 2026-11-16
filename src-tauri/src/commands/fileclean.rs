@@ -106,7 +106,7 @@ fn slot_key(label: &str, ty: &str) -> String {
     snapshot::domain_key(label, ty)
 }
 
-fn scope_store(label: &str, ty: &str, root: String, files: HashSet<String>) {
+pub(crate) fn scope_store(label: &str, ty: &str, root: String, files: HashSet<String>) {
     let mut g = FILECLEAN_SCOPES.lock().unwrap_or_else(|e| e.into_inner());
     g.get_or_insert_with(HashMap::new)
         .insert(slot_key(label, ty), Scope { root, files });
@@ -643,6 +643,11 @@ fn scan_response(items: Vec<Value>, total_size: u64, resolved: String, unhandled
 fn in_scope(scope: &Scope, file_path: &str) -> bool {
     let k = path_key(file_path);
     k.starts_with(&scope.root) && scope.files.contains(&k)
+}
+
+pub(crate) fn preview_path_in_scope(label: &str, scan_type: &str, file_path: &str) -> bool {
+    scope_get(label, scan_type)
+        .is_some_and(|scope| in_scope(&scope, file_path))
 }
 
 /// 回收站删除单个文件（供 delete-file / execute 共用），返回 (ok, recycled, message)

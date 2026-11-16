@@ -131,9 +131,9 @@ const MUST_MAIN = [
   'finder_ignore_remove', // 同上：名单移除（写侧）
   'maintenance_run',
   'memory_clean',
-  // v2-H2：两条顽固软件治理命令会批量结束进程 / 改服务启动类型 + 删计划任务，
-  // 后端不校验任何前端确认值，且只有主窗加载 memoryclean.js —— 必须锁为主窗档。
-  'memory_stubborn_block',
+  // v2-H2：顽固软件治理命令会批量结束进程，后端不校验任何前端确认值，
+  // 且只有主窗加载 memoryclean.js —— 必须锁为主窗档。
+  // （同族的 memory_stubborn_block 已于 2026-11-16 整链退役。）
   'memory_stubborn_kill',
   'netcheck_repair',
   'optimizer_backup_reg',

@@ -1,4 +1,2497 @@
 {
+  "_说明": "删除原语调用点棘轮基线：由 `node tools/check-delete-callsites.mjs --write` 现算回填，禁止手抄。顶层 api→file→count 保留棘轮口径，details 记录文件/函数/API/行锚点，meta 记录生成器版本与输入哈希。",
+  "meta": {
+    "generatorVersion": "p1-04e-v1",
+    "inputHash": "e4c88303de169600",
+    "callCount": 414,
+    "cleanupCallCount": 91
+  },
+  "details": [
+    {
+      "api": "DeleteFileW",
+      "file": "native-scanner/src/perf.rs",
+      "fn": "delete_bench_file",
+      "anchor": "if unsafe { DeleteFileW(wide(path).as_ptr()) } == 0 {"
+    },
+    {
+      "api": "reg_import_apply",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "live_roundtrip_原生import_类型不降级",
+      "anchor": "let stat = reg_import_apply(&file).expect( );"
+    },
+    {
+      "api": "reg_import_apply",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "reg_import_apply",
+      "anchor": "pub fn reg_import_apply(path: &std::path::Path) -> Result<RegImportStat, RegImportFailure> {"
+    },
+    {
+      "api": "reg_key_remove",
+      "file": "src-tauri/src/commands/optimizer/backup_restore.rs",
+      "fn": "expand_sz_真机往返回读一致",
+      "anchor": "let _ = native::reg_key_remove(native::hive_hkcu(), SUB, true);"
+    },
+    {
+      "api": "reg_key_remove",
+      "file": "src-tauri/src/commands/optimizer/backup_restore.rs",
+      "fn": "expand_sz_真机往返回读一致",
+      "anchor": "let _ = native::reg_key_remove(native::hive_hkcu(), SUB, true);"
+    },
+    {
+      "api": "reg_key_remove",
+      "file": "src-tauri/src/commands/optimizer/contract_tests.rs",
+      "fn": "drop",
+      "anchor": "let _ = crate::engine::native::reg_key_remove("
+    },
+    {
+      "api": "reg_key_remove",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "cleanup_execute_with_backup_root",
+      "anchor": "if reg_key_remove(*hive, rest, true) {"
+    },
+    {
+      "api": "reg_key_remove",
+      "file": "src-tauri/src/engine/native/registry.rs",
+      "fn": "drop",
+      "anchor": "let _ = reg_key_remove(HKEY_CURRENT_USER, EMPTY, true);"
+    },
+    {
+      "api": "reg_key_remove",
+      "file": "src-tauri/src/engine/native/registry.rs",
+      "fn": "drop",
+      "anchor": "let _ = reg_key_remove(HKEY_CURRENT_USER, NONEMPTY, true);"
+    },
+    {
+      "api": "reg_key_remove",
+      "file": "src-tauri/src/engine/native/registry.rs",
+      "fn": "drop",
+      "anchor": "let _ = reg_key_remove(HKEY_CURRENT_USER, SUB, true);"
+    },
+    {
+      "api": "reg_key_remove",
+      "file": "src-tauri/src/engine/native/registry.rs",
+      "fn": "drop",
+      "anchor": "let _ = reg_key_remove(HKEY_CURRENT_USER, SUB, true);"
+    },
+    {
+      "api": "reg_key_remove",
+      "file": "src-tauri/src/engine/native/registry.rs",
+      "fn": "drop",
+      "anchor": "let _ = reg_key_remove(HKEY_CURRENT_USER, SUB, true);"
+    },
+    {
+      "api": "reg_key_remove",
+      "file": "src-tauri/src/engine/native/registry.rs",
+      "fn": "drop",
+      "anchor": "let _ = reg_key_remove(HKEY_CURRENT_USER, SUB, true);"
+    },
+    {
+      "api": "reg_key_remove",
+      "file": "src-tauri/src/engine/native/registry.rs",
+      "fn": "reg_key_remove",
+      "anchor": "pub fn reg_key_remove(hive: HKEY, subkey: &str, recurse: bool) -> bool {"
+    },
+    {
+      "api": "reg_key_remove",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "drop_hkcu_scratch",
+      "anchor": "let _ = crate::engine::native::reg_key_remove(crate::engine::native::hive_hkcu(), sub, true);"
+    },
+    {
+      "api": "reg_key_remove",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "reg_import_apply_sections",
+      "anchor": "if crate::engine::native::reg_key_remove(hive, &sec.subkey, true) {"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/commands/optimizer/backup_restore.rs",
+      "fn": "restore_backup_values_with_report",
+      "anchor": "Some(h) => !h.is_invalid() && native::reg_restore_delete(h, &sub, &key),"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/commands/optimizer/contract_tests.rs",
+      "fn": "drop",
+      "anchor": "let _ = reg_restore_delete(HKEY_LOCAL_MACHINE, &self.sub, &self.value);"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/commands/optimizer/contract_tests.rs",
+      "fn": "m2_二进制读回原语的四条契约",
+      "anchor": "let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, sub, );"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/commands/optimizer/contract_tests.rs",
+      "fn": "m2_二进制读回原语的四条契约",
+      "anchor": "let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, sub, );"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/commands/optimizer/contract_tests.rs",
+      "fn": "m2_删除语义判据方向正确",
+      "anchor": "let _ = crate::engine::native::reg_restore_delete(HKEY_LOCAL_MACHINE, sub, value);"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/commands/optimizer/contract_tests.rs",
+      "fn": "m2_binary判据真机往返",
+      "anchor": "let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, probe_sub, value);"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/commands/optimizer/contract_tests.rs",
+      "fn": "m2c_两种新形态的判定分支真实生效",
+      "anchor": "let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, probe, );"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/commands/optimizer/contract_tests.rs",
+      "fn": "m2c_两种新形态的判定分支真实生效",
+      "anchor": "let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, probe, );"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/commands/optimizer/contract_tests.rs",
+      "fn": "m2c_enum判据三态真机往返",
+      "anchor": "let _ = crate::engine::native::reg_restore_delete("
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/commands/optimizer/contract_tests.rs",
+      "fn": "m2c_enum判据三态真机往返",
+      "anchor": "let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, probe, );"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/commands/optimizer/contract_tests.rs",
+      "fn": "m3_还原回读验证三种判据",
+      "anchor": "let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, sub, );"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/commands/optimizer/contract_tests.rs",
+      "fn": "m3_还原回读验证三种判据",
+      "anchor": "let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, sub, );"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/commands/optimizer/contract_tests.rs",
+      "fn": "m3_还原回读验证三种判据",
+      "anchor": "let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, sub, );"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/commands/optimizer/contract_tests.rs",
+      "fn": "m3_还原回读验证三种判据",
+      "anchor": "let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, sub, );"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/commands/uninstall/residue.rs",
+      "fn": "uninstall_residue_execute",
+      "anchor": "if crate::engine::native::reg_restore_delete(hive, rest, value_name) {"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "cleanup_execute_with_backup_root",
+      "anchor": "if reg_restore_delete(*hive, rest, &name) {"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "cleanup_execute_with_backup_root",
+      "anchor": "if reg_restore_delete(*hive, rest, v) {"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/engine/native/registry.rs",
+      "fn": "r5c_m01_含nul的目标必须被拒且同名真键不被删",
+      "anchor": "!super::reg_restore_delete(HKEY_CURRENT_USER, REAL, & .to_string()),"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/engine/native/registry.rs",
+      "fn": "r5c_m03_真机_默认值必须枚举到且清单完整",
+      "anchor": "super::reg_restore_delete(HKEY_CURRENT_USER, SUB, ),"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/engine/native/registry.rs",
+      "fn": "reg_restore_delete",
+      "anchor": "pub fn reg_restore_delete(hive: HKEY, subkey: &str, value_name: &str) -> bool {"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "drop",
+      "anchor": "let _ = crate::engine::native::reg_restore_delete("
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "drop_admin_seal",
+      "anchor": "crate::engine::native::reg_restore_delete("
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "drop_admin_seal_for",
+      "anchor": "crate::engine::native::reg_restore_delete("
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "reconcile_admin_seals",
+      "anchor": "let _ = crate::engine::native::reg_restore_delete(hklm, ADMIN_SEAL_SUBKEY, &vn);"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "reg_import_apply_sections",
+      "anchor": "if crate::engine::native::reg_restore_delete(hive, &sec.subkey, name) {"
+    },
+    {
+      "api": "RegDeleteKeyW",
+      "file": "src-tauri/src/engine/native/registry.rs",
+      "fn": "reg_key_remove_checked",
+      "anchor": "let e = RegDeleteKeyW(hive, PCWSTR(sk.as_ptr()));"
+    },
+    {
+      "api": "RegDeleteKeyW",
+      "file": "src-tauri/src/engine/native/registry.rs",
+      "fn": "reg_key_remove_checked",
+      "anchor": "let key = RegDeleteKeyW(hive, PCWSTR(sk.as_ptr()));"
+    },
+    {
+      "api": "RegDeleteKeyW",
+      "file": "src-tauri/src/engine/native/registry.rs",
+      "fn": "reg_key_remove_checked",
+      "anchor": "let r = RegDeleteKeyW(guard.0, PCWSTR(last_w.as_ptr()));"
+    },
+    {
+      "api": "RegDeleteTreeW",
+      "file": "src-tauri/src/engine/native/registry.rs",
+      "fn": "reg_key_remove_checked",
+      "anchor": "let tree = RegDeleteTreeW(hive, PCWSTR(sk.as_ptr()));"
+    },
+    {
+      "api": "RegDeleteValueW",
+      "file": "src-tauri/src/engine/native/contextmenu.rs",
+      "fn": "toggle_cm_item",
+      "anchor": "let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));"
+    },
+    {
+      "api": "RegDeleteValueW",
+      "file": "src-tauri/src/engine/native/contextmenu.rs",
+      "fn": "toggle_cm_item",
+      "anchor": "let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));"
+    },
+    {
+      "api": "RegDeleteValueW",
+      "file": "src-tauri/src/engine/native/contextmenu.rs",
+      "fn": "toggle_cm_item",
+      "anchor": "let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));"
+    },
+    {
+      "api": "RegDeleteValueW",
+      "file": "src-tauri/src/engine/native/contextmenu.rs",
+      "fn": "toggle_cm_item",
+      "anchor": "let _ = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));"
+    },
+    {
+      "api": "RegDeleteValueW",
+      "file": "src-tauri/src/engine/native/contextmenu.rs",
+      "fn": "toggle_cm_item",
+      "anchor": "let _ = RegDeleteValueW(hk2, PCWSTR(nm.as_ptr()));"
+    },
+    {
+      "api": "RegDeleteValueW",
+      "file": "src-tauri/src/engine/native/peripheral.rs",
+      "fn": "peripheral_apply",
+      "anchor": "None => RegDeleteValueW(hk, PCWSTR(nm.as_ptr())),"
+    },
+    {
+      "api": "RegDeleteValueW",
+      "file": "src-tauri/src/engine/native/registry.rs",
+      "fn": "reg_delete_value",
+      "anchor": "let r = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));"
+    },
+    {
+      "api": "RegDeleteValueW",
+      "file": "src-tauri/src/engine/native/registry.rs",
+      "fn": "reg_restore_delete_checked",
+      "anchor": "let r = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));"
+    },
+    {
+      "api": "RegDeleteValueW",
+      "file": "src-tauri/src/engine/native/runtimes_net.rs",
+      "fn": "netcheck_repair",
+      "anchor": "let r = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));"
+    },
+    {
+      "api": "RegDeleteValueW",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "drop",
+      "anchor": "let _ = RegDeleteValueW(hk, PCWSTR(self.0.as_ptr()));"
+    },
+    {
+      "api": "RegDeleteValueW",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "reg_delete_value_status",
+      "anchor": "let status = RegDeleteValueW(hk, PCWSTR(nm.as_ptr()));"
+    },
+    {
+      "api": "remove_dir",
+      "file": "src-tauri/src/commands/gameclean.rs",
+      "fn": "junction_root_rejected",
+      "anchor": "let _ = std::fs::remove_dir(&link);"
+    },
+    {
+      "api": "remove_dir",
+      "file": "src-tauri/src/commands/uninstall/residue_trace_tests.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir(&self.link);"
+    },
+    {
+      "api": "remove_dir",
+      "file": "src-tauri/src/commands/updater.rs",
+      "fn": "install_file_in_downloads_refuses_link_parent",
+      "anchor": "let _ = std::fs::remove_dir(&link);"
+    },
+    {
+      "api": "remove_dir",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "根内重解析段重定向的副本拒删",
+      "anchor": "let _ = std::fs::remove_dir(&sub);"
+    },
+    {
+      "api": "remove_dir",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "prune_file_backups_with",
+      "anchor": "let _ = std::fs::remove_dir(&p);"
+    },
+    {
+      "api": "remove_dir",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir(&self.1);"
+    },
+    {
+      "api": "remove_dir",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir(&self.link);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/cleanup_scan.rs",
+      "fn": "遍历顺序与截断golden_三遍历器",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/cleanup_scan.rs",
+      "fn": "遍历预算耗尽后不再下钻",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/cleanup_scan.rs",
+      "fn": "并行探测保持清单全集",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/cleanup_scan.rs",
+      "fn": "目录型收集模式出清单与身份证基线",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/cleanup_scan.rs",
+      "fn": "扫描侧保护过滤_真机探针",
+      "anchor": "let _ = fs::remove_dir_all(&tmp);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/cleanup_scan.rs",
+      "fn": "扫描侧保护过滤按注入清单生效",
+      "anchor": "let _ = fs::remove_dir_all(&tmp);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/cleanup_scan.rs",
+      "fn": "统计口径与列表口径逐项恒等",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/cleanup_scan.rs",
+      "fn": "checklocked_受保护文件不进占用报告",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/cleanup_scan.rs",
+      "fn": "detect_空路径条目改走候选存在性回退",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/cleanup_scan.rs",
+      "fn": "exclude_paths_分类器按实况分三态",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/cleanup_scan.rs",
+      "fn": "file_deletable_独占打开成本实测",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/cleanup_scan.rs",
+      "fn": "filekeys_单文件根必须进清单",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/cleanup_scan.rs",
+      "fn": "filekeys_skip_lock_不豁免保护闸",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/cleanup_scan.rs",
+      "fn": "to_long_path_对真实_planfile_形状恒等",
+      "anchor": "let _ = fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/cleanup_scan.rs",
+      "fn": "walk_deletable_深度超限不再下钻",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/cleanup_scan.rs",
+      "fn": "walk_fk_dll_深度超限不再下钻",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "大文件扫描三态留痕与终值信号",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "空扫描_递归入口拦住用户目录子树且父目录不判空",
+      "anchor": "let _ = fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "空扫描created字段与stat口径逐字节一致",
+      "anchor": "let _ = fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "枚举mtime与stat同值且重复组输出逐字节一致",
+      "anchor": "let _ = fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "删除侧复检_用户目录子树一律判非空",
+      "anchor": "let _ = fs::remove_dir_all(&raw);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "心跳_磁盘分析器按目录结算且数值逐条递增",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "心跳_大文件按目录结算而非整任务一次",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "心跳_应用数据du通道按目录结算",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "collect_empty_fast_深度超限判非空且不炸",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "drop",
+      "anchor": "fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "drop",
+      "anchor": "fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "drop",
+      "anchor": "fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "drop",
+      "anchor": "let _ = fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "drop",
+      "anchor": "let _ = fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "drop",
+      "anchor": "let _ = fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "drop",
+      "anchor": "let _ = fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "duplicates_根重叠同一文件只枚举一次",
+      "anchor": "let _ = fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "empty_ignore缺失按空名单损坏则显式终止根层年份闸齐平",
+      "anchor": "let _ = fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "empty_scan_only_reports_items_created_before_min_age",
+      "anchor": "let _ = fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "empty_scan_only_reports_items_created_before_min_age",
+      "anchor": "let _ = fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "j12_断链放行活链仍拒",
+      "anchor": "std::fs::remove_dir_all(&target).unwrap();"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "live_non_dir_reparse_entries_are_skipped_with_trace",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "lossy_假键在真实盘上判受保护",
+      "anchor": "let _ = fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "prune_tree_effectively_empty_allows_only_empty_trees",
+      "anchor": "let _ = fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "walk_level_跳过非目录reparse条目并计数",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/util.rs",
+      "fn": "名单落点当前根优先老根兜底两处都无则指当前根",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/util.rs",
+      "fn": "名单落点当前根优先老根兜底两处都无则指当前根",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/util.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/util.rs",
+      "fn": "expand_short_path_字面波浪号采信而真短名展不开才拒绝",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "native-scanner/src/util.rs",
+      "fn": "sandbox",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/diskbench.rs",
+      "fn": "cleanup_residue",
+      "anchor": "match std::fs::remove_dir_all(dir) {"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "超限样本触发truncated_不超限不触发",
+      "anchor": "let _ = std::fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "超限样本触发truncated_不超限不触发",
+      "anchor": "let _ = std::fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "内容根按账号与全局展开且不碰账号库",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "内容根按账号与全局展开且不碰账号库",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "内容根按账号与全局展开且不碰账号库",
+      "anchor": "let _ = std::fs::remove_dir_all(&wroot);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "内容根按账号与全局展开且不碰账号库",
+      "anchor": "let _ = std::fs::remove_dir_all(&wroot);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "深度截断必须记入truncated",
+      "anchor": "let _ = std::fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "深度截断必须记入truncated",
+      "anchor": "let _ = std::fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "条目reparse复核与按路径stat同值且命中集不变",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "条目reparse复核与按路径stat同值且命中集不变",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "无内容根时退回整根扫描",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "无内容根时退回整根扫描",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "真机_junction与文件型reparse条目按枚举快照判reparse",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "真机_junction与文件型reparse条目按枚举快照判reparse",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "nt布局深内容_旧口径零命中_新口径全收",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "nt布局深内容_旧口径零命中_新口径全收",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/gameclean.rs",
+      "fn": "drop",
+      "anchor": "fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/gameclean.rs",
+      "fn": "junction_root_rejected",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/gameclean.rs",
+      "fn": "junction_root_rejected",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/gameclean.rs",
+      "fn": "junction_root_rejected",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/gameclean.rs",
+      "fn": "lossy_redist_file_marked_undeletable",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/gameclean.rs",
+      "fn": "stub_dir_scan_contract",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/gameclean.rs",
+      "fn": "stub_dir_scan_contract",
+      "anchor": "std::fs::remove_dir_all(&root).ok();"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/optimizer/backup_restore.rs",
+      "fn": "补摘要_签的是落盘字节_哈希失败不签",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/optimizer/backup_restore.rs",
+      "fn": "篡改或缺失摘要的台账_摘要状态不可能为ok",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/optimizer/backup_restore.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/optimizer/backup_restore.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/realtime.rs",
+      "fn": "过期报告被回收而新鲜件与非报告件不动",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/realtime.rs",
+      "fn": "sandbox",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/backup_report.rs",
+      "fn": "跨根备份渲染标来源且缺封条仍列出",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/backup_report.rs",
+      "fn": "列表hkml缺管理员摘要时标不可还原",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/backup_report.rs",
+      "fn": "同毫秒同末段必须给出不同备份文件名",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/backup_report.rs",
+      "fn": "渲染拒绝目录项与非文件条目",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/backup_report.rs",
+      "fn": "sandbox",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/drivers_orphan.rs",
+      "fn": "real_symlink_sys_is_not_collected_as_driver_file",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/drivers_orphan.rs",
+      "fn": "real_symlink_sys_is_not_collected_as_driver_file",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/drivers_orphan.rs",
+      "fn": "real_symlink_sys_is_not_collected_as_driver_file",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/residue_trace_tests.rs",
+      "fn": "断链_junction_的_folder_候选放行_活链仍拒",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/residue_trace_tests.rs",
+      "fn": "断链_junction_的_folder_候选放行_活链仍拒",
+      "anchor": "std::fs::remove_dir_all(&target).unwrap();"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/residue_trace_tests.rs",
+      "fn": "bounded_dir_size_counts_files_and_flags_partial",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/residue_trace_tests.rs",
+      "fn": "bounded_dir_size_counts_files_and_flags_partial",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/residue_trace_tests.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/residue_trace_tests.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/residue_trace_tests.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/residue_trace_tests.rs",
+      "fn": "r2a_l04_巨型目标文件在读之前就被挡下",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/uninstall/residue_trace_tests.rs",
+      "fn": "r2a_l04_巨型目标文件在读之前就被挡下",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/updater.rs",
+      "fn": "install_file_in_downloads_refuses_link_parent",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/updater.rs",
+      "fn": "install_file_in_downloads_refuses_link_parent",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/updater.rs",
+      "fn": "install_file_in_downloads_refuses_link_parent",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/commands/updater.rs",
+      "fn": "same_real_dir_resolves_before_compare",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/backup_purge.rs",
+      "fn": "cleanup",
+      "anchor": "let _ = std::fs::remove_dir_all(p);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/hash.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/hash.rs",
+      "fn": "new",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "保留上限不得跟着被改写的清单删到备份根之外",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "裁剪不删本批清单",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "裁批次时保留幸存批次仍在引用的副本",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "裁最老批次时清单与副本同删并回收空规则目录",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "带点目录的排除按目录前缀生效",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "带点目录的排除按目录前缀生效",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "单文件_filekey_能删且不被报成成功零删",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "单文件_filekey_能删且不被报成成功零删",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "反向探针_真实扫描基线下未改必删被改必拦",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "反向探针_真实扫描基线下未改必删被改必拦",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "根目标不可用时降为_skip_而不是报成功零删",
+      "anchor": "let _ = std::fs::remove_dir_all(&missing);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "根内重解析段重定向的副本拒删",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "根内重解析段重定向的副本拒删",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "根内重解析段重定向的副本拒删",
+      "anchor": "let _ = std::fs::remove_dir_all(&target);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "根内重解析段重定向的副本拒删",
+      "anchor": "let _ = std::fs::remove_dir_all(&target);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "根内重解析段重定向的副本拒删",
+      "anchor": "let _ = std::fs::remove_dir_all(&target);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "孤儿副本按冷静期回收且不牵连清单引用的副本",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "仅大小写不同的规则根去重后只算一次",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "仅大小写不同的规则根去重后只算一次",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "清单读不动时放弃孤儿回收",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "删除链_std清位与共享冲突分档_真机探针",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "身份证键_别名写法也必须命中基线",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "身份证键_别名写法也必须命中基线",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "生产路径相位实测",
+      "anchor": "let _ = std::fs::remove_dir_all(&backup);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "生产路径相位实测",
+      "anchor": "let _ = std::fs::remove_dir_all(&backup);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "生产路径相位实测",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "生产路径相位实测",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "执行链相位探针",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "执行链相位探针",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "只读文件删除由std清位且链上计数正确",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "逐文件失败明细收占用项_真文件端到端",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "age_axis_扫描命中集与执行删除集一致",
+      "anchor": "let _ = std::fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "age_axis_扫描命中集与执行删除集一致",
+      "anchor": "let _ = std::fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "cleanup_execute_enforces_min_age",
+      "anchor": "let _ = std::fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "cleanup_execute_enforces_min_age",
+      "anchor": "let _ = std::fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "cleanup_preview_matches_execute_for_reparse_and_lossy",
+      "anchor": "let _ = std::fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "collect_files_respects_depth_cap",
+      "anchor": "let _ = std::fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "collect_files_respects_depth_cap",
+      "anchor": "let _ = std::fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "collect_files_skips_reparse_children",
+      "anchor": "let _ = std::fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "collect_files_skips_reparse_children",
+      "anchor": "let _ = std::fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "collect_files_skips_reparse_children",
+      "anchor": "let _ = std::fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "depth_cap_is_reported_in_details",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "depth_cap_is_reported_in_details",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "drop",
+      "anchor": "fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "drop",
+      "anchor": "fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "filekeys_段内多星在执行侧能展开并删除",
+      "anchor": "let _ = std::fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "filekeys_段内多星在执行侧能展开并删除",
+      "anchor": "let _ = std::fs::remove_dir_all(&base);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "kudu_s2_文件被换后删除被拒且计数",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "kudu_s2_文件被换后删除被拒且计数",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "new",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "sandbox",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/contextmenu.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/contextmenu.rs",
+      "fn": "explorer_image_reparse_self_is_rejected",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/peripheral.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/peripheral.rs",
+      "fn": "new",
+      "anchor": "let _ = std::fs::remove_dir_all(&d);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "越界台账禁用被拒且原文件不动",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "越界台账禁用被拒且原文件不动",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "越界台账启用被拒且原文件不动",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "越界台账启用被拒且原文件不动",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "drop",
+      "anchor": "let _ = fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(p);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "folder删除计划_合法两形态与越界两拒绝",
+      "anchor": "let _ = std::fs::remove_dir_all(&tmp);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "ledger_takes_the_newest_copy_not_the_new_root",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "ledger_takes_the_newest_copy_not_the_new_root",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "peripheral_backup_scan_spans_both_roots_and_sorts_by_time",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "peripheral_backup_scan_spans_both_roots_and_sorts_by_time",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "备份保留上限裁最老份且连封条一起删",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "备份实体定位新根优先且缺文件返回空",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "跨根列举_新根优先且老根标来源",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "名单搬迁逐行合并而非二选一",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "目录搬迁绝不覆盖目标已有文件",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "新根同名目录不屏蔽老根实体",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "新根无名单时整份搬迁",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "lib_test_data_root",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "p0_2b_备份枚举整根拒junction条目拒链接",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "sandbox",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "temp_dir_swap_between_check_and_create_is_rejected",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/protect.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/protect.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/protect.rs",
+      "fn": "kudu_s2_别名解析后指向受保护路径",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/protect.rs",
+      "fn": "literal_tilde_names_are_not_dropped_as_short_name_failures",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/protect.rs",
+      "fn": "literal_tilde_names_are_not_dropped_as_short_name_failures",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "备份内容指向受保护容器时拒还原",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "非法形状一律拒还原",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "封条状态决定放行与否",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "删除键段单独报不支持而不是误报受保护容器",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "续行删除臂对闸可见且两侧键集全等",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "dir",
+      "anchor": "let _ = std::fs::remove_dir_all(&d);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "hklm_未提权或无管理员摘要时拒还原",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "hklm缺边车封条拒还原_hkcu维持放行",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "live_管理员摘要_还原闸与对账闭环",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "reg_backup_seal_states_are_distinguishable",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "rm_sandbox",
+      "anchor": "let _ = std::fs::remove_dir_all(root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "sandbox",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "解包字节上限在写盘前早退",
+      "anchor": "std::fs::remove_dir_all(&probe_root).expect( );"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "未收尾的还原包不留目录",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "已入包内容的还原包不被丢弃路径删掉",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "已入包内容的还原包不被丢弃路径删掉",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "已入包内容的还原包不被丢弃路径删掉",
+      "anchor": "let _ = std::fs::remove_dir_all(&probe);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "摘要判据转接_hash_真源",
+      "anchor": "let _ = std::fs::remove_dir_all(&probe);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "begin",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.a);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.a);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.a);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.b);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.b);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.b);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.pack);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.probe);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "pack_then_restore_restores_bytes_end_to_end",
+      "anchor": "std::fs::remove_dir_all(&root).expect( );"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "pack_then_restore_restores_bytes_end_to_end",
+      "anchor": "std::fs::remove_dir_all(&root).expect( );"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/pwsh/mod.rs",
+      "fn": "递归深度封顶不无限下探",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/pwsh/mod.rs",
+      "fn": "公共根只删收件箱脚本形态且计数可见",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/pwsh/mod.rs",
+      "fn": "回收执行体只删沙箱内的过期文件",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/pwsh/mod.rs",
+      "fn": "临时脚本回收必须递归到子目录",
+      "anchor": "let _ = std::fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/pwsh/mod.rs",
+      "fn": "守卫对已消失的脚本保持静默",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/pwsh/mod.rs",
+      "fn": "守卫离开作用域即删除脚本",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/pwsh/mod.rs",
+      "fn": "写入成功的脚本由守卫持有且内容完整",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/pwsh/mod.rs",
+      "fn": "写入失败不得留下半截脚本",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/pwsh/mod.rs",
+      "fn": "sandbox_dir",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/security/mod.rs",
+      "fn": "回收只动过期隔离件不碰用户文件",
+      "anchor": "let _ = fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/security/mod.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/security/mod.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/security/mod.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/security/mod.rs",
+      "fn": "json_state_readers_are_shape_specific",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/security/mod.rs",
+      "fn": "sandbox",
+      "anchor": "let _ = fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/security/mod.rs",
+      "fn": "shape_mismatch_quarantines_and_recovers",
+      "anchor": "let _ = fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/security/mod.rs",
+      "fn": "update_json_array_形状安全且不改写损坏件",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/security/mod.rs",
+      "fn": "update_json_never_writes_on_read_failure",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/security/mod.rs",
+      "fn": "update_json_serializes_concurrent_writers",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/security/mod.rs",
+      "fn": "update_json对io失败拒写且原路径不动",
+      "anchor": "let _ = fs::remove_dir_all(&root);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/testutil.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_dir_all(&self.0);"
+    },
+    {
+      "api": "remove_dir_all",
+      "file": "src-tauri/src/testutil.rs",
+      "fn": "new",
+      "anchor": "let _ = std::fs::remove_dir_all(&dir);"
+    },
+    {
+      "api": "remove_file",
+      "file": "native-scanner/src/perf.rs",
+      "fn": "sweep_stale_bench_files",
+      "anchor": "match std::fs::remove_file(&p) {"
+    },
+    {
+      "api": "remove_file",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "删除回执_只有目标不在原位才算成功",
+      "anchor": "fs::remove_file(&p).unwrap();"
+    },
+    {
+      "api": "remove_file",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "empty_ignore缺失按空名单损坏则显式终止根层年份闸齐平",
+      "anchor": "let _ = fs::remove_file(&land);"
+    },
+    {
+      "api": "remove_file",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "prune_tree_effectively_empty_allows_only_empty_trees",
+      "anchor": "fs::remove_file(base.join( ).join( )).unwrap();"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/cleanup/backup.rs",
+      "fn": "backup_restore_does_not_overwrite",
+      "anchor": "fs::remove_file(&original).expect( );"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/cleanup/backup.rs",
+      "fn": "restore_entry",
+      "anchor": "let _ = std::fs::remove_file(&dst);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/elevate.rs",
+      "fn": "clear_handshake",
+      "anchor": "let _ = std::fs::remove_file(&p);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/elevate.rs",
+      "fn": "clear_pending_edit_intent",
+      "anchor": "let _ = std::fs::remove_file(&path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/elevate.rs",
+      "fn": "clear_pending_edit_intent_for",
+      "anchor": "let _ = std::fs::remove_file(&path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/elevate.rs",
+      "fn": "clear_pending_edit_intent_for",
+      "anchor": "let _ = std::fs::remove_file(&path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/elevate.rs",
+      "fn": "take_pending_edit_intent",
+      "anchor": "let _ = std::fs::remove_file(&path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/fonts.rs",
+      "fn": "magic_check_rejects_garbage",
+      "anchor": "let _ = std::fs::remove_file(&bad);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/fonts.rs",
+      "fn": "magic_check_rejects_garbage",
+      "anchor": "let _ = std::fs::remove_file(&good);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/fonts.rs",
+      "fn": "magic_check_rejects_garbage",
+      "anchor": "let _ = std::fs::remove_file(&woff);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/fonts.rs",
+      "fn": "stage_font_import",
+      "anchor": "let _ = std::fs::remove_file(&tmp_path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/fonts.rs",
+      "fn": "stage_font_import",
+      "anchor": "let _ = std::fs::remove_file(&tmp_path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/fonts.rs",
+      "fn": "stage_font_import",
+      "anchor": "let _ = std::fs::remove_file(&tmp_path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/optimizer/apply.rs",
+      "fn": "native_execute_steps",
+      "anchor": "let _ = std::fs::remove_file(&candidate);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/optimizer/apply.rs",
+      "fn": "native_execute_steps",
+      "anchor": "let _ = std::fs::remove_file(&candidate);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/optimizer/apply.rs",
+      "fn": "native_execute_steps",
+      "anchor": "let _ = std::fs::remove_file(&reg_path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/realtime.rs",
+      "fn": "prune_reports_in",
+      "anchor": "&& std::fs::remove_file(entry.path()).is_ok()"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/realtime.rs",
+      "fn": "realtime_report_clear",
+      "anchor": "match std::fs::remove_file(entry.path()) {"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/realtime.rs",
+      "fn": "realtime_report_delete",
+      "anchor": "match std::fs::remove_file(&fp) {"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/runtimes.rs",
+      "fn": "do_install",
+      "anchor": "let _ = std::fs::remove_file(&p);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/runtimes.rs",
+      "fn": "download_redist",
+      "anchor": "let _ = std::fs::remove_file(&cache_path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/runtimes.rs",
+      "fn": "download_redist",
+      "anchor": "let _ = std::fs::remove_file(&tmp_path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/runtimes.rs",
+      "fn": "download_redist",
+      "anchor": "let _ = std::fs::remove_file(&tmp_path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/runtimes.rs",
+      "fn": "download_redist",
+      "anchor": "let _ = std::fs::remove_file(&tmp_path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/runtimes.rs",
+      "fn": "download_redist",
+      "anchor": "let _ = std::fs::remove_file(&tmp_path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/runtimes.rs",
+      "fn": "download_to",
+      "anchor": "let _ = std::fs::remove_file(dest);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/runtimes.rs",
+      "fn": "redist_gates_reject_and_accept",
+      "anchor": "let _ = std::fs::remove_file(&bad);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/runtimes.rs",
+      "fn": "redist_gates_reject_and_accept",
+      "anchor": "let _ = std::fs::remove_file(&dest);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/runtimes.rs",
+      "fn": "redist_gates_reject_and_accept",
+      "anchor": "let _ = std::fs::remove_file(&dest);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/uninstall/list_run.rs",
+      "fn": "lpdirectory_钉根_真机探针",
+      "anchor": "let _ = std::fs::remove_file(&probe);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/uninstall/list_run.rs",
+      "fn": "lpdirectory_钉根_真机探针",
+      "anchor": "let _ = std::fs::remove_file(&probe);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/uninstall/list_run.rs",
+      "fn": "r2b_u01_裸名解析序_真机探针",
+      "anchor": "let _ = std::fs::remove_file(&standin);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/updater.rs",
+      "fn": "clean_installer",
+      "anchor": "match std::fs::remove_file(p) {"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/updater.rs",
+      "fn": "updater_completion",
+      "anchor": "let _ = std::fs::remove_file(&path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/commands/updater.rs",
+      "fn": "updater_install",
+      "anchor": "if let Err(e) = std::fs::remove_file(paths::join_data(DONE_FILE)) {"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/backup_write.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_file(&p);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/backup_write.rs",
+      "fn": "land_backup",
+      "anchor": "let _ = std::fs::remove_file(&stage);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/log.rs",
+      "fn": "drop",
+      "anchor": "let _ = fs::remove_file(&self.0);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "保留上限不得跟着被改写的清单删到备份根之外",
+      "anchor": "let _ = std::fs::remove_file(&outside);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "保留上限不得跟着被改写的清单删到备份根之外",
+      "anchor": "let _ = std::fs::remove_file(&outside);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "反向探针_真实扫描基线下未改必删被改必拦",
+      "anchor": "std::fs::remove_file(&swap).unwrap();"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "删除链_std清位与共享冲突分档_真机探针",
+      "anchor": "let raw_b = std::fs::remove_file(&b);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "执行链相位探针",
+      "anchor": "if std::fs::remove_file(p).is_ok() {"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "只读文件删除由std清位且链上计数正确",
+      "anchor": "if let Err(e) = std::fs::remove_file(&target) {"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "cleanup_execute_with_backup_root",
+      "anchor": "let _ = std::fs::remove_file(&dst);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "cleanup_execute_with_backup_root",
+      "anchor": "let _ = std::fs::remove_file(&dst);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "cleanup_execute_with_backup_root",
+      "anchor": "match std::fs::remove_file(path) {"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "cleanup_preview_matches_execute_for_reparse_and_lossy",
+      "anchor": "std::fs::remove_file(&rule_file).expect( );"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_file(f);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_file(p);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "live_tampered_ledger_enable_is_rejected",
+      "anchor": "let _ = std::fs::remove_file(std::env::temp_dir().join( ));"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/syspanel.rs",
+      "fn": "真机电源方案新建导出导入删除探针",
+      "anchor": "let _ = std::fs::remove_file(&export_file);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/syspanel.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_file(path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/syspanel.rs",
+      "fn": "power_plan_export",
+      "anchor": "let _ = std::fs::remove_file(&tmp_path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/syspanel.rs",
+      "fn": "power_plan_export",
+      "anchor": "let _ = std::fs::remove_file(&tmp_path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "prune_backups_reports_read_error",
+      "anchor": "std::fs::remove_file(&file).expect( );"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "封条状态决定放行与否",
+      "anchor": "std::fs::remove_file(reg_seal_path_for(&p)).unwrap();"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "live_管理员摘要_还原闸与对账闭环",
+      "anchor": "std::fs::remove_file(&q).unwrap();"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "live_hklm双封条篡改矩阵",
+      "anchor": "std::fs::remove_file(&seal).unwrap();"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "live_hklm双封条篡改矩阵",
+      "anchor": "std::fs::remove_file(&seal).unwrap();"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/reg_backup.rs",
+      "fn": "live_roundtrip_原生import_类型不降级",
+      "anchor": "let _ = std::fs::remove_file(&file);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "restore",
+      "anchor": "let _ = std::fs::remove_file(&tmp);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "restore",
+      "anchor": "let _ = std::fs::remove_file(&tmp);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "restore",
+      "anchor": "let _ = std::fs::remove_file(&tmp);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "restore",
+      "anchor": "let _ = std::fs::remove_file(&tmp);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "restore",
+      "anchor": "let _ = std::fs::remove_file(&tmp);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "restore",
+      "anchor": "let _ = std::fs::remove_file(&tmp);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/pwsh/mod.rs",
+      "fn": "守卫对已消失的脚本保持静默",
+      "anchor": "std::fs::remove_file(&file).unwrap();"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/pwsh/mod.rs",
+      "fn": "drop",
+      "anchor": "let _ = std::fs::remove_file(&self.path);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/pwsh/mod.rs",
+      "fn": "prune_temp_scripts_in",
+      "anchor": "if std::fs::remove_file(&path).is_ok() {"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/security/mod.rs",
+      "fn": "atomic_write_file",
+      "anchor": "let _ = fs::remove_file(&temp);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/security/mod.rs",
+      "fn": "prune_quarantined_depth",
+      "anchor": "if safe && fs::remove_file(entry.path()).is_ok() {"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/security/mod.rs",
+      "fn": "prune_stale_temps_counts_read_error",
+      "anchor": "std::fs::remove_file(&file).expect( );"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/security/mod.rs",
+      "fn": "prune_stale_temps_depth",
+      "anchor": "match fs::remove_file(&p) {"
+    },
+    {
+      "api": "remove_owned_font_copy",
+      "file": "src-tauri/src/commands/fonts.rs",
+      "fn": "fonts_remove_imported",
+      "anchor": "if !remove_owned_font_copy(&copy_path) {"
+    },
+    {
+      "api": "remove_owned_font_copy",
+      "file": "src-tauri/src/commands/fonts.rs",
+      "fn": "r1b_font_unc_rejected_before_touch",
+      "anchor": "assert!(!remove_owned_font_copy(unc), );"
+    },
+    {
+      "api": "remove_owned_font_copy",
+      "file": "src-tauri/src/commands/fonts.rs",
+      "fn": "remove_owned_font_copy",
+      "anchor": "fn remove_owned_font_copy(raw: &str) -> bool {"
+    },
+    {
+      "api": "remove_owned_font_copy",
+      "file": "src-tauri/src/commands/fonts.rs",
+      "fn": "stage_font_import",
+      "anchor": "remove_owned_font_copy(prev);"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "删除回执_只有目标不在原位才算成功",
+      "anchor": "super::recycle::send_to_trash_os(q.as_os_str()).expect( );"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "delete_one",
+      "anchor": "recycle::send_to_trash_os(p.as_os_str()).map_err(|reason| format!( , reason))"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "native-scanner/src/scan.rs",
+      "fn": "send_to_trash_os",
+      "anchor": "pub fn send_to_trash_os(path: &OsStr) -> Result<(), String> {"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/commands/appearance.rs",
+      "fn": "appearance_bg_delete",
+      "anchor": "match trim_finder::scan::recycle::send_to_trash_os(target.as_os_str()) {"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/commands/fileclean.rs",
+      "fn": "recycle_one",
+      "anchor": "match trim_finder::scan::recycle::send_to_trash_os(std::path::Path::new(file_path).as_os_str())"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/commands/fonts.rs",
+      "fn": "remove_owned_font_copy",
+      "anchor": "match trim_finder::scan::recycle::send_to_trash_os(p.as_os_str()) {"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/commands/optimizer/apply.rs",
+      "fn": "optimizer_run",
+      "anchor": "match trim_finder::scan::recycle::send_to_trash_os(target.path.as_os_str()) {"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/commands/peripheral.rs",
+      "fn": "prune_backups",
+      "anchor": "if let Err(e) = trim_finder::scan::recycle::send_to_trash_os(p.as_os_str()) {"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/commands/peripheral.rs",
+      "fn": "prune_backups",
+      "anchor": "if let Err(e) = trim_finder::scan::recycle::send_to_trash_os(seal_path.as_os_str()) {"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/commands/startup.rs",
+      "fn": "startup_delete",
+      "anchor": "match trim_finder::scan::recycle::send_to_trash_os(std::path::Path::new(p).as_os_str()) {"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/engine/backup_purge.rs",
+      "fn": "purge_pack",
+      "anchor": "trim_finder::scan::recycle::send_to_trash_os(dir.as_os_str())"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/engine/backup_purge.rs",
+      "fn": "trash_file",
+      "anchor": "trim_finder::scan::recycle::send_to_trash_os(p.as_os_str())"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/engine/delete_manifest.rs",
+      "fn": "prune_manifests",
+      "anchor": "match trim_finder::scan::recycle::send_to_trash_os(target.as_os_str()) {"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/engine/log.rs",
+      "fn": "prune_old_logs",
+      "anchor": "match trim_finder::scan::recycle::send_to_trash_os(entry.path().as_os_str()) {"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "prune_file_backups_with",
+      "anchor": "if let Err(e) = trim_finder::scan::recycle::send_to_trash_os(fp.as_os_str()) {"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "prune_file_backups_with",
+      "anchor": "if let Err(e) = trim_finder::scan::recycle::send_to_trash_os(mpath.as_os_str()) {"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "prune_file_backups_with",
+      "anchor": "if let Err(e) = trim_finder::scan::recycle::send_to_trash_os(victim.as_os_str()) {"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/engine/native/maintenance.rs",
+      "fn": "maint_run",
+      "anchor": "let removed = trim_finder::scan::recycle::send_to_trash_os(idx.as_os_str());"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "prune_backups_ext",
+      "anchor": "trim_finder::scan::recycle::send_to_trash_os(p)"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "prune_backups_ext",
+      "anchor": "trim_finder::scan::recycle::send_to_trash_os(p)"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/engine/paths.rs",
+      "fn": "prune_stamped_files",
+      "anchor": "trim_finder::scan::recycle::send_to_trash_os(p)"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/engine/restore_pack.rs",
+      "fn": "prune",
+      "anchor": "match trim_finder::scan::recycle::send_to_trash_os(target.as_os_str()) {"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/engine/shellicon.rs",
+      "fn": "recycle_own",
+      "anchor": "safe && trim_finder::scan::recycle::send_to_trash_os(p.as_os_str()).is_ok()"
+    },
+    {
+      "api": "send_to_trash_os",
+      "file": "src-tauri/src/pwsh/mod.rs",
+      "fn": "prune_reg_backups",
+      "anchor": "if let Err(e) = trim_finder::scan::recycle::send_to_trash_os(path.as_os_str()) {"
+    },
+    {
+      "api": "SHEmptyRecycleBinW",
+      "file": "src-tauri/src/commands/cleanup/recycle_bin.rs",
+      "fn": "cleanup_empty_recycle_bin",
+      "anchor": "shell_ffi::SHEmptyRecycleBinW("
+    },
+    {
+      "api": "SHEmptyRecycleBinW",
+      "file": "src-tauri/src/commands/cleanup/recycle_bin.rs",
+      "fn": "SHEmptyRecycleBinW",
+      "anchor": "pub fn SHEmptyRecycleBinW("
+    },
+    {
+      "api": "startup_delete",
+      "file": "src-tauri/src/commands/startup.rs",
+      "fn": "startup_delete",
+      "anchor": "let mut data = crate::engine::native::startup_delete(&safe)"
+    },
+    {
+      "api": "startup_delete",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "删除方向被拒",
+      "anchor": "let res = startup_delete(&[reg_item( , )])"
+    },
+    {
+      "api": "startup_delete",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "delete_for_test",
+      "anchor": "startup_delete(items)"
+    },
+    {
+      "api": "startup_delete",
+      "file": "src-tauri/src/engine/native/startup.rs",
+      "fn": "startup_delete",
+      "anchor": "pub fn startup_delete(items: &[Value]) -> Result<Value, String> {"
+    }
+  ],
   "send_to_trash_os": {
     "src-tauri/src/commands/appearance.rs": 1,
     "src-tauri/src/commands/fileclean.rs": 1,
@@ -28,7 +2521,7 @@
     "src-tauri/src/commands/updater.rs": 3,
     "src-tauri/src/engine/backup_write.rs": 2,
     "src-tauri/src/engine/log.rs": 1,
-    "src-tauri/src/engine/native/cleanup.rs": 9,
+    "src-tauri/src/engine/native/cleanup.rs": 10,
     "src-tauri/src/engine/native/startup.rs": 3,
     "src-tauri/src/engine/native/syspanel.rs": 4,
     "src-tauri/src/engine/paths.rs": 1,
@@ -54,7 +2547,7 @@
     "src-tauri/src/commands/updater.rs": 4,
     "src-tauri/src/engine/backup_purge.rs": 1,
     "src-tauri/src/engine/hash.rs": 2,
-    "src-tauri/src/engine/native/cleanup.rs": 51,
+    "src-tauri/src/engine/native/cleanup.rs": 53,
     "src-tauri/src/engine/native/contextmenu.rs": 2,
     "src-tauri/src/engine/native/peripheral.rs": 2,
     "src-tauri/src/engine/native/startup.rs": 11,
@@ -102,7 +2595,6 @@
   "RegDeleteValueW": {
     "src-tauri/src/engine/native/contextmenu.rs": 5,
     "src-tauri/src/engine/native/peripheral.rs": 1,
-    "src-tauri/src/engine/native/process.rs": 1,
     "src-tauri/src/engine/native/registry.rs": 2,
     "src-tauri/src/engine/native/runtimes_net.rs": 1,
     "src-tauri/src/engine/native/startup.rs": 2

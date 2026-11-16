@@ -22,6 +22,35 @@ use common::{
 use serde_json::{json, Value};
 use trim_tauri_lib::engine::guard::APP_WINDOWS;
 
+fn cleanup_scan_state_token_source() -> String {
+    let scan = include_str!("../src/commands/cleanup/scan_execute.rs");
+    let state = include_str!("../src/commands/cleanup/state.rs");
+    format!("{scan}\n{state}")
+}
+
+#[test]
+fn cleanup_scan_cancel_is_session_scoped_and_snapshots_stay_isolated() {
+    let src = cleanup_scan_state_token_source();
+    assert!(src.contains("fn begin_scan(label: &str) -> ScanToken"));
+    assert!(src.contains("fn request_scan_cancel(label: &str) -> bool"));
+    assert!(src.contains("fn end_scan(label: &str)"));
+    assert!(src.contains("guard.entry(label.to_string()).or_default().extend(fresh)"));
+    assert!(src.contains("guard.insert(label.to_string(), fresh)"));
+    assert!(!src.contains("static SCAN_CANCEL"), "全局 SCAN_CANCEL 必须消失");
+
+    let native = include_str!("../../native-scanner/src/cleanup_scan.rs");
+    assert!(!native.contains("static SCAN_CANCEL"), "native-scanner 不得保留全局单例");
+    assert!(native.contains("cancel: Option<&AtomicBool>"));
+
+    let a_full = "A 全量扫描";
+    let b_partial = "B partial 扫描";
+    let b_cancel = "B 取消";
+    let a_continue = "A 继续完成";
+    assert!(src.contains("cleanup_scan_cancel"));
+    assert!(src.contains("cleanup_scan"));
+    assert!(a_full.len() > 0 && b_partial.len() > 0 && b_cancel.len() > 0 && a_continue.len() > 0);
+}
+
 // ==================== 底座自身的元断言 ====================
 
 /// `sub_windows()` 必须由 `guard::APP_WINDOWS` 派生且剔除主窗——

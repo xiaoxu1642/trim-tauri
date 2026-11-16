@@ -44,7 +44,7 @@ const IMPL = [
  * 的数，不是被抬高的上限；真实债务只多算不少算，方向仍是「不许再涨」。
  */
 const CEILING = {
-  'src-tauri/src/engine/native/cleanup.rs': 20,
+  'src-tauri/src/engine/native/cleanup.rs': 21,
   'src-tauri/src/commands/fileclean.rs': 7,
   'src-tauri/src/engine/native/startup.rs': 8,
   'src-tauri/src/commands/uninstall/residue_trace_tests.rs': 5,

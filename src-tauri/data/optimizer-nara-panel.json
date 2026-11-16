@@ -11,8 +11,7 @@
         "mmcss_games",
         "net_qos_dscp",
         "tf_gamemode",
-        "game_dvr",
-        "tf_gamebar"
+        "game_dvr"
       ]
     },
     {
@@ -60,7 +59,6 @@
     "net_qos_dscp",
     "tf_gamemode",
     "game_dvr",
-    "tf_gamebar",
     "mmcss_games",
     "nara_bcd_timer",
     "nara_bcd_vsm",
@@ -86,6 +84,6 @@
   ],
   "_sig": {
     "alg": "ed25519",
-    "sig": "Ii3Tq5oJXVKxjWFqUn6MmrL+KRLeuPp1cE2s+Eh1b+mgDLAAU2+JB4PPz35zq5QpWKbqNhJsNlhKUXLbTfdsAg=="
+    "sig": "I8RntUlZGup+1ECkzTuY0o7YHK2xWZyXg9IY42+QaYinDia5nshncdNpUvZOpBcNzbhVB8TkLkZCyDutVnx9Bw=="
   }
 }

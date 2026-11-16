@@ -6,7 +6,6 @@
     "tf_ntfs": "reboot",
     "tf_core_misc": "reboot",
     "tf_timer_coal": "reboot",
-    "tf_gamebar": "reboot",
     "tf_gpu_latency": "reboot",
     "share_off": "reboot",
     "tf_defender": "reboot",
@@ -19,7 +18,6 @@
     "perf_remote_assist_off": "reboot",
     "perf_prefetcher_fast": "reboot",
     "perf_crash_autoreboot": "reboot",
-    "tf_disk_extra3": "reboot",
     "tf_perf_misc": "reboot",
     "mouse_optimize": "explorer",
     "desktop_show_ext": "explorer",
@@ -38,7 +36,6 @@
     "tf_ctx_copymove": "explorer",
     "sys_copilot_hide_button": "explorer",
     "sys_taskbar_anim_off": "explorer",
-    "sys_thumb_cache_off": "explorer",
     "net_no_active_probe": "reboot",
     "devmgr_show_hidden_default": "reboot",
     "nara_kbd_multi_ports": "reboot",
@@ -49,8 +46,6 @@
     "nara_kbd_wpp_ts": "reboot",
     "nara_win32prio": "reboot",
     "nara_mouse_queue": "reboot",
-    "telemetry_optimize": "reboot",
     "tf_nvidia_telemetry": "reboot"
   }
 }
-

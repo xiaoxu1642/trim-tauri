@@ -78,7 +78,7 @@ fn planfile_path(line: &str) -> Option<String> {
 /// 跑一次扫描的原始输出（不做路径裁剪）
 fn scan_raw(rules_json: &str) -> (i32, String, String) {
     let argv = vec!["[\"diffProbe\"]".to_string(), "{}".to_string()];
-    trim_finder::cleanup_scan::run_json(&argv, rules_json, None)
+    trim_finder::cleanup_scan::run_json(&argv, rules_json, None, None)
 }
 
 /// 取 `"pathCandidates":[` 后紧跟的是否就是 `]`（最小解析，不引依赖）

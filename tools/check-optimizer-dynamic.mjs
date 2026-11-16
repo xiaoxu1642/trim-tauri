@@ -662,8 +662,6 @@ function sideMarkerProblem(src, field, sideName, anchor) {
   const REPAIR_IDS = [
     'svc_w32time_manual',
     'svc_fdrespum_manual',
-    'svc_storsvc_manual',
-    'svc_xblauthmgr_manual',
   ];
 
   // ① 前端集合与「数据层里真有 startType 步骤的项」双向一致
@@ -687,8 +685,13 @@ function sideMarkerProblem(src, field, sideName, anchor) {
 
   // ② 每一项在数据层真有可用的 restore 步骤（restore 里也要有 startType，
   //    否则「修复」按钮会指向一个空操作 —— 正是 v0.5.0 那个缺陷的翻版）
+  // P1-23：遍历 A9.1 的 jsIds（动态集合），不再只验旧硬编码清单。
+  const repairSetMatches = JSON.stringify([...REPAIR_IDS].sort()) === JSON.stringify(jsIds);
+  check(repairSetMatches,
+    'A9.2 硬编码修复清单 ⇄ 前端集合（防止新增项只过集合不过步骤）',
+    repairSetMatches ? '' : `硬编码 [${[...REPAIR_IDS].sort().join(',')}] vs 前端 [${jsIds.join(',')}]`);
   const bad = [];
-  for (const id of REPAIR_IDS) {
+  for (const id of jsIds) {
     const o = options.find((x) => x.id === id);
     if (!o) { bad.push(`${id} 不在数据层`); continue; }
     const rs = Array.isArray(o.restore) ? o.restore : [];
@@ -697,7 +700,7 @@ function sideMarkerProblem(src, field, sideName, anchor) {
     }
   }
   check(bad.length === 0,
-    `A9.2 修复入口指向的 restore 步骤真实可用（${REPAIR_IDS.length} 项）`,
+    `A9.2 修复入口指向的 restore 步骤真实可用（${jsIds.length} 项）`,
     bad.join(' / '));
 
   // ③ 五处接线都在。判据必须逐处独立取**互不包含**的字符串，且对同一文件的多处

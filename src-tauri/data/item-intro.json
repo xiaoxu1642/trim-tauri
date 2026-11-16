@@ -1,6 +1,6 @@
 {
   "version": 4,
-  "updatedAt": "2026-11-12",
+  "updatedAt": "2026-11-16",
   "source": "Trim 内置本地简介库：内容随安装包内置、离线取用，这一份简介库本身不外发任何数据",
   "note": "本地简介为离线兜底内容；联网 AI 简介需在用户点击「获取AI简介」后由所选大模型生成，两者在界面上明确区分展示。外发范围按档不同：optimizer/startup/contextmenu/memoryclean/maintenance 只发条目名与厂商；v0.7.0 新增的 residue 档会连条目落点（注册表路径或文件路径，限 target/kind/class 三键白名单，后端 residue_detail_line 统一筛）一起发，用户名/机器名/卷号/整张平台清单不进待发串。 v3 起 byId 值形态为 {desc, tips?}；tips 是「日常 / 游戏 / 办公」三档场景建议，未填的项前端不显示该区。 2026-11-12 新增 uninstallapp 档（软件卸载页「应用详情」二级页）：键为应用显示名关键字，按长关键字优先匹配；只发应用名，不发安装路径。",
   "scopes": {
@@ -650,7 +650,7 @@
           "desc": "HKCU Explorer\\Advanced 的 TaskbarAnimations=0，任务栏按钮在窗口切换/最小化时不再播放滑动动画。属偏好设置。",
           "tips": {
             "normal": "可开：与 MinAnimate 配套，视觉上更「干脆」。",
-            "game": "可开：与 sys_minanimate_off 搭配。",
+            "game": "可开：与「关闭窗口开合动画」搭配。",
             "office": "推荐开：办公机常切窗口，动画关掉更清爽。"
           }
         },
@@ -759,7 +759,7 @@
           }
         },
         "nara_bcd_timer": {
-          "desc": "计时器三件套条件对齐（disabledynamictick/useplatformtick/useplatformclock）。",
+          "desc": "计时器与动态 Tick 条件对齐：仅在本机已有相关启动项时设为推荐值，不新建元素。",
           "tips": {
             "normal": "单核/老机器可开（条件命中）。",
             "game": "条件命中可开：减少计时器中断抖动。",
@@ -962,7 +962,7 @@
         "combine": "合并物理内存页（SystemCombinePhysicalMemoryInformation）：把系统中内容相同的物理页合并以降低页表开销，通常能额外释放少量内存，低配机器上可能造成短暂卡顿。",
         "modified": "修改列表（MemoryFlushModifiedList）：强制把尚未写盘的脏页刷入磁盘后清空，属于高危操作，瞬时磁盘 I/O 较高，可能造成卡顿，建议在空闲时段使用。",
         "standby": "备用列表（全部）（MemoryPurgeStandbyList）：清空全部备用内存页，释放量最大，但代价是下次打开应用时要重新从磁盘加载，短期内可能出现明显卡顿，需二次确认后执行。",
-        "stubbornKill": "两层处理。①「立即结束进程」：一次性结束 MuMu 模拟器、网易 UU 远程、抖音、剪映、WPS/金山办公和微软电脑管家相关的前台及后台进程，未保存的数据可能丢失，执行前请先正常退出这些软件并保存工作；②「阻止开机自启」：把这些软件的后台服务启动类型改为手动并停止（另含抖音与夸克网盘的更新服务），删除 WPS 更新与消息推送任务、抖音守护任务和夸克网盘更新任务，清理抖音托盘的 Run 自启项，并关闭 WPS 自动升级，属持久化设置且不提供自动还原。"
+        "stubbornKill": "一次性结束 MuMu 模拟器、网易 UU 远程、抖音、剪映、WPS/金山办公和微软电脑管家相关的前台及后台进程，未保存的数据可能丢失，执行前请先正常退出这些软件并保存工作。"
       }
     },
     "uninstallapp": {

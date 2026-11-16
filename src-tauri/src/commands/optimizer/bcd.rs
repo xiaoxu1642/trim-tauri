@@ -80,7 +80,7 @@ pub struct BcdElementDetail {
 /// 解析 bcdedit /enum 的原始 stdout → 元素 map
 ///
 /// 解析规则（fail-closed）：
-///   - 逐行扫，匹配 `^\s*([a-zA-Z][a-zA-Z0-9_:]*)\s{2,}(.+)$`（元素名 + 2+ 空格 + 值）
+///   - 逐行扫：元素名后跟分隔空白与值；短名要求更宽的分隔，超长名按固定列宽放行
 ///   - 元素名转小写做键（bcdedit 不区分大小写，统一归一）
 ///   - 继承行（只有 GUID 值、无元素名）跳过
 ///   - 区块标题行（`Windows Boot Loader` / `Global Settings` / 破折号线）跳过
@@ -117,7 +117,7 @@ fn is_section_header(line: &str) -> bool {
     )
 }
 
-/// 一行文本拆成 (元素名, 值) —— 按「2+ 空格分隔」匹配
+/// 一行文本拆成 (元素名, 值) —— 按 bcdedit 固定列宽匹配
 ///
 /// 不用 split_whitespace：值里可能含空格（如 `partition=C:` 不含，但 `bootmenupolicy Standard` 值就是 Standard）。
 /// 元素名本身不含空格（bcdedit 规范），所以「找到第一个 2+ 连续空格 → 左边是名、右边是值」。
@@ -147,13 +147,15 @@ fn split_name_value(line: &str) -> Option<(&str, &str)> {
         return None; // 没有元素名
     }
     let name = &line[name_start..i];
-    // 必须至少 2 个连续空格才是分隔（单空格可能是元素名的一部分？不会，元素名不含空格）
+    // bcdedit 的值列固定：超长元素名（allowedinmemorysettings）只剩一个分隔空格。
+    // 短名字仍要求更宽的分隔，避免把区块标题（`Windows Boot Loader`）误拆成元素行。
     let mut space_count = 0;
     while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
         space_count += 1;
         i += 1;
     }
-    if space_count < 2 {
+    let min_spaces = if name.len() >= 22 { 1 } else { 2 };
+    if space_count < min_spaces {
         return None; // 分隔不够 → 不是元素行
     }
     let value = &line[i..];
@@ -177,7 +179,26 @@ fn split_name_value(line: &str) -> Option<(&str, &str)> {
 /// 连接指引排查方向的措辞已经改掉。
 pub fn enum_current_map() -> Result<BcdMap, String> {
     let current = run_bcd_enum("{current}")?;
-    Ok(parse_bcd_enum(&current))
+    let mut map = parse_bcd_enum(&current);
+    // `timeout` 是启动管理器（{bootmgr}）元素，不在 {current} 里。面板的
+    // nara_bcd_boot 行登记了它，因此必须把 bootmgr 的 timeout 合并进来。
+    match run_bcd_enum("{bootmgr}") {
+        Ok(boot) => merge_bootmgr_timeout(&mut map, &boot),
+        Err(e) => {
+            crate::engine::log::write_log(
+                "warn",
+                &format!("BCD bootmgr 枚举失败，timeout 无法判定: {e}"),
+            );
+        }
+    }
+    Ok(map)
+}
+
+fn merge_bootmgr_timeout(map: &mut BcdMap, bootmgr_stdout: &str) {
+    let mut boot = parse_bcd_enum(bootmgr_stdout);
+    if let Some(v) = boot.remove("timeout") {
+        map.insert("timeout".to_string(), v);
+    }
 }
 
 fn run_bcd_enum(identifier: &str) -> Result<String, String> {
@@ -213,35 +234,35 @@ fn norm_val(s: &str) -> String {
 ///
 /// 所有字符串小写（与 parse_bcd_enum 的键归一一致）。
 /// 用函数返回避免 STATICS 生命周期问题。
-fn row_targets(row_id: &str) -> Vec<(&'static str, &'static str)> {
+fn row_targets(row_id: &str) -> Vec<(&'static str, &'static str, bool)> {
     match row_id {
         "nara_bcd_timer" => vec![
-            ("disabledynamictick", "yes"),
-            ("useplatformtick", "yes"),
-            ("useplatformclock", "__DELETE__"), // __DELETE__ 哨兵：元素应被删除（不存在）
+            ("disabledynamictick", "yes", false),
+            ("useplatformtick", "yes", false),
+            ("useplatformclock", "__DELETE__", true), // __DELETE__：不存在即达标
         ],
         "nara_bcd_vsm" => vec![
-            ("hypervisorlaunchtype", "off"),
-            ("vsmlaunchtype", "off"),
-            ("isolatedcontext", "no"),
+            ("hypervisorlaunchtype", "off", true),
+            ("vsmlaunchtype", "off", true),
+            ("isolatedcontext", "no", true),
         ],
         "nara_bcd_boot" => vec![
-            ("timeout", "0"),
-            ("bootmenupolicy", "standard"),
-            ("bootux", "disabled"),
-            ("quietboot", "yes"),
+            ("timeout", "0", false),
+            ("bootmenupolicy", "standard", false),
+            ("bootux", "disabled", false),
+            ("quietboot", "yes", false),
         ],
         "nara_bcd_lowmem" => vec![
-            ("firstmegabytepolicy", "useall"),
-            ("avoidlowmemory", "0x8000000"),
-            ("nolowmem", "yes"),
-            ("allowedinmemorysettings", "0x0"),
+            ("firstmegabytepolicy", "useall", false),
+            ("avoidlowmemory", "0x8000000", false),
+            ("nolowmem", "yes", false),
+            ("allowedinmemorysettings", "0x0", false),
         ],
         "nara_bcd_irq" => vec![
-            ("configaccesspolicy", "default"),
-            ("msi", "default"),
-            ("usephysicaldestination", "no"),
-            ("usefirmwarepcisettings", "no"),
+            ("configaccesspolicy", "default", true),
+            ("msi", "default", true),
+            ("usephysicaldestination", "no", true),
+            ("usefirmwarepcisettings", "no", true),
         ],
         _ => Vec::new(),
     }
@@ -285,13 +306,17 @@ pub fn evaluate_row(row_id: &'static str, current: &BcdMap) -> BcdRowState {
     let mut elements = Vec::with_capacity(targets.len());
     let mut any_exists = false;
     let mut any_needs = false;
+    let mut missing_required = false;
 
-    for (name, target) in &targets {
+    for (name, target, missing_ok) in &targets {
         // 面板登记元素全在 {current}（R3-L05：globals 那条枚举已随其唯一读者一起删除，
         // 不要再"顺手"加回来——加回来就得同时给出消费它的判据）
         let map = current;
         let exists = map.contains_key(*name);
         any_exists = any_exists || exists;
+        if !exists && !*missing_ok && *target != "__DELETE__" {
+            missing_required = true;
+        }
 
         let current_val = map.get(*name).cloned();
         let needs_change = if *target == "__DELETE__" {
@@ -324,7 +349,7 @@ pub fn evaluate_row(row_id: &'static str, current: &BcdMap) -> BcdRowState {
 
     let kind = if !any_exists {
         BcdRowKind::Unhit
-    } else if any_needs {
+    } else if any_needs || missing_required {
         BcdRowKind::Executable
     } else {
         BcdRowKind::Optimized
@@ -490,6 +515,13 @@ inherit                 {bootloadersettings}
         assert!(map.contains_key("inherit")); // inherit 本身是元素
     }
 
+    /// P1-20：23 字符元素名在 bcdedit 第 24 列只剩 1 个空格，必须仍能解析。
+    #[test]
+    fn parse_handles_23_char_element_with_one_space() {
+        let map = parse_bcd_enum("allowedinmemorysettings 0x0\n");
+        assert_eq!(map.get("allowedinmemorysettings").map(String::as_str), Some("0x0"));
+    }
+
     #[test]
     fn parse_handles_globalsettings() {
         let globals = r#"
@@ -500,6 +532,18 @@ custom:16000067         Yes
 "#;
         let map = parse_bcd_enum(globals);
         assert_eq!(map.get("custom:16000067").unwrap(), "Yes");
+    }
+
+    /// P5-M03 后续真机发现：`timeout` 只在 `{bootmgr}` 里，合并后面板才能判定。
+    #[test]
+    fn merge_bootmgr_timeout_进入面板_map() {
+        let mut map = parse_bcd_enum(SAMPLE_CURRENT);
+        assert!(!map.contains_key("timeout"));
+        merge_bootmgr_timeout(
+            &mut map,
+            "Windows Boot Manager\n--------------------\nidentifier              {bootmgr}\ntimeout                 0\n",
+        );
+        assert_eq!(map.get("timeout").map(String::as_str), Some("0"));
     }
 
     #[test]
@@ -566,6 +610,31 @@ custom:16000067         Yes
         assert_eq!(state.kind, BcdRowKind::Optimized);
     }
 
+    /// P1-21：登记元素部分缺失时，只有「缺失即达标」的行才可判 Optimized；
+    /// 其余行必须保持可执行（缺失元素 = 还没配到目标态）。
+    #[test]
+    fn 部分元素缺失按三态判定() {
+        let mut timer = BcdMap::new();
+        timer.insert("useplatformtick".into(), "Yes".into());
+        assert_eq!(evaluate_row("nara_bcd_timer", &timer).kind, BcdRowKind::Executable);
+
+        let mut boot = BcdMap::new();
+        boot.insert("timeout".into(), "0".into());
+        assert_eq!(evaluate_row("nara_bcd_boot", &boot).kind, BcdRowKind::Executable);
+
+        let mut lowmem = BcdMap::new();
+        lowmem.insert("firstmegabytepolicy".into(), "UseAll".into());
+        assert_eq!(evaluate_row("nara_bcd_lowmem", &lowmem).kind, BcdRowKind::Executable);
+
+        // vsm / irq 的缺失元素等于系统默认值，缺失不算未完成。
+        let mut vsm = BcdMap::new();
+        vsm.insert("hypervisorlaunchtype".into(), "Off".into());
+        assert_eq!(evaluate_row("nara_bcd_vsm", &vsm).kind, BcdRowKind::Optimized);
+        let mut irq = BcdMap::new();
+        irq.insert("configaccesspolicy".into(), "Default".into());
+        assert_eq!(evaluate_row("nara_bcd_irq", &irq).kind, BcdRowKind::Optimized);
+    }
+
     #[test]
     fn 不托管名单与无文档提示分层() {
         let map = parse_bcd_enum(SAMPLE_CURRENT);
@@ -601,8 +670,8 @@ custom:16000067         Yes
             // 基线：全部登记元素处于目标态（`__DELETE__` 元素刻意不存在）
             let base: BcdMap = targets
                 .iter()
-                .filter(|(_, t)| *t != "__DELETE__")
-                .map(|(n, t)| (n.to_string(), t.to_string()))
+                .filter(|(_, t, _)| *t != "__DELETE__")
+                .map(|(n, t, _)| (n.to_string(), t.to_string()))
                 .collect();
             assert_eq!(
                 evaluate_row(row_id, &base).kind,
@@ -610,7 +679,7 @@ custom:16000067         Yes
                 "{row_id} 连基线都没判成达标，夹具与 row_targets 已不同步"
             );
 
-            for (name, target) in &targets {
+            for (name, target, _) in &targets {
                 let mut mutated = base.clone();
                 mutated.insert(
                     name.to_string(),
@@ -625,7 +694,7 @@ custom:16000067         Yes
             }
 
             let mut missing = base.clone();
-            for (name, _) in &targets {
+            for (name, _, _) in &targets {
                 missing.remove(*name);
             }
             assert_eq!(

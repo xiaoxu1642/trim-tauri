@@ -285,6 +285,41 @@ pub fn task_change(path: Option<&str>, name: &str, disable: bool) -> TaskRun {
     }
 }
 
+/// 计划任务当前是否已禁用；`Ok(None)` = 任务不存在。
+///
+/// 为什么需要这条读面：一批优化项的步骤是 `Disable-ScheduledTask` 或
+/// `schtasks /change /disable`，执行侧在任务不存在时按源脚本静默语义跳过
+/// （[`TaskRun`] 的判定），检测侧却一条断言都产不出 —— 账本一旦被清掉，界面就只能把
+/// 「已经达标」显示成「未完成还原」。检测必须与执行侧同口径：**任务不存在 =
+/// 目标状态已达成**。
+///
+/// 判据取任务 XML 的 `<Settings><Enabled>`：`schtasks /Query /XML` 对不存在的任务
+/// 返回非零退出码，据此与「存在但读不出来」分开 —— 后者是 `Err`，调用方按
+/// fail-closed 处理，绝不冒充已禁用。
+pub fn task_disabled(path: Option<&str>, name: &str) -> Result<Option<bool>, String> {
+    let full = format!("{}{}", path.unwrap_or_default(), name);
+    let exe = system_tool("schtasks").map_err(|e| format!("schtasks 无法定位: {e}"))?;
+    let output = crate::engine::systembin::quiet_cmd_timeout(
+        &exe,
+        &["/Query", "/TN", &full, "/XML"],
+        crate::engine::systembin::SCHTASKS_TIMEOUT,
+    )
+    .map_err(|e| format!("schtasks 查询未运行: {e}"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let xml = crate::engine::systembin::decode_native_output(&output.stdout);
+    let enabled = xml
+        .split("<Enabled>")
+        .nth(1)
+        .and_then(|rest| rest.split("</Enabled>").next())
+        .map(|v| v.trim().eq_ignore_ascii_case("true"));
+    match enabled {
+        Some(v) => Ok(Some(!v)),
+        None => Err(format!("计划任务 XML 缺少 Enabled 字段: {full}")),
+    }
+}
+
 // ==================== B8 maint：维护命令 ====================
 
 /// 维护任务子进程超时上限（v2-L4P-37 / F-6）：sfc /scannow 与 DISM RestoreHealth

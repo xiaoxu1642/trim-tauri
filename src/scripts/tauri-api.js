@@ -24,9 +24,10 @@
   }
 
   // CHANNEL_MAP：Electron 通道（preload.js 快照为契约锚点）→ Rust snake_case 命令。
-  // 键集合必须与 preload 的 invoke 通道集合对拍；条数以 node tools/check-channel-map.mjs 现算为准
-  // （F2-L06：不写死统计数字，防过期误导）。生成规则：':' 与 '-' 统一转 '_'，显式列出、不做运行时
-  // 隐式推导，防「Rust 有了、前端没接 / 拼错」静默断裂。
+  // 键集合与 preload 的 invoke 通道集合按例外表对拍：RETIRED 允许 preload 独有，
+  // TAURI_ADDED 允许映射独有；两张表失效仍判红。以 `node tools/check-channel-map.mjs`
+  // 计数为准（F2-L06：不写死统计数字，防过期误导）。生成规则：':' 与 '-' 统一转 '_'，
+  // 显式列出、不做运行时隐式推导，防「Rust 有了、前端没接 / 拼错」静默断裂。
   var CHANNEL_MAP = {
     // app 域（memory:trim 事件已退役：Rust 侧从未有发射点，见 app 段注释）
     'app:get-info': 'app_get_info',
@@ -178,7 +179,6 @@
     'memory:info': 'memory_info',
     'memory:clean': 'memory_clean',
     'memory:stubborn-kill': 'memory_stubborn_kill',
-    'memory:stubborn-block': 'memory_stubborn_block',
     'memory:processes': 'memory_processes',
     'memory:kill': 'memory_kill',
     'processManager:open-window': 'process_manager_open_window',
@@ -437,7 +437,7 @@
     cleanup: {
       rules: function () { return invokeChannel('cleanup:rules'); },
       // 图片预览前按需放行 asset 协议（只放本次点开的那组图，暴露面不常开）
-      allowPreviewAssets: function (paths) { return invokeChannel('cleanup:allow-preview-assets', { paths: paths }); },
+      allowPreviewAssets: function (scanId, scanType, paths) { return invokeChannel('cleanup:allow-preview-assets', { scanId: scanId, scanType: scanType, paths: paths }); },
       regBackupList: function () { return invokeChannel('cleanup:reg-backup-list'); },
       regBackupRestore: function (file) { return invokeChannel('cleanup:reg-backup-restore', { file: file }); },
       fileBackupList: function () { return invokeChannel('cleanup:file-backup-list'); },
@@ -671,7 +671,6 @@
       info: function () { return invokeChannel('memory:info'); },
       clean: function (items) { return invokeChannel('memory:clean', { items: items }); },
       stubbornKill: function () { return invokeChannel('memory:stubborn-kill'); },
-      stubbornBlock: function () { return invokeChannel('memory:stubborn-block'); },
       processes: function () { return invokeChannel('memory:processes'); },
       kill: function (pid) { return invokeChannel('memory:kill', { pid: pid }); }
     },

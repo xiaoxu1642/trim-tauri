@@ -12,6 +12,8 @@ pub use cleanup::{cleanup_detail, CleanupExecuteResult, cleanup_execute, find_ru
 /// 备份清除要复用文件批次的清单解析与根内包含判定（`manifest_rels` /
 /// `backup_victim_within_root`），不另写第二套判据（§5.16）。
 pub(crate) use cleanup::{backup_victim_within_root, manifest_rels};
+pub(crate) use cleanup::{cleanup_byte_limits, ByteLimits};
+pub(crate) use cleanup::FILE_RESTORE_BATCH_MAX;
 mod common;
 pub(crate) use common::to_wide;
 pub(crate) use common::to_wide_checked;
@@ -26,7 +28,7 @@ pub use contextmenu::{cm_restart_explorer, cm_scan, cm_toggle, exe_from_command}
 mod diagnostics;
 pub use diagnostics::{sysdisk, device_info};
 mod maintenance;
-pub use maintenance::{task_change, TaskRun, MAINT_CMD_TIMEOUT, maint_run};
+pub use maintenance::{task_change, task_disabled, TaskRun, MAINT_CMD_TIMEOUT, maint_run};
 pub(crate) use maintenance::{dir_delete_blocked};
 pub(crate) use maintenance::ancestor_reparse_blocked;
 mod memory;
@@ -36,7 +38,7 @@ pub use paths_scan::{paths_scan};
 mod peripheral;
 pub use peripheral::{peripheral_query, peripheral_apply, peripheral_restore};
 mod process;
-pub use process::{kill_process, stubborn_kill, stubborn_block};
+pub use process::{kill_process, stubborn_kill};
 pub(crate) use process::{task_xml_backup_bytes, verify_task_xml_backup};
 mod realtime;
 pub use realtime::{realtime_adapters, realtime_loss};
@@ -46,8 +48,9 @@ mod runtimes_net;
 pub use runtimes_net::{runtimes_status, netcheck_status, runtimes_repair, netcheck_repair};
 mod services;
 pub use services::{
-    service_exists, service_start_type_is, service_absent_or_start_is, start_type_from_label,
+    service_exists, service_start_type_is, service_start_type_state, service_absent_or_start_is, start_type_from_label,
     SVC_START_AUTO, SVC_START_DISABLED, SVC_START_MANUAL, service_stop_pub, service_set_start_pub,
+    service_running, service_start_pub,
 };
 pub(crate) use services::win32_of;
 mod shortcut;

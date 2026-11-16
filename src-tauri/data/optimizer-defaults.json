@@ -50,12 +50,6 @@
       "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
       "reviewedAt": "2026-10-03"
     },
-    "tf_gamebar": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
-      "reviewedAt": "2026-10-03"
-    },
     "tf_gpu_latency": {
       "defaultKnown": false,
       "defaultValue": "unknown",
@@ -84,12 +78,6 @@
       "defaultKnown": false,
       "defaultValue": "unknown",
       "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
-      "reviewedAt": "2026-10-03"
-    },
-    "telemetry_optimize": {
-      "defaultKnown": true,
-      "defaultValue": null,
-      "why": "该键由本项执行时新建（steps 有 / restore 无，共 8 个），原状态必然是「键不存在」",
       "reviewedAt": "2026-10-03"
     },
     "tf_defender": {
@@ -296,12 +284,6 @@
       "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
       "reviewedAt": "2026-10-03"
     },
-    "peripheral_winkey_off": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
-      "reviewedAt": "2026-10-03"
-    },
     "peripheral_mouse_trails": {
       "defaultKnown": false,
       "defaultValue": "unknown",
@@ -354,12 +336,6 @@
       "defaultKnown": false,
       "defaultValue": "unknown",
       "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
-      "reviewedAt": "2026-10-03"
-    },
-    "svc_remote_registry_disable": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "无可机械判定的原值来源（无 restore 段、非新建键）",
       "reviewedAt": "2026-10-03"
     },
     "svc_remote_connectivity_manual": {
@@ -482,19 +458,7 @@
       "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
       "reviewedAt": "2026-10-03"
     },
-    "sys_minanimate_off": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
-      "reviewedAt": "2026-10-03"
-    },
     "sys_taskbar_anim_off": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
-      "reviewedAt": "2026-10-03"
-    },
-    "sys_thumb_cache_off": {
       "defaultKnown": false,
       "defaultValue": "unknown",
       "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
@@ -518,12 +482,6 @@
       "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
       "reviewedAt": "2026-10-03"
     },
-    "sys_transparency_off": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
-      "reviewedAt": "2026-10-03"
-    },
     "devmgr_show_hidden_default": {
       "defaultKnown": false,
       "defaultValue": "unknown",
@@ -537,18 +495,6 @@
       "reviewedAt": "2026-10-03"
     },
     "svc_fdrespum_manual": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
-      "reviewedAt": "2026-10-03"
-    },
-    "svc_storsvc_manual": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
-      "reviewedAt": "2026-10-03"
-    },
-    "svc_xblauthmgr_manual": {
       "defaultKnown": false,
       "defaultValue": "unknown",
       "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
@@ -675,12 +621,6 @@
       "reviewedAt": "2026-10-03"
     },
     "tf_ctx_copymove": {
-      "defaultKnown": false,
-      "defaultValue": "unknown",
-      "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",
-      "reviewedAt": "2026-10-03"
-    },
-    "tf_disk_extra3": {
       "defaultKnown": false,
       "defaultValue": "unknown",
       "why": "restore 段覆盖了全部写入键 ⇒ 原值是「执行前实测到的那个」，因机而异（组策略/用户偏好），不能当出厂值",

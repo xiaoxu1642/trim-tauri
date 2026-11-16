@@ -10,6 +10,7 @@ use crate::engine::{guard, log};
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
 use tauri::Emitter;
 use tauri::WebviewWindow;
 use trim_finder::cleanup_scan;
@@ -238,6 +239,7 @@ fn attach_cross_item_pairs(data: &mut [Value]) -> u64 {
 fn run_cleanup_scan_core<E: FnMut(&Value, usize, usize) + 'static>(
     cats: Vec<String>,
     mut emit: E,
+    cancel: Option<&AtomicBool>,
 ) -> Result<(Vec<Value>, usize), String> {
     let configured = load_paths_config();
     let rules = rules_value_arc().map_err(|e| {
@@ -274,7 +276,7 @@ fn run_cleanup_scan_core<E: FnMut(&Value, usize, usize) + 'static>(
     // 在块外又判了一次 `code != 0`，而块内已经 return 了，那句恒假、且让 `code`
     // 在块外留一个看似有意义的绑定。2026-10-04 审计 §3.2 顺手删掉。
     let stderr = {
-        let (code, _stdout, stderr) = cleanup_scan::run_json(&[cats_json, cfg_json, protect_json], &rules_json, hook);
+        let (code, _stdout, stderr) = cleanup_scan::run_json(&[cats_json, cfg_json, protect_json], &rules_json, hook, cancel);
         if code != 0 {
             let msg = if stderr.trim().is_empty() { format!("退出码 {code}") } else { stderr.trim().to_string() };
             log::write_log("error", &format!("Rust 清理扫描失败: {msg}"));
@@ -403,17 +405,15 @@ fn run_cleanup_scan_core<E: FnMut(&Value, usize, usize) + 'static>(
 }
 
 /// 扫描主体（纯原生引擎；PS 回退已随 S3 删除，见 :11）——窗口版：核心 + 进度 emit + 快照登记。
-pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, cats: Vec<String>, partial: bool) -> Value {
+pub(super) fn do_cleanup_scan<R: tauri::Runtime>(window: &WebviewWindow<R>, label: &str, cats: Vec<String>, partial: bool, token: &ScanToken) -> Value {
     let win = window.clone();
     let core = run_cleanup_scan_core(cats, move |item, done, total| {
         let _ = win.emit(
             "cleanup:scan-progress",
             json!({ "done": done, "total": total, "item": item }),
         );
-    });
-    // 先读取消位再复位：正常结束与 Err 早退都要把位清干净，下一轮不受影响。
-    let cancelled = trim_finder::cleanup_scan::scan_cancel_requested();
-    trim_finder::cleanup_scan::reset_scan_cancel();
+    }, Some(&token.cancelled));
+    let cancelled = token.is_cancelled();
     let (mut data, _malformed) = match core {
         Ok(v) => v,
         Err(msg) => return json!({ "success": false, "message": msg, "data": [] }),
@@ -498,7 +498,7 @@ fn all_rule_ids() -> Vec<String> {
 pub fn cleanup_scan_headless(cats: Vec<String>) -> Value {
     let cats = if cats.is_empty() { all_rule_ids() } else { cats };
     let rules = rules_value_arc().unwrap_or_default();
-    let (mut data, malformed) = match run_cleanup_scan_core(cats, |_, _, _| {}) {
+    let (mut data, malformed) = match run_cleanup_scan_core(cats, |_, _, _| {}, None) {
         Ok(v) => v,
         Err(msg) => return json!({ "success": false, "message": msg, "data": [], "counts": Value::Null }),
     };
@@ -562,14 +562,12 @@ fn parse_categories(categories: Option<&Value>) -> Result<Vec<String>, String> {
     let Some(a) = c.as_array() else {
         return Err("categories 不是数组".to_string());
     };
-    // 上限 512 与契约 maxItems(400) 对齐并留余量：全量扫描把全部条目 id 传上来，
-    // 规则库扩到 205 条时旧上限 200 直接把全量扫描拒成「清理分类参数无效」
-    // （2026-10-13 真机复检实测引爆）。上限的本意是防滥用，不该比库容量还小。
+    // P1-03b：扫描参数上限与执行上限同源；当前规则库总量低于该值，超限仅可能是误用或滥用。
     if a.is_empty() {
         return Err("categories 是空数组".to_string());
     }
-    if a.len() > 512 {
-        return Err(format!("categories 有 {} 项，超过上限 512", a.len()));
+    if a.len() > EXECUTE_MAX_ITEMS {
+        return Err(format!("categories 有 {} 项，超过上限 {EXECUTE_MAX_ITEMS}", a.len()));
     }
     let mut out = Vec::with_capacity(a.len());
     let mut seen: HashSet<String> = HashSet::new();
@@ -614,10 +612,14 @@ pub async fn cleanup_scan<R: tauri::Runtime>(window: WebviewWindow<R>, categorie
             .insert(label.clone(), HashMap::new());
     }
     log::write_log("info", &format!("开始扫描{}: {}", if partial { "（仅勾选）" } else { "" }, cats.join(", ")));
-    // 新一轮扫描复位取消位（上一轮「停止扫描」可能留下的 true 不许影响本轮）。
-    trim_finder::cleanup_scan::reset_scan_cancel();
+    next_scan_epoch(&label);
+    let token = begin_scan(&label);
     let win = window.clone();
-    let task = tauri::async_runtime::spawn_blocking(move || do_cleanup_scan(&win, &label, cats, partial));
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        let result = do_cleanup_scan(&win, &label, cats, partial, &token);
+        end_scan(&label);
+        result
+    });
     match task.await {
         Ok(v) => v,
         Err(e) => json!({ "success": false, "message": e.to_string(), "data": [] }),
@@ -633,9 +635,10 @@ pub async fn cleanup_scan_cancel<R: tauri::Runtime>(window: WebviewWindow<R>) ->
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
         return json!({ "success": false, "message": msg });
     }
-    trim_finder::cleanup_scan::request_scan_cancel();
+    let label = window.label().to_string();
+    let requested = request_scan_cancel(&label);
     log::write_log("info", "cleanup:scan-cancel 已请求停止扫描（条目边界生效）");
-    json!({ "success": true })
+    json!({ "success": requested, "message": if requested { "" } else { "当前窗口没有正在进行的清理扫描" } })
 }
 
 // ==================== cleanup:execute ====================
@@ -646,7 +649,7 @@ pub async fn cleanup_scan_cancel<R: tauri::Runtime>(window: WebviewWindow<R>) ->
 ///
 /// v3.3.0 用户裁定：常规清理**固定永久删**，`toRecycle` 恒 false。此前这条裁定
 /// 只在渲染层强制（`cleanup.js` 里 `const toRecycle = false;`），命令侧是
-/// `to_recycle.unwrap_or(false)` —— 也就是**任何**传 `true` 的调用方都能翻转。
+/// 把渲染层参数解包成运行开关 —— 也就是**任何**传 `true` 的调用方都能翻转。
 /// 审计 §3.6 把它钉到删除真正发生的地方。
 ///
 /// 2026-10-12 用户裁定（实测「清理一直卡死进度」后）：**移除批次 B 遗留的
@@ -756,7 +759,7 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
                     raw_stdout.push('\n');
                 }
                 Err(e) => {
-                    // R4-L04：回给渲染层的 message 不再带「永久删桶」——那是 2026-10-12
+                // R4-L04：回给渲染层的 message 不再带退役前的旧桶名——那是 2026-10-12
                     // 分桶退役前的词，渲染层把它当 toast 文案，等于当着用户说「还有另一个桶」。
                     // 桶/删除形态这类内部口径只留在日志里供对账。
                     log::write_log("error", &format!("原生执行失败(永久删形态): {e}"));
@@ -771,7 +774,7 @@ pub async fn cleanup_execute<R: tauri::Runtime>(
 
         let raw = raw_stdout;
         let diag_stripped = crate::diag::extract_diag_lines(&raw, "cleanup.execute");
-        // 2026-10-12：@@RECYCLE@@ 回环协议随回收站例外一并移除（原生永久删桶从不
+        // 2026-10-12：@@RECYCLE@@ 回环协议随回收站例外一并移除（原生永久删分支从不
         // 产生条目），回执正文即原生输出原文，不再需要逐行分流与畸形行计数。
         let body = if raw.trim().is_empty() {
             diag_stripped.trim().to_string()
@@ -1027,6 +1030,10 @@ pub async fn cleanup_item_detail<R: tauri::Runtime>(window: WebviewWindow<R>, id
     };
     // 2026-10-04 审计 §5.6：path 形参必须与**本窗口扫描快照**里该条目的 path
     // 同源（渲染层传的就是 result.path，与快照同一数据源，产品功能不受影响）。
+    // P2-05：前端构造规则——只有文件型条目才传 result.path；注册表型条目不传 path。
+    // 否则本分支按非空 path 做同源校验，注册表快照通常没有 path，会直接拒绝明细。
+    // P2-07：pathPs 未解析变量已由 P1-01a 在 native-scanner 统一写入 stderr 与
+    // 回执 unexpandedToken；本命令层只透传扫描留痕，不重复生成第二处口径。
     // 原先任意可读目录都会被枚举回最多 600 条路径，guard_readonly 又放行全部
     // 全部四个窗口 label——一条没有产品收益的任意目录读暴露面。口径沿用
     // validate_snapshot_items 的 path_resolve 词法折叠比对。
@@ -1069,6 +1076,49 @@ pub(super) struct LockedParse {
     pub(super) locked_by_item: Map<String, Value>,
     pub(super) whitelist: Vec<Value>,
     pub(super) malformed: usize,
+    pub(super) identities: Vec<ProcessIdentity>,
+    pub(super) rm_timeout: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ProcessIdentity {
+    pub(super) pid: i64,
+    pub(super) creation_time_ns: u64,
+    pub(super) image_path: String,
+    pub(super) label: String,
+    pub(super) scan_epoch: u64,
+}
+
+impl ProcessIdentity {
+    fn from_value(value: &Value, label: &str, scan_epoch: u64) -> Option<Self> {
+        let pid = value.get("pid")?.as_i64()?;
+        Some(Self {
+            pid,
+            creation_time_ns: value
+                .get("creationTimeNs")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            image_path: value
+                .get("imagePath")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            label: label.to_string(),
+            scan_epoch,
+        })
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        self.pid == other.pid
+            && self.creation_time_ns == other.creation_time_ns
+            && normalize_image_path(&self.image_path) == normalize_image_path(&other.image_path)
+            && self.label == other.label
+            && self.scan_epoch == other.scan_epoch
+    }
+}
+
+fn normalize_image_path(path: &str) -> String {
+    path.trim().to_lowercase().replace('/', "\\")
 }
 
 /// 解析 checklocked_json 的 `@@LOCKED@@` 行协议（check-locked / query-locked 共用）。
@@ -1080,11 +1130,12 @@ pub(super) struct LockedParse {
 ///    实际只认 explorer 一个名字，lsass/csrss 这类真关键进程会被列进可结束名单。
 ///    名字规则仍要保留：实测 RM 对 explorer 报的是 Application 不是 RmCritical。
 /// 畸形行不许静默丢（审查 L-21）：计数返回给调用方 warn 留痕。
-pub(super) fn parse_locked_lines(stdout: &str, self_pid: i64) -> LockedParse {
+pub(super) fn parse_locked_lines_with_epoch(stdout: &str, self_pid: i64, label: &str, scan_epoch: u64) -> LockedParse {
     let mut locked: Vec<Value> = Vec::new();
     let mut locked_by_item: Map<String, Value> = Map::new();
     let mut by_app: Map<String, Value> = Map::new();
     let mut procs: Vec<Value> = Vec::new();
+    let mut identities: Vec<ProcessIdentity> = Vec::new();
     let mut seen_pids: HashSet<i64> = HashSet::new();
     let mut malformed = 0usize;
     for line in stdout.lines() {
@@ -1129,6 +1180,9 @@ pub(super) fn parse_locked_lines(stdout: &str, self_pid: i64) -> LockedParse {
             by_app.insert(app.to_string(), Value::from(n as i64));
             if seen_pids.insert(pid) {
                 procs.push(json!({ "pid": pid, "app": app, "critical": critical }));
+                if let Some(identity) = ProcessIdentity::from_value(&p, label, scan_epoch) {
+                    identities.push(identity);
+                }
             }
         }
     }
@@ -1137,7 +1191,7 @@ pub(super) fn parse_locked_lines(stdout: &str, self_pid: i64) -> LockedParse {
         .filter(|p| p.get("critical").and_then(|v| v.as_bool()) == Some(false))
         .cloned()
         .collect();
-    LockedParse { locked, by_app, procs, locked_by_item, whitelist, malformed }
+    LockedParse { locked, by_app, procs, locked_by_item, whitelist, malformed, identities, rm_timeout: false }
 }
 
 /// cleanup:check-locked — 清理前占用检测（只读；PID 白名单仅供紧随其后的结束进程使用）
@@ -1147,12 +1201,13 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
         return json!({ "success": false, "message": msg });
     }
     let label = window.label().to_string();
+    let task_label = label.clone();
     // 白名单先置空（R4-M03）：必须在**任何早退之前**。2026-10-04 磁盘清理审计 §3.5 那次
     // 只做了一半 —— check-locked 有这一步，query-locked 五条早退（缺参 / 盘符相对 /
     // 路径不存在 / 空目录或全 reparse / RM 调用失败）都不写槽，于是「上一次成功检测拿到的
     // 名单」在这次检测失败后仍能被「结束进程」杀掉，与本函数头第③条承诺相反。
     // 写入口径收在 state::reset_lock_whitelist / store_lock_whitelist，两条命令不许各自 insert。
-    reset_lock_whitelist(&label);
+    reset_lock_whitelist(&label); let scan_epoch = current_scan_epoch(&label);
     let snapshot = snapshots()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1185,9 +1240,20 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
     let scanned = list.len();
     // R10（2026-10-15）：占用检测的可删判定与扫描/执行侧同源——保护清单随候选一起注入
     let payload = json_text(&json!({ "files": list, "protect": crate::engine::protect::protected_roots_json() }));
+    let cancel_label = label.clone();
     let task = tauri::async_runtime::spawn_blocking(move || {
-        let (code, stdout, stderr) = cleanup_scan::checklocked_json(&payload);
+        let cancel = scan_tokens()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&cancel_label)
+            .map(|token| token.cancelled.clone());
+        let (code, stdout, stderr) = cleanup_scan::checklocked_json_cancellable(&payload, cancel.as_deref());
         if code != 0 {
+            if code == cleanup_scan::EXIT_CHECK_LOCKED_TIMEOUT {
+                let mut parsed = LockedParse::default();
+                parsed.rm_timeout = true;
+                return (Some(parsed), String::new());
+            }
             let msg = if stderr.trim().is_empty() {
                 format!("占用检测退出码 {code}")
             } else {
@@ -1197,7 +1263,7 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
         }
         // 行协议解析抽成 parse_locked_lines（与 cleanup:query-locked 共用，判定不重写）；
         // 自身 PID 剔除 / critical 判定 / 畸形行计数的判据见该函数注释。
-        let parsed = parse_locked_lines(&stdout, std::process::id() as i64);
+        let parsed = parse_locked_lines_with_epoch(&stdout, std::process::id() as i64, &task_label, scan_epoch);
         if parsed.malformed > 0 {
             log::write_log(
                 "warn",
@@ -1219,6 +1285,7 @@ pub async fn cleanup_check_locked<R: tauri::Runtime>(window: WebviewWindow<R>, i
     // 白名单每次检测覆盖（防「检测 A 文件后延时结束 B 进程」的窗口）；
     // 只有走到这一行（检测全成功）才有名单，失败路径留在前的 reset 上空槽（R4-M03）
     store_lock_whitelist(&label, std::mem::take(&mut parsed.whitelist));
+    store_process_identities(&label, std::mem::take(&mut parsed.identities));
     // 占用检测的候选来自扫描快照，没有「整树遍历」这一步 ⇒ 第五个参数传 None，
     // 回执形状与本轮之前完全一致（整树放弃分类只属于 query-locked，R4-M01）。
     locked_receipt(parsed, scanned, truncated, None, None)
@@ -1301,6 +1368,13 @@ fn locked_receipt(
     path: Option<&str>,
     walk: Option<&QueryWalkSkips>,
 ) -> Value {
+    if parsed.rm_timeout {
+        return json!({
+            "success": false, "rmTimeout": true, "rmCanceled": true,
+            "message": "占用检测超时，未执行删除",
+            "locked": [], "byApp": {}, "procs": [], "lockedByItem": {}
+        });
+    }
     let mut out = json!({
         "success": true,
         "locked": parsed.locked,
@@ -1510,11 +1584,13 @@ pub async fn cleanup_query_locked<R: tauri::Runtime>(
         return json!({ "success": false, "message": msg });
     }
     let label = window.label().to_string();
+    let task_label = label.clone();
     // R4-M03：guard 之后**立刻**置空本槽。下面五条早退（缺参 / 盘符相对 / 路径不存在 /
     // 空目录或全 reparse / RM 调用失败）原本都不写白名单，于是「上一次成功检测拿到的名单」
     // 在这次注定失败的查询之后仍可被「结束进程」取走 —— 与函数头第③条（结束只认**本次**
     // 查询写下的一次性白名单）相反。清空放在早退之前，失败即留空名单。
     reset_lock_whitelist(&label);
+    let scan_epoch = current_scan_epoch(&label);
     let raw = match path {
         Some(p) if !p.trim().is_empty() => p.trim().to_string(),
         _ => return json!({ "success": false, "message": "缺少要查询的路径" }),
@@ -1572,9 +1648,22 @@ pub async fn cleanup_query_locked<R: tauri::Runtime>(
         "files": query_files_entries(&files),
         "protect": crate::engine::protect::protected_roots_json()
     }));
+    let cancel_label = label.clone();
     let task = tauri::async_runtime::spawn_blocking(move || {
-        let (code, stdout, stderr) = cleanup_scan::checklocked_json(&payload);
+        let cancel = scan_tokens()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&cancel_label)
+            .map(|t| t.cancelled.clone());
+        let cancel_ref = cancel.as_deref();
+        let (code, stdout, stderr) =
+            cleanup_scan::checklocked_json_cancellable(&payload, cancel_ref);
         if code != 0 {
+            if code == cleanup_scan::EXIT_CHECK_LOCKED_TIMEOUT {
+                let mut parsed = LockedParse::default();
+                parsed.rm_timeout = true;
+                return (Some(parsed), String::new());
+            }
             let msg = if stderr.trim().is_empty() {
                 format!("占用查询退出码 {code}")
             } else {
@@ -1582,7 +1671,7 @@ pub async fn cleanup_query_locked<R: tauri::Runtime>(
             };
             return (None, msg);
         }
-        let parsed = parse_locked_lines(&stdout, std::process::id() as i64);
+        let parsed = parse_locked_lines_with_epoch(&stdout, std::process::id() as i64, &task_label, scan_epoch);
         if parsed.malformed > 0 {
             log::write_log(
                 "warn",
@@ -1601,6 +1690,7 @@ pub async fn cleanup_query_locked<R: tauri::Runtime>(
     // 白名单每次查询覆盖（与 check-locked 同键同语义：紧随其后的结束进程只认这份名单，
     // 防「查询 A 路径后延时结束 B 进程」的窗口）
     store_lock_whitelist(&label, std::mem::take(&mut parsed.whitelist));
+    store_process_identities(&label, std::mem::take(&mut parsed.identities));
     // P1-6C：与占用检测同一构造处（同字段表、同 `malformed`/`partial` 语义）；
     // R4-M01：整树放弃分类（skippedTree / skippedReasons）与 truncated 一起下发。
     locked_receipt(parsed, scanned, truncated, Some(&expanded), Some(&walk_skips))
@@ -1612,9 +1702,56 @@ pub(super) mod kill_ffi {
     #[link(name = "kernel32")]
     extern "system" {
         pub fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> isize;
+        pub fn GetProcessTimes(process: isize, creation_time: *mut u64, exit_time: *mut u64, kernel_time: *mut u64, user_time: *mut u64) -> i32;
+        pub fn QueryFullProcessImageNameW(process: isize, flags: u32, image_name: *mut u16, size: *mut u32) -> i32;
         pub fn TerminateProcess(process: isize, exit_code: u32) -> i32;
         pub fn CloseHandle(object: isize) -> i32;
     }
+}
+
+pub(super) fn process_identity_matches(expected: &ProcessIdentity, actual: &ProcessIdentity) -> bool {
+    expected.matches(actual)
+}
+
+#[cfg(windows)]
+pub(super) fn query_process_identity(pid: i64, label: &str, scan_epoch: u64) -> Result<ProcessIdentity, String> {
+    if pid <= 0 || pid > u32::MAX as i64 {
+        return Err("无效的进程 ID".to_string());
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    unsafe {
+        let handle = kill_ffi::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+        if handle == 0 {
+            return Err("进程已退出或无法读取身份".to_string());
+        }
+        let (mut creation, mut exit, mut kernel, mut user) = (0u64, 0u64, 0u64, 0u64);
+        let times_ok = kill_ffi::GetProcessTimes(
+            handle,
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        ) != 0;
+        let mut name = [0u16; 1024];
+        let mut name_len = name.len() as u32;
+        let name_ok = kill_ffi::QueryFullProcessImageNameW(handle, 0, name.as_mut_ptr(), &mut name_len) != 0;
+        kill_ffi::CloseHandle(handle);
+        if !times_ok || !name_ok {
+            return Err("进程身份读取失败，已拒绝结束".to_string());
+        }
+        Ok(ProcessIdentity {
+            pid,
+            creation_time_ns: creation,
+            image_path: String::from_utf16_lossy(&name[..name_len as usize]),
+            label: label.to_string(),
+            scan_epoch,
+        })
+    }
+}
+
+#[cfg(not(windows))]
+pub(super) fn query_process_identity(_pid: i64, _label: &str, _scan_epoch: u64) -> Result<ProcessIdentity, String> {
+    Err("仅支持 Windows".to_string())
 }
 
 /// 结束进程（TerminateProcess；等价 Node `process.kill(pid)`）
@@ -1647,6 +1784,22 @@ pub(super) fn terminate_process(_pid: i64) -> Result<(), String> {
     Err("仅支持 Windows".to_string())
 }
 
+pub(super) fn verify_process_identity(
+    expected: &ProcessIdentity,
+    label: &str,
+    scan_epoch: u64,
+) -> Result<(), String> {
+    if expected.scan_epoch != scan_epoch {
+        return Err("身份纪元已失效".to_string());
+    }
+    let actual = query_process_identity(expected.pid, label, scan_epoch)?;
+    if process_identity_matches(expected, &actual) {
+        Ok(())
+    } else {
+        Err("身份变化".to_string())
+    }
+}
+
 /// cleanup:kill-locked-processes — 结束最近一次占用检测确认过的非关键进程（一次性白名单）
 #[tauri::command]
 pub fn cleanup_kill_locked_processes<R: tauri::Runtime>(window: WebviewWindow<R>) -> Value {
@@ -1654,21 +1807,40 @@ pub fn cleanup_kill_locked_processes<R: tauri::Runtime>(window: WebviewWindow<R>
         return json!({ "success": false, "message": msg });
     }
     let label = window.label().to_string();
-    let targets = lock_whitelist()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&label)
-        .unwrap_or_default();
+    let targets = take_lock_whitelist(&label);
+    let identities = take_process_identities(&label);
     if targets.is_empty() {
-        return json!({ "success": true, "killed": [], "failed": [] });
+        return json!({ "success": true, "killed": [], "failed": [], "identityChanged": [] });
     }
     let self_pid = std::process::id() as i64;
+    let scan_epoch = current_scan_epoch(&label);
     let mut killed: Vec<Value> = Vec::new();
     let mut failed: Vec<Value> = Vec::new();
+    let mut identity_changed: Vec<Value> = Vec::new();
     for p in targets {
         let pid = p.get("pid").and_then(|v| v.as_i64()).unwrap_or(-1);
         // v3.7.3 兜底：检测侧已剔除自身 PID，这里再挡一道——任何路径下都不允许 kill 自己
         if pid == self_pid {
+            continue;
+        }
+        let Some(identity) = identities.iter().find(|item| item.pid == pid) else {
+            let mut v = p.clone();
+            if let Some(o) = v.as_object_mut() {
+                o.insert("message".into(), Value::from("身份变化"));
+            }
+            identity_changed.push(v);
+            continue;
+        };
+        if let Err(e) = verify_process_identity(identity, &label, scan_epoch) {
+            let mut v = p.clone();
+            if let Some(o) = v.as_object_mut() {
+                o.insert("message".into(), Value::from(e));
+            }
+            if o_get_message_is_identity_changed(&v) {
+                identity_changed.push(v);
+            } else {
+                failed.push(v);
+            }
             continue;
         }
         match terminate_process(pid) {
@@ -1703,7 +1875,11 @@ pub fn cleanup_kill_locked_processes<R: tauri::Runtime>(window: WebviewWindow<R>
         "warn",
         &format!("结束占用进程（用户确认）: 成功 {} 个{fail_note}", killed.len()),
     );
-    json!({ "success": true, "killed": killed, "failed": failed })
+    json!({ "success": true, "killed": killed, "failed": failed, "identityChanged": identity_changed })
+}
+
+fn o_get_message_is_identity_changed(value: &Value) -> bool {
+    matches!(value.get("message").and_then(Value::as_str), Some("身份变化" | "身份纪元已失效"))
 }
 
 
@@ -1712,6 +1888,48 @@ pub fn cleanup_kill_locked_processes<R: tauri::Runtime>(window: WebviewWindow<R>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P1-04b/c：行协议坏 JSON / 缺字段 / 超长行三类都要判红，预算耗尽后不追加。
+    #[test]
+    fn scan_accum_budget_and_malformed_protocol_table() {
+        let long_path = "p".repeat(PLANFILE_PATH_MAX_CHARS + 1);
+        let cases = [
+            ("@@ITEM@@{bad json", "行解析失败"),
+            ("@@ITEM@@{}", "缺少 id"),
+            ("@@PLANFILE@@{bad json", "行解析失败"),
+            ("@@PLANFILE@@{\"id\":\"i\"}", "缺少 id 或 path"),
+        ];
+        for (line, reason) in cases {
+            let mut acc = ScanAccum::default();
+            acc.ingest_line(line);
+            assert_eq!(acc.malformed, 1, "坏行必须计数: {line}");
+            assert!(acc.first_malformed.as_deref().unwrap_or_default().contains(reason), "原因必须点名: {line}");
+            assert!(acc.data.is_empty() && acc.plan.is_empty(), "坏行不得入账: {line}");
+        }
+        let mut overlong = ScanAccum::default();
+        let long_line = format!("@@PLANFILE@@{{\"i\":\"{long_path}\"}}");
+        overlong.ingest_line(&long_line);
+        assert_eq!(overlong.malformed, 1);
+
+        let mut cap = ScanAccum::default();
+        cap.plan_total = PLAN_CAP_TOTAL;
+        cap.ingest_line("@@PLANFILE@@{\"id\":\"x\",\"path\":\"C:\\\\x\",\"size\":9}");
+        assert_eq!(cap.plan_total, PLAN_CAP_TOTAL);
+        assert!(cap.plan.is_empty(), "总量预算耗尽后不得再追加");
+    }
+
+    /// P1-03b：扫描参数上限必须跟随执行上限 500。
+    /// 判红自证：把 `EXECUTE_MAX_ITEMS` 暂改成 512 ⇒ 501 项被接受，本用例红。
+    #[test]
+    fn 扫描分类上限与执行上限同源() {
+        let cats: Vec<Value> = (0..501).map(|i| json!(format!("rule-{i}"))).collect();
+        let err = parse_categories(Some(&Value::Array(cats))).unwrap_err();
+        assert_eq!(
+            err,
+            format!("categories 有 501 项，超过上限 {EXECUTE_MAX_ITEMS}"),
+            "501 项必须在扫描参数入口被拒，不能扫得到却执行不了"
+        );
+    }
 
     /// `checklocked_json` 输入契约：files 元素必须是 `{"path","id"}` 对象——
     /// **真机抓出的回归面**：曾以字符串数组直接下发，native 侧 `f.get("path")`
@@ -1942,6 +2160,27 @@ mod tests {
 mod p1_6c_malformed_tests {
     use super::*;
 
+    /// PF-P0-02：超时回执必须结构化且为空，白名单由入口的 reset 保持为空；
+    /// `rmTimeout` 不允许带出任何占用进程或锁定条目。
+    /// 判红自证：把 `rmTimeout` 改成 `false` ⇒ 第一条红；把 `procs` 填上 ⇒ 第二条红。
+    #[test]
+    fn 占用检测超时回执结构化且不交白名单() {
+        let mut parsed = LockedParse::default();
+        parsed.rm_timeout = true;
+        parsed.procs.push(json!({ "pid": 4242, "app": "stale", "critical": false }));
+        parsed.locked.push(json!({ "path": r"C:\stale.txt" }));
+
+        let receipt = locked_receipt(parsed, 1, false, None, None);
+        assert_eq!(receipt["success"], json!(false));
+        assert_eq!(receipt["rmTimeout"], json!(true));
+        assert_eq!(receipt["rmCanceled"], json!(true));
+        assert_eq!(receipt["message"], json!("占用检测超时，未执行删除"));
+        assert_eq!(receipt["procs"], json!([]));
+        assert_eq!(receipt["locked"], json!([]));
+        assert_eq!(receipt["lockedByItem"], json!({}));
+        assert_eq!(receipt["byApp"], json!({}));
+    }
+
     /// P1-6C：注入畸形 `@@LOCKED@@` 行 ⇒ 计数必须显式非零，且**回执**必须带
     /// `malformed`/`partial`。旧实现只 write_log，两条命令的 `locked` 为空与
     /// 「协议被打断、根本没查全」在渲染层长得一模一样。
@@ -1954,7 +2193,7 @@ mod p1_6c_malformed_tests {
                       @@LOCKED@@{坏 JSON\n\
                       @@LOCKED@@{\"id\":\"i1\"}\n\
                       @@LOCKED@@{\"path\":\"\",\"id\":\"i1\"}\n";
-        let parsed = parse_locked_lines(stdout, 1);
+        let parsed = parse_locked_lines_with_epoch(stdout, 1, crate::MAIN_LABEL, 0);
         assert_eq!(parsed.locked.len(), 1, "合法行照常收下，畸形计数不得连带吞掉好数据");
         assert_eq!(parsed.malformed, 3, "非 JSON / 缺 path / path 空 三条都要逐条计数");
 
@@ -1964,7 +2203,7 @@ mod p1_6c_malformed_tests {
         assert_eq!(out["success"], json!(true), "partial 不等于整批失败：查到的那条仍要给用户");
         assert_eq!(out["path"], json!(r"C:\a.txt"), "查询侧的 path 字段是既有契约，收拢构造时不许丢");
 
-        let clean = locked_receipt(parse_locked_lines("@@LOCKED@@{\"path\":\"C:\\\\b.txt\"}\n", 1), 1, false, None, None);
+        let clean = locked_receipt(parse_locked_lines_with_epoch("@@LOCKED@@{\"path\":\"C:\\\\b.txt\"}\n", 1, crate::MAIN_LABEL, 0), 1, false, None, None);
         assert_eq!(clean["malformed"], json!(0));
         assert_eq!(clean["partial"], json!(false), "全干净时不得挂着 partial，否则两档又混回一潭");
         assert!(clean.get("path").is_none(), "检测侧没有单一 path，不得凭空造一个");

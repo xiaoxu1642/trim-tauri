@@ -475,9 +475,7 @@
   // 「绝不静默改机器」。按钮只在用户点开这一项的详情时出现，不主动弹。
   const START_TYPE_REPAIR_IDS = new Set([
     'svc_w32time_manual',
-    'svc_fdrespum_manual',
-    'svc_storsvc_manual',
-    'svc_xblauthmgr_manual'
+    'svc_fdrespum_manual'
   ]);
 
   /** 该项是否需要「修复服务启动类型」入口（仅这四项，且必须能还原） */
@@ -1639,7 +1637,12 @@
   function loadAppliedLocal() {
     try {
       const raw = JSON.parse(localStorage.getItem(OPT_APPLIED_KEY) || '[]');
-      if (!Array.isArray(raw)) return;
+      if (!Array.isArray(raw)) {
+        const msg = '本地已优化记录不是数组，已保留内存中的旧值';
+        window.app?.log?.('warn', msg);
+        window.app?.toast?.('warning', msg, 6000);
+        return;
+      }
       // P1-6H：成员判据取**全目录** ALL_OPTIONS，不取展示列表 OPTIONS。
       // hiddenFromOptimizer 是隐私面板与永劫专项两份侧表的并集 —— 这些项仍在目录里、
       // 只是不在优化中心这一列显示。按 OPTIONS 判成员会把它们从「已执行落盘」集合里丢掉，
@@ -1647,7 +1650,13 @@
       // 灰态是防重复执行的唯一护栏（宁可多灰，不可漏灰）。退役项离表由目录数据自己决定。
       const known = new Set(ALL_OPTIONS.map(o => o.id));
       for (const id of raw) if (typeof id === 'string' && known.has(id)) appliedLocal.add(id);
-    } catch (e) { /* 损坏即从空集合开始：漏灰有还原兜底，误灰会挡住合法操作 */ }
+    } catch (e) {
+      // P1-17：损坏时静默清空会让非可检测项失去唯一灰态来源。保留已有集合并显式提示；
+      // 本次会话的实时检测与后端账本仍可用。
+      const msg = '本地已优化记录读取失败，已保留当前会话的灰态；非可检测项可能需重新检测';
+      window.app?.log?.('warn', msg + '：' + ((e && e.message) || e));
+      window.app?.toast?.('warning', msg, 6000);
+    }
   }
 
   function saveAppliedLocal() {
@@ -1778,55 +1787,56 @@
   // 无备份记录时回退到优化项预置的还原脚本。
   // v2.6.0（P0-1）：提升到模块级，供详情弹窗与「未完成还原」横幅一键还原共用。
   async function restoreOption(opt) {
-    // v5 O-3：两条还原路径是**互补**，不是互斥。旧写法 reg 备份一成功就 return，于是预置
-    // 还原步里非 reg 的那部分（服务启动类型 / 计划任务 / 文件）永不执行，而账已被
-    // clearAllApplied 销掉、UI 弹「已恢复」—— tf_svc_extra5 实测就是只删了 WDI 值、
-    // 4 个服务照旧 Disabled。
-    // 顺序：先跑预置还原（数据层写的是"猜的出厂值"），再用值级备份回写 —— 真原值必须
-    // 最后落，否则会被预置里的猜测覆盖。
-    const hasPresetNonRegStep = Array.isArray(opt.restore) && opt.restore.some(s => !s || !s.reg);
-    let ok = true;
-    // F4b-L06：预置半成功、按备份回写失败 ⇒ 恢复的是出厂值而非改前值，
-    // 收尾不能照发绿色「已恢复」，否则用户以为回到了自己改之前的状态
-    let restoredByFallback = false;
-
-    if (hasPresetNonRegStep) {
-      ok = await runOptionActive({ restore: true }, opt);
-      if (!ok) return false;
+    if (!window.api?.optimizer?.restoreReg) {
+      window.app?.toast('error', '当前版本不支持按备份还原，请更新后再试');
+      return false;
     }
-
-    if (window.api?.optimizer?.restoreReg) {
-      let r = null;
-      try { r = await window.api.optimizer.restoreReg(opt.id); } catch (e) { /* 走回退 */ }
-      if (r && r.success) {
-        ok = true;
-      } else if (hasPresetNonRegStep) {
-        // 预置那半确实成了；但要说清"真原值没能回写"，否则用户以为恢复的是改前的状态。
-        // 预置还原自己会销账，所以这里备份缺失（missing）是预期路径，不另判失败。
-        if (r && !r.missing) {
-          restoredByFallback = true;
-          window.app?.log('warn', `预置还原已执行，但按备份回写失败（恢复的是数据层出厂值，非改前值）: ${opt.title || opt.id}: ${r.message || ''}`);
-        }
-        ok = true;
-      } else {
-        ok = false;
+    // P0-3：预置还原拆两段。第一段只跑非 reg 步（服务/任务/目录），不销账；
+    // 值级备份回写成功后才收口。没有备份时才允许第二段写回推定的 reg 默认值。
+    const hasPresetNonRegStep = Array.isArray(opt.restore) && opt.restore.some(s => !s || !s.reg);
+    if (hasPresetNonRegStep) {
+      const nonRegOk = await runOptionActive({ restore: true, restoreStage: 'non-reg' }, opt);
+      if (!nonRegOk) {
+        // 值级备份尚未动，记录保留；用户可重试，不允许此时写推定 reg 默认值。
+        window.app?.toast('warning', '非注册表还原步骤未完成，已停止；备份记录保留，可重试');
+        return false;
       }
     }
 
-    // 既没有备份可回写、该项也没有非 reg 预置步 → 原回退路径：整项按预置脚本跑一次
-    if (!ok && !hasPresetNonRegStep) {
-      ok = await runOptionActive({ restore: true }, opt);
+    let r = null;
+    try {
+      r = await window.api.optimizer.restoreReg(opt.id);
+    } catch (e) {
+      r = { success: false, message: (e && e.message) || String(e) };
     }
-    if (ok) {
+    if (r && r.success) {
       clearAllApplied(opt.id);
       renderGroups(OPTIONS);
-      if (restoredByFallback) {
-        window.app?.toast('warning', '已恢复为出厂值：' + (opt.title || opt.id) + ' 的改前值未能回写');
+      if (r.ledgerCleanupFailed) {
+        window.app?.toast('warning', '已恢复：' + (opt.title || opt.id) + '；但备份记录清理失败，记录已保留');
       } else {
         window.app?.toast('success', '已恢复：' + (opt.title || opt.id));
       }
+      return true;
     }
-    return ok;
+
+    // 只有「确认没有备份」才允许预置推定值兜底；安全拒绝一律停止并保留备份。
+    const isMissing = !!(r && r.missing === true && (r.reason === 'absent' || r.reason === 'empty'));
+    if (!isMissing) {
+      const why = (r && r.message) || '未知原因';
+      window.app?.log('warn', `按备份还原被拒，未执行预置兜底: ${opt.title || opt.id}: ${why}`);
+      window.app?.toast('error', '还原未执行：' + why);
+      return false;
+    }
+    // 无备份兜底：第二段只写推定 reg 默认值（非 reg 段已在上面跑过）。
+    const regOk = await runOptionActive({ restore: true, restoreStage: 'reg-only' }, opt);
+    if (regOk) {
+      clearAllApplied(opt.id);
+      renderGroups(OPTIONS);
+      window.app?.log('warn', `无值级备份，已按预置推定值还原: ${opt.title || opt.id}`);
+      window.app?.toast('warning', '已按预置推定值还原：' + (opt.title || opt.id) + ' 的改前值没有备份，无法还原为原值');
+    }
+    return regOk;
   }
 
   // ==================== 未完成还原提醒（v2.6.0 P0-1 崩溃自愈） ====================
@@ -1866,8 +1876,14 @@
       // 现在字段给的是「本机仍留有注册表备份的退役项」，还原由用户点，走同一条已确认通道。
       const mig = resp.migration;
       if (mig && Array.isArray(mig.pending) && mig.pending.length) showRetiredBanner(mig.pending);
+      if (resp.retiredLoadError) {
+        window.app?.log?.('warn', resp.retiredLoadError);
+        window.app?.toast?.('warning', resp.retiredLoadError, 6000);
+      }
       // F4b-M20：同上 —— 侧表成员的「执行中断、状态不明」不进横幅即永不提示。
-      const staleIds = (Array.isArray(resp.staleIds) ? resp.staleIds : []).filter(id => ALL_OPTIONS.some(o => o.id === id));
+      const staleIds = (Array.isArray(resp.staleIds) ? resp.staleIds : []).filter(id =>
+        id === 'tf_restore_point' || ALL_OPTIONS.some(o => o.id === id)
+      );
       if (staleIds.length) {
         // 根治（2026-10-03）：条目带失败子步原因——横幅文本与悬浮提示都从这里出
         const staleItems = staleIds.map(id => {
@@ -1935,7 +1951,34 @@
     const banner = document.getElementById('optimizerStaleBanner');
     const text = document.getElementById('optimizerStaleText');
     if (!banner || !text) return;
-    const ids = items.map(x => x.id);
+    const restorePoint = items.find(x => x.id === 'tf_restore_point');
+    const ids = items.filter(x => x.id !== 'tf_restore_point').map(x => x.id);
+    const rpBanner = document.getElementById('optimizerRestorePointBanner');
+    const rpText = document.getElementById('optimizerRestorePointText');
+    if (restorePoint && rpBanner && rpText) {
+      rpText.textContent = '系统还原点创建失败，因为 VSS / volsnap / swprv 中某个服务已被关闭。Trim 不会替你启动服务；请打开系统服务管理器处理后重试。';
+      bannerActive(rpBanner);
+      const openBtn = document.getElementById('btnRestorePointOpenServices');
+      if (openBtn) {
+        openBtn.onclick = guardAsync('打开系统服务', async () => {
+          try { await window.api?.quickcmds?.run?.('svc-services'); }
+          catch (e) { window.app?.toast?.('error', '打开系统服务失败: ' + ((e && e.message) || e)); }
+        });
+      }
+      const ignoreBtn = document.getElementById('btnRestorePointIgnore');
+      if (ignoreBtn) {
+        ignoreBtn.onclick = () => {
+          bannerIdle(rpBanner);
+          window.app?.log?.('info', '用户选择忽略还原点失败提示；未启动任何系统服务');
+        };
+      }
+    } else {
+      bannerIdle(rpBanner);
+    }
+    if (!ids.length) {
+      bannerIdle(banner);
+      return;
+    }
     // 根治（2026-10-03）：partial 项带失败步数，悬浮提示给头部原因——
     // 此前「状态不明」无从判断该还原还是该重跑（明细只在日志里）。
     const names = items.slice(0, 3).map(x => {
@@ -1957,6 +2000,15 @@
         btn.textContent = '还原中…';
         let okCount = 0;
         for (const id of ids) {
+          if (id === 'tf_restore_point') {
+            // P1-11：创建还原点崩溃遗留的 pending 不在 ALL_OPTIONS 里，但它的备份
+            // 还原通道（频率覆写值 + 销账）仍可用；不能因为目录找不到就跳过。
+            try {
+              const r = await window.api.optimizer.restoreReg(id);
+              if (r && r.success) okCount++;
+            } catch (e) { /* 单项失败继续 */ }
+            continue;
+          }
           const opt = ALL_OPTIONS.find(o => o.id === id); // F4b-M20：横幅还原入口对目录全集开放
           if (!opt) continue;
           try { if (await restoreOption(opt)) okCount++; } catch (e) { /* 单项失败继续 */ }
@@ -2022,17 +2074,29 @@
     const banner = document.getElementById('optimizerRetiredBanner');
     const text = document.getElementById('optimizerRetiredText');
     if (!banner || !text) return;
+    const restorableItems = items.filter(it => Number(it.restorable ?? it.values ?? 0) > 0);
+    const restorableTotal = restorableItems.reduce((n, i) => n + Number(i.restorable ?? i.values ?? 0), 0);
+    const uncertainTotal = items.reduce((n, i) => n + Number(i.uncertain ?? 0), 0);
     const names = items.slice(0, 3).map(i => i.title || i.id).join('、')
       + (items.length > 3 ? ` 等 ${items.length} 项` : '');
     text.textContent = `${items.length} 项已退役优化在本机仍留有注册表备份（${names}）。`
+      + (uncertainTotal > 0 ? `其中 ${uncertainTotal} 个值备份时存在性未知，不能按原值还原。` : '')
       + 'Trim 不会在启动时静默写回系统设置，需要你确认后按备份的原值逐项还原。';
     bannerActive(banner);
     const btn = document.getElementById('btnRetiredRestore');
     if (!btn) return;
+    if (!restorableItems.length) {
+      btn.disabled = true;
+      btn.textContent = '无可还原值';
+      btn.onclick = null;
+      return;
+    }
+    btn.disabled = false;
+    btn.textContent = '按原值还原';
     btn.onclick = guardAsync('退役优化项还原', async () => {
       const ok = await window.app?.confirmDanger?.(
         '按原值还原退役优化项',
-        `将把 ${items.length} 项已退役优化在执行前记录的注册表原值写回系统（共 ${items.reduce((n, i) => n + (i.values || 0), 0)} 个值）。`,
+        `将把 ${restorableItems.length} 项已退役优化在执行前记录的注册表原值写回系统（共 ${restorableTotal} 个可还原值${uncertainTotal > 0 ? `；另有 ${uncertainTotal} 个值存在性未知，不会写回` : ''}）。`,
         '仍然执行',
         '取消',
         '这些项已从优化目录移除，除了这里没有别的还原入口；需要管理员权限。'
@@ -2042,7 +2106,7 @@
       btn.textContent = '还原中…';
       let done = 0;
       const fails = [];
-      for (const it of items) {
+      for (const it of restorableItems) {
         try {
           const r = await window.api.optimizer.restoreReg(it.id);
           if (r && r.success) done++;
@@ -2542,6 +2606,7 @@
 
   function getOptionTitle(id) {
     // F4b-L05：与横幅成员判据同源（ALL_OPTIONS）——只查展示列表会让侧表成员的名字回落成裸 id
+    if (id === 'tf_restore_point') return '创建系统还原点';
     const o = ALL_OPTIONS.find(x => x.id === id);
     return o ? o.title : id;
   }
@@ -2621,7 +2686,10 @@
         }
         // 安全托底：执行成功后立即标记为已优化（灰态）+ 落本地数据
         if (params && params.restore) {
-          clearAllApplied(opt.id);
+          // P0-5：只有回读 pass 才算还原完成；partial/unknown 保留灰态与后端账本。
+          if (params.restoreStage !== 'non-reg' && resp.verify === 'pass') {
+            clearAllApplied(opt.id);
+          }
         } else {
           markOptimizedIfApplicable(opt);
         }
@@ -2653,6 +2721,16 @@
       if (resp && resp.needConfirm) {
         finishProgressToast(false, resp.message || '缺少高危确认回执');
         window.app?.log('warn', `优化电脑被拒: ${optName}: 缺少高危确认回执`);
+        return false;
+      }
+      // P0-5：还原方向的 partial/unknown 是「部分恢复 / 待复核」，不是绿色成功，也不清账。
+      if (params && params.restore && (resp.verify === 'partial' || resp.verify === 'unknown')) {
+        const msg = resp.message || (resp.verify === 'partial'
+          ? '还原已执行但未完全生效，请重试'
+          : '还原已执行，但无法验证是否生效，记录已保留');
+        finishProgressToast(false, msg);
+        window.app?.toast('warning', msg, 6000);
+        window.app?.log('warn', `优化电脑还原未完成（${resp.verify}）: ${optName}: ${msg}`);
         return false;
       }
       // 审查 2026-09-27 M4：后端随回执下发逐步失败原因（failedSteps），toast 展示前
@@ -2892,7 +2970,8 @@
     if (hazardList.length) {
       const detail = hazardList.map(o => {
         const sd = o.securityDegrade;
-        return `· ${o.title}${sd && sd.why ? `（${sd.why}）` : ''}`;
+        const why = (sd && sd.why) || o.desc || '';
+        return `· ${o.title}${why ? `（${why.length > 120 ? why.slice(0, 120) + '…' : why}）` : ''}`;
       }).join('\n');
       const go = await window.app.confirmDanger(
         '⚠️ 高危安全操作确认',
@@ -3087,7 +3166,8 @@
     if (hazardList.length) {
       const detail = hazardList.map(o => {
         const sd = o.securityDegrade;
-        return `· ${o.title}${sd && sd.why ? `（${sd.why}）` : ''}`;
+        const why = (sd && sd.why) || o.desc || '';
+        return `· ${o.title}${why ? `（${why.length > 120 ? why.slice(0, 120) + '…' : why}）` : ''}`;
       }).join('\n');
       const go = await window.app.confirmDanger(
         '⚠️ 高危安全操作确认',
@@ -3194,6 +3274,9 @@
         diskType = dt;
         // E7：分类两层结构。失败/形状不对时保留 GROUP_FALLBACK（applyGroupSidecar 内部已判）
         if (gs && gs.success) applyGroupSidecar(gs.data);
+        else if (gs && gs.success === false) {
+          window.app?.log?.('warn', '分类侧表不可用，已回落到默认分组：' + (gs.message || '未知原因'));
+        }
         // C3：永劫专项面板侧表。失败/null 时 NARA_PANEL 保持 null，但失败原因要留在
         // 入口卡上（A1-L04）：隐藏集合为空 ⇒ 成员回主列表，这个后果必须说给用户。
         if (np && np.success && np.data) NARA_PANEL = np.data;

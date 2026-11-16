@@ -7,7 +7,6 @@
       "id": "telemetry",
       "title": "遥测与诊断数据",
       "items": [
-        "telemetry_optimize",
         "privacy_wer_off",
         "privacy_compat_telemetry",
         "privacy_defender_cloud",
@@ -51,7 +50,6 @@
     }
   ],
   "hiddenFromOptimizer": [
-    "telemetry_optimize",
     "privacy_wer_off",
     "privacy_compat_telemetry",
     "privacy_defender_cloud",
@@ -81,6 +79,6 @@
   },
   "_sig": {
     "alg": "ed25519",
-    "sig": "eWR7yv3bYxHe8UJ4F+3P8sEWvnM2ioTrsqfs9d20VerQ7qknk+IEIOOfM3YSim2sEAn+pVy309WqfvS4yC18BA=="
+    "sig": "iMRQk8zOzY0G8B2mwVt0s6VJNjJlRn70MEyXtA1q5NDebwhFbOLDqba/XfM2Bwl/8yd6SVTUwQUO0UjLh0+NCg=="
   }
 }

@@ -1,5 +1,9 @@
 {
  "_说明": "清理规则「跨条目整树覆盖」台账：由 `node tools/check-cleanup-rule-contract.mjs --emit-overlaps` 现算回填，禁止手抄。每一行都是一处「逐条相加会算两遍」的实据；新增行必须伴随评审结论（合并 / 排除 / 明确共存），删行必须确认该覆盖关系真的消失了。",
+ "meta": {
+  "generatorVersion": "p1-04e-overlap-v1",
+  "inputHash": "1079b93bcfe100de"
+ },
  "pairs": [
   {
    "parentId": "qqCache",

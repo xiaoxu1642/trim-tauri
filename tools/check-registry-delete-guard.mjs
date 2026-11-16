@@ -32,7 +32,7 @@
 //
 // 用法：node tools/check-registry-delete-guard.mjs [--verbose]
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gate } from './lib/gate.mjs';
@@ -163,53 +163,102 @@ function denyFaceReached(fns, byName, f) {
   return f.calls.some((c) => byName.get(c)?.denyFace || byName.get(c)?.denyFaceWrap);
 }
 
+/**
+ * 单文件删树出口对账（真仓扫描与合成对照共用同一实现）。
+ *
+ * 为什么抽出来：豁免台账是本门禁唯一的「已裁定不补」出口，它的三条腿此前
+ * 只有真仓路径走过，合成对照够不着它 —— 判据真身一旦失真，豁免台账就成了
+ * 谁都能往里塞的万能赦免单。
+ *
+ * @param {string} code 文件内容
+ * @param {string} rel 仓库相对路径
+ * @param {Set<string>} exemptKeys 豁免键集合（`file#fn`）
+ * @returns {{treeExitCount:number, guardedCount:number, seen:Set<string>, guarded:Map<string,string>, violations:string[]}}
+ */
+function auditFile(code, rel, exemptKeys) {
+  const fns = build(code, rel);
+  const byName = new Map(fns.map((f) => [f.name, f]));
+  const violations = [];
+  const seen = new Set();
+  const guarded = new Map();
+  let treeExitCount = 0;
+  for (const f of fns) {
+    if (!f.treeRemoves) continue;
+    treeExitCount++;
+    const key = exemptKey(rel, f.name);
+    seen.add(key);
+    if (denyFaceReached(fns, byName, f)) {
+      guarded.set(key, `${rel}:${f.line} ${f.name}()`);
+      continue;
+    }
+    if (!exemptKeys.has(key)) {
+      violations.push(
+        `${rel}:${f.line} ${f.name}() 调用了注册表删树原语（${TREE_REMOVE}），但本函数与同文件 1 跳内都没有禁删面判据（${DENY_FACE.join(' / ')}），也不在过渡豁免里`,
+      );
+    }
+  }
+  return { treeExitCount, guardedCount: guarded.size, seen, guarded, violations };
+}
+
+/**
+ * 豁免台账对账（真仓与合成对照共用同一实现）：返回违例描述数组。
+ * @param {{seen:Set<string>, guarded:Map<string,string>}} actual 盘上识别结果
+ * @param {Array<{file:string,fn:string,batch?:string,reason?:string}>} table 豁免表
+ */
+function judgeExemptions(actual, table) {
+  const out = [];
+  for (const t of table) {
+    const key = exemptKey(t.file, t.fn);
+    if (actual.guarded.has(key)) {
+      out.push(`${actual.guarded.get(key)} 已调用禁删面判据，但 TRANSITION 仍挂着它（豁免未回收 = 第二类假绿）`);
+    } else if (!actual.seen.has(key)) {
+      out.push(`TRANSITION 条目已失效（盘上找不到同名函数）：${t.file}:${t.fn}（${t.batch}）`);
+    }
+  }
+  for (const t of table) {
+    if (!t.reason || t.reason.length < 8) out.push(`TRANSITION 条目缺理由：${t.file}#${t.fn}`);
+    if (!t.batch) out.push(`TRANSITION 条目缺批次：${t.file}#${t.fn}`);
+  }
+  return out;
+}
+
 const g = gate(import.meta.url);
 const exemptKey = (rel, fn) => `${rel}#${fn}`;
 const exempt = new Map(TRANSITION.map((t) => [exemptKey(t.file, t.fn), t]));
 
 let treeExitCount = 0;
 let guardedCount = 0;
-const found = new Set();
+const seen = new Set();
+const guarded = new Map();
 
-if (!g.skipUnlessPresent(join(SRC, 'engine', 'protect.rs'), 'src-tauri/src（本门禁的判定对象）')) {
-  g.finish();
+// P0-08：判定对象是**仓库跟踪文件**，不是本机可选输入。旧形态按「缺输入 SKIP」处理
+// 并以 0 退出 ⇒ 目录被搬走 / 仓库残缺时，本门禁安静地什么都不校验（普通绿）。
+// 现在按 fail-closed 判红并短路退出，避免后续 read 抛 ENOENT 栈。
+for (const [abs, rel] of [
+  [join(SRC, 'engine', 'protect.rs'), 'src-tauri/src/engine/protect.rs'],
+  [join(SRC, 'engine', 'native', 'registry.rs'), 'src-tauri/src/engine/native/registry.rs'],
+  [join(SRC, 'engine', 'pssteps.rs'), 'src-tauri/src/engine/pssteps.rs'],
+]) {
+  if (!existsSync(abs)) {
+    g.fail(`判定对象缺失：${rel} 不在仓库里（仓库被破坏或路径搬走）——本门禁此刻什么都守不住，判红`);
+    g.finish();
+  }
 }
 
 for (const abs of walk(SRC)) {
   const rel = relative(ROOT, abs).split('\\').join('/');
   const code = readFileSync(abs, 'utf8');
   if (!code.includes(TREE_REMOVE)) continue;
-  const fns = build(code, rel);
-  const byName = new Map(fns.map((f) => [f.name, f]));
-  for (const f of fns) {
-    if (!f.treeRemoves) continue;
-    treeExitCount++;
-    const key = exemptKey(rel, f.name);
-    const reached = denyFaceReached(fns, byName, f);
-    if (reached) {
-      guardedCount++;
-      if (exempt.has(key)) {
-        g.fail(`${rel}:${f.line} ${f.name}() 已调用禁删面判据，但 TRANSITION 仍挂着它（豁免未回收 = 第二类假绿）`);
-      }
-      continue;
-    }
-    found.add(key);
-    if (!exempt.has(key)) {
-      g.fail(
-        `${rel}:${f.line} ${f.name}() 调用了注册表删树原语（${TREE_REMOVE}），但本函数与同文件 1 跳内都没有禁删面判据（${DENY_FACE.join(' / ')}），也不在过渡豁免里`,
-      );
-    }
-  }
+  const a = auditFile(code, rel, new Set(exempt.keys()));
+  treeExitCount += a.treeExitCount;
+  guardedCount += a.guardedCount;
+  for (const k of a.seen) seen.add(k);
+  for (const [k, label] of a.guarded) guarded.set(k, label);
+  for (const v of a.violations) g.fail(v);
 }
 
-// 已登记但盘上找不到的豁免（改名/搬文件/删函数都会走到这里）
-for (const [k, t] of exempt) {
-  if (!found.has(k)) g.fail(`TRANSITION 条目已失效（盘上找不到同名函数）：${t.file}:${t.fn}（${t.batch}）`);
-}
-for (const t of TRANSITION) {
-  if (!t.reason || t.reason.length < 8) g.fail(`TRANSITION 条目缺理由：${t.file}#${t.fn}`);
-  if (!t.batch) g.fail(`TRANSITION 条目缺批次：${t.file}#${t.fn}`);
-}
+// 豁免台账对账（改名 / 搬文件 / 删函数 / 补上判定但忘了回收豁免都会走到这里）
+for (const v of judgeExemptions({ seen, guarded }, TRANSITION)) g.fail(v);
 
 if (treeExitCount < MIN_TREE_EXITS) {
   g.fail(
@@ -226,7 +275,9 @@ g.ok(
 // 形态闸。两者是不同的失效方向：调用点全对但原语没有形态闸 ⇒ 空子键 / 含 NUL 的
 // 目标照样直达 `RegDeleteTreeW`。
 const REGISTRY_RS = join(SRC, 'engine', 'native', 'registry.rs');
-if (g.skipUnlessPresent(REGISTRY_RS, 'src-tauri/src/engine/native/registry.rs')) {
+{
+  // P0-08：对象存在性已在上方按 fail-closed 判红，这里不再走 SKIP 分支
+  // （SKIP 会让本节在对象缺失时静默跳过，末行却照样打「全部通过」）。
   const regText = blankNonCode(readFileSync(REGISTRY_RS, 'utf8'), 'rs');
   if (!regText.includes(SHAPE_GUARD)) {
     g.fail(
@@ -300,6 +351,40 @@ const CONTROLS = [
   }
 }
 
+// ── 合成样本对照：豁免台账的三条腿（真仓与合成对照共用同一实现）──────────────────
+//
+// 为什么单独钉：豁免台账是本门禁唯一的「已裁定不补」出口，此前**没有任何合成样本**
+// 驱动过它 —— 判据真身（豁免未回收 / 条目失效 / 缺理由缺批次）一旦失真，真仓那三条腿
+// 会一起静默，豁免台账就成了一张谁都能往里塞的万能赦免单。
+// 样本走 `auditFile()` + `judgeExemptions()` —— 与真仓扫描同一实现。
+{
+  const REL = 'src-tauri/src/engine/native/registry.rs';
+  const GUARDED = 'fn a(h: u32, s: &str) { if crate::engine::protect::reg_target_block_reason(s).is_some() { return; } let _ = reg_key_remove_checked(h, s, true); }';
+  const UNGUARDED = 'fn a(h: u32, s: &str) { let _ = reg_key_remove_checked(h, s, true); }';
+  const NO_TREE = 'fn b(s: &str) { let _ = s.len(); }';
+  const tbl = (rows) => rows.map((r) => Object.assign({ file: REL, fn: 'a', batch: 'Bx', reason: '合成对照用的豁免理由文本' }, r));
+  const audit = (code, rows) => auditFile(code, REL, new Set(rows.map((t) => exemptKey(t.file, t.fn))));
+  const cases = [
+    ['豁免未回收必红（函数已过禁删面但豁免仍挂着）',
+      judgeExemptions(audit(GUARDED, tbl([{}])), tbl([{}])).length, 1],
+    ['豁免未回收时不得再报「条目失效」（同一条豁免不叠两种判红）',
+      judgeExemptions(audit(GUARDED, tbl([{}])), tbl([{}])).filter((v) => /失效/.test(v)).length, 0],
+    ['豁免条目失效必红（盘上找不到同名函数）',
+      judgeExemptions(audit(NO_TREE, tbl([{}])), tbl([{}])).length, 1],
+    ['豁免条目缺理由必红',
+      judgeExemptions(audit(UNGUARDED, tbl([{ reason: '短' }])), tbl([{ reason: '短' }])).length, 1],
+    ['豁免条目缺批次必红',
+      judgeExemptions(audit(UNGUARDED, tbl([{ batch: '' }])), tbl([{ batch: '' }])).length, 1],
+    ['豁免覆盖未过禁删面的调用点时不判红',
+      audit(UNGUARDED, tbl([{}])).violations.length, 0],
+    ['干净样本放行（豁免与盘上未过闸的调用点对得上）',
+      judgeExemptions(audit(UNGUARDED, tbl([{}])), tbl([{}])).length, 0],
+  ];
+  const bad = cases.filter(([, got, want]) => got !== want).map(([label, got, want]) => `${label}（期望 ${want}，实得 ${got}）`);
+  if (bad.length) g.fail(`豁免台账对照失败：${bad.join('；')}`);
+  else g.ok(`豁免台账对照 ${cases.length} 组：豁免未回收 / 条目失效 / 缺理由 / 缺批次 必红，干净样本放行`);
+}
+
 // ── pssteps 注册表出口专项（R5c-M02 ②：pssteps 全链没有一处禁删面）─────────────────
 //
 // 为什么单独钉：pssteps 是本轮实锤的**无闸可达形态**所在（R5c-M02 的现算证据：
@@ -308,7 +393,8 @@ const CONTROLS = [
 // **整条链一道都没有** —— 所以门禁必须对这条链单独断言「有」，否则将来有人把
 // pssteps 里的那道判定删掉，上面的逐函数扫描要等到**下一个**删树出口才报出来。
 const PSSTEPS_RS = join(SRC, 'engine', 'pssteps.rs');
-if (g.skipUnlessPresent(PSSTEPS_RS, 'src-tauri/src/engine/pssteps.rs')) {
+{
+  // P0-08：同上，对象缺失在上方已判红，本节无条件执行。
   const psText = blankNonCode(readFileSync(PSSTEPS_RS, 'utf8'), 'rs');
   const hasDeny = DENY_FACE.some((d) => psText.includes(d));
   if (!hasDeny) {

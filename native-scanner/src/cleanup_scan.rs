@@ -28,29 +28,13 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 #[cfg(test)]
 use crate::util::sandbox;
 
-// ==================== 协作式取消（2026-11-02：扫描按钮「停止扫描」） ====================
-// 扫描是进程内直调的长任务，不能直接 kill；由宿主置位，本引擎在**条目边界**检查并提前返回。
-// 粒度 = 单条目：正在扫的那一条会跑完（DISM/大目录可能较久），已扫条目原样返回。
-static SCAN_CANCEL: AtomicBool = AtomicBool::new(false);
-
-/// 请求停止正在进行的清理扫描（宿主命令调用）。
-pub fn request_scan_cancel() {
-    SCAN_CANCEL.store(true, Ordering::SeqCst);
-}
-
-/// 新一轮扫描开始前复位取消位。
-pub fn reset_scan_cancel() {
-    SCAN_CANCEL.store(false, Ordering::SeqCst);
-}
-
-/// 本轮扫描是否已被请求停止（宿主据此在回执里标 cancelled）。
-pub fn scan_cancel_requested() -> bool {
-    SCAN_CANCEL.load(Ordering::SeqCst)
-}
+// ==================== 协作式取消（P0-04：按扫描会话持有） ====================
+// 扫描是进程内直调的长任务，不能直接 kill；宿主为每轮扫描创建独立 AtomicBool 句柄，
+// 在条目边界检查。引擎不持有进程级单例，跨窗口取消互不串扰。
 
 // ==================== 输出汇聚：数据返回式入口（Tauri 进程内直调） ====================
 // CLI 形态沿用「写 stdout/stderr + 进程退出」；Tauri 侧需要「一次调用拿回数据」的入口：
@@ -111,6 +95,11 @@ const EXIT_FATAL: i32 = 2;
 /// 同一个 2 让「扫描器 own 的 bug」与「用户规则库不合法」在回执层长成一张脸，
 /// 而前者是要报障修引擎的、后者是要改规则的。
 const EXIT_ENGINE_PANIC: i32 = 3;
+/// 占用检测的单轮 RM 查询预算（PF-P0-02）。旧代码只把 60s 写在注释里，两侧没有同源常量；
+/// 这里定义唯一数字，Tauri 侧直接引用，不散落第二份。
+pub const CHECK_LOCKED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// 超时/取消的结构化回执码；Tauri 侧据此返回 `rmTimeout`，不交出半截占用名单。
+pub const EXIT_CHECK_LOCKED_TIMEOUT: i32 = 4;
 static HOOK_ONCE: std::sync::Once = std::sync::Once::new();
 
 /// 装一次转发 hook：FatalMarker 静默（fatal 自己落过行），其它 panic **既交回原 hook
@@ -301,6 +290,24 @@ mod ffi {
     };
     use crate::util::to_wide;
 
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> isize;
+        fn GetProcessTimes(
+            process: isize,
+            creation_time: *mut u64,
+            exit_time: *mut u64,
+            kernel_time: *mut u64,
+            user_time: *mut u64,
+        ) -> i32;
+        fn QueryFullProcessImageNameW(
+            process: isize,
+            flags: u32,
+            image_name: *mut u16,
+            size: *mut u32,
+        ) -> i32;
+    }
+
     pub const HKEY_CLASSES_ROOT: isize = -2147483648; // 0x80000000
     pub const HKEY_CURRENT_USER: isize = -2147483647; // 0x80000001
     pub const HKEY_LOCAL_MACHINE: isize = -2147483646; // 0x80000002
@@ -418,6 +425,32 @@ mod ffi {
         }
         out
     }
+
+    pub fn process_identity(pid: u32) -> Option<(u64, String)> {
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle == 0 {
+                return None;
+            }
+            let (mut creation, mut exit, mut kernel, mut user) = (0u64, 0u64, 0u64, 0u64);
+            let times_ok = GetProcessTimes(
+                handle,
+                &mut creation,
+                &mut exit,
+                &mut kernel,
+                &mut user,
+            ) != 0;
+            let mut name = [0u16; 1024];
+            let mut name_len = name.len() as u32;
+            let name_ok = QueryFullProcessImageNameW(handle, 0, name.as_mut_ptr(), &mut name_len) != 0;
+            CloseHandle(handle);
+            if !times_ok || !name_ok {
+                return None;
+            }
+            Some((creation, String::from_utf16_lossy(&name[..name_len as usize])))
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -431,6 +464,10 @@ mod ffi {
     }
     pub fn process_names() -> HashSet<String> {
         HashSet::new()
+    }
+
+    pub fn process_identity(_pid: u32) -> Option<(u64, String)> {
+        None
     }
 }
 
@@ -960,6 +997,12 @@ fn report_unexpanded_token(field: &str, rule_id: &str, expanded: &str) {
     }
 }
 
+/// P1-01a：未解析 token 的回执字段值。stderr 留痕保留，同时把令牌附在本条
+/// `@@ITEM@@` 上；只标记，不改扫描方向。
+fn unexpanded_token_field(expanded: &str) -> Option<String> {
+    first_unexpanded_token(expanded).map(|tok| jstr(&format!("%{tok}%")))
+}
+
 // ==================== 文件系统基础判定 ====================
 
 /// Test-Path -LiteralPath（文件或目录均算存在；空串 false）
@@ -1007,14 +1050,6 @@ fn scan_deletable(p: &Path, protect: Option<&str>) -> bool {
         return false;
     }
     file_deletable(p)
-}
-
-/// FileInfo.Length 语义：存在且为文件返回长度（元数据读失败按不存在）
-fn try_file_length(p: &Path) -> Option<u64> {
-    match fs::metadata(p) {
-        Ok(m) if m.is_file() => Some(m.len()),
-        _ => None,
-    }
 }
 
 /// 文件名通配（对齐 .NET FileSystemName.MatchesSimpleExpression ignoreCase=true）：
@@ -1607,10 +1642,20 @@ fn list_deletable_inner(
     let root = Path::new(root_str);
     // 根本身是文件（pattern='*'）：单文件口径（对齐 TryFileLength 分支）
     if all {
-        if let Some(fl) = try_file_length(root) {
+        // P1-01d：长度、出生时间与 reparse 位来自同一次 symlink_metadata，
+        // 消除两次读盘间文件被改写/替换造成的 size 与身份证基线错配。
+        if let Ok(md) = fs::symlink_metadata(root) {
+            if !md.is_file() { /* 目录根继续走下方枚举路径 */ }
+            else if md_reparse_flag(&md) {
+                return DeletableResult {
+                    files: Vec::new(), total: 0, deletable_count: 0, deletable_bytes: 0,
+                    skipped_reparse: 0, unreadable_dirs: 0, files_truncated: false,
+                };
+            } else {
+            let fl = md.len();
             // minAge：单文件同样要过时效护栏（够老判定与递归分支同一入口；
             // 有护栏且元数据读不到按太新，无护栏维持既有口径）
-            let old_enough = guard.old_enough_path(root);
+            let old_enough = guard.old_enough(&md);
             let root_low = root.to_string_lossy().to_lowercase();
             let excluded = path_excluded(excl_dirs, excl_files, &root_low);
             let mut files = Vec::new();
@@ -1622,7 +1667,7 @@ fn list_deletable_inner(
                 deletable_bytes = fl;
                 if collect_files {
                     // 与递归分支同口径：size 与出生时间来自同一次 metadata 读取
-                    let bt = fs::metadata(root).map(|m| birthtime_ns(&m)).unwrap_or(0);
+                    let bt = birthtime_ns(&md);
                     if cap.unwrap_or(usize::MAX) == 0 {
                         files_truncated = true;
                     } else {
@@ -1639,6 +1684,7 @@ fn list_deletable_inner(
                 unreadable_dirs: 0,
                 files_truncated,
             };
+            }
         }
     }
     let mut res = DeletableResult {
@@ -2012,9 +2058,8 @@ mod rstrtmgr {
     /// `RmGetList` 因 ERROR_MORE_DATA 重试的次数上限（N1a-L08）。
     ///
     /// 为什么必须有：`continue` 只把 `count` 换成 `needed`，`needed` 不前进时就是
-    /// 同参数无限重试；调用线程是 `checklocked` 的同步主线程，外层**没有超时**
-    /// （`src-tauri/src/commands/cleanup/mod.rs` 成文登记「无 60s 占用检测超时」），
-    /// 一旦触发就是不可中止的挂死。超限放弃的方向是「少报占用」，不是伪造结果。
+    /// 同参数无限重试；外层另有 [`super::CHECK_LOCKED_TIMEOUT`] 兜底。超限放弃的方向是
+    /// 「少报占用」，不是伪造结果。
     const RM_GETLIST_MAX_RETRY: u32 = 3;
 
     // 结构、布局断言与 FFI 声明已上移 `crate::util::ffi`（v3 C-3）。
@@ -2060,8 +2105,9 @@ mod rstrtmgr {
         pub critical: bool,
     }
 
-    pub fn query_lockers(path: &str) -> Vec<RmProc> {
+    pub fn query_lockers(path: &str, timeout: std::time::Duration) -> Vec<RmProc> {
         let mut out: Vec<RmProc> = Vec::new();
+        let deadline = std::time::Instant::now() + timeout;
         unsafe {
             let mut sess: u32 = 0;
             let mut key = [0u16; CCH_RM_SESSION_KEY + 1];
@@ -2083,6 +2129,9 @@ mod rstrtmgr {
                     let mut buf: Vec<RM_PROCESS_INFO> = vec![std::mem::zeroed(); count as usize];
                     let mut reboot: u32 = 0;
                     let rc2 = RmGetList(sess, &mut needed, &mut count, buf.as_mut_ptr(), &mut reboot);
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
                     if rc2 == ERROR_MORE_DATA {
                         retries += 1;
                         match rm_more_data_next(retries, needed) {
@@ -2128,7 +2177,7 @@ mod rstrtmgr {
         pub critical: bool,
     }
 
-    pub fn query_lockers(_path: &str) -> Vec<RmProc> {
+    pub fn query_lockers(_path: &str, _timeout: std::time::Duration) -> Vec<RmProc> {
         Vec::new()
     }
 }
@@ -2139,7 +2188,7 @@ pub fn run_checklocked() -> i32 {
     if std::io::stdin().read_to_string(&mut input).is_err() {
         fatal("stdin 读取失败");
     }
-    let (code, out, err) = capture(None, || checklocked_body(&input));
+    let (code, out, err) = capture(None, || checklocked_body(&input, None));
     write_back(&out, &err);
     code
 }
@@ -2147,7 +2196,23 @@ pub fn run_checklocked() -> i32 {
 /// 数据返回式入口（Tauri 进程内直调）：输出收集进内存，不写 stdout、不 exit。
 /// 返回 (exit_code, stdout, stderr)。
 pub fn checklocked_json(stdin_text: &str) -> (i32, String, String) {
-    capture(None, || checklocked_body(stdin_text))
+    checklocked_json_cancellable(stdin_text, None)
+}
+
+/// 可取消的进程内入口：取消位置零时立即收口并返回超时/取消退出码，不交半截结果。
+pub fn checklocked_json_cancellable(
+    stdin_text: &str,
+    cancel: Option<&AtomicBool>,
+) -> (i32, String, String) {
+    capture(None, || checklocked_body(stdin_text, cancel))
+}
+
+fn rm_query_timed_out(
+    deadline: std::time::Instant,
+    cancel: Option<&AtomicBool>,
+) -> bool {
+    cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::SeqCst))
+        || std::time::Instant::now() >= deadline
 }
 
 /// v7.2-C03（N1a-M02）：占用检测单文件判定——true = 应查 RM 并输出 @@LOCKED@@。
@@ -2162,7 +2227,7 @@ fn occupied_report_warranted(path: &str, protect: Option<&str>) -> bool {
 }
 
 /// checklocked 主流程：逐文件独占探测 → 被占用的查 RM → 行协议输出
-fn checklocked_body(input: &str) -> i32 {
+fn checklocked_body(input: &str, cancel: Option<&AtomicBool>) -> i32 {
     if input.trim().is_empty() {
         fatal("占用检测输入为空");
     }
@@ -2173,6 +2238,9 @@ fn checklocked_body(input: &str) -> i32 {
     let Some(files) = parsed.get("files").and_then(|v| v.as_arr()) else {
         fatal("占用检测输入缺少 files 结构");
     };
+    let deadline = std::time::Instant::now() + CHECK_LOCKED_TIMEOUT;
+    let mut rm_timed_out = false;
+    let mut locked_lines: Vec<String> = Vec::new();
     // R10（2026-10-15）：保护清单（可选）——占用检测的可删判定与扫描/执行侧同源
     let protect = parsed.get("protect").and_then(|v| v.as_str());
     let mut scanned: u64 = 0;
@@ -2181,6 +2249,10 @@ fn checklocked_body(input: &str) -> i32 {
     // 不构成异常）—— 计数并上终止行，让「输入畸形」可见。
     let mut skipped: u64 = 0;
     for f in files {
+        if rm_query_timed_out(deadline, cancel) {
+            rm_timed_out = true;
+            break;
+        }
         let Some(path) = f.get("path").and_then(|v| v.as_str()) else {
             skipped += 1;
             continue;
@@ -2202,23 +2274,49 @@ fn checklocked_body(input: &str) -> i32 {
         if !occupied_report_warranted(path, protect) {
             continue;
         }
-        let procs = rstrtmgr::query_lockers(path);
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let procs = rstrtmgr::query_lockers(path, remaining);
+        if rm_query_timed_out(deadline, cancel) {
+            rm_timed_out = true;
+            break;
+        }
         let id = f.get("id").and_then(|v| v.as_str()).unwrap_or("");
         // procs 携带 PID：主进程 kill 白名单（仅非 critical）来源；RM 对同一进程重复返回，主进程按 pid 去重
         let procs_json = procs
             .iter()
-            .map(|p| format!("{{\"pid\":{},\"app\":{},\"critical\":{}}}", p.pid, jstr(&p.app), if p.critical { "true" } else { "false" }))
+            .map(|p| {
+                let (creation, image) = ffi::process_identity(p.pid).unwrap_or((0, String::new()));
+                format!(
+                    "{{\"pid\":{},\"app\":{},\"critical\":{},\"creationTimeNs\":{},\"imagePath\":{}}}",
+                    p.pid,
+                    jstr(&p.app),
+                    if p.critical { "true" } else { "false" },
+                    creation,
+                    jstr(&image)
+                )
+            })
             .collect::<Vec<_>>()
             .join(",");
-        out_line(&format!(
+        locked_lines.push(format!(
             "@@LOCKED@@{{\"path\":{},\"id\":{},\"procs\":[{}]}}",
             jstr(path),
             jstr(id),
             procs_json
         ));
         locked += 1;
-        flush_stdout();
     }
+    if rm_timed_out {
+        err_line("[cleanup-scan] 占用检测超时或已取消，未执行删除");
+        return EXIT_CHECK_LOCKED_TIMEOUT;
+    }
+    debug_assert!(
+        locked_lines.is_empty() || locked == locked_lines.len() as u64,
+        "占用行数必须与延迟输出行数一致"
+    );
+    for line in locked_lines {
+        out_line(&line);
+    }
+    flush_stdout();
     // N1a-M09：skipped 上终止行（全仓现无消费方，先让形状活着，主进程对账时可直接取）
     out_line(&format!(
         "@@LOCKED_DONE@@{{\"scanned\":{},\"locked\":{},\"skipped\":{}}}",
@@ -2661,7 +2759,7 @@ pub fn rule_age_guard(hours: Option<f64>, days: Option<f64>, axis: Option<&str>)
 /// 读侧（本文件的 [`global_min_age_file`]）都从这里取，别在两处各写一遍字面量。
 pub const GLOBAL_MIN_AGE_FILE: &str = "cleanup-min-age-days.txt";
 
-/// G-2 全局年龄策略文件的落点：`<数据根>\cleanup-min-age-days.txt`。
+/// G-2 全局年龄策略文件的落点：`<数据根>` 下文件名取 `GLOBAL_MIN_AGE_FILE`。
 ///
 /// 为什么与 `empty-ignore.txt` 同落点、同「行文本」格式（而不是另开一份 JSON 配置）：
 /// - 落点由宿主注入（`util::list_file_path` ⇒ 便携模式感知），扫描器不自己拼 `%APPDATA%`（N2）；
@@ -2943,6 +3041,7 @@ fn walk_fk_dll(
     acc.unreadable_dirs += view.unreadable();
     let mut subdirs: Vec<std::path::PathBuf> = Vec::new();
     let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut local_seen: HashSet<String> = HashSet::new();
     for ent in view.entries() {
         match ent {
             CachedEntry::Dir { path, reparse } => {
@@ -2950,7 +3049,11 @@ fn walk_fk_dll(
                     subdirs.push(path.clone());
                 }
             }
-            CachedEntry::File { path, full, .. } => files.push((path.clone(), full.clone())),
+            CachedEntry::File { path, full, .. } => {
+                if local_seen.insert(crate::scan::lexically_normalize(full)) {
+                    files.push((path.clone(), full.clone()));
+                }
+            }
             CachedEntry::Other => {}
         }
     }
@@ -2980,20 +3083,22 @@ fn walk_fk_dll(
         if !p.counted {
             continue;
         }
+        // P1-01c：与快照分支同口径——先去重再计数，多根/glob 命中同一文件只计一次。
+        if !acc.seen.insert(crate::scan::lexically_normalize(full_s)) {
+            continue;
+        }
         acc.total_count += 1;
         if p.deletable {
-            acc.deletable_count += 1; // 去重前累加（对齐 PS DLL 分支）
-            if acc.seen.insert(full_s.to_lowercase()) {
-                let before = acc.truncated;
-                acc.push_budget(full_s.clone(), p.size, p.bt);
-                if !before && acc.truncated {
-                    // 只在**首次**翻转到截断时留一次痕：后续每层都打的话，
-                    // 一次扫描能刷出上千行同样的日志，把真留痕淹掉。
-                    err_line(&format!(
-                        "[trim-scanner] PLAN_CAP 已耗尽（单条目上限 {PLAN_CAP_PER_ITEM} 行 / 全扫描 {PLAN_CAP_TOTAL} 行），\
-                         剩余子树停止遍历（已记 filesTruncated）"
-                    ));
-                }
+            acc.deletable_count += 1;
+            let before = acc.truncated;
+            acc.push_budget(full_s.clone(), p.size, p.bt);
+            if !before && acc.truncated {
+                // 只在**首次**翻转到截断时留一次痕：后续每层都打的话，
+                // 一次扫描能刷出上千行同样的日志，把真留痕淹掉。
+                err_line(&format!(
+                    "[trim-scanner] PLAN_CAP 已耗尽（单条目上限 {PLAN_CAP_PER_ITEM} 行 / 全扫描 {PLAN_CAP_TOTAL} 行），\
+                     剩余子树停止遍历（已记 filesTruncated）"
+                ));
             }
         }
     }
@@ -3248,7 +3353,7 @@ fn get_file_key_deletable(rule: &Json, global_rows: &mut usize, global_min_age_d
                             acc.total_count += 1;
                             if scan_deletable(Path::new(&dir), protect) {
                                 acc.deletable_count += 1;
-                                if acc.seen.insert(low) {
+                                if acc.seen.insert(crate::scan::lexically_normalize(&dir)) {
                                     let before = acc.truncated;
                                     acc.push_budget(dir.clone(), md.len(), birthtime_ns(&md));
                                     if !before && acc.truncated {
@@ -3556,8 +3661,9 @@ pub fn run_json(
     argv: &[String],
     stdin_text: &str,
     on_line: Option<Box<dyn FnMut(&str)>>,
+    cancel: Option<&AtomicBool>,
 ) -> (i32, String, String) {
-    capture(on_line, || scan_body(argv, stdin_text))
+    capture(on_line, || scan_body(argv, stdin_text, cancel))
 }
 
 /// cleanup CLI 入口：argv/stdin 校验顺序与迁移前一致，输出回写标准流
@@ -3570,7 +3676,7 @@ pub fn run(argv: &[String]) -> i32 {
     if iostdin_read(&mut input).is_err() {
         fatal("stdin 读取失败");
     }
-    let (code, out, err) = capture(None, || scan_body(argv, &input));
+    let (code, out, err) = capture(None, || scan_body(argv, &input, None));
     write_back(&out, &err);
     code
 }
@@ -3593,7 +3699,7 @@ impl Drop for SlowRuleTimer {
 }
 
 /// argv = [categories_json, configured_paths_json, (可选) protect_json]；规则 JSON 由调用方读入
-fn scan_body(argv: &[String], input: &str) -> i32 {
+fn scan_body(argv: &[String], input: &str, cancel: Option<&AtomicBool>) -> i32 {
     // N1a-M05：`run_json` 的入口面不校 argv 长度（`run` 校，宿主直调与集成测试都不经过
     // `run`），而下面两处 `argv[0]/argv[1]` 是裸下标 ⇒ 少传一个参数就是越界 panic，
     // 正好落进「非 FatalMarker panic 无留痕」那条通道。检查必须落在**捕获体内**：
@@ -3661,7 +3767,7 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
     // N1a-M09：请求项与返回项的差额必须可对账 —— 宿主以 cats.len() 做分母，
     // 「请求的项数与实际回来的项数」静默发生时没人看得见（未知 id / 畸形条目必须留痕）。
     for cat in &categories {
-        if SCAN_CANCEL.load(Ordering::SeqCst) {
+        if cancel.is_some_and(|token| token.load(std::sync::atomic::Ordering::SeqCst)) {
             err_line("[cleanup-scan] 扫描已被用户停止，未扫描的条目已跳过");
             break;
         }
@@ -3830,21 +3936,31 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
         // §4.10：盘符相对形态（`$env:UNDEF + '\Foo'` → `\Foo`）不枚举——
         // 「当前盘」是 CWD 的偶然属性，不是规则作者的决定。
         // N1a-L01：拒绝形状收编进 [`reject_drive_relative`]，与设置页覆盖值共用同一道闸。
+        // P1-01a：主分支也走统一留痕出口（只留痕，方向仍少报不扩大删除面）。
+        report_unexpanded_token("pathPs", cat_id, &evaluated);
+        if let Some(token) = unexpanded_token_field(&evaluated) {
+            err_line(&format!(
+                "[cleanup-scan] 规则 {cat_id} pathPs 路径变量 {token} 未解析，该字段按展开后原文处理"
+            ));
+        }
         if reject_drive_relative("pathPs", cat_id, &evaluated) {
             continue;
         }
-        let mut path = evaluated.clone();
         let evaluated_path = evaluated;
+        let mut unexpanded_token = unexpanded_token_field(&evaluated_path);
+        let mut path = evaluated_path.clone();
         let mut path_source = "configured".to_string();
         let mut path_candidates: Vec<String> = Vec::new();
         let mut auto_path = String::new();
-
         // 应用缓存优先采用设置页已确认的路径；没有确认路径时才走内置候选
         // （取值为 detect 之前已算好的 `configured_value`，见 N1a-M01）
         if !configured_value.is_empty() {
             // §4.8：设置页存量配置值也可能带未解析 %TOKEN%（按原文永远 0 命中）——
             // 只留痕不拒用，让「为什么这项扫不出来」可对账
             report_unexpanded_token("configured", cat_id, &configured_value);
+            if unexpanded_token.is_none() {
+                unexpanded_token = unexpanded_token_field(&configured_value);
+            }
             // N1a-L01：configured 是全文件最后一个没过 §4.10 的路径字段——盘符相对形态
             // 会按当前盘根被真实枚举。命中则不采用覆盖值（退回 pathPs 求值结果）。
             if !reject_drive_relative("configured", cat_id, &configured_value) {
@@ -3994,6 +4110,9 @@ fn scan_body(argv: &[String], input: &str) -> i32 {
             ("exists", exists_json),
             ("blockedBy", blocked_json),
         ];
+        if let Some(token) = unexpanded_token {
+            fields.push(("unexpandedToken", token));
+        }
         if stats.files_truncated {
             // 与 fileKeys 支同名同义：清单被 PLAN_CAP 截断，确认环节必须告知
             // 「实际清理范围可能大于列出的清单」（渲染层 cleanup.js 有 filesTruncated 分支）。
@@ -4024,6 +4143,35 @@ fn flush_stdout() {
 
 #[cfg(test)]
 mod tests {
+    /// PF-P0-02：取消位与 deadline 任一成立都必须立即收口；两者都未成立才继续等待。
+    /// 判红自证：把 `||` 改成 `&&` ⇒ 第一条红；把 `>=` 改成 `<` ⇒ 第二条红。
+    #[test]
+    fn rm查询超时判定兼顾取消位与截止时刻() {
+        let now = std::time::Instant::now();
+        let cancelled = AtomicBool::new(true);
+        assert!(
+            rm_query_timed_out(now + std::time::Duration::from_secs(60), Some(&cancelled)),
+            "扫描取消位必须能让 RM 查询外层立即收口"
+        );
+        let active = AtomicBool::new(false);
+        assert!(
+            !rm_query_timed_out(now + std::time::Duration::from_secs(60), Some(&active)),
+            "未取消且未到 deadline 时不得误判超时"
+        );
+        assert!(
+            rm_query_timed_out(now, None),
+            "到达 deadline 必须判超时，哪怕没有取消位"
+        );
+    }
+
+    /// 结构化超时退出码不能和输入致命错/引擎 panic 共用，否则宿主无法区分并清空白名单。
+    #[test]
+    fn 占用检测超时退出码与既有分档不同() {
+        assert_ne!(EXIT_CHECK_LOCKED_TIMEOUT, EXIT_FATAL);
+        assert_ne!(EXIT_CHECK_LOCKED_TIMEOUT, EXIT_ENGINE_PANIC);
+        assert_eq!(CHECK_LOCKED_TIMEOUT, std::time::Duration::from_secs(60));
+    }
+
     /// N1a-U01 反例样本：当前盘根下一个**确实有子目录**的目录名。
     ///
     /// 不写死 `Windows`：测试不许依赖本机特定目录；拿运行时枚举结果当「UNC 首段」，
@@ -4508,6 +4656,31 @@ mod tests {
         assert!(zero.files.is_empty() && zero.files_truncated && zero.size == 9, "零预算必须「空清单 + 截断 + 全量 size」三件齐");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// P1-01d：单文件 list_deletable 支必须一次 symlink_metadata 同取 size/出生时间。
+    /// 判红自证：把 md.len() 与 birthtime 改成两次 metadata，或恢复 metadata 跟随链接，
+    /// 出生时间/字节一致性断言红。
+    #[test]
+    fn 单文件清单大小与出生时间同源() {
+        let _sb = sandbox(&format!("single-meta-{}", std::process::id()));
+        let file = _sb.path().join("single.bin");
+        fs::write(&file, b"0123456789").unwrap();
+        let got = list_deletable(
+            &file.to_string_lossy(), "*", AgeGuard::Off, &[], &[], None,
+        );
+        assert_eq!(got.deletable_count, 1);
+        assert_eq!(got.deletable_bytes, 10);
+        assert_eq!(got.files.len(), 1);
+        let md = fs::symlink_metadata(&file).unwrap();
+        let expected_bt = birthtime_ns(&md);
+        assert_eq!(got.files[0].1, 10);
+        assert_eq!(got.files[0].2, expected_bt, "出生时间必须来自与 size 同一次读取");
+        let src = include_str!("cleanup_scan.rs");
+        let body = src.split("fn list_deletable_inner(").nth(1).expect("list_deletable_inner 存在")
+            .split("fn get_path_deletable_stats(").next().expect("单文件段完整");
+        assert!(body.contains("fs::symlink_metadata(root)"), "单文件支必须走 symlink_metadata");
+        assert!(!body.contains("fs::metadata(root)"), "单文件支不得二次读取 metadata");
     }
 
     /// detect 回退链的候选档（2026-10-23）：`pathPs:"''"` 是「无固定根、靠候选自动发现」的
@@ -5272,7 +5445,7 @@ mod tests {
         for id in &ids {
             let cats = format!("[{}]", jstr(id));
             let t0 = Instant::now();
-            let (code, out, err) = run_json(&[cats, "{}".to_string(), String::new()], &rules_text, None);
+            let (code, out, err) = run_json(&[cats, "{}".to_string(), String::new()], &rules_text, None, None);
             let dt = t0.elapsed();
             total += dt;
             let rows_n = out.lines().filter(|l| l.starts_with("@@PLANFILE@@")).count();
@@ -5289,12 +5462,12 @@ mod tests {
     /// 「非 FatalMarker panic ⇒ 无留痕」那条通道）。检查落在捕获体内 ⇒ 走 fatal 一档。
     #[test]
     fn run_json_参数不足走致命档而不是越界() {
-        let (code, _out, err) = run_json(&["[]".to_string()], "{}", None);
+        let (code, _out, err) = run_json(&["[]".to_string()], "{}", None, None);
         assert_eq!(code, EXIT_FATAL, "参数不足必须是规则库/输入致命错那一档：{code}");
         assert!(err.contains("参数不足"), "必须说清缺什么：{err}");
         assert!(!err.contains("引擎 panic"), "不是引擎 bug：{err}");
         // 对照：参数够（stdin 空仍致命，但报的是规则库那条）
-        let (code2, _o2, err2) = run_json(&["[]".to_string(), "{}".to_string()], "", None);
+        let (code2, _o2, err2) = run_json(&["[]".to_string(), "{}".to_string()], "", None, None);
         assert_eq!(code2, EXIT_FATAL);
         assert!(err2.contains("stdin 规则 JSON 为空"), "对照未命中：{err2}");
     }
@@ -5476,7 +5649,7 @@ mod n1a_m09_tests {
             "{\"files\":[{\"path\":\"Z:\\\\TrimMissingProbe\\\\a.log\",\"id\":\"a\"},",
             "{\"id\":\"no-path\"},{\"path\":\"\",\"id\":\"empty\"}]}"
         );
-        let (_code, out, _err) = capture(None, || checklocked_body(&input));
+        let (_code, out, _err) = capture(None, || checklocked_body(&input, None));
         assert!(
             out.contains(concat!("\"skipped\":", "2")),
             "畸形输入项必须进 skipped 计数: {out}"
@@ -5531,6 +5704,7 @@ mod n1a_m01_m03_tests {
             &[r#"["n1aM01"]"#.to_string(), cfg, String::new()],
             &rules,
             None,
+            None,
         );
         assert_eq!(code, 0, "扫描不得失败: {err}");
         let item = out
@@ -5548,6 +5722,7 @@ mod n1a_m01_m03_tests {
         let (code2, out2, err2) = run_json(
             &[r#"["n1aM01"]"#.to_string(), "{}".to_string(), String::new()],
             &rules,
+            None,
             None,
         );
         assert_eq!(code2, 0, "{err2}");
@@ -5691,10 +5866,50 @@ mod n1a_g6_l_tests {
     #[test]
     fn n1a_empty_entry_is_reported() {
         let rules = r#"{"groups":[{"items":[{"id":"l02","name":"empty"}]}]}"#;
-        let (code, out, err) = run_json(&["[\"l02\"]".into(), "{}".into(), String::new()], rules, None);
+        let (code, out, err) = run_json(&["[\"l02\"]".into(), "{}".into(), String::new()], rules, None, None);
         assert_eq!(code, 0);
         assert!(!out.contains("l02"), "空条目不得伪造成可清项");
         assert!(err.contains("pathPs 缺失或为空串"), "空条目必须留诊断: {err}");
+    }
+
+    /// P1-01a：pathPs 主分支的 `%VAR%` 必须同时落 stderr 与回执字段。
+    /// 判红自证：删掉 `unexpanded_token_field` 接线或回执字段，本用例红。
+    #[test]
+    fn pathps_unexpanded_token_is_reported() {
+        let cfg = r#"{"tok":"C:\\TrimNoSuchRootP101A\\%TRIM_P1_01A_NO_SUCH_VAR%x"}"#;
+        let rules = r#"{"groups":[{"items":[{"id":"tok","name":"token","pathPs":"'C:\\Windows'","detect":[{"path":"C:\\Windows"}]}]}]}"#;
+        let (code, out, err) = run_json(&[r#"["tok"]"#.into(), cfg.into(), String::new()], rules, None, None);
+        assert_eq!(code, 0, "{err}");
+        assert!(err.contains("规则 tok configured 路径变量 %TRIM_P1_01A_NO_SUCH_VAR% 未解析"), "主分支留痕缺失: {err}");
+        let item = item_by_id(&out, "tok").expect("pathPs 条目必须出现");
+        assert!(item.contains("\"unexpandedToken\":\"%TRIM_P1_01A_NO_SUCH_VAR%\""), "回执未带 token: {item}");
+    }
+
+    /// P1-01c：两个 glob 命中同一文件时，total/deletable 都只计一次。
+    /// 判红自证：把 walk_fk_dll 恢复成「先计数再去重」，本用例红。
+    #[test]
+    fn walk_fk_dll_多根命中同一文件只计一次() {
+        let _sb = sandbox(&format!("p1-01c-{}", std::process::id()));
+        let root = _sb.path().to_path_buf();
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::write(root.join("a").join("dup.tmp"), b"x").unwrap();
+
+        let mut acc = FkAcc::new(0);
+        walk_fk_dll(&root.join("a"), true, "*.tmp", true, AgeGuard::Off, &[], &[], None, &mut acc, 0, None);
+        let plain = (acc.total_count, acc.deletable_count, acc.files.len());
+        assert_eq!(plain, (1, 1, 1), "单个根必须计一次: {plain:?}");
+
+        // 同一路径再走一次 DLL 分支；去重前 total/deletable 会加倍。
+        let mut acc2 = FkAcc::new(0);
+        walk_fk_dll(&root.join("a"), true, "*.tmp", true, AgeGuard::Off, &[], &[], None, &mut acc2, 0, None);
+        let again = (acc2.total_count, acc2.deletable_count, acc2.files.len());
+        assert_eq!(again, plain, "同路径重复遍历的口径必须与首次一致: {again:?}");
+        let src = include_str!("cleanup_scan.rs");
+        let body = src.split("fn walk_fk_dll(").nth(1).expect("walk_fk_dll 存在")
+            .split("fn walk_fk_snapshot(").next().expect("walk_fk_dll 段完整");
+        let inc = body.find("acc.total_count += 1").expect("计数点存在");
+        let dedup = body.find("acc.seen.insert").expect("去重点存在");
+        assert!(dedup < inc, "P1-01c 必须先把路径写入 seen，再累加计数");
     }
 
     /// N1a-L03 + L04：规则排除键必须折尾点、尾空白、正/反斜杠，并传进 pathPs 分支。
@@ -5713,7 +5928,7 @@ mod n1a_g6_l_tests {
                 crate::json_escape(&root.to_string_lossy()),
                 crate::json_escape(&variant)
             );
-            let (code, out, err) = run_json(&["[\"l03\"]".into(), "{}".into(), String::new()], &rules, None);
+            let (code, out, err) = run_json(&["[\"l03\"]".into(), "{}".into(), String::new()], &rules, None, None);
             assert_eq!(code, 0, "{err}");
             let item = item_by_id(&out, "l03").unwrap_or_else(|| panic!("pathPs 条目必须出现: {out}"));
             assert!(item.contains("\"size\":0"), "排除变体 {variant} 未命中: {item}");
@@ -5726,7 +5941,7 @@ mod n1a_g6_l_tests {
     #[test]
     fn n1a_dism_placeholder_has_no_path() {
         let rules = format!(r#"{{"groups":[{{"items":[{{"id":"l05","name":"dism","special":"dism"}}]}}]}}"#);
-        let (code, out, err) = run_json(&["[\"l05\"]".into(), "{}".into(), String::new()], &rules, None);
+        let (code, out, err) = run_json(&["[\"l05\"]".into(), "{}".into(), String::new()], &rules, None, None);
         assert_eq!(code, 0, "{err}");
         let item = item_by_id(&out, "l05").expect("DISM 占位必须仍有条目");
         assert!(item.contains("\"path\":\"\""), "占位 path 必须为空: {item}");
@@ -5781,6 +5996,7 @@ mod n1a_g6_l_tests {
                 String::new(),
             ],
             &rules,
+            None,
             None,
         );
         assert_eq!(code, 0, "扫描不得失败: {err}");
@@ -5888,6 +6104,7 @@ mod n1a_g6_l_tests {
         let (code, out, err) = run_json(
             &[r#"["n1aL03"]"#.to_string(), "{}".to_string(), String::new()],
             &rules,
+            None,
             None,
         );
         assert_eq!(code, 0, "{err}");

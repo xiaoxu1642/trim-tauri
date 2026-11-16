@@ -109,22 +109,44 @@ pub(super) fn find_option(id: &str) -> Option<&'static Value> {
 /// 真正的缺陷在另一半：还原通道只认目录里的 id，于是退役项留下的备份**连手动出口都没有**。
 /// 现在两半都补上：还原认得退役 id，概览把本机确有备份的那些列成待还原清单交用户点。
 pub(super) const RETIRED_JSON: &str = include_str!("../../../data/retired-optimizations.json");
+static RETIRED_ERROR: OnceLock<Option<&'static str>> = OnceLock::new();
 
 pub(super) fn retired_items() -> &'static [Value] {
     static CACHE: OnceLock<Vec<Value>> = OnceLock::new();
     CACHE
         .get_or_init(|| {
+            if let Err(e) = crate::engine::rules_signature::verify_rules_text(RETIRED_JSON) {
+                let reason = format!("retired-optimizations.json 验签失败: {e}");
+                crate::engine::log::write_log("error", &reason);
+                let _ = RETIRED_ERROR.set(Some(Box::leak(reason.into_boxed_str())));
+                return Vec::new();
+            }
             let parsed = parse_embedded_json(RETIRED_JSON, "retired-optimizations.json");
-            parsed
-                .get("items")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default()
+            let Some(items) = parsed.get("items").and_then(Value::as_array) else {
+                let reason = "retired-optimizations.json 解析失败或缺少 items 数组";
+                crate::engine::log::write_log("error", reason);
+                let _ = RETIRED_ERROR.set(Some(reason));
+                return Vec::new();
+            };
+            let _ = RETIRED_ERROR.set(None);
+            items
+                .clone()
                 .into_iter()
                 .filter(|i| !i["id"].as_str().unwrap_or("").is_empty())
                 .collect()
         })
         .as_slice()
+}
+
+/// 退役清单装载失败时的显式回执；`None` = 清单可用。
+pub(super) fn retired_load_failure() -> Option<Value> {
+    let reason = RETIRED_ERROR.get().copied().flatten()?;
+    Some(json!({
+        "success": false,
+        "degraded": true,
+        "code": "optimizer-retired-invalid",
+        "message": format!("退役优化清单不可用：{reason}；退役项还原与待还原提示已停止"),
+    }))
 }
 
 pub(super) fn is_retired_id(id: &str) -> bool {
@@ -578,14 +600,11 @@ pub(super) fn write_spec_of(option_id: &str) -> Option<WriteSpec> {
 ///
 /// 列出来会让用户点一个「还原」然后拿到「无备份记录」—— 那是把「没有依据」说成
 /// 「有入口但坏了」。
+#[cfg(test)]
 pub(super) fn restorable_items(backup_map: &Value) -> (Vec<Value>, Vec<Value>) {
     let count_of = |id: &str| -> Option<usize> {
-        backup_map
-            .get(id)?
-            .get("values")
-            .and_then(Value::as_array)
-            .map(|a| a.len())
-            .filter(|n| *n > 0)
+        let (restorable, _, _) = entry_restore_summary(backup_map.get(id)?);
+        (restorable > 0).then_some(restorable)
     };
     // 在用项
     let active: Vec<Value> = options()
@@ -608,12 +627,8 @@ pub(super) fn restorable_items(backup_map: &Value) -> (Vec<Value>, Vec<Value>) {
 
 /// B4：某项是否可逐项还原（供 `optimizer_list` 逐行注入 `restorable`）
 pub(super) fn is_restorable(backup_map: &Value, option_id: &str) -> Option<usize> {
-    backup_map
-        .get(option_id)?
-        .get("values")
-        .and_then(Value::as_array)
-        .map(|a| a.len())
-        .filter(|n| *n > 0)
+    let (restorable, _, _) = entry_restore_summary(backup_map.get(option_id)?);
+    (restorable > 0).then_some(restorable)
 }
 
 pub(super) fn retired_pending_backups(backup_map: &Value) -> Vec<Value> {
@@ -621,15 +636,46 @@ pub(super) fn retired_pending_backups(backup_map: &Value) -> Vec<Value> {
         .iter()
         .filter_map(|i| {
             let id = i["id"].as_str()?;
-            let n = backup_map
-                .get(id)?
-                .get("values")
-                .and_then(Value::as_array)
-                .map(|a| a.len())
-                .filter(|n| *n > 0)?;
-            Some(json!({ "id": id, "title": i["title"].as_str().unwrap_or(id), "values": n }))
+            let (restorable, uncertain, total) = entry_restore_summary(backup_map.get(id)?);
+            (total > 0).then(|| {
+                json!({
+                    "id": id,
+                    "title": i["title"].as_str().unwrap_or(id),
+                    "values": restorable,
+                    "restorable": restorable,
+                    "uncertain": uncertain,
+                    "total": total,
+                })
+            })
         })
         .collect()
+}
+
+/// 台账条目的可还原计数：新条目读 `restorable`，旧条目按 values 的 presence 现算。
+fn entry_restore_summary(entry: &Value) -> (usize, usize, usize) {
+    let total = entry
+        .get("values")
+        .and_then(Value::as_array)
+        .map(|a| a.len())
+        .unwrap_or(0);
+    if let Some(n) = entry.get("restorable").and_then(Value::as_u64) {
+        let restorable = (n as usize).min(total);
+        return (restorable, total.saturating_sub(restorable), total);
+    }
+    let restorable = entry
+        .get("values")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter(|v| entry_restorable(v)).count())
+        .unwrap_or(0);
+    (restorable, total.saturating_sub(restorable), total)
+}
+
+fn entry_restorable(v: &Value) -> bool {
+    match v.get("presence").and_then(Value::as_str) {
+        Some("value" | "absent") => true,
+        Some(_) => false,
+        None => v.get("exists").and_then(Value::as_bool).unwrap_or(false),
+    }
 }
 
 /// OPT-1 高危清单。

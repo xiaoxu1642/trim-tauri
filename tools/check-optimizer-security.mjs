@@ -325,10 +325,27 @@ const BCD_FORBIDDEN_ELEMENTS = [
 function extractBcdElements(text) {
   const out = new Set();
   // /set {store} <ELEMENT> <value>  或  /deletevalue {store} <ELEMENT>
-  const setRx = /bcdedit[^\r\n]*?\/(?:set|deletevalue|enum)[^\r\n]*?(?:\{[^\}]*\}\s+)?([a-zA-Z][a-zA-Z0-9:-]*)/g;
+  // P1-22：store 允许带引号（`bcdedit /set "{current}" nx ...`），否则会把 store 内的
+  // `current` 当元素、真正的 nx 从未进入禁写检查。
+  const setRx = /bcdedit[^\r\n]*?\/(?:set|deletevalue|enum)[^\r\n]*?(?:["']?\{[^\}]+\}["']?\s+)?([a-zA-Z][a-zA-Z0-9:-]*)/g;
   let m;
   while ((m = setRx.exec(text))) out.add(m[1].toLowerCase());
   return [...out];
+}
+
+// P1-22 正向对照：带引号 store 必须仍然提取到真实元素。
+{
+  const cases = [
+    ['bcdedit /set {current} nx AlwaysOff', ['nx']],
+    ['bcdedit /set "{current}" nx AlwaysOff', ['nx']],
+    ['bcdedit /set "{current}" allowedinmemorysettings 0x0', ['allowedinmemorysettings']],
+  ];
+  const bad = [];
+  for (const [cmd, want] of cases) {
+    const got = extractBcdElements(cmd);
+    if (JSON.stringify(got) !== JSON.stringify(want)) bad.push(`${cmd} → ${got.join(',') || '空'}`);
+  }
+  check(bad.length === 0, 'BCD 提取器正反对照（无引号/带引号/长元素，且不得把 store 当元素）', bad.join('；'));
 }
 
 {

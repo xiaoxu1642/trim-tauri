@@ -79,6 +79,70 @@ pub(super) fn load_paths_config() -> Value {
 
 pub(super) static CLEANUP_SNAPSHOTS: OnceLock<Mutex<HashMap<String, HashMap<String, Arc<Value>>>>> = OnceLock::new();
 pub(super) static LOCK_WHITELIST: OnceLock<Mutex<HashMap<String, Vec<Value>>>> = OnceLock::new();
+static LOCK_EPOCH: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+static SCAN_TOKENS: OnceLock<Mutex<HashMap<String, ScanToken>>> = OnceLock::new();
+type ProcessIdentityList = Vec<crate::commands::cleanup::scan_execute::ProcessIdentity>;
+static PROCESS_IDENTITIES: OnceLock<Mutex<HashMap<String, ProcessIdentityList>>> = OnceLock::new();
+
+pub(super) struct ScanToken {
+    pub(super) label: String,
+    pub(super) cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ScanToken {
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+pub(super) fn scan_tokens() -> &'static Mutex<HashMap<String, ScanToken>> {
+    SCAN_TOKENS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(super) fn begin_scan(label: &str) -> ScanToken {
+    let token = ScanToken {
+        label: label.to_string(),
+        cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let mut guard = scan_tokens().lock().unwrap_or_else(|e| e.into_inner());
+    guard.insert(label.to_string(), ScanToken {
+        label: token.label.clone(),
+        cancelled: token.cancelled.clone(),
+    });
+    token
+}
+
+pub(super) fn request_scan_cancel(label: &str) -> bool {
+    let guard = scan_tokens().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(token) = guard.get(label) else { return false };
+    token.cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+    true
+}
+
+pub(super) fn end_scan(label: &str) {
+    scan_tokens()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(label);
+}
+
+pub(super) fn next_scan_epoch(label: &str) -> u64 {
+    let mut guard = LOCK_EPOCH.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let epoch = guard.entry(label.to_string()).or_insert(0);
+    *epoch = epoch.saturating_add(1);
+    *epoch
+}
+
+pub(super) fn current_scan_epoch(label: &str) -> u64 {
+    LOCK_EPOCH.get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(label)
+        .copied()
+        .unwrap_or(0)
+}
 
 /// 分槽快照表：槽值按条目 id 存 `Arc<Value>`（R4-L06）。
 ///
@@ -107,15 +171,50 @@ pub(super) fn reset_lock_whitelist(label: &str) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(label.to_string(), Vec::new());
+    next_scan_epoch(label);
+    PROCESS_IDENTITIES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(label);
+}
+
+fn insert_lock_whitelist(label: &str, whitelist: Vec<Value>) {
+    lock_whitelist()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(label.to_string(), whitelist);
 }
 
 /// 一次性白名单槽的**唯一写入口**之二：写入本次检测确认的名单（覆盖式）。
 /// `cleanup:kill-locked-processes` 用 `remove` 一次性取走，反复读不到陈旧快照。
 pub(super) fn store_lock_whitelist(label: &str, whitelist: Vec<Value>) {
+    insert_lock_whitelist(label, whitelist);
+}
+
+pub(super) fn store_process_identities(label: &str, identities: ProcessIdentityList) {
+    PROCESS_IDENTITIES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(label.to_string(), identities);
+}
+
+pub(super) fn take_process_identities(label: &str) -> ProcessIdentityList {
+    PROCESS_IDENTITIES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(label)
+        .unwrap_or_default()
+}
+
+pub(super) fn take_lock_whitelist(label: &str) -> Vec<Value> {
     lock_whitelist()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(label.to_string(), whitelist);
+        .remove(label)
+        .unwrap_or_default()
 }
 
 /// 窗口适配层专用：把进入快照条目的 `files` 搬进快照，窗口回执不再携带逐文件清单。

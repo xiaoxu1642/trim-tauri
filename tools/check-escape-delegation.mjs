@@ -344,17 +344,13 @@ function htmlLeaves(expr, out = []) {
 }
 
 // 过渡表：收紧后的现存违例逐条登记（file#fn#操作数），只减不增。
-// 2026-11-02 收紧后现算两条（全仓 HTML 汇聚点全扫，无整文件跳过）：
-//   · cleanup.js#openItemDetail#total —— resp.data 解构出的注册表条目计数（后端契约为
-//     number，只作文本展示）；门禁不解析解构类型 ⇒ 登记放行。收敛方向：Number(total)
-//     显式化，或走 ds 的数字格式化。
+// 2026-11-16 P2 后现算一条（全仓 HTML 汇聚点全扫，无整文件跳过）：
 //   · optimizer.js#renderGroups#moreBtn —— map 回调内的字面量按钮片段（三元两支均为
 //     字符串字面量，无插值）；声明在 sink 起点之后，门禁不进入回调体取声明 ⇒ 登记放行。
 //     收敛方向：内联进模板或提到 sink 之前。
 // 表机制：新增违例要么改代码，要么在此逐条登记并写明理由；条目必须命中，
 // 代码修好而台账不回收同样判红（双向咬合，防「登记后永远绿」）。
 const TRANSITION = [
-  { file: 'cleanup.js', fn: 'openItemDetail', operand: 'total', count: 1, why: 'resp.data 解构计数（number 契约）；门禁不解析解构类型' },
   { file: 'optimizer.js', fn: 'renderGroups', operand: 'moreBtn', count: 1, why: 'map 回调内字面量按钮片段（无插值）；声明在 sink 起点之后' },
 ];
 

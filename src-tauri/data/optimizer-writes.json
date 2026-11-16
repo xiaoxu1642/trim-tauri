@@ -8,7 +8,8 @@
         {
           "expectStart": 3,
           "services": [
-            "wuauserv"
+            "wuauserv",
+            "CryptSvc"
           ]
         },
         {
@@ -18,10 +19,8 @@
             "AppReadiness",
             "BcastDVRUserService",
             "CaptureService",
-            "CryptSvc",
             "CscService",
             "DPS",
-            "DiagTrack",
             "DsSvc",
             "DusmSvc",
             "FontCache",
@@ -33,25 +32,16 @@
             "MapsBroker",
             "MicrosoftEdgeElevationService",
             "Netlogon",
-            "NfsClnt",
-            "OSRSS",
-            "PNRPsvc",
-            "PhoneSvc",
             "QWAVE",
-            "RetailDemo",
             "SEMgrSvc",
             "SENS",
             "SensorService",
-            "SharedRealitySvc",
             "StiSvc",
             "SysMain",
-            "TabletInputService",
-            "TapiSrv",
             "Themes",
             "TrkWks",
             "TroubleshootingSvc",
             "WEPHOSTSVC",
-            "WMPNetworkSvc",
             "WdiServiceHost",
             "WdiSystemHost",
             "Wecsvc",
@@ -62,7 +52,6 @@
             "XboxNetApiSvc",
             "autotimesvc",
             "defragsvc",
-            "diagnosticshub.standardcollector.service",
             "diagsvc",
             "dmwappushservice",
             "edgeupdate",
@@ -70,15 +59,8 @@
             "icssvc",
             "lfsvc",
             "lltdsvc",
-            "p2pimsvc",
-            "p2psvc",
-            "perceptionsimulation",
-            "sedsvc",
-            "shpamsvc",
-            "ssh-agent",
             "svsvc",
-            "tzautoupdate",
-            "wisvc"
+            "tzautoupdate"
           ]
         },
         {
@@ -111,10 +93,8 @@
             "CLFS",
             "CSC",
             "FileCrypt",
-            "GpuEnergyDrv",
             "PEAUTH",
             "QWAVEdrv",
-            "RasAcd",
             "RasPppoe",
             "RasSstp",
             "Rasl2tp",
@@ -135,16 +115,6 @@
           "services": [
             "CDPSvc",
             "CDPUserSvc"
-          ]
-        }
-      ]
-    },
-    "svc_remote_registry_disable": {
-      "groups": [
-        {
-          "expectStart": 4,
-          "services": [
-            "RemoteRegistry"
           ]
         }
       ]
@@ -171,17 +141,6 @@
           "services": [
             "bthserv"
           ]
-        }
-      ]
-    },
-    "peripheral_winkey_off": {
-      "regWrites": [
-        {
-          "hive": "HKLM",
-          "subkey": "SYSTEM\\CurrentControlSet\\Control\\Keyboard Layout",
-          "value": "Scancode Map",
-          "kind": "binary",
-          "expect": "00000000000000000300000000005be000005ce000000000"
         }
       ]
     },

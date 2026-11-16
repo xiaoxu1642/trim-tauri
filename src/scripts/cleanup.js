@@ -173,6 +173,8 @@
   // size=0 的占位行（native-scanner 的 emit_recycle_bin）。判据集中在这一个常量上，
   // 不要在别处再写字符串字面量。
   const RECYCLE_ID = 'recycleBin';
+  // P1-03b：展示 / 执行 / 回执共用同一个条目上限；不提高永久删除上限。
+  const EXECUTE_MAX_ITEMS = 500;
   const PERMANENT_DELETE_NOTE = '常规清理项直接永久删除、不进入回收站，删后不可恢复；含注册表项的条目删除前自动导出 .reg 备份，永久删除的文件在 64MB/文件、256MB/批次上限内自动留副本。';
   const FILECLEAN_RECYCLE_NOTE = '文件清理项移入回收站，可从回收站还原。';
 
@@ -186,8 +188,30 @@
   let isScanning = false;
   let scanCancelRequested = false;
   let isCleaning = false;
-  // P1-7：确认期间的重复点击标志（在任何 await 之前同步置起、在 finally 复位）。
-  let confirmInFlight = false;
+  // P0-05：清理链单一入口状态。状态迁移只在 clean()/finishClean() 内发生，
+  // 非 idle 时入口同步早退，快速双击不会各自进入确认与执行。
+  const CLEAN_STATES = new Set(['idle', 'confirming', 'scanning', 'occupied-decision', 'executing', 'done']);
+  let cleanState = 'idle';
+  function setCleanState(next) {
+    if (!CLEAN_STATES.has(next)) return false;
+    if (cleanState === next) return true;
+    // 完成态是唯一出口的瞬时标记：下一次入口从这里进入 confirming。
+    if (cleanState === 'done') {
+      cleanState = next === 'idle' || next === 'confirming' ? next : cleanState;
+      return cleanState === next;
+    }
+    const allowed = {
+      idle: ['confirming'],
+      confirming: ['scanning', 'occupied-decision', 'idle', 'done'],
+      scanning: ['occupied-decision', 'idle', 'done'],
+      'occupied-decision': ['confirming', 'executing', 'idle', 'done'],
+      executing: ['done', 'idle'],
+      done: ['idle']
+    }[cleanState] || [];
+    if (!allowed.includes(next)) return false;
+    cleanState = next;
+    return true;
+  }
   // F4a1-L11：init 自身幂等守卫。app.js 的 _initedModules 只保证今天这一条调用路径；
   // 一旦出现第二个调用方，重复绑定 click/订阅会叠出双份执行。
   let inited = false;
@@ -288,6 +312,24 @@
   }
 
   function escapeHtml(s) { return window.ds.esc(s); }
+
+  // P1-03d：确认弹窗的 message 是纯文本，换行在 modal.js 统一转 <br>；
+  // 先把规则字段里的换行折叠掉，避免字段内容越权排版。
+  function confirmText(value) { return String(value == null ? '' : value).replace(/[\r\n]+/g, ' '); }
+
+  // P1-03e：规则库 icon 只允许已登记的 SVG 白名单值；未知值一律降级默认图标。
+  const GROUP_ICON_WHITELIST = new Set([
+    '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/></svg>',
+    '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h4l4 4 4-4h4c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>',
+    '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>',
+    '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7 14c1.66 0 3-1.34 3-3S8.66 8 7 8s-3 1.34-3 3 1.34 3 3 3zm5-6h10V5H12v3zm0 12h10v-3H12v3zm0-6h10v-3H12v3zM4 9h2v2H2v-2h2zm0 12v-2h2v2H4zm-2-6h4v2H2v-2z"/></svg>',
+    '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>'
+  ]);
+  function groupIconHtml(icon) {
+    const svg = GROUP_ICON_WHITELIST.has(icon) ? icon : GROUP_ICON_WHITELIST.values().next().value;
+    const decorated = svg.replace(/^<svg\s/, '<svg aria-hidden="true" focusable="false" ');
+    return `<span class="category-group-icon">${decorated}</span>`;
+  }
 
   // 跨条目重复计账扣减（唯一口径，所有汇总走它）。后端把「两条 item 覆盖到同一批文件」
   // 配成无序对挂在后到的一条上（overlapsWith）；只有**两端都在本次求和集合内**才扣，
@@ -427,6 +469,10 @@
           break;
         }
         case 'path':
+          if (result && result.scanError) {
+            inner = `<span class="xtable-cell-text" data-tip="${escapeHtml(result.scanError)}">扫描失败：${escapeHtml(result.scanError)}</span>`;
+            break;
+          }
           if (result && result.path) {
             const autoTag = result.pathSource === 'auto' ? ' <span class="path-auto-tag">自动定位</span>' : '';
             // P1：fileKeys/regKeys 条目的规模标签 + requiredStoppedProcesses 命中提示标签
@@ -569,7 +615,7 @@
         const totalItems = subGroups.reduce((s, sg) => s + sg.items.length, 0);
         groupEl.innerHTML = `
           <div class="category-group-header" data-group-toggle="${window.ds.escAttr(groupKey)}">
-            <span class="category-group-icon">${group.icon}</span>
+            ${groupIconHtml(group.icon)}
             <span>${escapeHtml(group.title)}</span>
             <span style="margin-left:auto;font-size:11px;color:var(--fg-tertiary)" data-group-count="${window.ds.escAttr(groupKey)}">${totalItems} 项 · ${subGroups.length} 分类</span>
           </div>
@@ -584,7 +630,7 @@
         if (!items.length) continue;
         groupEl.innerHTML = `
           <div class="category-group-header" data-group-toggle="${window.ds.escAttr(groupKey)}">
-            <span class="category-group-icon">${group.icon}</span>
+            ${groupIconHtml(group.icon)}
             <span>${escapeHtml(group.title)}</span>
             <span style="margin-left:auto;font-size:11px;color:var(--fg-tertiary)" data-group-count="${window.ds.escAttr(groupKey)}">${items.length} 项</span>
           </div>
@@ -943,7 +989,9 @@
     const sizeCell = row.querySelector('[data-cell="size"]');
     if (sizeCell) sizeCell.innerHTML = (r.size !== null && r.size !== undefined) ? formatSize(r.size) : '<span class="xtable-cell-muted">—</span>';
     const pathCell = row.querySelector('[data-cell="path"]');
-    if (pathCell && r.path) {
+    if (pathCell && r.scanError) {
+      pathCell.innerHTML = `<span class="xtable-cell-text" data-tip="${escapeHtml(r.scanError)}">扫描失败：${escapeHtml(r.scanError)}</span>`;
+    } else if (pathCell && r.path) {
       const autoTag = r.pathSource === 'auto' ? ' <span class="path-auto-tag">自动定位</span>' : '';
       const fileTag = r.fileCount > 0 ? ` <span class="path-auto-tag">共 ${r.fileCount} 个文件</span>` : '';
       const regTag = r.regCount > 0 ? ` <span class="path-auto-tag">注册表 ${r.regCount} 项</span>` : '';
@@ -1075,7 +1123,7 @@
           try {
             const fcResp = await window.api.fileclean.scan(item.fileCleanType, customPath);
             if (fcResp.success && fcResp.data) {
-              fileCleanData.set(id, fcResp.data);
+              fileCleanData.set(id, { ...fcResp.data, scanType: item.fileCleanType });
               if (fcResp.data.degraded) {
                 window.app?.toast?.('warning', `${item.name}：${fcResp.data.degradedReason || '路径配置读取失败，扫描结果可能不完整'}`);
               }
@@ -1102,7 +1150,8 @@
               results.push({
                 id,
                 name: item.name,
-                path: customPath ? `扫描失败：${why}` : '未配置',
+                path: customPath || '',
+                scanError: customPath ? why : '',
                 pathSource: 'configured',
                 size: 0,
                 risk: fcRisk,
@@ -1115,7 +1164,8 @@
             results.push({
               id,
               name: item.name,
-              path: customPath ? `扫描失败：${e.message}` : '未配置',
+              path: customPath || '',
+              scanError: customPath ? ((e && e.message) || '扫描异常') : '未配置',
               pathSource: 'configured',
               size: 0,
               risk: fcRisk,
@@ -1286,6 +1336,7 @@
   // 收成唯一出口后，新增早退只需想「return 前调 finishClean()」。
   function finishClean() {
     isCleaning = false;
+    cleanState = 'idle';
     setCleaningBtn(false);
     updateUI();
   }
@@ -1298,11 +1349,16 @@
   //   'aborted'       —— 确认件（modal.js）缺席：独立信号，fail-closed 中止本次清理
   //                      （2026-10-15 裁定 / 方案 J4；刻意不复用 null——null 的既有语义是
   //                      「照常清理」，混用会静默丢掉占用告知与「放弃清理它们」的选择权）
+  //   'rmTimeout'     —— RM 占用检测超时/取消：fail-closed 中止本次清理，不执行删除
   async function offerCloseLocked(ids) {
     if (!ids.length || !window.api?.cleanup?.checkLocked) return null;
     let info = null;
     try {
       const resp = await window.api.cleanup.checkLocked(ids);
+      if (resp?.rmTimeout) {
+        window.app?.toast?.('warning', '占用检测超时，未执行删除');
+        return 'rmTimeout';
+      }
       if (!resp || !resp.success) return null; // 检测不可用不阻塞清理（执行侧仍会如实报残留）
       info = resp;
     } catch (e) {
@@ -1491,6 +1547,12 @@
       lockQueryPath = '';
       lockQueryProcs = [];
       if (killBtn) killBtn.disabled = true;
+      if (resp?.rmTimeout) {
+        const msg = '占用检测超时，未执行删除';
+        window.app?.toast?.('warning', msg);
+        box.innerHTML = `<div class="empty-state"><p>${escapeHtml(msg)}</p></div>`;
+        return;
+      }
       const msg = (resp && resp.message) || '占用查询失败';
       window.app?.toast?.('error', msg);
       box.innerHTML = `<div class="empty-state"><p>${escapeHtml(msg)}</p></div>`;
@@ -1571,7 +1633,7 @@
     // 全选时 22 条后果实测 1609px 对可视 659px，长墙等于没有）。没有登记 ifDeleted 的
     // 条目不进这个列表，不编话。
     const consequenceItems = (list) => list
-      .map(r => { const m = getItemById(r.id); return m && m.ifDeleted ? { name: r.name, text: m.ifDeleted } : null; })
+      .map(r => { const m = getItemById(r.id); return m && m.ifDeleted ? { name: confirmText(r.name), text: confirmText(m.ifDeleted) } : null; })
       .filter(Boolean);
 
     // 高风险二次确认（红色，删除类操作规范要求）。
@@ -1580,7 +1642,7 @@
     if (highRisk.length > 0) {
       const ok = await window.app?.confirmDanger(
         '高风险操作确认',
-        `您选择了 ${highRisk.length} 个高风险项并确认要清理：\n${highRisk.map(r => '• ' + r.name).join('\n')}`,
+        `您选择了 ${highRisk.length} 个高风险项并确认要清理：\n${highRisk.map(r => '• ' + confirmText(r.name)).join('\n')}`,
         '仍然执行',
         '取消',
         '删除后可能无法恢复，请确认已了解风险。',
@@ -1602,9 +1664,10 @@
       const deletionNote = hasFileClean
         ? PERMANENT_DELETE_NOTE + FILECLEAN_RECYCLE_NOTE
         : PERMANENT_DELETE_NOTE;
-      const ok = await window.app?.confirmWarning(
+      const warningConfirm = window.app?.confirmWarning;
+      const ok = await warningConfirm(
         '中风险操作确认',
-        `您选择了 ${mediumRisk.length} 个中风险项（建议清理前核对用途）：\n${mediumRisk.map(r => '• ' + r.name).join('\n')}`,
+        `您选择了 ${mediumRisk.length} 个中风险项（建议清理前核对用途）：\n${mediumRisk.map(r => '• ' + confirmText(r.name)).join('\n')}`,
         '确认清理',
         '取消',
         '部分中风险项可能正被应用使用，清理后若个别程序异常需要重新安装或重建缓存。' + deletionNote,
@@ -1622,7 +1685,7 @@
       try {
         ok = await window.app?.confirmWarning(
           '永久删除确认',
-          `您选择了 ${lowRisk.length} 个低风险常规清理项：\n${lowRisk.map(r => '• ' + r.name).join('\n')}\n\n这些项目会直接永久删除，不进入回收站。`,
+          `您选择了 ${lowRisk.length} 个低风险常规清理项：\n${lowRisk.map(r => '• ' + confirmText(r.name)).join('\n')}\n\n这些项目会直接永久删除，不进入回收站。`,
           '仍然清理',
           '取消',
           PERMANENT_DELETE_NOTE,
@@ -1681,9 +1744,10 @@
       .map(id => scanResults.get(id))
       .filter(r => r && r.filesTruncated);
     if (truncatedItems.length > 0) {
-      const ok = await window.app?.confirmWarning(
+      const warningConfirm = window.app?.confirmWarning;
+      const ok = await warningConfirm(
         '清理清单已截断确认',
-        `所选 ${truncatedItems.length} 个条目的文件清单超出单次上限已截断：\n${truncatedItems.map(r => '• ' + r.name).join('\n')}\n实际清理范围可能大于上面列出的清单。`,
+        `所选 ${truncatedItems.length} 个条目的文件清单超出单次上限已截断：\n${truncatedItems.map(r => '• ' + confirmText(r.name)).join('\n')}\n实际清理范围可能大于上面列出的清单。`,
         '仍然执行',
         '取消',
         '清单截断意味着确认时看到的文件数少于将要清理的文件数；执行后请以日志与实测释放量为准。'
@@ -1697,18 +1761,34 @@
     // 系统级动作，没有「某个被锁的文件」可以指认，列进去只会给出一堆无关进程。
     const lockIds = selectedWithResultIds().filter(id => !FILECLEAN_IDS.includes(id) && id !== RECYCLE_ID);
     let abandonIds = new Set();
+    setCleanState('scanning');
     const lockDecision = await offerCloseLocked(lockIds);
+    setCleanState('occupied-decision');
+    if (lockDecision === 'rmTimeout') return null;
     if (lockDecision === 'aborted') {
       // 确认件缺席（信号与提示都在 offerCloseLocked 内），与用户取消同姿势收尾
       return null;
     }
-    if (lockDecision === 'cancel') return null;
+    if (lockDecision === 'cancel') {
+      window.app?.toast?.('info', '已取消本次清理');
+      return null;
+    }
     if (lockDecision && lockDecision.skipIds) abandonIds = lockDecision.skipIds;
 
-    const allItems = selectedWithResultIds()
+    const selectedItems = selectedWithResultIds()
       .filter(id => !abandonIds.has(id))
       .map(id => scanResults.get(id))
-      .filter(Boolean);
+      .filter(item => item && !item.scanError);
+    if (selectedItems.length > EXECUTE_MAX_ITEMS) {
+      const ok = await warningConfirm(
+        '清理条目数超限确认',
+        `本次选中 ${selectedItems.length} 项，超过单次执行上限 ${EXECUTE_MAX_ITEMS} 项：\n将只执行前 ${EXECUTE_MAX_ITEMS} 项，其余请分批清理。`,
+        '仍执行前 500 项',
+        '取消'
+      );
+      if (!ok) return null;
+    }
+    const allItems = selectedItems.slice(0, EXECUTE_MAX_ITEMS);
     // 分离三类：常规清理项 / 文件清理项 / 回收站（G-4，唯一走 Shell API 的条目）
     const regularItems = allItems.filter(i => !FILECLEAN_IDS.includes(i.id) && i.id !== RECYCLE_ID);
     const fileCleanItems = allItems.filter(i => FILECLEAN_IDS.includes(i.id));
@@ -1745,19 +1825,26 @@
     }
   }
 
-  async function clean() {
-    if (isCleaning || confirmInFlight || selectedIds.size === 0) return;
-    confirmInFlight = true;
+  async function clean(opts) {
+    // P0-05：入口同步置位，确认段也在同一把锁内；入口早退绝不吞错，
+    // 由调用方决定提示方式（按钮点击给出「正在确认或清理」提示）。
+    if (isCleaning || cleanState !== 'idle' || selectedIds.size === 0) return false;
+    if (!setCleanState('confirming')) return false;
+    isCleaning = true;
+    setCleaningBtn(true);
+    updateUI();
     let plan = null;
     try {
       plan = await confirmCleanPlan();
     } catch (e) {
       // 确认件自己挂了（modal IPC reject / 确认件缺失）：如实给一条出口，不再让按钮无声失灵
       window.app?.toast?.('error', '清理确认流程中断：' + ((e && e.message) || e));
-    } finally {
-      confirmInFlight = false;
     }
-    if (!plan) return;
+    if (!plan) {
+      if (!opts?.silent) window.app?.toast?.('info', '已取消本次清理');
+      finishClean();
+      return false;
+    }
     const { allItems, regularItems, fileCleanItems, recycleItems, force, explorerPickIds } = plan;
     // F4a1-M01：空计划必须在置 busy 之前早退。旧写法把「全选（全部条目进 selectedIds，
     // 但 scanResults 为空）」一路放行到底：一个确认弹窗都不弹、三条执行链一条都不发，
@@ -1768,13 +1855,12 @@
       window.app?.toast?.('info', selectedWithResultIds().length === 0
         ? '所选条目还没有扫描结果，请先点「扫描大小」再开始清理'
         : '所选条目本次都被跳过（多因被其他程序占用），没有可执行的清理项');
-      return;
+      finishClean();
+      return false;
     }
+    setCleanState('executing');
     // P1-7：busy 一经置起，到下面执行段 `try` 之间**一个 await 都不许有**
     // （`tools/check-async-exits.mjs` 的 busy-window 判据钉的就是这条）。
-    isCleaning = true;
-    setCleaningBtn(true);
-    updateUI();
     // v3.3.0（用户裁定）：执行选项 UI 已移除，固定语义——常规清理**不进回收站、直接永久删**。
     // 审查 v2-M20 订正：后半句原先写「回收站优先删除逻辑仍在主进程 trashOrUnlink 内」，那是
     // Electron 轨的事实；本轨（Tauri/Rust）没有 trashOrUnlink，`toRecycle=false` 使
@@ -1880,7 +1966,13 @@
               // v4 P2-E（R4-M04）：count 后端查不到时回 null —— 此时不显示条目数，
               // 不得用 `|| 0` 把「没拿到」说成「0 个条目」。
               const countText = rr.count == null ? '' : `（${Number(rr.count) || 0} 个条目）`;
-              detail = { id: RECYCLE_ID, name: item.name, status: 'ok', freed: freed, message: `已清空回收站${countText}` };
+              let note = '';
+              if (rr.partial === true) {
+                note = `（部分未清空，仍有 ${Number(rr.afterCount) || 0} 个条目）`;
+              } else if (rr.statsFailed === true) {
+                note = '（清空后统计不可得）';
+              }
+              detail = { id: RECYCLE_ID, name: item.name, status: 'ok', freed: freed, message: `已清空回收站${countText}${note}` };
               rcFreed += freed;
               rcSuccess += 1;
             } else {
@@ -2001,8 +2093,10 @@
       maybeOfferElevation('清理操作失败，可能需要管理员权限。');
     } finally {
       execProgressSink = null;
+      setCleanState('done');
       finishClean();
     }
+    return true;
   }
 
   // 无管理员权限时提供 UAC 提权入口（应用以 asInvoker 启动，按需提权）
@@ -2469,7 +2563,13 @@
     (async () => {
       // ① 先放行 asset 读取（只放本次这组图；失败就不开灯箱，不能拿白图糊弄）
       try {
-        const resp = await window.api.cleanup.allowPreviewAssets(images.map(f => f.path));
+        const previewData = fileCleanData.get(id);
+        const previewScanType = previewData?.scanType;
+        const resp = await window.api.cleanup.allowPreviewAssets(
+          `fileclean:${previewScanType}:main`,
+          previewScanType,
+          images.map(f => f.path),
+        );
         if (!resp || !resp.success) {
           window.app?.toast('warning', '无法读取这些图片：' + ((resp && resp.message) || '未知原因'));
           return;
@@ -2520,6 +2620,16 @@
   // 2026-11-02 用户裁定：「登记到重启后删除」的注册入口全应用退役，面板只剩这一条出路；
   // 已登记条目的**查看/撤回**保留（见下方 K13 清单，后端 list/revoke 未退役）。
 
+  function verifyRetryOccupancy(ids) {
+    if (!window.api?.cleanup?.checkLocked) {
+      return Promise.reject(new Error('占用检测通道不可用，已中止重试'));
+    }
+    return window.api.cleanup.checkLocked(ids).then(resp => {
+      if (!resp || !resp.success) throw new Error((resp && resp.message) || '占用复查失败，已中止重试');
+      return Array.isArray(resp.procs) ? resp.procs : [];
+    });
+  }
+
   function offerCleanupRetryPanel(items) {
     if (!window.modal?.create) {
       // modal 缺席（理论不可达）：退回旧文案，至少不失声
@@ -2553,29 +2663,78 @@
     const failedIds = items.map(d => d.id);
 
     explorerBtn.addEventListener('click', async () => {
-      const ok = await window.app?.confirmWarning(
+      const confirmRetry = window.app.confirmWarning;
+      const ok = await confirmRetry(
         '重启资源管理器确认',
-        '将结束并重新打开资源管理器（explorer.exe）：桌面与任务栏会短暂消失后自动恢复，已打开的文件夹窗口会被关闭。随后自动重试刚失败的清理项。',
+        '将结束并重新打开资源管理器（explorer.exe）：桌面与任务栏会短暂消失后自动恢复，已打开的文件夹窗口会被关闭。随后复查占用；无占用时自动重试，仍有占用时重新询问如何处置。',
         '重启并重试',
         '取消'
-      );
-      if (!ok) return;
-      explorerBtn.disabled = true;
-      explorerBtn.textContent = '正在重启...';
-      try {
-        await window.api.contextmenu.restartExplorer();
-      } catch (e) {
-        window.app?.toast('error', '重启资源管理器失败：' + ((e && e.message) || e));
-        explorerBtn.disabled = false;
-        explorerBtn.textContent = '重启资源管理器并重试';
+      ).catch(e => {
+        window.app?.toast?.('error', '重启确认失败：' + ((e && e.message) || e));
+        return false;
+      });
+      if (!ok) {
+        window.app?.toast?.('info', '已取消重启资源管理器与自动重试');
         return;
       }
-      // explorer 退出到重新拉起、句柄释放需要几秒；太早重试会再撞一次占用
-      await new Promise(r => setTimeout(r, 3500));
-      ctrl.close();
-      selectedIds = new Set(failedIds);
-      updateUI();
-      await clean();
+      try {
+        explorerBtn.disabled = true;
+        explorerBtn.textContent = '正在重启...';
+        try {
+          await window.api.contextmenu.restartExplorer();
+        } catch (e) {
+          throw new Error('重启资源管理器失败：' + ((e && e.message) || e));
+        }
+        await new Promise(r => setTimeout(r, 3500));
+        const procs = await verifyRetryOccupancy(failedIds);
+        if (procs.length) {
+          window.app?.toast?.('warning', '重启后仍有文件被占用，请重新确认结束进程或放弃清理');
+          setCleanState('confirming');
+          setCleanState('scanning');
+          let decision;
+          try {
+            decision = await offerCloseLocked(failedIds);
+          } catch (e) {
+            window.app?.toast?.('error', '占用复核失败：' + ((e && e.message) || e));
+            finishClean();
+            return;
+          }
+          if (decision === 'rmTimeout') {
+            finishClean();
+            return;
+          }
+          if (decision === 'aborted' || decision === 'cancel') {
+            window.app?.toast?.('info', '已放弃本次重试');
+            if (decision === 'cancel') window.app?.toast?.('info', '已取消占用处置');
+            finishClean();
+            return;
+          }
+          if (decision && decision.skipIds) {
+            const skip = decision.skipIds;
+            const retryIds = failedIds.filter(id => !skip.has(id));
+            if (!retryIds.length) {
+              window.app?.toast?.('info', '已放弃清理这些占用项');
+              finishClean();
+              return;
+            }
+            selectedIds = new Set(retryIds);
+          } else {
+            selectedIds = new Set(failedIds);
+          }
+          finishClean();
+        } else {
+          selectedIds = new Set(failedIds);
+        }
+        ctrl.close();
+        updateUI();
+        const started = await clean({ silent: true });
+        if (!started) window.app?.toast?.('info', '重试未开始：当前已有清理流程在进行');
+      } catch (e) {
+        finishClean();
+        window.app?.toast?.('error', (e && e.message) || '重试失败');
+        explorerBtn.disabled = false;
+        explorerBtn.textContent = '重启资源管理器并重试';
+      }
     });
   }
 
@@ -2964,10 +3123,13 @@
     const backdrop = ctrl.backdrop;
     const body = ctrl.body;
     ctrl.footer.querySelector('[data-role="doneBtn"]').addEventListener('click', closeItemDetail);
+    // P2-05：注册表/系统动作型条目没有同源 path，明细请求只带文件型条目的扫描路径。
+    // 后端按 path 非空做同源校验；误传空串以外的 path 会被拒绝，而不是降级成注册表明细。
+    const detailPath = result && !result.regCount && item && item.action === undefined ? result.path : '';
 
     (async () => {
       try {
-        const resp = await window.api.cleanup.itemDetail(id, (result && result.path) || '');
+        const resp = await window.api.cleanup.itemDetail(id, detailPath || '');
         if (!document.body.contains(body)) return;
         if (!resp || !resp.success) {
           body.innerHTML = `<div class="empty-state"><p>${escapeHtml((resp && resp.message) || '明细枚举失败')}</p></div>`;
@@ -2977,7 +3139,7 @@
         const degraded = resp.data?.degraded === true;
         const meta = ctrl.footer.querySelector('[data-role="meta"]');
         if (kind === 'reg') {
-          body.innerHTML = `<div class="empty-state"><p>注册表条目（共 ${total} 项键/值），不产生文件清单。</p></div>`;
+          body.innerHTML = `<div class="empty-state"><p>注册表条目（共 ${Number(total) || 0} 项键/值），不产生文件清单。</p></div>`;
         } else if (kind === 'dism') {
           body.innerHTML = `<div class="empty-state"><p>DISM 组件清理为系统级操作，不产生文件清单。</p></div>`;
         } else if (!files.length) {
@@ -3020,7 +3182,9 @@
       if (isScanning) requestScanCancel();
       else scan();
     });
-    document.getElementById('btnClean')?.addEventListener('click', clean);
+    document.getElementById('btnClean')?.addEventListener('click', () => {
+      if (!clean()) window.app?.toast?.('info', '清理已在确认或执行中，请稍候');
+    });
     document.getElementById('btnSelectAll')?.addEventListener('click', toggleSelectAll);
     document.getElementById('btnRefreshBackups')?.addEventListener('click', renderBackupsPage);
     document.getElementById('btnPurgeBackups')?.addEventListener('click', purgeSelectedBackups);
@@ -3035,13 +3199,23 @@
 
     // P1-12：订阅扫描逐项进度（一次性；ipcRenderer.on 会累积，不能放进 scan）
     if (window.api?.cleanup?.onScanProgress) {
-      window.app?.trackSubscription?.(window.api.cleanup.onScanProgress(onScanProgress));
+      try {
+        window.app?.trackSubscription?.(window.api.cleanup.onScanProgress(onScanProgress));
+      } catch (e) {
+        window.app?.log?.('error', '扫描进度订阅失败：' + ((e && e.message) || e));
+        window.app?.toast?.('error', '扫描进度订阅失败，进度显示可能不准确');
+      }
     }
     // 2026-10-12：订阅执行逐项进度（清理大目录耗时长时进度条不再假走 90% 后冻结）
     if (window.api?.cleanup?.onExecuteProgress) {
-      window.app?.trackSubscription?.(window.api.cleanup.onExecuteProgress(function (payload) {
-        if (execProgressSink) execProgressSink(payload);
-      }));
+      try {
+        window.app?.trackSubscription?.(window.api.cleanup.onExecuteProgress(function (payload) {
+          if (execProgressSink) execProgressSink(payload);
+        }));
+      } catch (e) {
+        window.app?.log?.('error', '清理进度订阅失败：' + ((e && e.message) || e));
+        window.app?.toast?.('error', '清理进度订阅失败，进度显示可能不准确');
+      }
     }
 
     // P1-9：Electron 运行时从 cleanup-rules.json（唯一数据源）加载分类，

@@ -248,7 +248,7 @@ pub fn record_pending_scoped(
     }
     let allowed: Vec<Value> = kinds
         .iter()
-        .filter(|k| matches!(k.as_str(), "reg" | "cmd" | "service"))
+        .filter(|k| matches!(k.as_str(), "reg" | "cmd" | "pwsh" | "service"))
         .map(|k| json!(k))
         .collect();
     // v4 P2-D 尾：写侧走 update_state（读失败拒写）
@@ -390,6 +390,35 @@ pub fn remove_many(ids: &[String]) -> bool {
     update_state(|state| {
         for id in ids {
             remove_one_from_state(state, id);
+        }
+        Ok(())
+    })
+}
+
+/// 只删除**此刻仍是 pending** 的条目（`optimizer:state-overview` 清理动态项遗留用）。
+///
+/// P1-26：调用方先读快照、再删；若两次之间该项被 `record_pending_scoped` 重新写成
+/// pending，无条件 `remove_many` 会把新账误删。条件判断与删除必须在同一个
+/// `update_state` 闭包里完成，不能靠「窗口很小」。
+pub fn remove_many_pending(ids: &[String]) -> bool {
+    if ids.is_empty() {
+        return true;
+    }
+    update_state(|state| {
+        let to_remove: Vec<String> = ids
+            .iter()
+            .filter(|id| {
+                state
+                    .get("items")
+                    .and_then(|v| v.get(id.as_str()))
+                    .and_then(|rec| rec.get("status"))
+                    .and_then(|v| v.as_str())
+                    == Some("pending")
+            })
+            .cloned()
+            .collect();
+        for id in to_remove {
+            remove_one_from_state(state, &id);
         }
         Ok(())
     })
@@ -776,5 +805,25 @@ mod tests {
             rec.get("picked")
         );
         let _ = st::remove(id);
+    }
+
+    /// P1-26：清理动态项遗留 pending 时，只删「此刻仍是 pending」的条目；
+    /// 快照之后刚被转正的条目不得被误删。
+    #[test]
+    fn remove_many_pending_只删仍是pending的条目() {
+        let _guard = _state_guard();
+        use crate::engine::optimization_state as st;
+        let pending = "__p1_26_pending";
+        let applied = "__p1_26_applied";
+        let _ = st::remove(pending);
+        let _ = st::remove(applied);
+        assert!(st::record_pending(pending, "p1-26 pending", &["reg".into()]));
+        assert!(st::record_pending(applied, "p1-26 applied", &["reg".into()]));
+        assert!(st::mark_applied(applied, "pass"));
+        let ids = vec![pending.to_string(), applied.to_string()];
+        assert!(st::remove_many_pending(&ids));
+        assert!(st::get(pending).is_none(), "pending 条目应被清理");
+        assert!(st::get(applied).is_some(), "已转正条目不得被误删");
+        let _ = st::remove(applied);
     }
 }

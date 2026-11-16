@@ -115,6 +115,52 @@ pub(super) unsafe fn service_stop(name: &str) -> Result<(), u32> {
     r
 }
 
+/// 服务当前是否在运行。`None` = 查不到（服务不存在 / SCM 打不开 / 查询失败），
+/// 调用方不得把 `None` 当成「未运行」写进备份。
+pub fn service_running(name: &str) -> Option<bool> {
+    match unsafe { service_status_query(name) } {
+        ServiceQuery::State(state) => Some(state == SVC_RUNNING),
+        _ => None,
+    }
+}
+
+/// 启动服务（`Start-Service -Name X` 的动作侧等价物）。
+///
+/// 只服务「值级还原后把执行前本就在运行的服务重新拉起来」这一条链；返回 win32 码，
+/// 由 [`service_start_pub`] 折叠成终态语义。启动请求受理后最多等 1s 看是否进入
+/// RUNNING，未稳也按「请求已受理」返回（与 `service_stop` 同口径）。
+pub(super) unsafe fn service_start(name: &str) -> Result<(), u32> {
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus, StartServiceW,
+        SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS, SERVICE_START, SERVICE_STATUS,
+    };
+    let scm = OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT)
+        .map_err(|e| win32_of(&e))?;
+    let name_w = to_wide(name);
+    let svc = match OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_START | SERVICE_QUERY_STATUS) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = CloseServiceHandle(scm);
+            return Err(win32_of(&e));
+        }
+    };
+    let r = StartServiceW(svc, None).map_err(|e| win32_of(&e));
+    if r.is_ok() {
+        let mut status = SERVICE_STATUS::default();
+        for _ in 0..20 {
+            match QueryServiceStatus(svc, &mut status) {
+                Ok(()) if status.dwCurrentState.0 == SVC_RUNNING => break,
+                Ok(()) => {}
+                Err(_) => break,
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    let _ = CloseServiceHandle(svc);
+    let _ = CloseServiceHandle(scm);
+    r
+}
+
 /// HRESULT → win32 码。`HRESULT_FROM_WIN32(x)` = `0x8007xxxx`，低位段就是原码。
 /// R9（2026-10-15）：卸载启动把 `ERROR_CANCELLED` 从 HRESULT 里折出来的口径也引这里
 /// （`pub(crate)` + `mod.rs` re-export，与 to_wide 同姿势）——判「用户拒了 UAC」不许再写
@@ -131,6 +177,7 @@ pub(crate) fn win32_of(e: &windows::core::Error) -> u32 {
 pub const SVC_STOPPED: u32 = 1;
 const SVC_NOT_RUNNING: u32 = 1062;
 const SVC_NOT_INSTALLED: u32 = 1060;
+const SVC_HAS_DEPENDENTS: u32 = 1051;
 
 /// 设置服务启动类型。**数值以 windows crate 常量为真源**（0.61.3 实测）：
 /// `SERVICE_AUTO_START = 2`（自动）/ `SERVICE_DEMAND_START = 3`（手动）/ `SERVICE_DISABLED = 4`（禁用）。
@@ -311,6 +358,49 @@ pub fn service_absent_or_start_is(name: &str, expected: u32) -> bool {
 /// `SERVICE_DISABLED`（供跨 crate 比较，避免调用方 import windows crate）
 pub const SVC_START_DISABLED: u32 = windows::Win32::System::Services::SERVICE_DISABLED.0;
 
+/// 服务启动类型的三态判定：`None` = 服务在本机不存在。
+///
+/// 为什么不能继续用 [`service_start_type_is`]：它把「服务不存在」也折成 `false`，
+/// 于是本机已卸载的服务（如 `RasAuto`）在批量项里恒判「未生效」，账本被清后
+/// 界面就显示成「未完成还原」。执行侧 [`service_set_start_pub`] 早已把 1060 当目标
+/// 达成（服务没装 = 它不会自己起来），检测侧必须同口径。
+///
+/// `Err` = 真的读不出来（SCM 打不开 / 权限不足），调用方按 fail-closed 判未生效，
+/// 绝不把「读不到」冒充「不存在」。
+pub fn service_start_type_state(name: &str, expected: u32) -> Result<Option<bool>, u32> {
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceConfigW,
+        SC_MANAGER_CONNECT, SERVICE_QUERY_CONFIG,
+    };
+    unsafe {
+        let scm = OpenSCManagerW(PCWSTR::default(), PCWSTR::default(), SC_MANAGER_CONNECT)
+            .map_err(|e| win32_of(&e))?;
+        let name_w = to_wide(name);
+        let svc = match OpenServiceW(scm, PCWSTR(name_w.as_ptr()), SERVICE_QUERY_CONFIG) {
+            Ok(h) => h,
+            Err(e) => {
+                let code = win32_of(&e);
+                let _ = CloseServiceHandle(scm);
+                return if code == SVC_NOT_INSTALLED { Ok(None) } else { Err(code) };
+            }
+        };
+        let mut needed = 0u32;
+        let _ = QueryServiceConfigW(svc, None, 0, &mut needed);
+        let verdict = if needed == 0 {
+            Err(SVC_NOT_INSTALLED)
+        } else {
+            let (_buf, cfg) = aligned_service_config_buffer(needed);
+            match QueryServiceConfigW(svc, Some(cfg), needed, &mut needed) {
+                Ok(()) => Ok(Some((*cfg).dwStartType.0 == expected)),
+                Err(e) => Err(win32_of(&e)),
+            }
+        };
+        let _ = CloseServiceHandle(svc);
+        let _ = CloseServiceHandle(scm);
+        verdict
+    }
+}
+
 /// `SERVICE_DEMAND_START`（手动启动）。与 [`SVC_START_DISABLED`] 同理由导出。
 pub const SVC_START_MANUAL: u32 = windows::Win32::System::Services::SERVICE_DEMAND_START.0;
 
@@ -367,8 +457,35 @@ pub fn service_stop_pub(name: &str) -> Result<(), String> {
     unsafe {
         match service_stop(name) {
             Ok(()) => Ok(()),
-            Err(c) if matches!(c, SVC_NOT_RUNNING | SVC_NOT_INSTALLED) => Ok(()),
+            Err(c) if service_stop_code_is_terminal_ok(c) => {
+                if c == SVC_HAS_DEPENDENTS {
+                    crate::engine::log::write_log(
+                        "warn",
+                        &format!("服务 {name} 仍被依赖服务占用，停止请求未完成；启动类型已改，重启后按新启动类型生效"),
+                    );
+                }
+                Ok(())
+            }
             Err(c) => Err(format!("停止服务失败: {name} —— {}", svc_err(c))),
+        }
+    }
+}
+
+/// `Stop-Service -ErrorAction SilentlyContinue` 的终态口径：没在跑 / 没装 /
+/// 有依赖服务占用（1051）都不阻断优化步骤。1051 时启动类型已经写入，
+/// 立即停服只是附加动作；真机执行已证实把它判失败会让整项报假红。
+fn service_stop_code_is_terminal_ok(code: u32) -> bool {
+    matches!(code, SVC_NOT_RUNNING | SVC_NOT_INSTALLED | SVC_HAS_DEPENDENTS)
+}
+
+/// 启动服务（还原回启用）。终态口径：已在运行（1056）与服务不存在（1060）都算目标达成。
+pub fn service_start_pub(name: &str) -> Result<(), String> {
+    const SVC_ALREADY_RUNNING: u32 = 1056;
+    unsafe {
+        match service_start(name) {
+            Ok(()) => Ok(()),
+            Err(SVC_ALREADY_RUNNING | SVC_NOT_INSTALLED) => Ok(()),
+            Err(c) => Err(format!("启动服务失败: {name} —— {}", svc_err(c))),
         }
     }
 }
@@ -409,6 +526,14 @@ mod tests {
         );
         assert_eq!(cfg as usize, buf.as_ptr() as usize, "指针必须指向缓冲区基址");
         assert!(!buf.is_empty(), "256 字节至少需要一个 u64 槽位");
+    }
+
+    #[test]
+    fn stop_terminal_codes_match_silently_continue() {
+        assert!(service_stop_code_is_terminal_ok(SVC_NOT_RUNNING));
+        assert!(service_stop_code_is_terminal_ok(SVC_NOT_INSTALLED));
+        assert!(service_stop_code_is_terminal_ok(SVC_HAS_DEPENDENTS));
+        assert!(!service_stop_code_is_terminal_ok(5));
     }
 
     /// service_absent_or_start_is 的 1060「已卸载」分支真机探针（AGENTS §1.6 第二问：

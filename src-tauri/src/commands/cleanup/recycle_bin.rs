@@ -82,7 +82,11 @@ fn query_recycle_stats() -> Result<(u64, u64), String> {
     // 空根路径 = 所有驱动器合计（MSDN 明确支持）。
     let hr = unsafe { SHQueryRecycleBinW(std::ptr::null(), &mut info) };
     if hr < 0 {
-        return Err(format!("查询回收站失败（HRESULT 0x{:08X}）", hr as u32));
+        return Err(format!(
+            "查询回收站失败（HRESULT 0x{:08X}）：{}",
+            hr as u32,
+            classify_shell_failure(hr)
+        ));
     }
     // 负值理论上不出现；真出现按 0 处理而不是把它们当无符号数放大（u64 转型的经典坑）。
     let bytes = if info.i64_size > 0 { info.i64_size as u64 } else { 0 };
@@ -93,6 +97,31 @@ fn query_recycle_stats() -> Result<(u64, u64), String> {
 #[cfg(not(windows))]
 fn query_recycle_stats() -> Result<(u64, u64), String> {
     Err("仅支持 Windows".to_string())
+}
+
+/// Shell 失败原因分档（P2-04 / R03）：把 HRESULT 折成**用户可操作**的原因。
+///
+/// 口径与清理域其余失败分档一致（权限不足 → 提权重试；对象不存在 → 无需重试；
+/// 占用 → 关程序后重试；其余不猜），**只按 HRESULT 判**，不掺任何路径细节 ——
+/// 回收站里的文件名与盘符都不进回执（那属于用户隐私，不是排障信息）。
+///
+/// 未知码保留原始 HRESULT，不瞎猜成某一类（宁可少说，不可说错）。
+fn classify_shell_failure(hr: i32) -> &'static str {
+    match hr as u32 {
+        // HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED)：权限不足，提权重试有意义。
+        0x8007_0005 => "权限不足：请以管理员身份运行 Trim 后重试（可退出后右键 Trim，选择「以管理员身份运行」）；若已提权仍失败，可能是组策略或安全软件限制了回收站操作",
+        // HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)：系统或组策略不支持。
+        0x8007_0032 => "当前系统或组策略不支持清空回收站，请检查回收站所在驱动器是否可用",
+        // HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND / ERROR_PATH_NOT_FOUND)：驱动器未就绪或已移除。
+        0x8007_0002 | 0x8007_0003 => "回收站位置不可用（驱动器未就绪或已被移除），请插回驱动器后重试",
+        // HRESULT_FROM_WIN32(ERROR_CANCELLED)：被系统取消。
+        0x8007_04C7 => "操作被系统取消，请重试",
+        // HRESULT_FROM_WIN32(ERROR_OUTOFMEMORY)。
+        0x8007_000E => "内存不足，请关闭其他程序后重试",
+        // E_UNEXPECTED：Shell 侧状态异常。
+        0x8000_FFFF => "回收站服务异常，请重启资源管理器后重试",
+        _ => "原因未知，请重试；若持续失败请把下面的错误码一并反馈",
+    }
 }
 
 /// cleanup:recycle-stats —— 回收站条目数与体积（只读；主窗档）
@@ -117,6 +146,14 @@ pub async fn cleanup_recycle_stats<R: tauri::Runtime>(window: WebviewWindow<R>) 
 /// 回执里的 `count` / `freed` 是**清空前的**条目数与体积，供渲染层如实告诉用户
 /// 「刚刚清掉了多少」。统计失败不阻断清空（统计只是回执用），但清空本身失败
 /// 必须原样上报，不许把失败渲染成成功。
+///
+/// P0-06（R01/R02）：清空**之后**再查一次统计，回执带 `afterCount` / `afterBytes` /
+/// `partial` / `statsFailed`：
+///   · `afterCount`/`afterBytes` = 清空后的实测值（非零 ⇒ `partial`，前端提示「部分未清空」）。
+///   · 复查统计失败 ⇒ `statsFailed: true` 且 `afterCount`/`afterBytes` 为 `null`。
+///     **不许拿清空前的旧统计冒充清空后结果**（那正是 R01 的形态）。
+///   · `count`/`freed`（清空前）在清空前统计失败时同样为 `null`，与「本来就是空的」
+///     区分开（沿用 v4 P2-E 的 null 口径）。
 ///
 /// ⚠️ `SHEmptyRecycleBinW` **刻意直接写在本命令体内、不外包给 helper**：
 /// 它是本仓唯一的回收站破坏性出口，而 `tools/check-delete-exits.mjs` 的
@@ -143,23 +180,82 @@ pub async fn cleanup_empty_recycle_bin<R: tauri::Runtime>(window: WebviewWindow<
         #[cfg(not(windows))]
         let hr: i32 = -1;
         if hr < 0 {
-            return json!({ "success": false, "message": format!("清空回收站失败（HRESULT 0x{:08X}）", hr as u32) });
+            return json!({ "success": false, "message": format!("清空回收站失败（HRESULT 0x{:08X}）：{}", hr as u32, classify_shell_failure(hr)) });
         }
-        // v4 P2-E（R4-M04）：统计查不到回 **null** 而不是编造 0 ——「清空成功但没拿到
-        // 清空前的数字」与「清空前真的是 0 项」是两件事，回 0 会把两件事说成一件。
-        // 渲染层（cleanup.js）对 null 的消费口径：只报「已清空」，不显示条目数与体积。
-        match before {
-            Some((count, bytes)) => json!({ "success": true, "count": count, "freed": bytes }),
-            None => {
-                log::write_log("warn", "清空回收站成功，但清空前统计不可得（SHQueryRecycleBinW 失败），回执按 null 上报");
-                json!({ "success": true, "count": null, "freed": null })
-            }
+        // P0-06（R01）：清空后**复查**统计 —— Shell 返回成功不等于真的清空了
+        // （多盘回收站、权限拒绝都会留下残余）。复查失败不许拿清空前的旧数字冒充。
+        let after = query_recycle_stats();
+        let receipt = empty_receipt(before, after);
+        if receipt["statsFailed"] == json!(true) {
+            log::write_log(
+                "warn",
+                &format!(
+                    "清空回收站完成，但统计不可得：{}",
+                    receipt["statsError"].as_str().unwrap_or("未知原因")
+                ),
+            );
+        } else if receipt["partial"] == json!(true) {
+            log::write_log(
+                "warn",
+                &format!(
+                    "清空回收站后仍有残余：{} 项 / {} 字节",
+                    receipt["afterCount"].as_i64().unwrap_or(0),
+                    receipt["afterBytes"].as_i64().unwrap_or(0)
+                ),
+            );
         }
+        receipt
     });
     match task.await {
         Ok(v) => v,
         Err(e) => json!({ "success": false, "message": format!("清空任务异常终止: {e}") }),
     }
+}
+
+/// 清空回收站的回执构造（**纯函数**，P0-06）。
+///
+/// 为什么要抽成纯函数：Shell 调用要真机才有，而「三种结局的诚实口径」是本条的全部
+/// 判据 —— 不抽出来就只能靠真机碰运气验证。
+///
+/// 口径：
+/// - `count` / `freed` = 清空**前**的条目数与体积；查不到就是 `null`（不是 0）。
+/// - `afterCount` / `afterBytes` = 清空**后**的实测值；复查失败就是 `null`，
+///   **绝不用清空前的旧值顶替**（R01 的核心）。
+/// - `partial` = 复查成功且残余非零（真·部分未清空）。
+/// - `statsFailed` = 任一次统计查询失败（清空前或清空后）。
+/// - `statsError` = 首个失败原因（不含敏感信息，只有 HRESULT 与文案）。
+fn empty_receipt(
+    before: Option<(u64, u64)>,
+    after: Result<(u64, u64), String>,
+) -> Value {
+    let (count, freed) = match before {
+        Some((c, b)) => (json!(c), json!(b)),
+        None => (Value::Null, Value::Null),
+    };
+    let stats_failed = count.is_null() || after.is_err();
+    let (after_count, after_bytes, partial) = match &after {
+        Ok((c, b)) => (
+            json!(c),
+            json!(b),
+            Value::Bool(*c > 0 || *b > 0),
+        ),
+        Err(_) => (Value::Null, Value::Null, Value::Bool(false)),
+    };
+    let stats_error = match &after {
+        Err(e) => e.clone(),
+        Ok(_) if count.is_null() => "清空前统计不可得（SHQueryRecycleBinW 失败）".to_string(),
+        Ok(_) => String::new(),
+    };
+    json!({
+        "success": true,
+        "count": count,
+        "freed": freed,
+        "afterCount": after_count,
+        "afterBytes": after_bytes,
+        "partial": partial,
+        "statsFailed": stats_failed,
+        "statsError": stats_error,
+    })
 }
 
 /// cleanup:open-recycle-bin —— 打开系统回收站（回收站行「明细」入口；主窗档）
@@ -212,6 +308,8 @@ fn open_recycle_bin() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     /// 布局契约：`SHQUERYRBINFO` 在 x64 上必须是 24 字节。
     ///
     /// 这不是防御性断言，是**唯一的 ABI 钉桩**：`cb_size` 用它填给 Shell 做版本
@@ -226,6 +324,129 @@ mod tests {
             std::mem::size_of::<ShQueryRbInfo>(),
             24,
             "SHQUERYRBINFO 的 ABI 变了：cb_size 会被 Shell 判为非法版本，查询将恒失败"
+        );
+    }
+
+    /// P0-06（R01）：清空后复查为零 ⇒ 回执说「已清空」，且**不**带 partial。
+    #[test]
+    fn 回执_清空成功且复查为零_不标部分未清空() {
+        let r = super::empty_receipt(Some((7, 4096)), Ok((0, 0)));
+        assert_eq!(r["success"], json!(true));
+        assert_eq!(r["count"], json!(7));
+        assert_eq!(r["freed"], json!(4096));
+        assert_eq!(r["afterCount"], json!(0));
+        assert_eq!(r["afterBytes"], json!(0));
+        assert_eq!(r["partial"], json!(false));
+        assert_eq!(r["statsFailed"], json!(false));
+    }
+
+    /// P0-06（R01）：Shell 说成功但回收站仍有残余 ⇒ 必须标 `partial`，
+    /// 让前端能说「部分未清空」而不是「已清空」。
+    #[test]
+    fn 回执_清空后仍有残余_必须标部分未清空() {
+        let r = super::empty_receipt(Some((7, 4096)), Ok((2, 512)));
+        assert_eq!(r["afterCount"], json!(2));
+        assert_eq!(r["afterBytes"], json!(512));
+        assert_eq!(
+            r["partial"],
+            json!(true),
+            "复查非零必须标 partial（否则用户看到的就是假「已清空」）: {r}"
+        );
+        assert_eq!(r["statsFailed"], json!(false));
+    }
+
+    /// P0-06（R01/R02）：复查统计失败 ⇒ `statsFailed`，且 `afterCount`/`afterBytes`
+    /// 必须是 null —— **不许拿清空前的旧统计冒充清空后结果**。
+    #[test]
+    fn 回执_复查统计失败_不得用清空前旧统计冒充() {
+        let r = super::empty_receipt(Some((7, 4096)), Err("查询回收站失败（HRESULT 0x80000000）".to_string()));
+        assert_eq!(r["statsFailed"], json!(true));
+        assert!(
+            r["afterCount"].is_null() && r["afterBytes"].is_null(),
+            "复查失败时清空后数字必须是 null（旧统计顶替 = R01 的形态）: {r}"
+        );
+        // 清空前统计仍如实保留（那是「刚刚清掉了多少」的依据，不是清空后结果）。
+        assert_eq!(r["count"], json!(7));
+        assert_eq!(r["freed"], json!(4096));
+        assert_eq!(r["partial"], json!(false), "统计不可得时不得断言「部分未清空」");
+        assert!(!r["statsError"].as_str().unwrap_or("").is_empty(), "必须留失败原因");
+    }
+
+    /// P0-06：清空前统计也失败时 `count`/`freed` 是 null（不是 0），
+    /// 「查不到」与「本来就是 0 项」必须能分开。
+    #[test]
+    fn 回执_清空前统计失败_回null而不是0() {
+        let r = super::empty_receipt(None, Ok((0, 0)));
+        assert!(r["count"].is_null() && r["freed"].is_null(), "清空前统计失败必须是 null: {r}");
+        assert_eq!(r["statsFailed"], json!(true));
+        assert_eq!(r["afterCount"], json!(0), "清空后统计成功时照常给实测值");
+    }
+
+    /// P2-04（R03）：权限不足必须给出**用户可操作**的下一步（提权重试），
+    /// 而不是只甩一个 HRESULT 让用户自己猜。
+    #[test]
+    fn 回收站失败_权限不足给出提权出路() {
+        let hr = 0x8007_0005u32 as i32;
+        let msg = format!(
+            "清空回收站失败（HRESULT 0x{:08X}）：{}",
+            hr as u32,
+            super::classify_shell_failure(hr)
+        );
+        assert!(msg.contains("权限不足"), "必须点名是权限问题: {msg}");
+        assert!(msg.contains("管理员"), "必须给出提权出路: {msg}");
+        assert!(msg.contains("0x80070005"), "必须保留原始 HRESULT 供排障: {msg}");
+    }
+
+    /// P2-04：未知码不许瞎猜成某一类，但必须保留原始码 + 给重试出路。
+    #[test]
+    fn 回收站失败_未知码保留原始码且不瞎猜() {
+        let hr = 0x1234_5678u32 as i32;
+        let msg = format!(
+            "查询回收站失败（HRESULT 0x{:08X}）：{}",
+            hr as u32,
+            super::classify_shell_failure(hr)
+        );
+        assert!(msg.contains("0x12345678"), "未知码必须原样保留: {msg}");
+        assert!(msg.contains("原因未知"), "未知码不得瞎猜成某一类: {msg}");
+        assert!(msg.contains("重试"), "未知码也要给出下一步: {msg}");
+    }
+
+    /// P2-04：失败文案**不得带路径细节**（回收站里的文件名与盘符属用户隐私，
+    /// 不是排障信息）。判据：文案里不许出现路径分隔符与盘符冒号。
+    #[test]
+    fn 回收站失败文案不得泄露路径细节() {
+        for hr in [
+            0x8007_0005u32,
+            0x8007_0032,
+            0x8007_0002,
+            0x8007_04C7,
+            0x8000_FFFF,
+            0x1234_5678,
+        ] {
+            let msg = format!(
+                "清空回收站失败（HRESULT 0x{:08X}）：{}",
+                hr,
+                super::classify_shell_failure(hr as i32)
+            );
+            assert!(!msg.contains('\\'), "文案不得含路径分隔符: {msg}");
+            assert!(!msg.contains(':'), "文案不得含盘符/路径片段: {msg}");
+        }
+    }
+
+    /// P2-04：查询与清空**两个**失败出口都必须走分类器 —— 少一处就有一处
+    /// 仍是「只甩 HRESULT」。
+    ///
+    /// 判红自证：把清空出口的分类器调用去掉 ⇒ 本条红。
+    #[test]
+    fn 两处回收站失败出口都必须走分类器() {
+        // 探针自己的字面量不得与被查字符串同形，否则计数把自己算进去。
+        let needle = format!("classify_shell_failure({})", "hr");
+        // 用例里的 `super::classify_shell_failure(hr)` 调用先剔掉，只数生产出口。
+        let src = include_str!("recycle_bin.rs").replace("super::classify_shell_failure(", "");
+        assert_eq!(
+            src.matches(&needle).count(),
+            2,
+            "查询与清空两个失败出口都必须细分用户可操作原因: {src}"
         );
     }
 }

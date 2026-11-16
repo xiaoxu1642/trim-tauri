@@ -364,4 +364,13 @@ mod tests {
             "🎮"
         );
     }
+
+    /// P1-04a：真 ACL 条件不是每个本机都有，先钉纯判据分档；真机 SKIP 留发布记录。
+    #[test]
+    fn classify_delete_error_denied_stays_separate_from_gone_and_occupied() {
+        use DeleteFailureKind::{Denied, Gone, Other};
+        assert_eq!(classify_delete_error(&std::io::Error::new(std::io::ErrorKind::PermissionDenied, "x")), Denied);
+        assert_eq!(classify_delete_error(&std::io::Error::new(std::io::ErrorKind::NotFound, "x")), Gone);
+        assert_eq!(classify_delete_error(&std::io::Error::new(std::io::ErrorKind::WouldBlock, "x")), Other);
+    }
 }

@@ -65,7 +65,7 @@
     {
       "id": "tasks_stubborn_strategy",
       "title": "顽固软件策略专杀",
-      "note": "N1（2026-09-14 重复点审查）：与「内存清理 - 顽固软件治理」针对同一批目标（MuMu / 网易 UU 远程 / 微软电脑管家 / WPS），现合并为内存清理页同一张卡片的两层（立即结束进程 / 阻止开机自启）。脚本已迁至 vendor/upstream-js/src/scripts-powershell/memory-scripts.js 的 STUBBORN_BLOCK_SCRIPT，IPC 为 memory:stubborn-block。该项为 pwsh 步骤、不含注册表写入，通常无备份记录需要还原。"
+      "note": "N1（2026-09-14 重复点审查）：与「内存清理 - 顽固软件治理」针对同一批目标（MuMu / 网易 UU 远程 / 微软电脑管家 / WPS），现合并为内存清理页「顽固软件治理」卡片的一次性「立即结束进程」动作。该项为脚本清理步骤、不含注册表写入，通常无备份记录需要还原。"
     },
     {
       "id": "mmcss_optimize",
@@ -181,6 +181,60 @@
       "id": "nara_usb3_lpm_off",
       "title": "关闭 USB 3 链路省电",
       "note": "P0-1 电源写面总收敛（2026-10-16）：powercfg 写 SCHEME_CURRENT 的 USB 3 Link Power Management（AC/DC）属用户电源配置；随面板「电源」分区一并撤除。还原缺口：pwsh 型不进值级备份 —— 已应用用户可在电源编辑器把「USB 3 链路电源管理」改回默认。"
+    },
+    {
+      "id": "peripheral_winkey_off",
+      "title": "禁用 Win 键误触",
+      "note": "2026-11-16 用户裁定「性能项收敛」：用 Scancode Map 屏蔽 Win 键属于小众输入偏好且会禁用全部 Win+快捷键，整项退役。还原缺口：pwsh 写 Scancode Map，进值级备份；旧备份仍可按退役历史声明面还原。"
+    },
+    {
+      "id": "sys_minanimate_off",
+      "title": "关闭窗口开合动画",
+      "note": "2026-11-16 用户裁定「性能项收敛」：窗口开合动画属视觉偏好，收益不可稳定测量，整项退役。还原缺口：reg 步骤进值级备份；旧备份仍可按退役历史声明面还原。"
+    },
+    {
+      "id": "sys_thumb_cache_off",
+      "title": "禁用缩略图缓存（thumbcache）",
+      "note": "2026-11-16 用户裁定「性能项收敛」：缩略图缓存主要影响隐私与偶发重算开销，不属于可验证的性能收益，整项退役。还原缺口：reg 步骤进值级备份；旧备份仍可按退役历史声明面还原。"
+    },
+    {
+      "id": "sys_transparency_off",
+      "title": "关闭系统透明效果",
+      "note": "2026-11-16 用户裁定「性能项收敛」：系统透明效果属视觉偏好，DWM 合成收益因机而异且不可稳定验证，整项退役。还原缺口：reg 步骤进值级备份；旧备份仍可按退役历史声明面还原。"
+    },
+    {
+      "id": "tf_gamebar",
+      "title": "关闭游戏栏后台捕获",
+      "note": "2026-11-16 用户裁定「真机仍失败项退役」：写入 HKLM\\SOFTWARE\\Microsoft\\WindowsRuntime\\...\\PresenceWriter\\ActivationType 时，即使管理员权限仍返回 Access denied，手工 reg add 同样被拒。Trim 不代取所有权、不绕过系统 ACL，本项结构上无法成功，整项退役。还原缺口：reg 步骤进 optimizer-backups，旧备份可在优化中心「待还原」入口按原值写回；不做启动静默写回。"
+    },
+    {
+      "id": "telemetry_optimize",
+      "title": "遥测优化",
+      "note": "2026-11-16 用户裁定「真机仍失败项退役」：3 个 AutoLogger 系统键（EventLog-Security / NetCore / RadioMgr）的 Start 写入均被 ACL 拒绝，管理员权限与手工 reg add 同样失败。整项退役，不代取所有权。还原缺口：本项无 restore 段、不产生值级备份；已成功写入的策略/任务/服务若需恢复，须按 Windows 策略或系统设置手工改回。"
+    },
+    {
+      "id": "tf_disk_extra3",
+      "title": "NTFS 加密与保留存储精简 (DISM /Set-ReservedStorageState)",
+      "note": "2026-11-16 用户裁定「真机仍失败项退役」：DISM /Online /Set-ReservedStorageState /State:Disabled 退出码 5，手工执行同样 Access denied；整项因此无法完成。NtfsDisableEncryption 与 Start_SearchFiles 两步虽可写，但不再作为独立优化项保留。还原缺口：reg 步骤进 optimizer-backups，旧备份可在优化中心「待还原」入口按原值写回；DISM 步骤不进值级备份，保留存储若曾被改过需用 DISM /State:Enabled 手工恢复。"
+    },
+    {
+      "id": "svc_remote_registry_disable",
+      "title": "RemoteRegistry 远程管理排查",
+      "note": "2026-11-16 用户裁定：26H2 本机已无 RemoteRegistry 服务（SCM 1060），目标状态天然达成；旧系统目标不再适配，整项退役。"
+    },
+    {
+      "id": "svc_storsvc_manual",
+      "title": "Storage Service 改手动启动",
+      "note": "2026-11-16 用户裁定：目标已由手动改为禁用，旧手动项退役；同批把 StorSvc/XblAuthManager/XblGameSave/XboxNetApiSvc 全部禁用并销账。"
+    },
+    {
+      "id": "svc_xblauthmgr_manual",
+      "title": "Xbox Live Auth Manager 改手动启动",
+      "note": "2026-11-16 用户裁定：Xbox 相关服务全部改为禁用，旧“仅 Auth Manager 手动”项退役并销账。"
     }
-  ]
+  ],
+  "_sig": {
+    "alg": "ed25519",
+    "sig": "Jd6fZsYJ5KFkYvfsXLSPvWIUgNdD2dOWnruphn72/YJG4haUtO50VAiYZlh5C2MfFvcd7es1KKnKtqF60HcyAw=="
+  }
 }

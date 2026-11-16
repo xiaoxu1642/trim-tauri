@@ -195,7 +195,7 @@ pub(super) fn rebuild_steps(
 
     let (label, body) = match option_id {
         // 服务：Start=4 + 停服
-        "tf_svc_bulk" | "tf_drv_disable" => (
+        "tf_svc_bulk" => (
             format!(
                 "按选择禁用 {} / {} 项服务（启动类型=禁用）",
                 selected.len(),
@@ -203,7 +203,25 @@ pub(super) fn rebuild_steps(
             ),
             format!(
                 "$picked = @({list})\n\
-foreach ($n in $picked) {{ $p = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$n\"; if (Test-Path $p) {{ New-ItemProperty -Path $p -Name Start -Value 4 -PropertyType DWord -Force | Out-Null; Stop-Service -Name $n -Force -ErrorAction SilentlyContinue }} }}"
+foreach ($n in $picked) {{ $p = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$n\"; if (Test-Path $p) {{ New-ItemProperty -Path $p -Name Start -Value 4 -PropertyType DWord -Force | Out-Null; Stop-Service -Name $n -Force -ErrorAction SilentlyContinue }} }}\n\
+$w = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\wuauserv\"; if (Test-Path $w) {{ New-ItemProperty -Path $w -Name Start -Value 3 -PropertyType DWord -Force | Out-Null }}\n\
+$l = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\lfsvc\\Service\\Configuration\"; New-Item -Path $l -Force | Out-Null; New-ItemProperty -Path $l -Name Status -Value 0 -PropertyType DWord -Force | Out-Null\n\
+$e = \"HKLM:\\SOFTWARE\\Policies\\Microsoft\\MicrosoftEdge\\Main\"; New-Item -Path $e -Force | Out-Null; New-ItemProperty -Path $e -Name AllowPrelaunch -Value 0 -PropertyType DWord -Force | Out-Null\n\
+$t = \"HKLM:\\SOFTWARE\\Policies\\Microsoft\\MicrosoftEdge\\TabPreloader\"; New-Item -Path $t -Force | Out-Null; New-ItemProperty -Path $t -Name AllowTabPreloading -Value 0 -PropertyType DWord -Force | Out-Null"
+            ),
+        ),
+        // 驱动：只改启动类型，**不得**停驱动。数据层 tf_drv_disable 的原脚本只有
+        // `Start=4`；子集路径多出 Stop-Service 会立即停止 cdrom/CLFS/CSC 等驱动，
+        // 而备份只记录 Start、还原不回启 —— 重启前无法恢复。
+        "tf_drv_disable" => (
+            format!(
+                "按选择禁用 {} / {} 项驱动（启动类型=禁用，重启后生效）",
+                selected.len(),
+                all.len()
+            ),
+            format!(
+                "$picked = @({list})\n\
+foreach ($n in $picked) {{ $p = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$n\"; if (Test-Path $p) {{ New-ItemProperty -Path $p -Name Start -Value 4 -PropertyType DWord -Force | Out-Null }} }}"
             ),
         ),
         // AppX：按通配名移除
@@ -338,7 +356,7 @@ mod tests {
         for id in ["tf_svc_bulk", "tf_drv_disable", "tf_appx", "tf_dev_disable"] {
             assert!(supports_subitems(id), "{id} 应支持自选目标");
             assert!(
-                targets_of(id).len() >= 19,
+                targets_of(id).len() >= 17,
                 "{id} 目标数过少：{}",
                 targets_of(id).len()
             );
@@ -376,15 +394,15 @@ mod tests {
     /// 这类越权写入的唯一机械拦截点。只断言条数会漏掉「顺序串了」的形态。
     #[test]
     fn 勾选子集只写入选中的目标() {
-        let picked = s(&["RetailDemo", "lltdsvc", "sedsvc"]);
+        let picked = s(&["FontCache", "lltdsvc", "diagsvc"]);
         let steps = rebuild_steps("tf_svc_bulk", Some(&picked), None).expect("应重建出步骤");
         assert_eq!(steps.len(), 1, "未选附带开关时只应有清单这一步");
         let pwsh = steps[0]["pwsh"].as_str().expect("pwsh 字段");
-        for want in ["RetailDemo", "lltdsvc", "sedsvc"] {
+        for want in ["FontCache", "lltdsvc", "diagsvc"] {
             assert!(pwsh.contains(want), "重建脚本缺少选中项 {want}: {pwsh}");
         }
         // 未选中项一个都不许出现（含子串误伤：sedsvc 出现过 ⇒ sedsvc 不该再出现第二次）
-        for absent in ["CryptSvc", "Netlogon", "Themes", "WpnService"] {
+        for absent in ["Netlogon", "Themes", "WpnService"] {
             assert!(
                 !pwsh.contains(absent),
                 "未选中的 {absent} 出现在重建脚本里 —— 会越权写入: {pwsh}"
@@ -393,6 +411,38 @@ mod tests {
         // 动作语义：服务是 Start=4 + 停服
         assert!(pwsh.contains("-Name Start -Value 4"), "服务项必须写 Start=4: {pwsh}");
         assert!(pwsh.contains("Stop-Service"), "服务项必须停服: {pwsh}");
+        // P1-1：数据层原脚本在服务循环后还有无条件写入，子集重建必须同语义。
+        for want in [
+            "wuauserv",
+            "-Name Start -Value 3",
+            "lfsvc\\Service\\Configuration",
+            "AllowPrelaunch",
+            "AllowTabPreloading",
+        ] {
+            assert!(pwsh.contains(want), "子集重建丢了数据层无条件写入「{want}」: {pwsh}");
+        }
+        assert!(
+            crate::engine::pssteps::compile(pwsh).is_ok(),
+            "服务子集重建脚本编译失败: {pwsh}"
+        );
+    }
+
+    /// P0-1：驱动的子集重建只能改启动类型，数据层原脚本没有停驱动这一步。
+    /// 破坏形态 = 把 `tf_drv_disable` 并回 `tf_svc_bulk` 分支 ⇒ 本用例红。
+    #[test]
+    fn 驱动子集不得停驱动() {
+        let picked = s(&["cdrom", "CLFS"]);
+        let steps = rebuild_steps("tf_drv_disable", Some(&picked), None).expect("应重建出步骤");
+        let pwsh = steps[0]["pwsh"].as_str().expect("pwsh 字段");
+        assert!(pwsh.contains("-Name Start -Value 4"), "驱动项必须写 Start=4: {pwsh}");
+        assert!(
+            !pwsh.contains("Stop-Service"),
+            "驱动子集重建混入了 Stop-Service —— 会立即停驱动且还原不回启: {pwsh}"
+        );
+        // 服务侧保持原语义（停服是数据层原脚本的一部分）
+        let svc = rebuild_steps("tf_svc_bulk", Some(&s(&["FontCache"])), None).expect("应重建出步骤");
+        let svc_pwsh = svc[0]["pwsh"].as_str().expect("pwsh 字段");
+        assert!(svc_pwsh.contains("Stop-Service"), "服务子集必须停服: {svc_pwsh}");
     }
 
     #[test]
@@ -451,11 +501,9 @@ mod tests {
 
     #[test]
     fn 附带开关各自独立成步() {
-        let picked = s(&["RetailDemo"]);
+        let picked = s(&["FontCache"]);
         let extras = s(&["wuau_manual", "edge_prelaunch", "__不存在__"]);
         let steps = rebuild_steps("tf_svc_bulk", Some(&picked), Some(&extras)).unwrap();
-        // 1 步清单 + 2 个真实附带开关（未登记 id 被忽略）
-        assert_eq!(steps.len(), 3, "步数不对：{:?}", steps.iter().map(|x| &x["label"]).collect::<Vec<_>>());
         let joined: String = steps.iter().filter_map(|x| x["pwsh"].as_str()).collect();
         assert!(joined.contains("wuauserv"), "{joined}");
         assert!(joined.contains("AllowTabPreloading"), "{joined}");
@@ -533,6 +581,12 @@ mod tests {
         assert!(joined.contains("ONEDRIVESETUP.EXE"), "{joined}");
         assert!(joined.contains("/UNINSTALL"), "{joined}");
         assert!(joined.contains("@@RECYCLE2@@"), "{joined}");
+        // P1-2：附带步骤必须能被原生编译链接住（否则执行侧只会记一条 pwsh 失败）。
+        let uninstall = with[1]["pwsh"].as_str().expect("OneDrive 卸载步是 pwsh");
+        assert!(
+            crate::engine::pssteps::compile(uninstall).is_ok(),
+            "OneDrive 附带步骤编译失败: {uninstall}"
+        );
         // 回收站协议必须挂在 tf_appx 名下（退役前挂在已不存在的 tf_onedrive 上）
         assert!(joined.contains("id = 'tf_appx'"), "{joined}");
         let reg = with

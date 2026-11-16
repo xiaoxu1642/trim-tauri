@@ -14,6 +14,9 @@
 //   F2  sizeNumber 映射之后紧跟 reduce 相加：map(... sizeNumber(...) ...).reduce((a, b) => a + b
 //   F3  dedupSize 函数体之外的累加赋值：+= sizeNumber(  以及  x = x + sizeNumber(
 //   F4  两条条目体积直接相加后写进 Map：set(k, sizeNumber(..) + sizeNumber(..))
+//   F5  sum(sizeNumber(...) 形态：reduce/sum 包装前把条目体积转成数字
+//   F6  total += Number(... / sizeNumber(...) 形态：元信息标签变化仍需判红
+//   F7  addSize(...) / sumItemSizes(...) 自定义包装内的条目体积累加
 //   刻意不判（射程如实写明）：sizeNumber(..) + sizeNumber(..) 出现在上述四形态之外
 //   （例如与第三方量相加后落变量）。真仓现算没有这种写法；要扩射程先现算再补判据 ——
 //   一条泛化的「+ sizeNumber」会把「体积 + 常量」这类合法写法一起判红，误报洪水淹掉真信号。
@@ -76,6 +79,21 @@ const FORMS = [
     id: 'F4',
     label: '两条条目体积直接相加后写进 Map',
     re: /\.set\s*\(\s*[^,\n)]{1,40}\s*,\s*sizeNumber\s*\([^\n;]*?\)\s*\+\s*sizeNumber\s*\(/g,
+  },
+  {
+    id: 'F5',
+    label: 'sum(sizeNumber(...) 汇总条目体积',
+    re: /\b(?:sum|totalSize|aggregateSize)\s*\(\s*sizeNumber\s*\(/g,
+  },
+  {
+    id: 'F6',
+    label: 'total += Number(...) 或 total += sizeNumber(...) 累加条目体积',
+    re: /\b(?:total|bytes|sum|acc|size|amount)\b\s*\+=\s*(?:Number|BigInt|parseFloat|parseInt)\s*\(\s*sizeNumber\s*\([^;\n]*?\)\s*\)\s*;/g,
+  },
+  {
+    id: 'F7',
+    label: '包装函数内累加条目体积',
+    re: /\b(?:addSize|sumItemSizes|accumulateBytes)\s*\(\s*sizeNumber\s*\(/g,
   },
 ];
 
@@ -283,6 +301,9 @@ const AGG_CONTROLS = [
   { label: 'F3 违例：体外 += 条目体积', want: 1, code: 'let acc = 0;\nfor (const i of items) acc += sizeNumber(i.size);\n' },
   { label: 'F3b 违例：体外 x = x + 条目体积', want: 1, code: 'let acc = 0;\nfor (const i of items) acc = acc + sizeNumber(i.size);\n' },
   { label: 'F4 违例：两条体积直接相加后写进 Map', want: 1, code: 'totals.set(gk, sizeNumber(totals.get(gk)) + sizeNumber(r.size));\n' },
+  { label: 'F5 违例：sum(sizeNumber(...)) 汇总条目体积', want: 1, code: 'const total = sum(sizeNumber(item.size));\n' },
+  { label: 'F6 违例：total += Number(sizeNumber(...)) 绕过赋值形态', want: 1, code: 'let total = 0;\nfor (const i of items) total += Number(sizeNumber(i.size));\n' },
+  { label: 'F7 违例：包装函数 addSize(sizeNumber(...)) 仍属体外累加', want: 1, code: 'let total = 0;\nfunction addSize(x) { total += x; }\nitems.forEach((i) => addSize(sizeNumber(i.size)));\n' },
   { label: '多形态同页：命中数要报准，不能只报第一条', want: 2, code: 'let acc = 0;\nfor (const i of items) acc += sizeNumber(i.size);\nconst total = picked.reduce((s, i) => s + sizeNumber(i.size), 0);\n' },
   // ② 合规形态：必须 0 命中（防判据退化成「永远红」）
   { label: '合规：走 dedupSize 的唯一汇总', want: 0, code: 'const total = dedupSize(items.map(i => i.id));\n' },

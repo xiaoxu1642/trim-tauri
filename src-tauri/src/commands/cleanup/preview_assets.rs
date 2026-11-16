@@ -16,16 +16,10 @@
 //! 2. **累计面靠 [`MAX_SESSION_ALLOWS`] 兜**：单次上限只挡一次调用塞进来的清单，
 //!    逐组点开照样能把 scope 无限撑大。
 //!
-//! 尚未落地的一条（属跨面改动，已登记进 P1 汇报）：把放行集**绑定到来源快照** ——
-//! 即只放行「本窗口最近一次扫描结果里出现过的文件路径」，其余拒放（同域
-//! `cleanup_item_detail` 已经是这个口径）。做不到的原因：本命令唯一消费方是主窗磁盘
-//! 清理页的预览（`cleanup.js` 的 openPreview 吃 `fileCleanData`），那份清单在
-//! `engine::snapshot` 的 **fileclean 域槽**里，而本域只握有 cleanup 域的槽、且
-//! `engine::snapshot` 没有「按 label 列出各域槽」的读口。要落地必须二选一：给
-//! `engine::snapshot` 加那个读口（引擎射程），或把预览字节改走一条非 asset 的读图通道
-//! （原 `fileclean:read-image` 已随预览链退役，重开属 fileclean 域）。
-//! 拿 cleanup 域的槽去核 fileclean 域的路径 = 把磁盘清理页的预览锁死，
-//! 属 AGENTS §3「档位/闸写错方向会锁死功能」的同型错误，不硬改。
+//! P0-03：放行集绑定到**来源 fileclean 域槽** —— 只放行「本窗口最近一次 fileclean
+//! 扫描结果里出现过的文件路径」，其余拒放；`scan_id` 仅作为回执留痕，不另建第二份
+//! 索引。预览消费方就是 fileclean 页的 `fileCleanData`，域槽由 fileclean 扫描写入；
+//! 用 `snapshot::domain_key(label, ty)` 同一把键取快照，不再拿 cleanup 域的槽核错域。
 //!
 //! R4-L09 复核（2026-11-01）：比上面登记的口径**还宽一层** —— `filter_preview_paths`
 //! 只挡空值、长度与 NUL，连 `..` 段与设备/verbatim 前缀形态都不判，所以「任意绝对路径
@@ -80,6 +74,26 @@ pub(super) fn filter_preview_paths(list: &[Value]) -> (Vec<String>, [usize; 3]) 
     (kept, reasons)
 }
 
+fn snapshot_rejects(
+    label: &str,
+    scan_id: &str,
+    scan_type: &str,
+    paths: &[String],
+) -> bool {
+    let Some(expected) = scan_id.strip_prefix("fileclean:") else {
+        return true;
+    };
+    let Some((expected_type, expected_label)) = expected.split_once(':') else {
+        return true;
+    };
+    if expected_type != scan_type || expected_label != label {
+        return true;
+    }
+    paths.iter().any(|p| {
+        !crate::commands::fileclean::preview_path_in_scope(label, scan_type, p)
+    })
+}
+
 /// cleanup:allow-preview-assets — 把本次预览的图片路径逐个放行进 asset 协议 scope
 ///
 /// 主窗专属（`MAIN`）：预览入口只在主窗，子窗没有理由申请文件读取授权。
@@ -87,6 +101,8 @@ pub(super) fn filter_preview_paths(list: &[Value]) -> (Vec<String>, [usize; 3]) 
 pub async fn cleanup_allow_preview_assets<R: Runtime>(
     app: AppHandle<R>,
     window: WebviewWindow<R>,
+    scan_id: Option<String>,
+    scan_type: Option<String>,
     paths: Option<Value>,
 ) -> Value {
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
@@ -94,6 +110,12 @@ pub async fn cleanup_allow_preview_assets<R: Runtime>(
     }
     let Some(arr) = paths.as_ref().and_then(|v| v.as_array()) else {
         return json!({ "success": false, "message": "缺少路径清单" });
+    };
+    let Some(scan_id) = scan_id.as_deref().filter(|v| !v.is_empty()) else {
+        return json!({ "success": false, "message": "缺少扫描标识" });
+    };
+    let Some(scan_type) = scan_type.as_deref().filter(|v| matches!(*v, "qq" | "wechat")) else {
+        return json!({ "success": false, "message": "缺少有效的扫描类型" });
     };
     // R4-L03：超出单次上限**截断**而不是整包拒绝 —— 渲染层拿 success:false 就不开灯箱，
     // 旧形态等于让「图片多于上限的组」永远无法预览；截断后回执带 truncated，日志点名实到条数。
@@ -118,6 +140,15 @@ pub async fn cleanup_allow_preview_assets<R: Runtime>(
     }
     let (kept, reasons) = filter_preview_paths(&arr[..arr.len().min(MAX_PATHS)]);
     let invalid = reasons[0] + reasons[1] + reasons[2];
+    if snapshot_rejects(window.label(), scan_id, scan_type, &kept) {
+        return json!({
+            "success": false,
+            "message": "预览路径不在本次扫描快照内，已拒绝放行",
+            "assetScopeRejected": kept.len() + invalid,
+            "requested": arr.len() as i64,
+            "allowed": 0,
+        });
+    }
     let scope = app.asset_protocol_scope();
     let mut allowed = 0usize;
     let mut allow_failed = 0usize;
@@ -138,6 +169,7 @@ pub async fn cleanup_allow_preview_assets<R: Runtime>(
         "skipped": skipped,
         "invalid": invalid,
         "allowFailed": allow_failed,
+        "assetScopeRejected": 0,
         "truncated": truncated,
         "sessionAllowed": SESSION_ALLOWED.load(Ordering::Relaxed),
     });

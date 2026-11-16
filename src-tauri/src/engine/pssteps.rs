@@ -1267,6 +1267,10 @@ const PS_INLINE_ALLOW: &[&str] = &[
     "Join-Path",
     "New-Item",
     "New-ItemProperty",
+    // 2026-11-16 P1-2：OneDrive 附带卸载步需要启动官方卸载器并回传回收协议行。
+    // 该步文本是编译期内嵌常量，不接受用户输入；逐字执行不引入参数拼接面。
+    "Start-Process",
+    "Write-Output",
     // 回退阀（原生面已支持，见上方 R6c-L02）：参数契约不认识时交回 PS 逐字解释
     "Set-ItemProperty",
     "Remove-Item",
@@ -2604,7 +2608,10 @@ fn exec_one(op: &PsOp) -> Result<String, String> {
             let mut out = String::new();
             let mut errs: Vec<String> = Vec::new();
             // R5c-L10：设备清单读不动 ≠ 没有设备——与 ForSubKey 同口径，不完整必须回执。
-            let (ids, incomplete) = native::reg_enum_dev_ids(class);
+            // 2026-11-16 真机：注册表 Enum\PCI\...\Class 对管理员也全拒；优先走 CfgMgr
+            // 设备属性（原 PS 路径的 Win32_USBController 等价面），失败才回落注册表读面。
+            let (ids, incomplete) = crate::engine::pnp::enumerate_pci_class_ids(class)
+                .unwrap_or_else(|_| native::reg_enum_dev_ids(class));
             if incomplete {
                 errs.push(format!("PCI 设备清单不完整（类 {class}），本组未覆盖全部设备"));
             }

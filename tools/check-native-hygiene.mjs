@@ -216,11 +216,11 @@ function n9TableDeclIssues(readFile, entries) {
  *  更深的缩进版吞掉。 */
 const CLEANUP_SNAPSHOT_SITES = [
   { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: 'let mut guard = snapshots().lock()' },
-  { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: 'let auto_rebuild = auto_rebuild.unwrap_or(false);\n    let snapshot = snapshots()' },
+  { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: 'let auto_rebuild = auto_rebuild.unwrap_or(false);' },
   { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: '.insert(label.clone(), HashMap::new());' },
   { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: '\n        let buckets = snapshots().lock().unwrap_or_else(|e| e.into_inner());' },
   { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: '\n            let buckets = snapshots().lock().unwrap_or_else(|e| e.into_inner());' },
-  { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: 'reset_lock_whitelist(&label);\n    let snapshot = snapshots()' },
+  { file: 'src-tauri/src/commands/cleanup/scan_execute.rs', anchor: 'reset_lock_whitelist(&label); let scan_epoch = current_scan_epoch(&label);' },
 ];
 /** N9-C 登记表：两张跨窗快照表（与取它的访问器同文件，注释见 helpers.rs 头） */
 const SNAPSHOT_TABLES = [
@@ -369,8 +369,6 @@ const WALK_DEPTH_SITES = [
   // v7.2-C03（N1a-L04）：第三个深度上限入棘轮——fileKeys 快照遍历对齐 PS -Depth 24，
   // 与工程护栏 MAX_WALK_DEPTH 目的不同、数值不同，但同样是「删掉判据门禁照绿」的假绿面。
   { file: 'native-scanner/src/cleanup_scan.rs', name: 'fileKeys 快照遍历（对齐 PS -Depth 24）', token: 'FK_SNAPSHOT_MAX_DEPTH' },
-  // v7.2-C06（R5b-M13）：顽固软件治理的计划任务 DFS 此前无上限、不查重解析点，且不在 N6 面。
-  { file: 'src-tauri/src/engine/native/process.rs', name: '顽固软件计划任务 DFS', token: 'STUBBORN_TASKS_MAX_DEPTH' },
 ];
 for (const s of WALK_DEPTH_SITES) {
   const f = join(ROOT, s.file);

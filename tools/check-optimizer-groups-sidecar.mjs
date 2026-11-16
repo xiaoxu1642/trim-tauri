@@ -267,6 +267,18 @@ function groupCoverageProblems({ runtime, defaultGroups, groupMap, itemOverride,
   if (onlyHidden.length) out.push(`隐私面板隐藏集里不属于「${privacyGroup}」组：${onlyHidden.join('、')}`);
   return { problems: out, displayGroups: byDisplay.size, extraGroups: extra.length };
 }
+
+// P5-M09：面板 sections 并集 ⇄ hiddenFromOptimizer 的双向差集（永劫/隐私同构）。
+function panelCoverageProblems(panel, label) {
+  const members = new Set((panel.sections || []).flatMap((s) => s.items || []));
+  const hidden = new Set(panel.hiddenFromOptimizer || []);
+  const onlyMembers = [...members].filter((id) => !hidden.has(id));
+  const onlyHidden = [...hidden].filter((id) => !members.has(id));
+  const out = [];
+  if (onlyMembers.length) out.push(`${label}面板成员未进 hiddenFromOptimizer：${onlyMembers.join('、')}`);
+  if (onlyHidden.length) out.push(`${label} hiddenFromOptimizer 里有不属于面板的 id：${onlyHidden.join('、')}`);
+  return out;
+}
 {
   const runtime = JSON.parse(read('src-tauri', 'data', 'optimizer-runtime.json'));
   const hiddenUnion = new Set([...(privacyPanel.hiddenFromOptimizer || []), ...(naraPanel.hiddenFromOptimizer || [])]);
@@ -294,6 +306,10 @@ function groupCoverageProblems({ runtime, defaultGroups, groupMap, itemOverride,
     groupCoverageProblems({ ...base, privacyHidden: new Set() }).problems.some((p) => p.includes('未进隐私面板')),
     'F. 对照：隐私双向差集必须判红',
   );
+  check(
+    panelCoverageProblems({ sections: [{ items: ['a'] }], hiddenFromOptimizer: [] }, '对照').length > 0,
+    'F. 对照：面板 sections ⇄ hidden 双向差集必须判红',
+  );
   const res = groupCoverageProblems({
     runtime,
     defaultGroups: groups.default || [],
@@ -308,6 +324,8 @@ function groupCoverageProblems({ runtime, defaultGroups, groupMap, itemOverride,
     `F. 展示分组 ⇄ 面板隐藏集（映射后 ${res.displayGroups} 组 / 未登记 ${res.extraGroups} 组）`,
     res.problems.join('; '),
   );
+  const naraProblems = panelCoverageProblems(naraPanel, '永劫专项');
+  check(naraProblems.length === 0, 'F. 永劫面板 sections ⇄ hiddenFromOptimizer 双向一致', naraProblems.join('; '));
 }
 
 console.log('');
