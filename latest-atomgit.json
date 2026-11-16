@@ -1,15 +1,15 @@
 {
-  "version": "0.9.7",
-  "notes": "## 版本 0.9.7（2026-11-17 重复文件扫描读拒绝回执）\n\n> 本版只修一件事：重复文件扫描遇到读不了的文件不再静默漏报。\n\n① **读拒绝文件计入回执不再静默消失** —— 症状：重复文件扫描对 ACL 拒绝读取的文件既不进结果也不报错，回执显示「无重复」，用户无法知道有文件根本没参与判定。根因：内容指纹函数用 `Option` 返回，打开或读取失败被当成「没有指纹」直接丢弃，错误不进任何计数。修法：指纹函数改 `Result` 原样返回错误，扫描器新增未读计数回调；Tauri 侧并入既有「N 处无法读取」回执并写汇总日志，CLI 打印告警行。新增真机 ACL 探针用 icacls 拒读样本钉住行为。\n\n② **本版验证（如实标注）** —— `cargo test`（src-tauri）1206 passed / 0 failed / 78 ignored；`cargo test -p trim-finder` 173 passed / 0 failed / 10 ignored（含真机 ACL 探针单跑 1 passed）；全量门禁 `73/73`。真机端到端：ACL 拒读样本回执 `errors=2`。**本版未做的验证**：发版产物与双线清单核验在发布后补记；OS 级拖拽与真实 hover 未取证。\n\n---",
-  "pub_date": "2026-11-16T18:57:10Z",
-  "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.9.7/attach_files/Trim_0.9.7_x64-setup.exe/download",
-  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaE51UCtjWkY0RC82UGxYbzYreVB1MFp1T0p5c2NGV3BYTjY3REN3YVIzUm1oNU5Hak9QdVRtTkNhL05RTjBtTW5HT0Fyb2IyK3cwbThvemRzcWRyV3dVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0ODU1MzQzCWZpbGU6VHJpbV8wLjkuN194NjQtc2V0dXAuZXhlCXZlcnNpb246MC45LjcKeHAxbWhhNkFTMUlqZ0JzSmdjdllZUkdyTHhJMlFiMlpTaFp4S2lOOXBLbzM5UldCWlF6QzhqNmRZc2tmbU4xNjlwRnpLVVNzMHNzTUl5TWRZV0srQkE9PQo=",
-  "sha256": "b731d29b8eb7424fcd2c719dea2cf3155a8ae73edb8132251ee9d8ff90c7be68",
+  "version": "0.9.8",
+  "notes": "## 版本 0.9.8（2026-11-17 命令面单一真源与架构边界收口）\n\n> 本版没有新功能，是内部架构质量版：把「改一处要记三处」的命令面和散装的页面脚本收成单一真源。\n\n① **页面脚本依赖收口，消除一类页面失效隐患** —— 症状：磁盘清理与备份还原两页的脚本清单逐字重复、靠注释提醒「改一边必须改另一边」，顺序错或漏改会让页面按钮没绑事件甚至直接白屏。根因：每个页面的脚本加载顺序手写在数组里，调用方还要自己补查找器的脚本。修法：清理域脚本收敛为单一定义，加载器统一解析顺序、记录已加载页面并保证初始化恰好一次；查找器子视图并入同一条加载路径。\n\n② **新增命令从「手改三处」变成「只改清单」** —— 症状：新增一个命令要同时手改 Rust 注册表、前端通道表、档位表三个文件，漏一处命令面静默断裂，门禁只能在事后判红。根因：三份清单没有共同来源。修法：命令清单（179 条）成为唯一真源，生成器产出三处生成物，两个门禁改为清单与生成物逐项对拍；清单漏填在提交前判红。\n\n③ **扫描器公共行为进主仓测试** —— 症状：扫描器不是主仓工作区成员，主仓 `cargo test` 跑不到它的测试，重复文件、空文件、年龄护栏这些公共行为改动后可能没人跑。修法：主仓新增契约测试直接调扫描器公共 API（样本临时自建自清，回收站用例只测失败形态不真删），并挂进门禁清单；规则差分门禁保留。\n\n④ **共享状态按域分文件** —— 命令层共享状态表原先一个文件装下所有域的类型，锁序纪律仍集中一处可核，但跨域类型 import 混在一起；现在按面板/诊断/文件工具/跨域四组拆文件，命令文件的引用路径与命令行为零改动。\n\n⑤ **本版验证（如实标注）** —— `cargo test`（src-tauri）1281 passed / 0 failed / 105 ignored（含扫描器契约 4 用例）；全量门禁 `74/74`；真机 CDP 走查主窗 19 页全部正常、无未捕获异常，进程管理子窗冒烟通过，页面初始化恰好一次；命令清单与三处生成物逐项一致（179 / 176 / 115 / 61）。**本版未做的验证**：OS 级拖拽与真实 hover 未取证；发版产物与双线清单核验在发布后补记。\n\n---",
+  "pub_date": "2026-11-16T21:58:36Z",
+  "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.9.8/attach_files/Trim_0.9.8_x64-setup.exe/download",
+  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaE9ybkc4ZGtLUU9OSXliTUl6NHlhY3cxU1c3bzlKNHRhd1k1RURUYWFBc1JoOEF0K3hRVHlWY1p3OWs1LzVzSDFkS2hCT0JsdUx1VmluMkowMTBrR3dzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0ODY0MDI3CWZpbGU6VHJpbV8wLjkuOF94NjQtc2V0dXAuZXhlCXZlcnNpb246MC45LjgKUWJwS1hhUy9VQkVJU1Q1dmMzeC85a25kZ1lCdGd3dzlBVG5pSXNOWFMybjNGMVprN2YxU1JQSHRtMmUzK3dOQkpjcElpdDZxMlNtbm9YSnZuQjFZQ0E9PQo=",
+  "sha256": "948d8d24c506fda37ad28dc247985d553f07fcd3efd51679b926445d4923c026",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.9.7/attach_files/Trim_0.9.7_x64-setup.exe/download",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaE51UCtjWkY0RC82UGxYbzYreVB1MFp1T0p5c2NGV3BYTjY3REN3YVIzUm1oNU5Hak9QdVRtTkNhL05RTjBtTW5HT0Fyb2IyK3cwbThvemRzcWRyV3dVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0ODU1MzQzCWZpbGU6VHJpbV8wLjkuN194NjQtc2V0dXAuZXhlCXZlcnNpb246MC45LjcKeHAxbWhhNkFTMUlqZ0JzSmdjdllZUkdyTHhJMlFiMlpTaFp4S2lOOXBLbzM5UldCWlF6QzhqNmRZc2tmbU4xNjlwRnpLVVNzMHNzTUl5TWRZV0srQkE9PQo=",
-      "sha256": "b731d29b8eb7424fcd2c719dea2cf3155a8ae73edb8132251ee9d8ff90c7be68"
+      "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.9.8/attach_files/Trim_0.9.8_x64-setup.exe/download",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaE9ybkc4ZGtLUU9OSXliTUl6NHlhY3cxU1c3bzlKNHRhd1k1RURUYWFBc1JoOEF0K3hRVHlWY1p3OWs1LzVzSDFkS2hCT0JsdUx1VmluMkowMTBrR3dzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0ODY0MDI3CWZpbGU6VHJpbV8wLjkuOF94NjQtc2V0dXAuZXhlCXZlcnNpb246MC45LjgKUWJwS1hhUy9VQkVJU1Q1dmMzeC85a25kZ1lCdGd3dzlBVG5pSXNOWFMybjNGMVprN2YxU1JQSHRtMmUzK3dOQkpjcElpdDZxMlNtbm9YSnZuQjFZQ0E9PQo=",
+      "sha256": "948d8d24c506fda37ad28dc247985d553f07fcd3efd51679b926445d4923c026"
     }
   }
 }
