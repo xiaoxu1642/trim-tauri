@@ -50,3 +50,6 @@ ehthumbs.db
 .opencode/
 # zcode CLI 生成的本机忽略规则（含本机资料区路径），非交付物
 .zcodeignore
+
+# birdview 架构图（本机生成，不入库）
+.birdview/

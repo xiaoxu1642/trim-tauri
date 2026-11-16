@@ -1,5 +1,7 @@
 # AGENTS.md — Trim (Tauri) Agent Collaboration Constraints (tracked in-repo since 2026-10-24)
 
+> 改代码前先看 `.birdview/architecture.html` 和 `.birdview/architecture.json`。
+
 > This file holds only three things: **behavior discipline, non-negotiable red lines, and where to look**.
 > Long-term maintenance details live in the Obsidian vault folder `trim-tauri/` (vault library `ob doucument`, a local knowledge base — paths below it are vault-relative, not repository-relative):
 > - Current long-line maintenance: `trim-tauri 08 当前 AGENTS 长线维护 2026-10-24.md`
