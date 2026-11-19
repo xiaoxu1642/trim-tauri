@@ -204,7 +204,6 @@ pub(super) fn rebuild_steps(
             format!(
                 "$picked = @({list})\n\
 foreach ($n in $picked) {{ $p = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$n\"; if (Test-Path $p) {{ New-ItemProperty -Path $p -Name Start -Value 4 -PropertyType DWord -Force | Out-Null; Stop-Service -Name $n -Force -ErrorAction SilentlyContinue }} }}\n\
-$w = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\wuauserv\"; if (Test-Path $w) {{ New-ItemProperty -Path $w -Name Start -Value 3 -PropertyType DWord -Force | Out-Null }}\n\
 $l = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\lfsvc\\Service\\Configuration\"; New-Item -Path $l -Force | Out-Null; New-ItemProperty -Path $l -Name Status -Value 0 -PropertyType DWord -Force | Out-Null\n\
 $e = \"HKLM:\\SOFTWARE\\Policies\\Microsoft\\MicrosoftEdge\\Main\"; New-Item -Path $e -Force | Out-Null; New-ItemProperty -Path $e -Name AllowPrelaunch -Value 0 -PropertyType DWord -Force | Out-Null\n\
 $t = \"HKLM:\\SOFTWARE\\Policies\\Microsoft\\MicrosoftEdge\\TabPreloader\"; New-Item -Path $t -Force | Out-Null; New-ItemProperty -Path $t -Name AllowTabPreloading -Value 0 -PropertyType DWord -Force | Out-Null"
@@ -262,10 +261,6 @@ foreach ($n in $picked) {{ Get-PnpDevice -ErrorAction SilentlyContinue | Where-O
 /// 数据层多写了一个 id 也不会凭空多一步写入。
 fn extra_steps(option_id: &str, extra_id: &str) -> Vec<Value> {
     match (option_id, extra_id) {
-        ("tf_svc_bulk", "wuau_manual") => vec![json!({
-            "label": "wuauserv 改为手动启动（保持 Windows Update 可用）",
-            "pwsh": "$p = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\wuauserv\"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 3 -PropertyType DWord -Force | Out-Null }"
-        })],
         ("tf_svc_bulk", "lfsvc_status") => vec![json!({
             "label": "清零位置服务状态（让 lfsvc 彻底不工作）",
             "pwsh": "$p = \"HKLM:\\SYSTEM\\CurrentControlSet\\Services\\lfsvc\\Service\\Configuration\"; New-Item -Path $p -Force -ErrorAction SilentlyContinue | Out-Null; New-ItemProperty -Path $p -Name Status -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null"
@@ -356,7 +351,7 @@ mod tests {
         for id in ["tf_svc_bulk", "tf_drv_disable", "tf_appx", "tf_dev_disable"] {
             assert!(supports_subitems(id), "{id} 应支持自选目标");
             assert!(
-                targets_of(id).len() >= 17,
+                targets_of(id).len() >= 10,
                 "{id} 目标数过少：{}",
                 targets_of(id).len()
             );
@@ -394,11 +389,11 @@ mod tests {
     /// 这类越权写入的唯一机械拦截点。只断言条数会漏掉「顺序串了」的形态。
     #[test]
     fn 勾选子集只写入选中的目标() {
-        let picked = s(&["FontCache", "lltdsvc", "diagsvc"]);
+        let picked = s(&["FontCache3.0.0.0", "lltdsvc", "diagsvc"]);
         let steps = rebuild_steps("tf_svc_bulk", Some(&picked), None).expect("应重建出步骤");
         assert_eq!(steps.len(), 1, "未选附带开关时只应有清单这一步");
         let pwsh = steps[0]["pwsh"].as_str().expect("pwsh 字段");
-        for want in ["FontCache", "lltdsvc", "diagsvc"] {
+        for want in ["FontCache3.0.0.0", "lltdsvc", "diagsvc"] {
             assert!(pwsh.contains(want), "重建脚本缺少选中项 {want}: {pwsh}");
         }
         // 未选中项一个都不许出现（含子串误伤：sedsvc 出现过 ⇒ sedsvc 不该再出现第二次）
@@ -412,9 +407,10 @@ mod tests {
         assert!(pwsh.contains("-Name Start -Value 4"), "服务项必须写 Start=4: {pwsh}");
         assert!(pwsh.contains("Stop-Service"), "服务项必须停服: {pwsh}");
         // P1-1：数据层原脚本在服务循环后还有无条件写入，子集重建必须同语义。
+        // wuau_manual 已退役：重建脚本不得再写 wuauserv / Start=3。
+        assert!(!pwsh.contains("wuauserv"), "子集重建残留已退役的 wuauserv: {pwsh}");
+        assert!(!pwsh.contains("-Name Start -Value 3"), "子集重建残留已退役的 Start=3: {pwsh}");
         for want in [
-            "wuauserv",
-            "-Name Start -Value 3",
             "lfsvc\\Service\\Configuration",
             "AllowPrelaunch",
             "AllowTabPreloading",
@@ -431,7 +427,7 @@ mod tests {
     /// 破坏形态 = 把 `tf_drv_disable` 并回 `tf_svc_bulk` 分支 ⇒ 本用例红。
     #[test]
     fn 驱动子集不得停驱动() {
-        let picked = s(&["cdrom", "CLFS"]);
+        let picked = s(&["Beep", "CAD"]);
         let steps = rebuild_steps("tf_drv_disable", Some(&picked), None).expect("应重建出步骤");
         let pwsh = steps[0]["pwsh"].as_str().expect("pwsh 字段");
         assert!(pwsh.contains("-Name Start -Value 4"), "驱动项必须写 Start=4: {pwsh}");
@@ -440,7 +436,7 @@ mod tests {
             "驱动子集重建混入了 Stop-Service —— 会立即停驱动且还原不回启: {pwsh}"
         );
         // 服务侧保持原语义（停服是数据层原脚本的一部分）
-        let svc = rebuild_steps("tf_svc_bulk", Some(&s(&["FontCache"])), None).expect("应重建出步骤");
+        let svc = rebuild_steps("tf_svc_bulk", Some(&s(&["FontCache3.0.0.0"])), None).expect("应重建出步骤");
         let svc_pwsh = svc[0]["pwsh"].as_str().expect("pwsh 字段");
         assert!(svc_pwsh.contains("Stop-Service"), "服务子集必须停服: {svc_pwsh}");
     }
@@ -501,14 +497,14 @@ mod tests {
 
     #[test]
     fn 附带开关各自独立成步() {
-        let picked = s(&["FontCache"]);
-        let extras = s(&["wuau_manual", "edge_prelaunch", "__不存在__"]);
+        let picked = s(&["FontCache3.0.0.0"]);
+        let extras = s(&["edge_prelaunch", "__不存在__"]);
         let steps = rebuild_steps("tf_svc_bulk", Some(&picked), Some(&extras)).unwrap();
         let joined: String = steps.iter().filter_map(|x| x["pwsh"].as_str()).collect();
-        assert!(joined.contains("wuauserv"), "{joined}");
+        assert!(joined.contains("FontCache3.0.0.0"), "{joined}");
         assert!(joined.contains("AllowTabPreloading"), "{joined}");
-        // wuauserv 那步是「改手动 3」不是「禁用 4」
-        assert!(joined.contains("-Name Start -Value 3"), "{joined}");
+        // 退役 wuau_manual 后不再有 Start=3 写入
+        assert!(!joined.contains("wuauserv"), "{joined}");
     }
 
     /// 名称里的引号必须被转义 —— 单引号串字面量的唯一风险点。

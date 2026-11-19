@@ -450,7 +450,7 @@ if (!sigB64) {
 // 公钥与 src-tauri/src/engine/rules_signature.rs 的 RULES_PUBKEY_PEM 逐字一致；
 // 轮换背景（2026-10-04 重装丢钥 → 0.6.6 双钥兼容 → 0.7.3 完成退役）见该文件注释。
 const PUBKEY_PEMS = {
-  current: '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAcfi1pq5dJY2x3/d+sDdLmj1N6eGIqOmttQh5rTbKCro=\n-----END PUBLIC KEY-----',
+  current: '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA99tf+9CA7IERwd7lhUtS2zlNg88w5ER8w70A1iH9GY4=\n-----END PUBLIC KEY-----',
 };
 try {
   const msg = Buffer.from(JSON.stringify(body), 'utf8');

@@ -32,7 +32,7 @@ use serde_json::{Map, Value};
 /// 该影响已写入 0.7.3 更新说明）。
 /// 私钥在发布机的本机密钥目录（`tools/sign-cleanup-rules.mjs` 读取），绝不入库。
 pub const RULES_PUBKEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
-MCowBQYDK2VwAyEAcfi1pq5dJY2x3/d+sDdLmj1N6eGIqOmttQh5rTbKCro=\n\
+MCowBQYDK2VwAyEA99tf+9CA7IERwd7lhUtS2zlNg88w5ER8w70A1iH9GY4=\n\
 -----END PUBLIC KEY-----";
 
 /// 取规则对象的规范化签名文本（无 `_sig` 的紧凑 JSON 文本）

@@ -44,17 +44,10 @@
         "TroubleshootingSvc",
         "DsSvc",
         "FrameServer",
-        "FontCache",
-        "SENS",
-        "Themes",
-        "BcastDVRUserService",
-        "CaptureService",
         "XblAuthManager",
         "XblGameSave",
         "XboxNetApiSvc",
-        "WpnService",
-        "lfsvc",
-        "CryptSvc"
+        "lfsvc"
       ],
       "labels": {
         "FontCache3.0.0.0": "字体缓存（旧版 3.0 通道）— 系统级字体缓存，禁后首次开应用会略慢",
@@ -85,7 +78,6 @@
         "defragsvc": "磁盘碎片整理 — SSD 上不适用，机械硬盘需手动安排时可禁",
         "lltdsvc": "链路层拓扑发现 — 网络拓扑图，可禁",
         "TrkWks": "分布式跟踪客户端 — 跨机错误报告，用 Windows 错误报告可禁",
-        "CryptSvc": "Cryptographic Services — **证书、签名、EFS、BitLocker 全靠它，禁了系统会大面积出错**",
         "diagsvc": "诊断执行服务 — 排障用的后台通道，可禁（但故障排查能力下降）",
         "DPS": "诊断策略服务 — 上者的策略层，可禁",
         "WdiServiceHost": "诊断服务主机 — 硬件/网络诊断，可禁",
@@ -94,23 +86,12 @@
         "TroubleshootingSvc": "疑难解答 — 网络疑难解答面板，可禁",
         "DsSvc": "数据共享服务 — 跨设备数据同步，可禁",
         "FrameServer": "帧服务器 — 视频/游戏录制与播放框架，**录屏/视频会议就别禁**",
-        "FontCache": "字体缓存 — 系统字体缓存，禁后首次开应用会略慢",
-        "SENS": "事件系统 — 事件日志基础设施，日志/COM 依赖它，慎禁",
-        "Themes": "主题 — 桌面主题与视觉样式，**禁了 Aero 效果和部分界面会失效**",
-        "BcastDVRUserService": "广播 DVR 用户服务 — 游戏直播录制，**直播/录制就别禁**",
-        "CaptureService": "游戏捕获 — 录屏/游戏录制，**录屏就别禁**",
         "XblAuthManager": "Xbox 登录管理器 — 用 Xbox / Microsoft Store 买游戏可禁",
         "XblGameSave": "Xbox 游戏存档同步 — 云存档，**在玩 Xbox 游戏就别禁**",
         "XboxNetApiSvc": "Xbox 网络 API — 可禁",
-        "WpnService": "Windows 推送通知 — **通知中心 / 应用推送依赖它**，禁了收不到通知",
         "lfsvc": "位置服务 — 定位、天气、附近推荐，不用定位可禁"
       },
       "extras": [
-        {
-          "id": "wuau_manual",
-          "label": "wuauserv 改为「手动」启动（保持 Windows Update 可用）",
-          "note": "不动它的话，清单里没有它，但它的启动类型可能被其它路径影响。勾上=明确保持手动而不是被动继承。"
-        },
         {
           "id": "lfsvc_status",
           "label": "把位置服务状态清零（让上面的 lfsvc 彻底不工作）",
@@ -129,13 +110,8 @@
       "hint": "这一组是**底层驱动**，误禁可能让某个硬件直接失效（网卡/声卡/USB）。不确定的别勾。",
       "kind": "service-start-4",
       "targets": [
-        "acpipagr",
-        "AcpiPmi",
         "Beep",
         "CAD",
-        "CLFS",
-        "CSC",
-        "luafv",
         "Rasl2tp",
         "RasPppoe",
         "RasSstp",
@@ -143,18 +119,11 @@
         "dam",
         "PEAUTH",
         "QWAVEdrv",
-        "cdrom",
-        "fileinfo",
         "FileCrypt"
       ],
       "labels": {
-        "acpipagr": "ACPI 聚合设备 — 电源管理聚合，**笔记本/台式机都可能依赖，禁后休眠唤醒可能异常**",
-        "AcpiPmi": "ACPI 电源管理 — **电源/休眠/唤醒核心驱动，禁了大概率睡死或唤醒失败**",
         "Beep": "蜂鸣器驱动 — 老式蜂鸣器，无可禁",
         "CAD": "内核实时通信 — 实时内核内交换，禁后实时音频/部分音视频采集会失效",
-        "CLFS": "事务日志 — 依赖它的应用（部分数据库/安装器）会出错",
-        "CSC": "客户端/服务器缓存 — 脱机文件，禁后 C: 盘会不可用（**高危，务必别勾**）",
-        "luafv": "LUA 文件虚拟化驱动 — UAC 虚拟化层，禁后部分安装器/程序无法提权运行",
         "Rasl2tp": "L2TP VPN — **用 L2TP VPN 就别禁**",
         "RasPppoe": "PPPoE VPN — **用 PPPoE 拨号宽带就别禁**",
         "RasSstp": "SSTP VPN — **用 VPN 就别禁**",
@@ -162,8 +131,6 @@
         "dam": "数据访问监视 — 兼容性 shim 监控，可禁",
         "PEAUTH": "备用受保护存储 — 凭据保护，禁后部分登录/加密功能异常",
         "QWAVEdrv": "Q Wave 驱动 — 旧式 QoS，可禁",
-        "cdrom": "CD-ROM 驱动 — **有光驱或挂载 ISO 就别禁**",
-        "fileinfo": "文件信息 — 缩略图/图标/属性与搜索索引依赖它，禁后资源管理器图标大量丢失",
         "FileCrypt": "文件加密 — EFS 文件系统，无用 EFS 可禁"
       },
       "extras": []
@@ -304,6 +271,6 @@
   },
   "_sig": {
     "alg": "ed25519",
-    "sig": "uvyiReR+FwgKTXiXCzmpcAsghLH79OnR+EvfDPm0Fy9R5a0PNYztYP9KH/cEzkCp2zaVJDJIaHn1OIwCZV8lBw=="
+    "sig": "vIMDmCnSWJ/GzC3AAqmYQxvdzl3JLfNFEcLJHbclqfAagjDG4HcahObhOsJRTM5DkIqWdvKR8OWrKnVrYKHMDg=="
   }
 }

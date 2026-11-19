@@ -1111,16 +1111,6 @@ pub(super) fn assemble_steps(
     p: &RunParams,
 ) -> Result<(Vec<Value>, Option<Vec<String>>), String> {
     let is_dynamic = opt.get("dynamic").and_then(|v| v.as_bool()).unwrap_or(false);
-    // P1-9：两项目标相反（保持更新可用 vs 禁用 wuauserv）。同时选中时拒绝，
-    // 不靠执行顺序让后者静默覆盖前者。
-    if option_id == "tf_svc_bulk"
-        && p.include_store
-        && p.picked_extras
-            .as_ref()
-            .is_some_and(|extras| extras.iter().any(|e| e == "wuau_manual"))
-    {
-        return Err("「wuauserv 改为手动」与「禁用商店相关服务」不能同时选择".into());
-    }
 
     // includeStore 与子集选择是**正交**参数：早期实现里子集分支优先，把 includeStore
     // 整个吞掉（勾了商店段却不写、回执仍成功）。把商店服务并进子集清单，让
@@ -2112,7 +2102,7 @@ mod backup_gate_tests {
 
 #[cfg(test)]
 mod restore_stage_tests {
-    use super::{assemble_steps, find_option, staged_restore_steps, RestoreStage, RunDirection, RunParams};
+    use super::{staged_restore_steps, RestoreStage, RunDirection, RunParams};
     use serde_json::json;
 
     /// P0-3：预置还原必须能拆成「非 reg」与「只 reg」两段，空段显式拒绝；
@@ -2160,17 +2150,4 @@ mod restore_stage_tests {
         );
     }
 
-    /// P1-9：`includeStore` 与 `wuau_manual` 同时选时拒绝，不让后者被覆盖。
-    #[test]
-    fn wuau手动与商店禁用互斥() {
-        let opt = find_option("tf_svc_bulk").expect("数据层应有 tf_svc_bulk");
-        let p: RunParams = serde_json::from_value(json!({
-            "pickedTargets": ["RetailDemo"],
-            "pickedExtras": ["wuau_manual"],
-            "includeStore": true
-        }))
-        .expect("RunParams 反序列化");
-        let err = assemble_steps(opt, "tf_svc_bulk", &p).expect_err("冲突组合必须拒绝");
-        assert!(err.contains("不能同时选择"), "{err}");
-    }
 }

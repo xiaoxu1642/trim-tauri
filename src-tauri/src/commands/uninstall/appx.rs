@@ -1,6 +1,6 @@
 //! AppX / Store 应用：枚举准入、卸载、logo 取回（原 UWP 通道）。
 //!
-//! `valid_appx_fullname` 的字符集闸口 [A-Za-z0-9._-] 必须先于任何喂给 pwsh 的地方生效
+//! `valid_appx_fullname` 的字符集闸口 [A-Za-z0-9._~-] 必须先于任何喂给 pwsh 的地方生效
 //! （HiBit 反例：用户输入直接拼进 Remove-AppxPackage 模板）。
 //! 枚举/卸载超时常量随本域留在本文件；logo 命令走的是「只读文件字节」路径，不做写侧。
 
@@ -13,7 +13,7 @@ pub(crate) fn valid_appx_fullname(fullname: &str) -> bool {
         && fullname.len() <= 200
         && fullname
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '~'))
 }
 
 /// 包全名 → 包系列名（PFN，U-4）：`Name_Version_Arch__PublisherId` → `Name_PublisherId`。
@@ -415,6 +415,8 @@ pub(super) mod uninstall_appx_tests {
     fn appx_fullname_charset_gate() {
         assert!(valid_appx_fullname("OpenAI.ChatGPT-Desktop_1.2025.123.0_x64__0000000000000"));
         assert!(valid_appx_fullname("Microsoft.WindowsNotepad_11.2607.14.0_x64__8wekyb3d8bbwe"));
+        // bundle 主包全名的真实形态（staged 残留枚举 2026-11-20：`~` 是 Windows 合法字符）
+        assert!(valid_appx_fullname("RealtekSemiconductorCorp.RealtekAudioControl_1.53.376.0_neutral_~_dt26b99r8h8gj"));
         // 注入面：引号 / 分号 / 换行 / 非 ASCII 一律拒绝
         assert!(!valid_appx_fullname("a'; Remove-Item C:\\ -Recurse; '"));
         assert!(!valid_appx_fullname("a\"b"));

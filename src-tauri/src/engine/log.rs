@@ -104,15 +104,22 @@ fn local_utc_offset_secs() -> i64 {
 ///
 /// 判据两条，覆盖两种测试形态：
 ///  ① 单元测试：lib 内部 `#[cfg(test)]` 编译 → `cfg!(test)`；
-///  ② 集成/文档测试：产物落在 `target\<profile>\deps\<name>-<hash>.exe`。**应用本体不在此目录**
-///     （dev 是 `target\debug\trim-tauri.exe`，发布版是 `Trim.exe`），所以不会误伤真机运行。
+///  ② 集成/文档测试：产物落在 `target\` 下 cargo 的测试产物目录。旧 cargo 落
+///     `target\<profile>\deps\<name>-<hash>.exe`；cargo 1.99 起全部测试（含 unittests）
+///     移到 `target\debug\build\<pkg>\<hash>\out\`（2026-11-20 实测，
+///     `integration_tests_do_not_write_prod_log` 因此红过一次）。**应用本体不在这两类
+///     目录**（dev 是 `target\debug\trim-tauri.exe`，发布版是 `Trim.exe` /
+///     `build-release\Trim.exe`），所以不会误伤真机运行。
 fn is_test_process() -> bool {
     if cfg!(test) {
         return true;
     }
     std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.file_name().map(|n| n == "deps").unwrap_or(false)))
+        .and_then(|p| {
+            p.parent()
+                .and_then(|d| d.file_name().map(|n| n == "deps" || n == "out"))
+        })
         .unwrap_or(false)
 }
 

@@ -6,24 +6,14 @@
     "tf_svc_bulk": {
       "groups": [
         {
-          "expectStart": 3,
-          "services": [
-            "wuauserv",
-            "CryptSvc"
-          ]
-        },
-        {
           "expectStart": 4,
           "services": [
             "ALG",
             "AppReadiness",
-            "BcastDVRUserService",
-            "CaptureService",
             "CscService",
             "DPS",
             "DsSvc",
             "DusmSvc",
-            "FontCache",
             "FontCache3.0.0.0",
             "FrameServer",
             "IpxlatCfgSvc",
@@ -34,11 +24,9 @@
             "Netlogon",
             "QWAVE",
             "SEMgrSvc",
-            "SENS",
             "SensorService",
             "StiSvc",
             "SysMain",
-            "Themes",
             "TrkWks",
             "TroubleshootingSvc",
             "WEPHOSTSVC",
@@ -46,7 +34,6 @@
             "WdiSystemHost",
             "Wecsvc",
             "WpcMonSvc",
-            "WpnService",
             "XblAuthManager",
             "XblGameSave",
             "XboxNetApiSvc",
@@ -87,22 +74,15 @@
         {
           "expectStart": 4,
           "services": [
-            "AcpiPmi",
             "Beep",
             "CAD",
-            "CLFS",
-            "CSC",
             "FileCrypt",
             "PEAUTH",
             "QWAVEdrv",
             "RasPppoe",
             "RasSstp",
             "Rasl2tp",
-            "acpipagr",
-            "cdrom",
             "dam",
-            "fileinfo",
-            "luafv",
             "tcpipreg"
           ]
         }

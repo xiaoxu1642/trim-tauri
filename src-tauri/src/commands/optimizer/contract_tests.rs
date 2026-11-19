@@ -824,7 +824,7 @@ fn strip_js_comments(src: &str) -> String {
                 }
             }
         }
-        assert!(checked >= 278, "步骤总数异常（现算 {checked}），这条对照已经测不到东西");
+        assert!(checked >= 274, "步骤总数异常（现算 {checked}），这条对照已经测不到东西");
     }
 
     /// R3-L07：`"path": ""` 与「缺 path」「解析失败」同归畸形；重复行只去重不计畸形。
@@ -1491,7 +1491,7 @@ fn strip_js_comments(src: &str) -> String {
             let id = o.get("id").and_then(|v| v.as_str()).unwrap_or("");
             assert!(needs_high_risk_confirm(o, id), "risk=high 的 {id} 未被高危闸门覆盖");
         }
-        assert!(n_high >= 9, "数据层 high 项数异常（{n_high}）——是否被批量降级");
+        assert!(n_high >= 5, "数据层 high 项数异常（{n_high}）——是否被批量降级");
 
         // 2026-10-11 随退役/降级收窄：tf_ifeo_perf/tf_ifeo_wipe/tf_dev_audio/tf_dev_printer/
         // tf_onedrive/perf_exploit_protection_off 已退役（find_option 应为 None），
@@ -1810,8 +1810,8 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
     fn m2_服务类盲区项现在能产出断言() {
         // (id, 期望的服务断言条数下限)
         for (id, min_checks) in [
-            ("tf_svc_bulk", 47), // 仅 65 个基础服务；wuauserv 与商店 5 项期望值取决于运行期选项，静态不可断言
-            ("tf_drv_disable", 17),
+            ("tf_svc_bulk", 40), // 退役 6 个通用服务 + CryptSvc/wuauserv 后；商店 5 项期望值取决于运行期选项，静态不可断言
+            ("tf_drv_disable", 10),
             ("svc_connected_devices_manual", 2),
             ("svc_remote_connectivity_manual", 6),
             ("svc_bluetooth_disable", 1),
@@ -1850,7 +1850,7 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
         let opt = find_option("tf_svc_bulk").expect("tf_svc_bulk 在目录里");
         let spec = write_spec_of("tf_svc_bulk").expect("tf_svc_bulk 应在写入坐标侧表里");
         let checks = collect_checks(opt);
-        assert!(checks.len() >= 47, "服务清单断言数异常：{}", checks.len());
+        assert!(checks.len() >= 40, "服务清单断言数异常：{}", checks.len());
 
         let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
         for c in &checks {
@@ -2980,9 +2980,9 @@ let ov = include_str!("overview.rs");
     fn 子集作用域只收窄服务断言() {
         let bulk = find_option("tf_svc_bulk").expect("tf_svc_bulk 在目录里");
         let checks = collect_checks(bulk);
-        assert!(checks.len() >= 47, "服务清单断言数异常：{}", checks.len());
+        assert!(checks.len() >= 40, "服务清单断言数异常：{}", checks.len());
 
-        let picked = vec!["FontCache".to_string(), "lltdsvc".to_string()];
+        let picked = vec!["FontCache3.0.0.0".to_string(), "lltdsvc".to_string()];
         let scoped = scope_checks(&checks, Some(&picked));
         let names: Vec<&str> = scoped
             .iter()
@@ -2996,8 +2996,8 @@ let ov = include_str!("overview.rs");
             picked.len(),
             "收窄后应只剩勾中的服务，实际：{names:?}"
         );
-        assert!(names.contains(&"FontCache") && names.contains(&"lltdsvc"), "{names:?}");
-        assert!(!names.contains(&"CryptSvc"), "未勾中的服务混进了断言范围");
+        assert!(names.contains(&"FontCache3.0.0.0") && names.contains(&"lltdsvc"), "{names:?}");
+        assert!(!names.contains(&"Themes"), "未勾中的服务混进了断言范围");
 
         // 全选（None / 空 vec）⇒ 一条不动，与既有行为一致
         assert_eq!(scope_checks(&checks, None).len(), checks.len());

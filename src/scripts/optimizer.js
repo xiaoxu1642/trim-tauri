@@ -454,8 +454,6 @@
     'disable_uac',           // 禁用 UAC
     'tf_defender',           // 关闭 Defender 与 SmartScreen
     'perf_vbs_off',          // 关闭 VBS / 内存完整性
-    'tf_svc_bulk',           // 禁用 70+ 非必要服务（含安全服务）
-    'tf_drv_disable',        // 禁用高风险驱动服务
     'perf_windows_update_off' // v3.7.0 P1：彻底禁用 Windows 更新（安全补丁不再送达）
   ]);
 

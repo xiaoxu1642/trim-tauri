@@ -615,8 +615,17 @@ pub fn startup_scan() -> Result<(Vec<Value>, Vec<String>), String> {
         for (hive_tag, hive, subkey, label, scope) in RUN_PATHS {
             let sk = to_wide(&subkey);
             let mut hk = HKEY::default();
-            if RegOpenKeyExW(*hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk).is_err() {
-                warnings.push(format!("启动项注册表根不可读：{label}（{subkey}）"));
+            let opened = RegOpenKeyExW(*hive, PCWSTR(sk.as_ptr()), Some(0), KEY_READ, &mut hk);
+            if opened.is_err() {
+                // ERROR_FILE_NOT_FOUND(2)/ERROR_PATH_NOT_FOUND(3)：键不存在 = 该来源没有启动项，
+                // 是正常空列表（HKCU 的 WOW6432Node\...\Run 只有 32 位程序写过才会创建），不算
+                // 「不可读」；其余（ACCESS_DENIED 等）才是真读失败。与 registry.rs 的
+                // open_key_missing_is_idempotent 同口径。
+                const ERROR_FILE_NOT_FOUND: u32 = 2;
+                const ERROR_PATH_NOT_FOUND: u32 = 3;
+                if !matches!(opened.0, ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) {
+                    warnings.push(format!("启动项注册表根不可读：{label}（{subkey}）"));
+                }
                 continue;
             }
             let values = reg_enum_values(hk);

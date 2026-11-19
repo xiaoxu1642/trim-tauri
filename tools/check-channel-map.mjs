@@ -1097,9 +1097,9 @@ if (!rustHazard || !jsHazard) {
   //   ① 清单里每个 id 都真在数据层存在（死条目会让这份清单看起来「已核对」，反向掩盖漂移）；
   //   ② 两侧的判据函数都没被退回成「只认清单」（文本锚点钉住，改回去即红）；
   //   ③ 数据层 high 的数量没有塌方（把 risk 批量降级成 medium 是绕开这条闸门的捷径）。
-  // T1i-L04：数据层 high 条目现算（取数命令：node tools/check-channel-map.mjs）；地板提到现算值，并把三条 BCD 高危项钉进必需集。
-  const HIGH_FLOOR = 9;
-  const REQUIRED_HIGH = ['nara_bcd_vsm', 'nara_bcd_boot', 'nara_bcd_lowmem'];
+  // T1i-L04：数据层 high 条目现算（取数命令：node tools/check-channel-map.mjs）；2026-11-19 用户裁定 tf_svc_bulk / tf_drv_disable 降 medium（9→7）、nara_bcd_boot / nara_bcd_lowmem 降 medium（7→5）；BCD 必需集只剩 vsm。
+  const HIGH_FLOOR = 5;
+  const REQUIRED_HIGH = ['nara_bcd_vsm'];
   const optPath = join(TAURI_ROOT, 'src-tauri', 'data', 'optimizer-runtime.json');
   let optIds = null;
   let highIds = null;

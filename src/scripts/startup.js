@@ -420,7 +420,9 @@
       // `degraded: true` 分支，形态恒为 { success:true, cached:true, cachedAt, degraded:true }）。
       // 旧代码对它零引用 ⇒ 照旧弹绿色「扫描完成」，用户以为刚扫过，随后拿过期快照启停，
       // 已从系统消失的项会在原生侧逐项报错。失败回落必须与「扫描完成」分开说。
-      const degraded = resp.degraded === true;
+      // dbed0e4（2026-11-09）起「真实扫描但部分来源不可读」的返回也带 degraded:true 但没有 cached
+      // 字段——必须再要求 resp.cached 才算回落，否则那种情况会被误报成「扫描失败回落缓存」。
+      const degraded = resp.degraded === true && resp.cached === true;
       const scanWarnings = Array.isArray(resp.scanWarnings) ? resp.scanWarnings : [];
       // 按 启用状态 -> 来源 -> 名称 排序，禁用项置底
       next.sort((a, b) => {

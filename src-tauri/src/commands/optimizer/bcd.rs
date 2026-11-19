@@ -255,8 +255,6 @@ fn row_targets(row_id: &str) -> Vec<(&'static str, &'static str, bool)> {
         "nara_bcd_lowmem" => vec![
             ("firstmegabytepolicy", "useall", false),
             ("avoidlowmemory", "0x8000000", false),
-            ("nolowmem", "yes", false),
-            ("allowedinmemorysettings", "0x0", false),
         ],
         "nara_bcd_irq" => vec![
             ("configaccesspolicy", "default", true),

@@ -125,12 +125,12 @@ for (const id of REQUIRED) {
     .map((s) => s.pwsh || '')
     .join('\n');
   const arrays = extractArrays(allPwsh);
-  const expectedArrays = id === 'tf_svc_bulk' ? 2 : 1;
+  const expectedArrays = 1; // tf_svc_bulk 的手动服务数组已随 CryptSvc 退役删除，现仅 $disabled 一个清单
   if (!check(arrays.length === expectedArrays, `2. ${id} 的 steps/restore 里恰好 ${expectedArrays} 个 @("...") 清单`,
     arrays.length === 0 ? '没有可解析清单' : `实得 ${arrays.length} 个`)) {
     continue;
   }
-  const fromScript = id === 'tf_svc_bulk' ? [...arrays[0], ...arrays[1]] : arrays[0];
+  const fromScript = arrays.flat();
 
   const full = row.targets;
   if (!check(Array.isArray(full) && full.length > 0, `2. ${id} 的 targets 是非空数组`)) continue;

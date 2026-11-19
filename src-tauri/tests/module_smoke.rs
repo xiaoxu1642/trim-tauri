@@ -1594,7 +1594,8 @@ fn cleanup_reg_backup_restore_shares_the_uninstall_domain_gates() {
 fn integration_tests_do_not_write_prod_log() {
     assert!(
         !trim_tauri_lib::engine::log::log_sink_enabled(),
-        "集成测试进程打开了生产日志落盘 —— 测试夹具会再次灌进用户的「操作日志」"
+        "集成测试进程打开了生产日志落盘 —— 测试夹具会再次灌进用户的「操作日志」（current_exe: {:?}）",
+        std::env::current_exe()
     );
 }
 

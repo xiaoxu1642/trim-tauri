@@ -304,7 +304,7 @@ const BCD_ALLOWED_ELEMENTS = new Set([
   'disabledynamictick', 'useplatformtick', 'useplatformclock', // nara_bcd_timer
   'hypervisorlaunchtype', 'vsmlaunchtype', 'isolatedcontext', // nara_bcd_vsm
   'timeout', 'bootmenupolicy', 'bootux', 'quietboot', // nara_bcd_boot
-  'firstmegabytepolicy', 'avoidlowmemory', 'nolowmem', 'allowedinmemorysettings', // nara_bcd_lowmem
+  'firstmegabytepolicy', 'avoidlowmemory', // nara_bcd_lowmem（nolowmem/allowedinmemorysettings 已退役）
   'configaccesspolicy', 'msi', 'usephysicaldestination', 'usefirmwarepcisettings', // nara_bcd_irq
   // store 标识符（bcdedit /enum {current} 里会出现，不算元素）
   'current', 'globalsettings', 'default',
@@ -338,7 +338,7 @@ function extractBcdElements(text) {
   const cases = [
     ['bcdedit /set {current} nx AlwaysOff', ['nx']],
     ['bcdedit /set "{current}" nx AlwaysOff', ['nx']],
-    ['bcdedit /set "{current}" allowedinmemorysettings 0x0', ['allowedinmemorysettings']],
+    ['bcdedit /set "{current}" usefirmwarepcisettings No', ['usefirmwarepcisettings']],
   ];
   const bad = [];
   for (const [cmd, want] of cases) {

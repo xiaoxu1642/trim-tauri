@@ -689,8 +689,6 @@ pub(super) const HAZARD_IDS: &[&str] = &[
     "disable_uac",
     "tf_defender",
     "perf_vbs_off",
-    "tf_svc_bulk",
-    "tf_drv_disable",
     "perf_windows_update_off",
 ];
 

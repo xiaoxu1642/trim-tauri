@@ -80,10 +80,9 @@ function qosDscpValues(exe) {
 const OOSU_CFG_B64 = 'IyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIw0KIyBUaGlzIGZpbGUgd2FzIGNyZWF0ZWQgd2l0aCBPJk8gU2h1dFVwMTArKyBWMS45LjE0MzYNCiMgYW5kIGNhbiBiZSBpbXBvcnRlZCBvbnRvIGFub3RoZXIgY29tcHV0ZXIuIA0KIw0KIyBEb3dubG9hZCB0aGUgYXBwbGljYXRpb24gYXQgaHR0cHM6Ly93d3cub28tc29mdHdhcmUuY29tL3NodXR1cDEwDQojIFlvdSBjYW4gdGhlbiBpbXBvcnQgdGhlIGZpbGUgZnJvbSB3aXRoaW4gdGhlIHByb2dyYW0uIA0KIw0KIyBBbHRlcm5hdGl2ZWx5IHlvdSBjYW4gaW1wb3J0IGl0IGF1dG9tYXRpY2FsbHkgb3ZlciBhIGNvbW1hbmQgbGluZS4NCiMgU2ltcGx5IHVzZSB0aGUgZm9sbG93aW5nIHBhcmFtZXRlcjogDQojIE9PU1UxMC5leGUgPHBhdGggdG8gZmlsZT4NCiMgDQojIFNlbGVjdGluZyB0aGUgT3B0aW9uIC9xdWlldCBlbmRzIHRoZSBhcHAgcmlnaHQgYWZ0ZXIgdGhlIGltcG9ydCBhbmQgdGhlDQojIHVzZXIgZG9lcyBub3QgZ2V0IGFueSBmZWVkYmFjayBhYm91dCB0aGUgaW1wb3J0Lg0KIw0KIyBXZSBhcmUgYWx3YXlzIGhhcHB5IHRvIGFuc3dlciBhbnkgcXVlc3Rpb25zIHlvdSBtYXkgaGF2ZSENCiMgwqkgMjAxNS0yMDIzIE8mTyBTb2Z0d2FyZSBHbWJILCBCZXJsaW4uIEFsbCByaWdodHMgcmVzZXJ2ZWQuDQojIGh0dHBzOi8vd3d3Lm9vLXNvZnR3YXJlLmNvbS8NCiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMNCg0KUDAwMQkrDQpQMDAyCSsNClAwMDMJKw0KUDAwNAktDQpQMDA1CSsNClAwMDYJKw0KUDAwOAkrDQpQMDI2CS0NClAwMjcJKw0KUDAyOAktDQpQMDY0CSsNClAwNjUJKw0KUDA2NgkrDQpQMDY3CSsNClAwNzAJKw0KUDA2OQktDQpQMDA5CSsNClAwMTAJKw0KUDAxNQkrDQpQMDY4CSsNClAwMTYJKw0KQTAwMQkrDQpBMDAyCSsNCkEwMDMJKw0KQTAwNAktDQpBMDA2CSsNCkEwMDUJLQ0KUDAwNwktDQpQMDM2CSsNClAwMjUJKw0KUDAzMwktDQpQMDIzCSsNClAwNTYJKw0KUDA1NwkrDQpQMDEyCS0NClAwMzQJLQ0KUDAxMwktDQpQMDM1CS0NClAwNjIJKw0KUDA2MwkrDQpQMDgxCSsNClAwNDcJKw0KUDAxOQkrDQpQMDQ4CS0NClAwNDkJKw0KUDAyMAktDQpQMDM3CSsNClAwMTEJLQ0KUDAzOAkrDQpQMDUwCS0NClAwNTEJKw0KUDAxOAktDQpQMDM5CSsNClAwMjEJLQ0KUDA0MAkrDQpQMDIyCS0NClAwNDEJKw0KUDAxNAktDQpQMDQyCSsNClAwNTIJLQ0KUDA1MwkrDQpQMDU0CS0NClAwNTUJKw0KUDAyOQktDQpQMDQzCSsNClAwMzAJLQ0KUDA0NAkrDQpQMDMxCS0NClAwNDUJKw0KUDAzMgktDQpQMDQ2CSsNClAwNTgJLQ0KUDA1OQkrDQpQMDYwCS0NClAwNjEJKw0KUDAyNAkrDQpTMDAxCS0NClMwMDIJKw0KUzAwMwkrDQpTMDA4CS0NCkUxMDEJKw0KRTIwMQktDQpFMTE1CSsNCkUyMTUJLQ0KRTExOAkrDQpFMjE4CS0NCkUxMDcJKw0KRTIwNwktDQpFMTExCSsNCkUyMTEJLQ0KRTExMgkrDQpFMjEyCS0NCkUxMDkJKw0KRTIwOQktDQpFMTIxCSsNCkUyMjEJLQ0KRTEwMwkrDQpFMjAzCS0NCkUxMjMJKw0KRTIyMwktDQpFMTI0CSsNCkUyMjQJLQ0KRTEyOAkrDQpFMjI4CS0NCkUxMTkJKw0KRTIxOQktDQpFMTIwCSsNCkUyMjAJLQ0KRTEyMgkrDQpFMjIyCS0NCkUxMjUJKw0KRTIyNQktDQpFMTI2CSsNCkUyMjYJLQ0KRTEwNgkrDQpFMjA2CS0NCkUxMjcJKw0KRTIyNwktDQpFMDAxCSsNCkUwMDIJKw0KRTAwMwkrDQpFMDA4CSsNCkUwMDcJLQ0KRTAxMAkrDQpFMDExCS0NCkUwMTIJLQ0KRTAwOQkrDQpFMDA0CSsNCkUwMDUJKw0KRTAxMwkrDQpFMDE0CSsNCkUwMDYJKw0KWTAwMQkrDQpZMDAyCSsNClkwMDMJKw0KWTAwNAkrDQpZMDA1CSsNClkwMDYJKw0KWTAwNwkrDQpDMDEyCSsNCkMwMDIJKw0KQzAxMwktDQpDMDA3CSsNCkMwMDgJLQ0KQzAwOQkrDQpDMDEwCS0NCkMwMTEJKw0KQzAxNAkrDQpDMDE1CS0NCkwwMDEJKw0KTDAwMwkrDQpMMDA0CSsNCkwwMDUJKw0KVTAwMQkrDQpVMDA0CSsNClUwMDUJKw0KVTAwNgktDQpVMDA3CS0NClcwMDEJLQ0KVzAxMQktDQpXMDA0CS0NClcwMDUJKw0KVzAxMAkrDQpXMDA5CS0NClAwMTcJKw0KVzAwNgktDQpXMDA4CS0NCk0wMDYJKw0KTTAxMQkrDQpNMDEwCSsNCk8wMDMJLQ0KTzAwMQkrDQpTMDEyCSsNClMwMTMJKw0KUzAxNAkrDQpLMDAxCSsNCkswMDIJKw0KSzAwNQkrDQpNMDAzCSsNCk0wMTUJKw0KTTAxNgkrDQpNMDE3CS0NCk0wMTgJKw0KTTAxOQktDQpNMDIwCSsNCk0wMjIJKw0KTTAwMQkrDQpNMDA0CSsNCk0wMDUJKw0KTTAyNAkrDQpNMDEyCS0NCk0wMTMJLQ0KTTAxNAktDQpNMDIzCS0NCk4wMDEJLQ0K';
 
 // P1-02：tf_svc_bulk 服务名单单一来源（基础步骤与「跳过项报告」步骤共用，防漂移）。
-const SVC_BULK_NAMES = ["FontCache3.0.0.0","WpcMonSvc","SEMgrSvc","LanmanWorkstation","WEPHOSTSVC","Wecsvc","StiSvc","autotimesvc","edgeupdatem","MicrosoftEdgeElevationService","ALG","QWAVE","IpxlatCfgSvc","icssvc","DusmSvc","MapsBroker","edgeupdate","SensorService","svsvc","SysMain","MSiSCSI","Netlogon","CscService","AppReadiness","tzautoupdate","defragsvc","lltdsvc","TrkWks","diagsvc","DPS","WdiServiceHost","WdiSystemHost","dmwappushservice","TroubleshootingSvc","DsSvc","FrameServer","FontCache","SENS","Themes","BcastDVRUserService","CaptureService","XblAuthManager","XblGameSave","XboxNetApiSvc","WpnService","lfsvc"];
-const SVC_MANUAL_NAMES = ["CryptSvc"];
+const SVC_BULK_NAMES = ["FontCache3.0.0.0","WpcMonSvc","SEMgrSvc","LanmanWorkstation","WEPHOSTSVC","Wecsvc","StiSvc","autotimesvc","edgeupdatem","MicrosoftEdgeElevationService","ALG","QWAVE","IpxlatCfgSvc","icssvc","DusmSvc","MapsBroker","edgeupdate","SensorService","svsvc","SysMain","MSiSCSI","Netlogon","CscService","AppReadiness","tzautoupdate","defragsvc","lltdsvc","TrkWks","diagsvc","DPS","WdiServiceHost","WdiSystemHost","dmwappushservice","TroubleshootingSvc","DsSvc","FrameServer","XblAuthManager","XblGameSave","XboxNetApiSvc","lfsvc"];
 // P1-02：tf_drv_disable 驱动名单单一来源（同上）。
-const DRV_NAMES = ["acpipagr","AcpiPmi","Beep","CAD","CLFS","CSC","luafv","Rasl2tp","RasPppoe","RasSstp","tcpipreg","dam","PEAUTH","QWAVEdrv","cdrom","fileinfo","FileCrypt"];
+const DRV_NAMES = ["Beep","CAD","Rasl2tp","RasPppoe","RasSstp","tcpipreg","dam","PEAUTH","QWAVEdrv","FileCrypt"];
 
 const OPTIONS = [
   // ---------- 启动与响应 ----------
@@ -275,15 +274,12 @@ const OPTIONS = [
   // 它是「关闭内存压缩与内存页合并」(tf_mmagent) 的子集（后者 = 本项 + PageCombining），
   // 合并后只保留超集项，避免同一项 Disable-MMAgent 被两个入口各执行一次。
   {
-    id: 'tf_svc_bulk', group: '系统服务与内存', title: '禁用非必要服务', risk: 'high',
-    desc: '批量调整服务启动类型：默认把 wuauserv（Windows 更新）由「自动」改为「手动」（更新仍可手动检查），其余非必要服务全部禁用(Start=4)，并关闭 Edge 预启动/预加载；应用商店其余服务保持默认。\n\n执行时会单独弹窗询问是否连商店相关服务一并禁用——含 ClipSVC（许可）、InstallService（安装）、PushToInstall（远程安装）、wuauserv（Windows 更新）、DoSvc（传递优化下载），选择禁用会影响 Windows 应用商店的使用、更新与下载以及系统更新。\n\n禁用(Start=4)服务清单：TapiSrv、FontCache3.0.0.0、WpcMonSvc、SEMgrSvc、PNRPsvc、LanmanWorkstation、WEPHOSTSVC、p2psvc、p2pimsvc、PhoneSvc、Wecsvc、perceptionsimulation、StiSvc、WMPNetworkSvc、autotimesvc、edgeupdatem、MicrosoftEdgeElevationService、ALG、QWAVE、IpxlatCfgSvc、icssvc、DusmSvc、MapsBroker、edgeupdate、SensorService、shpamsvc、svsvc、SysMain、MSiSCSI、Netlogon、CscService、ssh-agent、AppReadiness、tzautoupdate、NfsClnt、wisvc、defragsvc、SharedRealitySvc、RetailDemo、lltdsvc、TrkWks、CryptSvc、DiagTrack、diagsvc、DPS、WdiServiceHost、WdiSystemHost、dmwappushservice、TroubleshootingSvc、DsSvc、FrameServer、FontCache、OSRSS、sedsvc、SENS、TabletInputService、Themes、BcastDVRUserService、CaptureService、diagnosticshub.standardcollector.service、XblAuthManager、XblGameSave、XboxNetApiSvc、WpnService、lfsvc。',
+    id: 'tf_svc_bulk', group: '系统服务与内存', title: '禁用非必要服务', risk: 'medium',
+    desc: '批量调整服务启动类型：将其余非必要服务禁用(Start=4)，并关闭 Edge 预启动/预加载；商店其余服务保持默认。\n\n执行时会单独弹窗询问是否连商店相关服务一并禁用——含 ClipSVC（许可）、InstallService（安装）、PushToInstall（远程安装）、wuauserv（Windows 更新）、DoSvc（传递优化下载），选择禁用会影响 Windows 应用商店的使用、更新与下载以及系统更新。\n\n禁用(Start=4)服务清单（实际执行数组，40 项）：FontCache3.0.0.0、WpcMonSvc、SEMgrSvc、LanmanWorkstation、WEPHOSTSVC、Wecsvc、StiSvc、autotimesvc、edgeupdatem、MicrosoftEdgeElevationService、ALG、QWAVE、IpxlatCfgSvc、icssvc、DusmSvc、MapsBroker、edgeupdate、SensorService、svsvc、SysMain、MSiSCSI、Netlogon、CscService、AppReadiness、tzautoupdate、defragsvc、lltdsvc、TrkWks、diagsvc、DPS、WdiServiceHost、WdiSystemHost、dmwappushservice、TroubleshootingSvc、DsSvc、FrameServer、XblAuthManager、XblGameSave、XboxNetApiSvc、lfsvc。',
     steps: [
-      { label: '批量禁用非必要服务（wuauserv 改手动，商店服务保持默认）', pwsh: [
+      { label: '批量禁用非必要服务（商店服务保持默认）', pwsh: [
         '$disabled = @("' + SVC_BULK_NAMES.join('","') + '")',
         'foreach ($n in $disabled) { $p = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$n"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 4 -PropertyType DWord -Force | Out-Null; Stop-Service -Name $n -Force -ErrorAction SilentlyContinue } }',
-        '$manual = @("' + SVC_MANUAL_NAMES.join('","') + '")',
-        'foreach ($n in $manual) { $p = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$n"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 3 -PropertyType DWord -Force | Out-Null } }',
-        '$p = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\wuauserv"; if (Test-Path $p) { New-ItemProperty -Path $p -Name Start -Value 3 -PropertyType DWord -Force | Out-Null }',
         '$p = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\lfsvc\\Service\\Configuration"; New-Item -Path $p -Force | Out-Null; New-ItemProperty -Path $p -Name Status -Value 0 -PropertyType DWord -Force | Out-Null',
         'New-Item -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\MicrosoftEdge\\Main" -Force | Out-Null; New-ItemProperty -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\MicrosoftEdge\\Main" -Name AllowPrelaunch -Value 0 -PropertyType DWord -Force | Out-Null',
         'New-Item -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\MicrosoftEdge\\TabPreloader" -Force | Out-Null; New-ItemProperty -Path "HKLM:\\SOFTWARE\\Policies\\Microsoft\\MicrosoftEdge\\TabPreloader" -Name AllowTabPreloading -Value 0 -PropertyType DWord -Force | Out-Null'
@@ -291,8 +287,8 @@ const OPTIONS = [
     ]
   },
   {
-    id: 'tf_drv_disable', group: '系统服务与内存', title: '禁用高风险驱动服务', risk: 'high',
-    desc: 'Trim DisableDrivers（Start=4，名单实数见勾选区）：acpipagr、AcpiPmi、Beep、CAD、GpuEnergyDrv、CLFS、CSC、luafv、RasAcd/Rasl2tp/RasPppoe/RasSstp、tcpipreg、dam、PEAUTH、QWAVEdrv、cdrom、fileinfo、FileCrypt。可能影响光驱/VPN，高风险（已剔除 IPv6 相关驱动 Tcpip6/wanarpv6，遵守项目硬约束）。',
+    id: 'tf_drv_disable', group: '系统服务与内存', title: '禁用高风险驱动服务', risk: 'medium',
+    desc: 'Trim DisableDrivers（Start=4，名单实数见勾选区）：Beep、CAD、Rasl2tp/RasPppoe/RasSstp、tcpipreg、dam、PEAUTH、QWAVEdrv、FileCrypt。可能影响 VPN/网络与凭据功能，高风险（已剔除引导级驱动、光驱/脱机文件/电源管理/文件虚拟化驱动与 IPv6 相关驱动 Tcpip6/wanarpv6，遵守项目硬约束）。',
     steps: [
       { label: '驱动服务 Start=4', pwsh: [
         '$drv = @("' + DRV_NAMES.join('","') + '")',
@@ -1986,7 +1982,7 @@ const OPTIONS = [
     ]
   },
   {
-    id: 'nara_bcd_boot', group: '启动与响应', title: '启动菜单/开机画面条件对齐', risk: 'high',
+    id: 'nara_bcd_boot', group: '启动与响应', title: '启动菜单/开机画面条件对齐', risk: 'medium',
     desc: '仅当本机已存在 timeout/bootmenupolicy/bootux/quietboot 时对齐：timeout=0, bootmenupolicy=standard, bootux=disabled（展开 nobootuxtext+nobootuxprogress）, quietboot=yes。不主动创建启动菜单元素。',
     steps: [
       { label: 'timeout 0', cmd: 'bcdedit /set {bootmgr} timeout 0' },
@@ -2002,19 +1998,15 @@ const OPTIONS = [
     ]
   },
   {
-    id: 'nara_bcd_lowmem', group: '启动与响应', title: '低 1MB/内存映射策略条件对齐', risk: 'high',
-    desc: '仅当本机已存在 firstmegabytepolicy/avoidlowmemory/nolowmem/allowedinmemorysettings 时对齐：UseAll/0x8000000/Yes/0x0。命中主要作为危险配置体检+还原出口，常态不可执行。',
+    id: 'nara_bcd_lowmem', group: '启动与响应', title: '低 1MB/内存映射策略条件对齐', risk: 'medium',
+    desc: '仅当本机已存在 firstmegabytepolicy/avoidlowmemory 时对齐：UseAll/0x8000000。命中主要作为危险配置体检+还原出口，常态不可执行。',
     steps: [
       { label: 'firstmegabytepolicy UseAll', cmd: 'bcdedit /set {current} firstmegabytepolicy UseAll' },
-      { label: 'avoidlowmemory 0x8000000', cmd: 'bcdedit /set {current} avoidlowmemory 0x8000000' },
-      { label: 'nolowmem Yes', cmd: 'bcdedit /set {current} nolowmem Yes' },
-      { label: 'allowedinmemorysettings 0x0', cmd: 'bcdedit /set {current} allowedinmemorysettings 0x0' }
+      { label: 'avoidlowmemory 0x8000000', cmd: 'bcdedit /set {current} avoidlowmemory 0x8000000' }
     ],
     restore: [
       { label: 'firstmegabytepolicy 删除', cmd: 'bcdedit /deletevalue {current} firstmegabytepolicy' },
-      { label: 'avoidlowmemory 删除', cmd: 'bcdedit /deletevalue {current} avoidlowmemory' },
-      { label: 'nolowmem 删除', cmd: 'bcdedit /deletevalue {current} nolowmem' },
-      { label: 'allowedinmemorysettings 删除', cmd: 'bcdedit /deletevalue {current} allowedinmemorysettings' }
+      { label: 'avoidlowmemory 删除', cmd: 'bcdedit /deletevalue {current} avoidlowmemory' }
     ]
   },
   {
