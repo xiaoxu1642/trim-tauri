@@ -1,15 +1,15 @@
 {
-  "version": "0.9.8",
-  "notes": "## 版本 0.9.8（2026-11-17 命令面单一真源与架构边界收口）\n\n> 本版没有新功能，是内部架构质量版：把「改一处要记三处」的命令面和散装的页面脚本收成单一真源。\n\n① **页面脚本依赖收口，消除一类页面失效隐患** —— 症状：磁盘清理与备份还原两页的脚本清单逐字重复、靠注释提醒「改一边必须改另一边」，顺序错或漏改会让页面按钮没绑事件甚至直接白屏。根因：每个页面的脚本加载顺序手写在数组里，调用方还要自己补查找器的脚本。修法：清理域脚本收敛为单一定义，加载器统一解析顺序、记录已加载页面并保证初始化恰好一次；查找器子视图并入同一条加载路径。\n\n② **新增命令从「手改三处」变成「只改清单」** —— 症状：新增一个命令要同时手改 Rust 注册表、前端通道表、档位表三个文件，漏一处命令面静默断裂，门禁只能在事后判红。根因：三份清单没有共同来源。修法：命令清单（179 条）成为唯一真源，生成器产出三处生成物，两个门禁改为清单与生成物逐项对拍；清单漏填在提交前判红。\n\n③ **扫描器公共行为进主仓测试** —— 症状：扫描器不是主仓工作区成员，主仓 `cargo test` 跑不到它的测试，重复文件、空文件、年龄护栏这些公共行为改动后可能没人跑。修法：主仓新增契约测试直接调扫描器公共 API（样本临时自建自清，回收站用例只测失败形态不真删），并挂进门禁清单；规则差分门禁保留。\n\n④ **共享状态按域分文件** —— 命令层共享状态表原先一个文件装下所有域的类型，锁序纪律仍集中一处可核，但跨域类型 import 混在一起；现在按面板/诊断/文件工具/跨域四组拆文件，命令文件的引用路径与命令行为零改动。\n\n⑤ **本版验证（如实标注）** —— `cargo test`（src-tauri）1281 passed / 0 failed / 105 ignored（含扫描器契约 4 用例）；全量门禁 `74/74`；真机 CDP 走查主窗 19 页全部正常、无未捕获异常，进程管理子窗冒烟通过，页面初始化恰好一次；命令清单与三处生成物逐项一致（179 / 176 / 115 / 61）。**本版未做的验证**：OS 级拖拽与真实 hover 未取证；发版产物与双线清单核验在发布后补记。\n\n---",
-  "pub_date": "2026-11-16T21:58:36Z",
-  "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.9.8/attach_files/Trim_0.9.8_x64-setup.exe/download",
-  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaE9ybkc4ZGtLUU9OSXliTUl6NHlhY3cxU1c3bzlKNHRhd1k1RURUYWFBc1JoOEF0K3hRVHlWY1p3OWs1LzVzSDFkS2hCT0JsdUx1VmluMkowMTBrR3dzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0ODY0MDI3CWZpbGU6VHJpbV8wLjkuOF94NjQtc2V0dXAuZXhlCXZlcnNpb246MC45LjgKUWJwS1hhUy9VQkVJU1Q1dmMzeC85a25kZ1lCdGd3dzlBVG5pSXNOWFMybjNGMVprN2YxU1JQSHRtMmUzK3dOQkpjcElpdDZxMlNtbm9YSnZuQjFZQ0E9PQo=",
-  "sha256": "948d8d24c506fda37ad28dc247985d553f07fcd3efd51679b926445d4923c026",
+  "version": "0.9.10",
+  "notes": "## 版本 0.9.10（2026-11-20 优化中心停用面收敛与两处枚举修复）\n\n> 本版做三件事：优化中心的批量停用面收窄、启动项管理两处误报修复、卸载残留对 bundle 主包的漏读修复。\n\n① **优化中心批量停用面收窄，4 项风险重定级** —— 症状：服务批量停用一类的重风险项与系统核心服务混在同一份名单里，误开对系统更新/通知/记录类服务影响面过大。修法：把 FontCache、SENS、Themes、BcastDVRUserService、CaptureService、WpnService、lfsvc、CryptSvc 共 8 个系统服务移出批量停用面，退役「手动触发 Windows 更新服务（wuau_manual）」子项，tf_svc_bulk（服务批量停用）、tf_drv_disable（驱动禁用）、nara_bcd_boot（BCD 引导）、nara_bcd_lowmem（BCD 内存）4 项风险从 high 降为 medium（目录总数不变，仍 124 项）；规则库与侧表全量重签，签名密钥轮换后旧签名数据走内置回退并留 warn 日志。\n\n② **启动项管理不再弹「扫描失败回落缓存」的误报** —— 症状：扫描明明成功，页面却弹「本次扫描失败，已回落到上次的缓存结果」。根因有二：一是 2026-11-09 起后端在「扫描成功但部分来源不可读」的返回里也带 degraded 标记，前端把两种情况混成一谈；二是当前用户的 32 位 Run 键（HKCU\\SOFTWARE\\WOW6432Node\\...\\Run）在没有任何 32 位程序写过时不存在，枚举把「键不存在」也当「来源不可读」告警。修法：前端只在真回落缓存时弹失败提示，「部分来源不可读」改弹具体来源数；「键不存在」按空列表处理，只有真读失败（权限等）才告警。\n\n③ **卸载残留能看到 bundle 主包形态的 staged 项** —— 症状：残留清单的 staged 子树枚举数比注册表实际少（实测 4/5），漏掉的正是以 `neutral_~_` 形态结尾的 bundle 主包（如 Realtek Audio Control）。根因：包全名字符集闸 `[A-Za-z0-9._-]` 不含 `~`，而 `~` 是 Windows 对 bundle 主包的合法字符。修法：闸口加 `~`，注入防线语义不变（引号/分号/换行/非 ASCII 仍一律拒绝），补 bundle 形态用例。",
+  "pub_date": "2026-11-19T17:30:58Z",
+  "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.9.10/attach_files/Trim_0.9.10_x64-setup.exe/download",
+  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaEFaaXlqcU1GWWpQTzBOb2VUNFpsU3NwNGpKTGxDR1VZWis5STNMeEFZSnBtUDhOS3Z0NVlTLzlQVUdqa3NKZEl5N2F0aUdXNWk2Mk9EbXFHQkFVcFFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1MTA5MDM4CWZpbGU6VHJpbV8wLjkuMTBfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuOS4xMApXWVNMVzFPOUsyUnZKTmlCZWhOTDJRdUhuampKZ3ltdkU1S1hCbVRBc3JQdDN5ZGc1VGJKS1ZrT2FzYUZoUElSczA1dGtvcENnRVo1UlRGU3ZoVjdDdz09Cg==",
+  "sha256": "33d53601061fa681f2c94f7598b3142d608f7fa8ce3d655f37dc86b9167e6d69",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.9.8/attach_files/Trim_0.9.8_x64-setup.exe/download",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaE9ybkc4ZGtLUU9OSXliTUl6NHlhY3cxU1c3bzlKNHRhd1k1RURUYWFBc1JoOEF0K3hRVHlWY1p3OWs1LzVzSDFkS2hCT0JsdUx1VmluMkowMTBrR3dzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0ODY0MDI3CWZpbGU6VHJpbV8wLjkuOF94NjQtc2V0dXAuZXhlCXZlcnNpb246MC45LjgKUWJwS1hhUy9VQkVJU1Q1dmMzeC85a25kZ1lCdGd3dzlBVG5pSXNOWFMybjNGMVprN2YxU1JQSHRtMmUzK3dOQkpjcElpdDZxMlNtbm9YSnZuQjFZQ0E9PQo=",
-      "sha256": "948d8d24c506fda37ad28dc247985d553f07fcd3efd51679b926445d4923c026"
+      "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.9.10/attach_files/Trim_0.9.10_x64-setup.exe/download",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaEFaaXlqcU1GWWpQTzBOb2VUNFpsU3NwNGpKTGxDR1VZWis5STNMeEFZSnBtUDhOS3Z0NVlTLzlQVUdqa3NKZEl5N2F0aUdXNWk2Mk9EbXFHQkFVcFFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1MTA5MDM4CWZpbGU6VHJpbV8wLjkuMTBfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuOS4xMApXWVNMVzFPOUsyUnZKTmlCZWhOTDJRdUhuampKZ3ltdkU1S1hCbVRBc3JQdDN5ZGc1VGJKS1ZrT2FzYUZoUElSczA1dGtvcENnRVo1UlRGU3ZoVjdDdz09Cg==",
+      "sha256": "33d53601061fa681f2c94f7598b3142d608f7fa8ce3d655f37dc86b9167e6d69"
     }
   }
 }
