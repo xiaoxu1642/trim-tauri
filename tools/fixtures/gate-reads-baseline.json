@@ -15,14 +15,14 @@
     "M-12"
   ],
   "srcHash": {
-    "check-channel-map": "d52040002988ce44",
+    "check-channel-map": "aa434cab2fddda61",
     "check-guard-tiers": "b26212ede09385f6",
     "check-layering": "2eafd617abcf47b6",
     "check-delete-exits": "c7c3b79a79f4928d",
     "check-delete-callsites": "fd8c5fb7da03595d",
     "check-fail-closed": "23812150076bbd2f",
     "check-system-bin": "e5543f449007f9bc",
-    "check-residue-rule-contract": "b9cb889602e43fe2",
+    "check-residue-rule-contract": "6222ac2bbbcda371",
     "check-cleanup-rule-contract": "55730099eeb938e0",
     "check-scan-rule-diff": "057ed4341fac7613",
     "check-scanner-contract": "592d2bd532a94ed8",
@@ -55,16 +55,16 @@
     "check-data-parity": "e2997063c1f90497",
     "check-rule-schema-sync": "56857836ba91312d",
     "check-optimizer-dynamic": "12c1496e1befd159",
-    "check-optimizer-security": "d2cf5e07b519bde1",
-    "check-optimizer-subitem-contract": "646acc7860863601",
+    "check-optimizer-security": "d790a44e21ecaf4d",
+    "check-optimizer-subitem-contract": "577f68cac9f20e15",
     "check-optimizer-groups-sidecar": "2e4396bd59c601d9",
     "check-optimizer-schema-sync": "4878f3eced74efb2",
     "check-bcd-row-ids": "2d3d8d209426fdd1",
     "check-optimizer-write-contract": "86057a09adc44a3c",
     "check-power-write-surface": "05d67579eba7bda6",
-    "check-cleanup-postactions": "7fab3b90021428b8",
+    "check-cleanup-postactions": "b21c6c0bde8730b4",
     "check-cleanup-aggregates": "e3aab132471bba68",
-    "check-desc-vs-writes": "b41b2b568fe1c9c1",
+    "check-desc-vs-writes": "f8e29ec92efa21c5",
     "check-elapsed-facts": "f304136bf6794c55",
     "check-version-sync": "52c5b0be6f4e081b",
     "check-updater-pubkey": "fd4341f59ac2d84c",
@@ -87,7 +87,7 @@
     "check-test-sandbox": "7111cb54a357bb89",
     "check-finder-scan-notes": "d353cb678acc30e3",
     "check-registry-delete-guard": "54ea1923bdedbbd4",
-    "check-receipt-tri-state": "e59e303f2c84beee",
+    "check-receipt-tri-state": "52c095398c087283",
     "check-user-copy-policy": "2d46ab57018cc892"
   },
   "reads": {
@@ -549,5 +549,5 @@
       "M-12"
     ]
   },
-  "bodyHash": "b50cf8ea1d4d1e0c"
+  "bodyHash": "3d4d7a95e06c68e0"
 }
