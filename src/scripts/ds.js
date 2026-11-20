@@ -64,16 +64,22 @@
     neutral: 'neutral', accent: 'accent'
   };
 
+  // 徽章 class 组装单一真源：DOM 形态（badge）与 HTML 形态（badgeHtml）共用。
+  // 原先两处逐字重复同一串拼接，改变体或 sm 规则要同步改两处、漏一处就漂。
+  function badgeClass(type, small) {
+    return 'ds-badge ' + (BADGE_VARIANT[type] || 'neutral') + (small ? ' sm' : '');
+  }
+
   function badge(type, text, { title = '', small = false } = {}) {
     const el = document.createElement('span');
-    el.className = 'ds-badge ' + (BADGE_VARIANT[type] || 'neutral') + (small ? ' sm' : '');
+    el.className = badgeClass(type, small);
     if (title) el.setAttribute('data-tip', title); // LG-3（2026-09-15）：data-tip 替代原生 title（下方委托收敛；badgeHtml 同款）
     el.textContent = text == null ? '' : String(text);
     return el;
   }
 
   function badgeHtml(type, text, { title = '', small = false } = {}) {
-    const cls = 'ds-badge ' + (BADGE_VARIANT[type] || 'neutral') + (small ? ' sm' : '');
+    const cls = badgeClass(type, small);
     return `<span class="${cls}"${title ? ` data-tip="${escAttr(title)}"` : ''}>${esc(text)}</span>`;
   }
 
@@ -509,7 +515,8 @@
   //   · 子窗：window.api.log.write —— log_write 命令体是 guard_readonly 档，guard::APP_WINDOWS 的
   //     4 个 label 全放行，所以子窗写得进去；写失败只能 console，**这里再挂 .catch 兜自己**，
   //     否则兜底本身制造一条新 rejection（自我放大）。
-  // 只记日志、不弹 toast：后台噪声糊到用户脸上是另一种体验事故；
+  // 出口：F4a1-M18 起除落盘/console 外也给可见 toast（不再是「只记日志」），
+  // 限流思路保留——toast 归 app.toast 的 FIFO 护栏管。
   // 该给用户看错的调用点各自补显式 catch（v2-M22 ① 已逐个补）。
   // 防双写：window.__dsErrGuard 是认领标记，主窗 app.js 见到就不再重复注册
   // ——ds.js 在 index.html 里先于 app.js 加载（§2 的加载序），所以主窗走的就是这一份。

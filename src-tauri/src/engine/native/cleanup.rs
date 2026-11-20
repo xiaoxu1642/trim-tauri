@@ -7,7 +7,9 @@
 //! 规则库契约测试（P0）与文件备份保留测试随本实现放在同一文件。
 //!
 //! **P3 · N1a-U02 书面豁免（2026-10-22 用户裁定「维持不接 + 书面登记」）**：
-//! 逐文件执行链**不接** `is_system_namespace`（系统命名空间）这一道闸，理由与复核条件如下——
+//! 逐文件执行链**不接** `is_system_namespace`（系统命名空间）这一道闸（R5a-K02：本豁免
+//! **只覆盖系统命名空间闸**；名字形态闸已接入——删除前调用 `protect::path_name_shape_block_reason`，
+//! 见 `name_shape_blocked` 计数与回执 `nameShapeBlocked` 字段，不随本豁免一并移除），理由与复核条件如下——
 //! ① 本链的目标不来自外部：全部来自扫描结果，且删除前已过 `is_path_protected` 的受保护面 /
 //!    别名 / 父链 / 身份证四道闸（见下面「安全口径」）；
 //! ② 盲接会**误拒正常功能**：现算有 29 条合法规则要写/清 `%WINDIR%` 下的内容（取数命令：
@@ -174,7 +176,13 @@ pub fn cleanup_detail(rule: &Value, target_path: &str) -> Result<Value, String> 
             let mut total = 0usize;
             let mut seen = std::collections::HashSet::new();
             let mut depth_capped = 0i64;
-            enumerate_files(target_path, "*", true, guard, &mut files, &mut total, &mut seen, cap, &mut unreadable, &mut depth_capped);
+            let mut lossy = 0i64;
+            enumerate_files(target_path, "*", true, guard, &mut files, &mut total, &mut seen, cap, &mut lossy, &mut unreadable, &mut depth_capped);
+            if lossy > 0 {
+                // A6-K02：预览与执行同源过滤 lossy 名字；跳过的条数必须显式留痕，
+                // 不能伪装成「没有目标」。
+                unresolved.push(format!("{target_path}（lossy 路径）"));
+            }
             if depth_capped > 0 {
                 unresolved.push(format!("{depth_capped} 个子树超过遍历深度上限，明细可能偏少"));
             }
@@ -229,10 +237,11 @@ fn enumerate_files(
     guard: trim_finder::cleanup_scan::AgeGuard,
     files: &mut Vec<Value>, total: &mut usize,
     seen: &mut std::collections::HashSet<String>, cap: usize,
+    lossy: &mut i64,
     unreadable: &mut i64,
     depth_capped: &mut i64,
 ) {
-    enumerate_files_at(dir, pattern, recurse, guard, files, total, seen, cap, 0, unreadable, depth_capped)
+    enumerate_files_at(dir, pattern, recurse, guard, files, total, seen, cap, 0, lossy, unreadable, depth_capped)
 }
 
 fn enumerate_files_at(
@@ -240,7 +249,8 @@ fn enumerate_files_at(
     guard: trim_finder::cleanup_scan::AgeGuard,
     files: &mut Vec<Value>, total: &mut usize,
     seen: &mut std::collections::HashSet<String>, cap: usize,
-    depth: usize, unreadable: &mut i64,
+    depth: usize, lossy: &mut i64,
+    unreadable: &mut i64,
     depth_capped: &mut i64,
 ) {
     if depth >= ENGINE_WALK_MAX_DEPTH {
@@ -259,10 +269,22 @@ fn enumerate_files_at(
         let Ok(meta) = entry.metadata() else { *unreadable += 1; continue; };
         if crate::engine::protect::is_reparse(&meta) { continue; }
         if meta.is_dir() {
+            // A6-K02：与执行侧 `collect_files_at` 同一 lossy 判据——目录名无法无损
+            // 表示时 `to_string_lossy()` 递进去的可能是另一个目录，宁可不深入，
+            // 也不要把别处的文件列进用户确认的清单。
+            if trim_finder::util::has_lossy_path(&path) {
+                *lossy += 1;
+                continue;
+            }
             if recurse {
-                enumerate_files_at(&path.to_string_lossy(), pattern, recurse, guard, files, total, seen, cap, depth + 1, unreadable, depth_capped);
+                enumerate_files_at(&path.to_string_lossy(), pattern, recurse, guard, files, total, seen, cap, depth + 1, lossy, unreadable, depth_capped);
             }
         } else if meta.is_file() {
+            // A6-K02：文件名无法无损表示时预览与执行同判据跳过（执行侧同样不收）。
+            if trim_finder::util::has_lossy_path(&path) {
+                *lossy += 1;
+                continue;
+            }
             let name = entry.file_name().to_string_lossy().to_string();
             if !glob_match(pattern, &name) { continue; }
             // R5a-M04-09：与 `collect_files_at` 的时效判定同款——太新文件不进预览候选，
@@ -400,14 +422,6 @@ impl ManifestBudget {
         self.bytes += bytes as usize;
         true
     }
-
-    fn release(&mut self, entry: &Value) {
-        if let Ok(bytes) = serde_json::to_string(entry) {
-            self.entries = self.entries.saturating_sub(1);
-            self.bytes = self.bytes.saturating_sub(bytes.len());
-        }
-    }
-
 }
 
 /// 永久删副本的保留上限（N3，2026-09-29）。裁「最老批次」，但副本落在
@@ -1873,7 +1887,7 @@ let mut freed = 0i64;
     let mut name_shape_blocked = 0i64;
     let mut name_shape_samples: Vec<String> = Vec::new();
     // Kudu S2（2026-10-16）：删除瞬间父链变成链接的拒绝，独立计数（与 protected_blocked
-    // 同口径：安全闸门动作要留痕、不许混进「被占用」）；按父目录 memo 避免逐文件重走链。
+    // 同口径：安全闸门动作要留痕、不许混进「被占用」）；memo 键是整文件路径（见下方取舍声明）。
     let mut reparse_blocked = 0i64;
     let mut reparse_samples: Vec<String> = Vec::new();
     let mut ancestor_memo: std::collections::HashMap<String, Option<String>> =
@@ -1896,13 +1910,12 @@ let mut freed = 0i64;
     // 该清单供渲染层的「未完全清理」引导面板逐项展示（登记入口已于 2026-11-02 退役）。
     // 上限 FAILED_FILES_CAP，总数另计（failedFilesTotal）。
     let mut failed_files: Vec<Value> = Vec::new();
-    // Kudu S2（2026-10-16）：别名解析（父目录 canonicalize）按父目录 memo——同目录下成千上万个文件只解析一次
-    // R5a-L01 取舍声明：两条 memo（final_memo / ancestor_memo）按**父目录**缓存某一时刻的
-    // 判定，同目录后续文件复用首个结果 ⇒「删除瞬间父链复检」对批内第 2..N 个文件退化为
-    // 「批内一次」而非逐文件。这是性能换实时性的刻意取舍（逐文件 canonicalize 是批量
-    // 清理的大头），接受的前提：① 批内时间窗极短；② identity 基线缺项
-    // （identity_no_birth_baseline）没有第二道兜底，靠计数外发保证失守可见——改并发/跨进程
-    // 写同目录时必须重估。
+    // Kudu S2（2026-10-16）：别名解析（父目录 canonicalize）的结果按**整文件路径**
+    // `path_key(path)` 记忆——批内每个文件各自复检一次父链，memo 只给同路径重复项去重。
+    // R5a-L01 取舍声明（P1-01f 已收紧）：两条 memo（final_memo / ancestor_memo）的键都是
+    // 整文件路径，目录级复用已取消——旧键会让批内第 2..N 个文件复用首个结论，父目录在
+    // 批内被换成 junction 时漏过删除前复检。代价是逐文件 canonicalize（批量清理的大头），
+    // 这是安全换性能的刻意取舍，不许为省时把键改回目录级。
     let mut final_memo: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
         let mut backup_skipped = 0usize;
         // 未留副本有两个成因，必须分开：① 超单文件/整批体积上限（本来就不打算留）；
@@ -2079,7 +2092,6 @@ let mut freed = 0i64;
                             let _ = std::fs::remove_file(&dst);
                         }
                         backup_skipped += 1;
-                        manifest_budget.release(&entry);
                     }
                 } else {
                     backup_skipped += 1;
@@ -5125,7 +5137,8 @@ mod review_shape_tests {
     use super::*;
 
     /// PF-P0-03：写入侧必须调用读取侧同源上限，超限项不写副本也不落清单。
-    /// 判红自证：删掉 cleanup_byte_limits 调用、跳过 reserve，或把回执计数写死 ⇒ 本用例红。
+    /// 判红自证：删掉 cleanup_byte_limits 调用、跳过 reserve、恢复无配对 release，
+    /// 或把回执计数写死 ⇒ 本用例红。
     #[test]
     fn 大清单写入上限与读取侧同源且不产生不可还原副本() {
         let src = include_str!("cleanup.rs")
@@ -5139,6 +5152,10 @@ mod review_shape_tests {
         assert!(
             src.contains("if manifest_budget.reserve(&entry)"),
             "只有清单额度内的副本才允许登记"
+        );
+        assert!(
+            !src.contains("manifest_budget.release("),
+            "R5a-K01：落位失败臂从未 reserve，不得调用 release（会把预算计数加回去）"
         );
         assert!(
             src.contains("\"backupManifestTruncated\": manifest_budget.truncated_entries"),
@@ -5323,5 +5340,53 @@ mod review_shape_tests {
         drops.note_unbaselined("a");
         drops.note_unbaselined("b");
         assert_eq!(drops.unbaselined, 2, "unbaselined 必须逐条累加");
+    }
+
+    /// A6-K02：目录型预览与执行侧必须同一 lossy 判据——非法 UTF-16 文件名（孤立代理项）
+    /// 不列进明细、执行侧也不收。破坏自证：删掉 `enumerate_files_at` 的
+    /// `has_lossy_path` 分支 ⇒ 预览 total 变成 2（红）。
+    #[test]
+    fn a6_dir_preview_and_execute_both_skip_lossy_names() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        let sb = crate::testutil::Sandbox::new("a6-lossy-preview");
+        let root = sb.path().to_path_buf();
+        std::fs::write(root.join("plain.txt"), b"plain").expect("写普通文件");
+        // 0xD800 是前导代理项却没有后继 ⇒ to_str() 为 None，正是 lossy 判据要拦的形态
+        let weird = root.join(OsString::from_wide(&[
+            0xD800, 'w' as u16, '.' as u16, 't' as u16, 'x' as u16,
+        ]));
+        std::fs::write(&weird, b"lossy").expect("非良构 UTF-16 名字应可在临时盘落盘");
+
+        let preview = cleanup_detail(&serde_json::json!({}), &root.to_string_lossy())
+            .expect("目录型预览不应失败");
+        assert_eq!(
+            preview["total"].as_u64(),
+            Some(1),
+            "lossy 名字不得进目录型预览: {preview}"
+        );
+        assert!(
+            preview["unresolved"].as_array().is_some_and(|v| v
+                .iter()
+                .any(|x| x.as_str().unwrap_or_default().contains("lossy 路径"))),
+            "lossy 跳过必须显式 unresolved: {preview}"
+        );
+
+        let mut files = Vec::new();
+        let mut too_new = 0i64;
+        let mut lossy = 0i64;
+        let mut drops = CollectDrops::default();
+        collect_files(
+            &root.to_string_lossy(),
+            "*",
+            true,
+            trim_finder::cleanup_scan::AgeGuard::Off,
+            &mut files,
+            &mut too_new,
+            &mut lossy,
+            &mut drops,
+        );
+        assert_eq!(files.len(), 1, "执行侧同样不得收 lossy 名字: {files:?}");
+        assert_eq!(lossy, 1, "执行侧 lossy 计数必须为 1");
     }
 }

@@ -1189,6 +1189,26 @@ pub(super) fn assemble_steps(
     Ok((steps, picked_targets_effective))
 }
 
+/// 还原步骤的注册表形态判据（R3-K02）：顶层 `reg` 字段，或 `cmd` 步里的
+/// `reg.exe add/delete`（允许带路径/引号）。只认顶层字段会把 cmd 形态的注册表还原
+/// 错分进 NonReg 段，阶段回读据此把「没还原的注册表」误报成 pass。
+fn restore_step_is_reg(step: &Value) -> bool {
+    if step.get("reg").and_then(|v| v.as_str()).is_some() {
+        return true;
+    }
+    let Some(cmd) = step.get("cmd").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    let tokens: Vec<String> = cmd
+        .split_whitespace()
+        .map(|t| t.trim_matches('"').to_ascii_lowercase())
+        .collect();
+    tokens.windows(2).any(|w| {
+        let exe = w[0].rsplit(|c| c == '\\' || c == '/').next().unwrap_or("");
+        (exe == "reg" || exe == "reg.exe") && (w[1] == "add" || w[1] == "delete")
+    })
+}
+
 /// 还原分层：只取非 reg 步或只取 reg 步。空集即拒，避免「这一层什么都没跑」被当成成功。
 fn staged_restore_steps(restore: &[Value], stage: Option<RestoreStage>) -> Result<Vec<Value>, String> {
     let Some(stage) = stage else {
@@ -1197,7 +1217,7 @@ fn staged_restore_steps(restore: &[Value], stage: Option<RestoreStage>) -> Resul
     let steps: Vec<Value> = restore
         .iter()
         .filter(|s| {
-            let is_reg = s.get("reg").and_then(|v| v.as_str()).is_some();
+            let is_reg = restore_step_is_reg(s);
             match stage {
                 RestoreStage::NonReg => !is_reg,
                 RestoreStage::RegOnly => is_reg,
@@ -2102,7 +2122,7 @@ mod backup_gate_tests {
 
 #[cfg(test)]
 mod restore_stage_tests {
-    use super::{staged_restore_steps, RestoreStage, RunDirection, RunParams};
+    use super::{restore_step_is_reg, staged_restore_steps, RestoreStage, RunDirection, RunParams};
     use serde_json::json;
 
     /// P0-3：预置还原必须能拆成「非 reg」与「只 reg」两段，空段显式拒绝；
@@ -2132,6 +2152,28 @@ mod restore_stage_tests {
         assert!(
             staged_restore_steps(&only_non_reg, Some(RestoreStage::RegOnly)).is_err(),
             "没有 reg 步骤时必须拒绝，而不是跑 0 步报成功"
+        );
+    }
+
+    /// R3-K02：注册表形态不只认顶层 `reg` 字段 —— cmd 步里的 `reg.exe add/delete`
+    /// 同样必须分进 RegOnly 段。破坏自证：把判据退回「只认顶层 reg 字段」⇒
+    /// reg 段为空直接 Err，本用例第一条 `expect` 即红。
+    #[test]
+    fn 注册表形态的_cmd_步必须分进_reg_段() {
+        let restore = vec![
+            json!({ "label": "注册表写入", "cmd": "reg.exe add \"HKLM\\Software\\Trim\" /v A /t REG_DWORD /d 1 /f" }),
+            json!({ "label": "注册表删除", "cmd": "reg delete \"HKCU\\Software\\Trim\" /v B /f" }),
+            json!({ "label": "带路径的 reg.exe", "cmd": "\"C:\\Windows\\System32\\reg.exe\" add \"HKLM\\Software\\Trim\" /v C /t REG_SZ /d x /f" }),
+            json!({ "label": "bcd 非注册表形态", "cmd": "bcdedit /set {current} isolatedcontext Yes" }),
+            json!({ "label": "服务恢复", "service": "X", "startType": "automatic" }),
+        ];
+        let reg = staged_restore_steps(&restore, Some(RestoreStage::RegOnly)).expect("reg 段");
+        assert_eq!(reg.len(), 3, "cmd 形态的注册表还原必须进 reg 段: {reg:?}");
+        let non_reg = staged_restore_steps(&restore, Some(RestoreStage::NonReg)).expect("非 reg 段");
+        assert_eq!(non_reg.len(), 2, "bcdedit / 服务步不得混进 reg 段: {non_reg:?}");
+        assert!(
+            non_reg.iter().all(|s| !restore_step_is_reg(s)),
+            "非 reg 段里不得残留注册表形态: {non_reg:?}"
         );
     }
 

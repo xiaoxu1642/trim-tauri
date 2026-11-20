@@ -491,7 +491,9 @@ fn walk_level_flush(
             Ok(e) => e,
             Err(_) => {
                 // N1b-M01：条目读失败不是「目录到此为止」，计数后继续下一条。
-                note_entry_stat_fail();
+                // N1b-K02：只累加实例级 —— 本链的消费出口是 `finish` 的实例账；
+                // 再记进程级会让并发链的 `since()` 窗口把同一笔重复计入。
+                ctx.entry_stat_fails.note();
                 continue;
             }
         };
@@ -652,11 +654,6 @@ fn dir_size_with_sink(
                     continue;
                 }
             };
-            // v5-K02 批次 2（N1-M05）：reparse 拦在类型分支前（条目级全形状，同 walk_level）
-            if is_reparse(&ent) {
-                note_reparse_skip();
-                continue;
-            }
             // v5-K02 批次 2（N1-M05）：reparse 拦在类型分支前（条目级全形状，同 walk_level）
             if is_reparse(&ent) {
                 note_reparse_skip();
@@ -946,6 +943,9 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
         // 清零等于把并发扫描（宿主每路都进 spawn_blocking）的留痕偷走，第二路恒报 0。
         let reparse_base = REPARSE_SKIPS.mark();
         let unreadable_base = UNREADABLE_DIRS.mark();
+        // N1b-K02：条目级「读不到」与目录级同口径读增量 —— 旧写法只累加进程级静态、
+        // 没有任何读者，扫描结果偏小时无从解释。
+        let entry_stat_base = ENTRY_STAT_FAILS.mark();
         let rd = match fs::read_dir(&root) {
             Ok(r) => r,
             // v7.2-C03（N1b-M01）：根级 read_dir 失败原先整根静默跳过，输出与
@@ -1099,6 +1099,13 @@ fn analyze_beating(paths: &[String], sink: &dyn Sink, beat: &ScanBeat) {
                 ("mtimeMs", ms.to_string()),
                 ("family", fam.to_string()),
             ]);
+        }
+        // N1b-K02：本根条目级读不到的增量必须出声（只留痕，不进任何统计字段）。
+        let entry_fail = ENTRY_STAT_FAILS.since(entry_stat_base);
+        if entry_fail > 0 {
+            sink.warn(&format!(
+                "有 {entry_fail} 个条目的类型或元数据读不到（权限或 IO 失败），这部分未计入，分析结果可能不完整"
+            ));
         }
         progress(sink, 100);
     }
@@ -1408,14 +1415,21 @@ fn expand_tasks(root: &Path, task_depth: usize, trace: &BigfilesTrace) -> Vec<(P
                     trace.note_entry_error();
                     continue;
                 };
-                if let Ok(ft) = ent.file_type() {
-                    if ft.is_dir() && !is_reparse(&ent) {
-                        let p = ent.path();
-                        // 最深层：整体递归并兜底子树；中间层：只收直属文件，子目录继续展开
-                        out.push((p.clone(), last));
-                        if !last {
-                            next.push(p);
-                        }
+                // N1b-K04：`file_type()` 读不到同样计入条目失败 —— 旧写法 `if let Ok`
+                // 把这一族静默吞掉，`BigfilesTrace` 自称「条目读取失败计数」却缺这类。
+                let ft = match ent.file_type() {
+                    Ok(t) => t,
+                    Err(_) => {
+                        trace.note_entry_error();
+                        continue;
+                    }
+                };
+                if ft.is_dir() && !is_reparse(&ent) {
+                    let p = ent.path();
+                    // 最深层：整体递归并兜底子树；中间层：只收直属文件，子目录继续展开
+                    out.push((p.clone(), last));
+                    if !last {
+                        next.push(p);
                     }
                 }
             }
@@ -1536,9 +1550,14 @@ fn topk_in(dir: &Path, recursive: bool, cap: usize, min_size: u64, beat: &ScanBe
                 trace.note_entry_error();
                 continue;
             };
+            // N1b-K04：`file_type()` 读不到不许静默 `continue` —— 计入条目读取失败，
+            // 收尾 `finish_lines` 才会说「有 N 个条目读不到」。
             let ft = match ent.file_type() {
                 Ok(t) => t,
-                Err(_) => continue,
+                Err(_) => {
+                    trace.note_entry_error();
+                    continue;
+                }
             };
             if ft.is_symlink() {
                 continue;
@@ -1588,6 +1607,9 @@ pub fn bigfiles(roots: &[String], count: usize, min_size: u64, sink: &dyn Sink) 
     let cap = count.max(1);
     let beat = ScanBeat::new(sink);
     let trace = BigfilesTrace::default();
+    // N1b-K02：条目级读不到的收尾增量基线（`topk_in` 的元数据失败走进程级静态，
+    // 与 `trace.entry_errors` 分账；旧写法只累加、没有任何读者）。
+    let entry_stat_base = ENTRY_STAT_FAILS.mark();
     let mut tasks: Vec<(PathBuf, bool)> = Vec::new();
     for r in roots {
         if let Some(p) = canonical(r) {
@@ -1624,6 +1646,14 @@ pub fn bigfiles(roots: &[String], count: usize, min_size: u64, sink: &dyn Sink) 
     let (lines, limited) = trace.finish_lines(all.len());
     for line in &lines {
         sink.warn(line);
+    }
+    // N1b-K02：`topk_in` 元数据失败的进程级增量在这里消费 —— 旧写法只累加不读，
+    // 结果偏小时没有一句话解释（只留痕，不进 Top-K 判定）。
+    let entry_fail = ENTRY_STAT_FAILS.since(entry_stat_base);
+    if entry_fail > 0 {
+        sink.warn(&format!(
+            "有 {entry_fail} 个条目的元数据读不到（权限或 IO 失败），这部分未计入，大文件结果可能不完整"
+        ));
     }
     if limited {
         sink.truncated();
@@ -1943,6 +1973,8 @@ impl EmptyAccum {
 ///   · 按条目发 scanned 心跳（用户实测 2026-09-28：全程无反馈被当成「准备慢」）
 pub fn empty(roots: &[String], sink: &dyn Sink) {
     init_scan_threads();
+    // N1b-K02：条目级读不到的收尾增量基线（只留痕，不进任何判定；旧写法只累加进程级静态、无读者）。
+    let entry_stat_base = ENTRY_STAT_FAILS.mark();
     let ignore = match load_empty_ignore(Some(sink)) {
         Ok(v) => v,
         Err(_) => {
@@ -2060,6 +2092,13 @@ pub fn empty(roots: &[String], sink: &dyn Sink) {
     if skipped > 0 {
         sink.warn(&format!(
             "已跳过 {skipped} 个重解析点条目（junction/挂载点等，不深入以避免重复计数）"
+        ));
+    }
+    // N1b-K02：条目级读不到必须出声（只留痕，不进候选判定）。
+    let entry_fail = ENTRY_STAT_FAILS.since(entry_stat_base);
+    if entry_fail > 0 {
+        sink.warn(&format!(
+            "有 {entry_fail} 个条目的类型或元数据读不到（权限或 IO 失败），这部分未计入，空目录/空文件结果可能不完整"
         ));
     }
     progress(sink, 100);
@@ -2381,12 +2420,16 @@ pub fn appdata(min_size_mb: u64, sink: &dyn Sink) {
         // N1b-M02：本根区间的基线（读增量，不清零 —— 并发扫描互不偷账）
         let reparse_base = REPARSE_SKIPS.mark();
         let unreadable_base = UNREADABLE_DIRS.mark();
+        // N1b-K02：条目级读不到与目录级同口径读增量（旧写法无读者）。
+        let entry_stat_base = ENTRY_STAT_FAILS.mark();
         child_dir_sizes(&root, &mut cur, &beat);
         // v5-K02 批次2（N1-M05）：本根 reparse 跳过量一次性 warn（同 ScanCtx::finish 姿势，只呈现）
         let skipped = REPARSE_SKIPS.since(reparse_base);
         if skipped > 0 { sink.warn(&format!("应用数据扫描（{label}）：已跳过 {skipped} 个重解析点条目（不深入以避免重复计数）")); }
         let unreadable = UNREADABLE_DIRS.since(unreadable_base);
         if unreadable > 0 { sink.warn(&format!("应用数据扫描（{label}）：有 {unreadable} 个目录读不到（权限或 IO 失败），结果可能不完整")); }
+        let entry_fail = ENTRY_STAT_FAILS.since(entry_stat_base);
+        if entry_fail > 0 { sink.warn(&format!("应用数据扫描（{label}）：有 {entry_fail} 个条目的类型或元数据读不到（权限或 IO 失败），这部分未计入，结果可能不完整")); }
         for (p, sz) in cur {
             if sz >= minb {
                 out.push((label.clone(), p, sz));
@@ -2425,6 +2468,8 @@ pub fn sizes(paths: &[String], sink: &dyn Sink) {
             // sizes 的 du 可能跑很久，按目录结算心跳让进度真的在走（与 analyze/appdata 同口径）。
             // N1b-M02：本路径区间的基线，读增量而非清零。
             let reparse_base = REPARSE_SKIPS.mark();
+            // N1b-K02：条目级读不到与目录级同口径读增量（旧写法无读者）。
+            let entry_stat_base = ENTRY_STAT_FAILS.mark();
             // N1b-L04：sizes 的心跳与诊断都走 Sink，读目录失败不许直写 stderr。
             let sz = dir_size_with_sink(
                 &p,
@@ -2432,6 +2477,10 @@ pub fn sizes(paths: &[String], sink: &dyn Sink) {
                 Some(sink),
             );
             item(sink, "size", &p, sz, &[("exists", "true".to_string()), ("skippedReparse", REPARSE_SKIPS.since(reparse_base).to_string())]); // v5-K02 批次2：本根 reparse 跳过量（只呈现）
+            let entry_fail = ENTRY_STAT_FAILS.since(entry_stat_base);
+            if entry_fail > 0 {
+                sink.warn(&format!("{}：有 {entry_fail} 个条目的类型或元数据读不到（权限或 IO 失败），体积可能少报", p.display()));
+            }
         }
     }
     progress(sink, 100);
@@ -3033,13 +3082,17 @@ fn delete_one(_p: &Path, _kind: &str) -> Result<(), String> {
 
 /// 火眼眼审查 2026-09-14（M-1）：删除目标本身是 reparse point（junction/symlink）时拒绝——
 /// 遍历侧已跳过 reparse 防环，直删入口补同一道闸，防止借链接改写真实删除目标。
+///
+/// N1b-K03：属性读不到时按重解析点处理（fail-closed），与扫描侧 [`is_reparse`] 的
+/// `unwrap_or(true)` 同向 —— 旧写法 `unwrap_or(false)` 把「读不到」判成「不是链接」
+/// 放行，与本节「不可判一律照拒」的承诺相反（可达性需 TOCTOU + IO 失败叠加）。
 #[cfg(windows)]
 fn is_reparse_target(p: &Path) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
     fs::symlink_metadata(p)
         .map(|m| m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 #[cfg(not(windows))]
@@ -3266,15 +3319,20 @@ mod tests {
     use super::empty_list_guard;
 
     /// A1-M02（v7.2 C06）：不可读目录的计数出口必须接线（计数 + 输出字段 + 主 walk 记录）。
+    /// N1b-K01：只断言生产段且 needle 动态拼 —— 旧写法三条 needle 都是本函数源码里的
+    /// 字面量，`include_str!` 把测试段也算语料 ⇒ 删掉生产接线仍恒绿。
+    /// 判红自证：删掉生产段 walk_level 的 `ctx.note_unreadable();`，第三条红。
     #[test]
     fn unreadable_dir_counter_contract() {
         let src = include_str!("scan.rs");
-        assert!(src.contains("static UNREADABLE_DIRS"), "进程级不可读计数不见了");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        assert!(prod.contains("static UNREADABLE_DIRS"), "进程级不可读计数不见了");
         assert!(
-            src.contains("(\"unreadableDirs\", UNREADABLE_DIRS.since(unreadable_base).to_string())"),
+            prod.contains("(\"unreadableDirs\", UNREADABLE_DIRS.since(unreadable_base).to_string())"),
             "analyzer 输出缺 unreadableDirs 字段"
         );
-        assert!(src.contains("ctx.note_unreadable();"), "主 walk 的 read_dir 失败没进计数");
+        let needle = format!("ctx.{}();", "note_unreadable");
+        assert!(prod.contains(&needle), "主 walk 的 read_dir 失败没进计数");
     }
 
     /// A1-U02：条目级 `file_type()` / `metadata()` 失败必须计数，并在收尾告警里可见。
@@ -3310,6 +3368,52 @@ mod tests {
         assert!(
             warns.contains("个条目的类型或元数据读不到"),
             "条目级失败在收尾没有可见告警: {warns}"
+        );
+    }
+
+    /// N1b-K02：进程级 `ENTRY_STAT_FAILS` 必须有读者 —— 五条扫描链
+    /// （analyze/appdata/sizes/empty/bigfiles）各自在收尾读增量并发 warn；
+    /// duplicates 链走 `ScanCtx::finish` 的实例账（上一条已钉）。
+    /// 判红自证：删掉任一链的读点（计数降到 4），本用例红。needle 动态拼且只看生产段。
+    #[test]
+    fn entry_stat_failures_have_consumers() {
+        let src = include_str!("scan.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        let needle = format!("{}_STAT_FAILS.since(", "ENTRY");
+        assert!(
+            prod.matches(needle.as_str()).count() >= 5,
+            "条目级读不到必须在 analyze/appdata/sizes/empty/bigfiles 五条链各自收尾读增量（N1b-K02）"
+        );
+    }
+
+    /// N1b-K03：删除链 `is_reparse_target` 必须 fail-closed（属性读不到按「是链接」处理），
+    /// 与扫描侧 `is_reparse` 同向。行为面需要「属性读失败」样本（ACL / TOCTOU），
+    /// 本机不可构造 ⇒ 钉默认值方向。
+    /// 判红自证：把 `unwrap_or(true)` 改回 `unwrap_or(false)`，本用例红。
+    #[test]
+    fn delete_chain_reparse_check_is_fail_closed() {
+        let prod = include_str!("scan.rs").split("\nmod tests {").next().unwrap_or("");
+        let start = prod.find("fn is_reparse_target(p: &Path) -> bool {").expect("is_reparse_target 不见了");
+        let rest = &prod[start..];
+        let body = &rest[..rest.find("\n}").unwrap_or(rest.len())];
+        assert!(body.contains("unwrap_or(true)"), "删除链 reparse 判据必须 fail-closed（N1b-K03）");
+        assert!(!body.contains("unwrap_or(false)"), "删除链 reparse 判据又退回 fail-open");
+    }
+
+    /// N1b-K04：bigfiles 两处 `file_type()` 读失败必须进 `BigfilesTrace` 计数
+    /// （旧写法一处静默 `continue`、一处 `if let Ok` 吞掉）。「file_type 失败」样本
+    /// 不可构造 ⇒ 钉接线点数量。
+    /// 判红自证：删掉任一 `trace.note_entry_error();`（计数降到 3），本用例红。
+    #[test]
+    fn bigfiles_file_type_errors_are_counted() {
+        let prod = include_str!("scan.rs").split("\nmod tests {").next().unwrap_or("");
+        let seg_start = prod.find("fn expand_tasks(").expect("expand_tasks 不见了");
+        let seg_end = prod.find("pub fn bigfiles(").expect("bigfiles 不见了");
+        let seg = &prod[seg_start..seg_end];
+        let needle = format!("trace.{}();", "note_entry_error");
+        assert!(
+            seg.matches(needle.as_str()).count() >= 4,
+            "expand_tasks/topk_in 的条目读失败必须全部接进 BigfilesTrace（N1b-K04）"
         );
     }
 

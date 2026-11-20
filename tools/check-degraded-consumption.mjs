@@ -294,7 +294,12 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  */
 export function judgeAnchorInText(src, anchor) {
   const view = blankJs(src);
-  const re = new RegExp(escapeRe(anchor.text), 'g');
+  // T1e-K02（2026-11-20）：锚点是**表达式片段**，裸子串匹配会让 `degraded` 命中
+  // `degradedFlag` / `degradedRate`（短锚点被子串顶账，实测 hit=true）。标识符边界只在
+  // 锚点首尾本身是词字符时加 —— 以 `.`/`(` 等非词字符开头的锚点加 `\b` 反而会失配。
+  const lead = /^\w/.test(anchor.text) ? '\\b' : '';
+  const tail = /\w$/.test(anchor.text) ? '\\b' : '';
+  const re = new RegExp(`${lead}${escapeRe(anchor.text)}${tail}`, 'g');
   const lines = [];
   let m;
   while ((m = re.exec(view))) lines.push(lineAt(view, m.index));
@@ -488,8 +493,20 @@ g.ok(`degraded 契约对账（双视图 / 函数级）：发射 ${commandCount} 
     ['别的函数里的命中不顶账', { file: 's.js', fn: 'other', text: 'if (resp.degraded === true)' }, false],
   ];
   const bad = cases.filter(([, a, want]) => judgeAnchorInText(JS_SAMPLE, a).hit !== want).map(([label]) => label);
+  // T1e-K02：短锚点的标识符边界（样本里只有 degradedFlag / degradedRate，没有独立词 degraded）
+  const BOUNDARY_SAMPLE = [
+    'function load() {',
+    '  const degradedFlag = 1;',
+    '  if (state.degradedRate > 0) { tick(); }',
+    '}',
+  ].join('\n');
+  const boundaryCases = [
+    ['短锚点不命中 degradedFlag 与 state.degradedRate（子串顶账）', { file: 's.js', fn: 'load', text: 'degraded' }, false],
+    ['完整标识符锚点命中 degradedFlag', { file: 's.js', fn: 'load', text: 'degradedFlag' }, true],
+  ];
+  bad.push(...boundaryCases.filter(([, a, want]) => judgeAnchorInText(BOUNDARY_SAMPLE, a).hit !== want).map(([label]) => label));
   if (bad.length) g.fail(`消费锚点判定器对照失败：${bad.join('、')}`);
-  else g.ok(`消费锚点判定器对照 ${cases.length} 组：函数体命中；日志字符串 / 注释 / 模板内容 / 别的函数不顶账`);
+  else g.ok(`消费锚点判定器对照 ${cases.length + boundaryCases.length} 组：函数体命中；日志字符串 / 注释 / 模板内容 / 别的函数不顶账；短锚点不命中更长标识符`);
 }
 
 // ── 合成对照：对账判据（新增发射必红 / 消费点缺失必红 / pending 未回收必红）──────────

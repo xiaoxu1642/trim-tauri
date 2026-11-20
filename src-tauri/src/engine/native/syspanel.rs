@@ -2166,7 +2166,7 @@ fn apply_pagefile_registry(
 /// `PagingFiles` → 写 `AutomaticManagedPagefile` → 每次写后回读实际字节 → 返回
 /// `requiresReboot: true`。第二写或任一回读失败时，手动模式回滚 `PagingFiles`。
 ///
-/// 备份走 `atomic_write_json`（AGENTS §3 写 JSON 唯一姿势）、落在
+/// 备份走 `land_backup`（判备份根后同卷落位，内容用 `atomic_write_json` 产出）、落在
 /// `paths::backup_write_dir()/pagefile-backups/<timestamp>.json`；`prune_stamped_files` 保留 50 份。
 /// 一键还原命令留下一轮（AGENTS §3「危险能力默认关，猜错方向的代价不对称」），
 /// 用户可先通过备份 JSON 手动 reg import 恢复。
@@ -2252,19 +2252,31 @@ pub fn pagefile_apply(managed: bool, entries: &[PagefileEntry]) -> Result<Value,
 }
 
 /// 把当前 `pagefile_state()` 落进 `backup_write_dir("pagefile-backups")/<ts>.json`。
-/// 走 `atomic_write_json`（AGENTS §3），写完 `prune_stamped_files` 保留 50 份。
+/// 写出走 `land_backup`（私有 tmp 产出 → 判备份根 → 同卷 rename），与「隐藏高性能」
+/// 的 `.powrplan` 同口径；写完 `prune_stamped_files` 保留 50 份。
 fn write_pagefile_backup(snapshot: &Value) -> Result<String, String> {
-    use crate::engine::paths;
-    use crate::security::atomic_write_json;
-    let root = paths::backup_write_dir("pagefile-backups");
-    std::fs::create_dir_all(&root).map_err(|e| format!("建备份目录失败：{e}"))?;
+    write_pagefile_backup_at(
+        &crate::engine::paths::backup_write_dir("pagefile-backups"),
+        snapshot,
+    )
+}
+
+/// R5b-K05：pagefile 备份是改写前唯一还原凭据，落点判据不能比 `.powrplan` 弱——
+/// 旧实现 `create_dir_all` + 直写目标，备份根被换成 junction 时会落到链接另一头。
+fn write_pagefile_backup_at(
+    root: &std::path::Path,
+    snapshot: &Value,
+) -> Result<String, String> {
+    std::fs::create_dir_all(root).map_err(|e| format!("建备份目录失败：{e}"))?;
     let ts = crate::engine::now_ms();
     let file = root.join(format!("{ts}.json"));
-    atomic_write_json(&file, snapshot)?;
+    crate::engine::backup_write::land_backup(root, &file, |stage| {
+        crate::security::atomic_write_json(stage, snapshot)
+    })?;
     // 保留 50 份；prune 失败不阻断主流程（备份本身已落盘，最坏情况下一份份堆积由下次调用回收）。
     // v5 批次 9（D1-M04）：本根全是 `<ts>.json`，旧 `prune_backups` 只数 `.reg` ⇒ 上限恒空转
     // （盘上 9 个 .json 无界涨）——改按 13 位时间戳前缀计数裁剪。
-    paths::prune_stamped_files(&root, 50);
+    crate::engine::paths::prune_stamped_files(root, 50);
     Ok(file.display().to_string())
 }
 
@@ -2283,6 +2295,34 @@ mod tests {
     fn guid大小写归一化小写() {
         let g = parse_guid_str("8C5E7FDA-E8BF-4A96-9A85-A6E23A8C635C").expect("解析失败");
         assert_eq!(guid_string(&g), "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
+    }
+
+    /// R5b-K05：pagefile 备份写前必须判备份根——根被换成 junction 时拒绝写出，
+    /// 链接另一头不得落任何文件（与「隐藏高性能」的 `.powrplan` 同口径）。
+    /// 破坏自证：退回 `create_dir_all` + 直写目标 ⇒ 拒收断言红。
+    /// 链接造不出来时显式 SKIP，不伪装通过。
+    #[test]
+    fn pagefile备份根被换成链接时拒绝写出() {
+        let _g = crate::engine::backup_write::lock_stage_serial();
+        let sb = crate::testutil::Sandbox::new("r5b-pagefile-backup");
+        let real = sb.join("real");
+        std::fs::create_dir_all(&real).expect("建真实目录");
+        let link = sb.join("pagefile-backups");
+        if std::os::windows::fs::symlink_dir(&real, &link).is_err() {
+            eprintln!("SKIP: 当前环境无法创建目录链接，未验证 pagefile 备份根拒收");
+            return;
+        }
+        let err = write_pagefile_backup_at(&link, &serde_json::json!({"probe": 1}))
+            .expect_err("junction 根必须拒绝写出");
+        assert!(err.contains("备份根不可信"), "拒收必须说明根不可信: {err}");
+        assert!(
+            std::fs::read_dir(&real)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true),
+            "链接另一头不得落下备份文件"
+        );
+        write_pagefile_backup_at(&sb.join("ok-backups"), &serde_json::json!({"probe": 1}))
+            .expect("正常根必须可写");
     }
 
     /// 方案 §7.1：会话快照必须能跨重启还原 ⇒ 落盘形状必须逐字段可逆；

@@ -254,16 +254,39 @@ check(
 // 开头的路径）必须落盘 —— 已删的双跑工具 `tools/dual-run-batchA.mjs` 此前仍被白名单
 // 点名，就是这条缺口的实例（v4 §1.3）。带 * ? { } | 的 glob/占位形态不判。
 // AGENTS.md 缺席 ⇒ 显式 SKIP，声明本节未校验。
+// 坐标分类（T1a-K03，2026-11-20）：点名坐标里的构建产物目录（native-scanner/target 等
+// .gitignore 产物）在干净克隆 + 静态验收下必然不存在；一律按 tracked 判红会让干净机恒红，
+// 假红淹没真问题。generated 缺失 ⇒ 显式 SKIP 声明未校验；tracked 缺失仍判红
+// （白名单不许指向已删除的文件）。按目录边界比，防 `src-tauri/targeting/` 这类子串误判。
+const GENERATED_DIRS = ['src-tauri/target', 'native-scanner/target', 'src-tauri/gen', 'node_modules', 'dist', 'build-release'];
+const refKind = (p) => (GENERATED_DIRS.some((d) => p === d || p.startsWith(d + '/')) ? 'generated' : 'tracked');
+
 if (agentsPresent) {
   const CODE_REF_RE = /`((?:tools|src|src-tauri|native-scanner|vendor)\/[\w./\u4e00-\u9fa5-]+)`/g;
   const named = [];
   const ghost = [];
+  const generatedMissing = [];
   for (const m of readFileSync(AGENTS_MD, 'utf8').matchAll(CODE_REF_RE)) {
     const p = m[1];
     if (/[*?{}|]/.test(p)) continue;
     named.push(p);
-    if (!existsSync(join(ROOT, p))) ghost.push(p);
+    if (existsSync(join(ROOT, p))) continue;
+    if (refKind(p) === 'generated') generatedMissing.push(p);
+    else ghost.push(p);
   }
+  // 分类器对照：两向都必须成立，且目录名子串不得被误判成 generated
+  const KIND_CONTROLS = [
+    { p: 'src-tauri/target/release/Trim.exe', kind: 'generated' },
+    { p: 'native-scanner/target', kind: 'generated' },
+    { p: 'src-tauri/targeting/x.rs', kind: 'tracked' },
+    { p: 'src/scripts/ds.js', kind: 'tracked' },
+  ];
+  const kindBad = KIND_CONTROLS.filter((c) => refKind(c.p) !== c.kind);
+  check(
+    kindBad.length === 0,
+    `3a. 坐标分类对照 ${KIND_CONTROLS.length} 组（generated/tracked 两向 + 目录名子串不误判）`,
+    kindBad.map((c) => `${c.p} 被判 ${refKind(c.p)}，应为 ${c.kind}`).join('；'),
+  );
   check(
     named.length >= 8,
     `3. AGENTS.md 点名的仓内坐标 ${named.length} 处（≥8 地板，防解析失明）`,
@@ -271,9 +294,18 @@ if (agentsPresent) {
   );
   check(
     ghost.length === 0,
-    '3b. 点名的仓内坐标全部落盘（白名单不许指向已删除的文件）',
+    '3b. 点名的仓内 tracked 坐标全部落盘（白名单不许指向已删除的文件；构建产物另计 3c）',
     ghost.join('；'),
   );
+  const generatedNamed = named.filter((p) => refKind(p) === 'generated');
+  if (generatedMissing.length) {
+    skipped++;
+    console.log(`⚠ 3c. 点名的构建产物 ${generatedMissing.length} 处不在本机（${generatedMissing.join('、')}）：产物落盘性**未校验**（SKIP，不是通过）`);
+  } else if (generatedNamed.length) {
+    check(true, `3c. 点名的构建产物 ${generatedNamed.length} 处全部落盘`);
+  } else {
+    console.log('⚠ 3c. AGENTS.md 未点名任何构建产物：本节无对象（不计通过）');
+  }
 } else {
   skipped++;
   console.log('⚠ AGENTS.md 缺席：3 白名单坐标存在性**未校验**（SKIP，不是通过）');

@@ -94,6 +94,13 @@ fn utf16_str(buf: &[u16]) -> String {
     String::from_utf16_lossy(&buf[..end])
 }
 
+/// 卷标取值（N1c-K01）：`GetVolumeInformationW` 返回 0 = 读失败，必须与「确实没有
+/// 卷标（返回非 0、缓冲为空串）」可分辨 —— 旧写法丢弃返回码，两者同为空串。
+/// 纯展示字段，不进 `okDisks`/`success`。
+fn volume_label(ok: bool, buf: &[u16]) -> String {
+    if ok { utf16_str(buf) } else { "未取到".to_string() }
+}
+
 // ============================ R1: diskbench ============================
 // 契约（v2 §2.2）：进度行 __PROG__{"phase","percent"}；最终 JSON 必含
 //   sequentialRead/Write、randomRead/Write、iops、latency、blockSize、queueDepth、
@@ -168,13 +175,20 @@ fn is_stale_bench_name(name: &str) -> bool {
 }
 
 /// 清理同一测速目录里上一轮留下的精确命名文件（只碰本工具自己的形态）。
-/// 返回 `(removed, skipped, failed)`；受保护路径/名字不匹配/读不到都只记 skipped。
+/// 返回 `(removed, skipped, failed)`；名字不匹配/受保护路径只记 skipped，
+/// 逐项枚举失败与删除失败同进 failed（N1c-K02：旧 `flatten()` 把枚举错误也吞了）。
 fn sweep_stale_bench_files(dir: &std::path::Path) -> (usize, usize, usize) {
     let mut removed = 0usize;
     let mut skipped = 0usize;
     let mut failed = 0usize;
     if let Ok(rd) = std::fs::read_dir(dir) {
-        for entry in rd.flatten() {
+        for entry in rd {
+            let Ok(entry) = entry else {
+                // N1c-K02：枚举中途 Err 不许静默丢弃 —— 计入 failed，收尾告警才说得清
+                // 「上一轮残留为什么没清干净」。删除面仍受名字闸 + 保护闸两道。
+                failed += 1;
+                continue;
+            };
             let name = entry.file_name();
             let s = name.to_string_lossy();
             if !is_stale_bench_name(&s) {
@@ -977,8 +991,9 @@ pub fn ov_metrics_json() -> String {
             let (mut t, mut f) = (0u64, 0u64);
             if GetDiskFreeSpaceExW(rw.as_ptr(), std::ptr::null_mut(), &mut t, &mut f) == 0 { continue; }
             let mut vol = [0u16; 261];
-            GetVolumeInformationW(rw.as_ptr(), vol.as_mut_ptr(), 261, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), 0);
-            let label = utf16_str(&vol);
+            // N1c-K01：返回码必须判 —— 与 GetDiskFreeSpaceExW / GlobalMemoryStatusEx 同口径。
+            let vol_ok = GetVolumeInformationW(rw.as_ptr(), vol.as_mut_ptr(), 261, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), 0) != 0;
+            let label = volume_label(vol_ok, &vol);
             let used = t.saturating_sub(f);
             let percent = if t > 0 { used as f64 * 100.0 / t as f64 } else { 0.0 };
             disks.push(format!(
@@ -2189,5 +2204,42 @@ mod n1b_m01_tests {
             branch.matches("sample_frame()").count() >= 2,
             "单帧模式必须先建基线再取第二帧（N1c-M01），实得分支：\n{branch}"
         );
+    }
+
+    /// N1c-K01：卷标读失败（返回码 0）与「确实没有卷标」（返回非 0、缓冲空）必须不同形。
+    /// 判红自证：把 `volume_label` 改回 `utf16_str(buf)`，第一条断言红。
+    #[test]
+    fn volume_label_distinguishes_read_failure_from_empty() {
+        let empty = [0u16; 4];
+        assert_eq!(volume_label(false, &empty), "未取到", "读失败不许与空卷标同形");
+        assert_eq!(volume_label(true, &empty), "", "返回码非 0 的空缓冲 = 确实无卷标");
+        let mut buf = [0u16; 8];
+        for (i, c) in "系统".encode_utf16().enumerate() {
+            buf[i] = c;
+        }
+        assert_eq!(volume_label(true, &buf), "系统");
+    }
+
+    /// N1c-K02：清扫链不许再用 `flatten()` 吞逐项枚举错误（needle 动态拼，防自指）。
+    /// 判红自证：恢复 `rd.flatten()`，第一条断言红。
+    #[test]
+    fn sweep_does_not_swallow_enumeration_errors() {
+        let src = include_str!("perf.rs");
+        let prod = src.split("\nmod tests {").next().unwrap_or(src);
+        let needle = format!("for entry in rd.{}()", "flatten");
+        assert!(!prod.contains(needle.as_str()), "sweep 逐项枚举错误不许被 flatten 吞掉（N1c-K02）");
+    }
+
+    /// N1c-K02 行为面：只删精确命名形态，其余计 skipped。
+    #[test]
+    fn sweep_removes_only_exact_bench_names() {
+        let sb = crate::util::sandbox(&format!("n1c-k02-{}", std::process::id()));
+        let dir = sb.path();
+        std::fs::write(dir.join("tb_1_2_3.bin"), b"x").unwrap();
+        std::fs::write(dir.join("tb_notes.bin"), b"x").unwrap();
+        let (removed, skipped, failed) = sweep_stale_bench_files(dir);
+        assert_eq!((removed, skipped, failed), (1, 1, 0), "只删精确测速残留");
+        assert!(!dir.join("tb_1_2_3.bin").exists());
+        assert!(dir.join("tb_notes.bin").exists());
     }
 }

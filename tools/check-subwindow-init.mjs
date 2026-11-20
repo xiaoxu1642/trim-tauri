@@ -972,6 +972,46 @@ for (const page of PAGES) {
   }
 }
 
+// ---- 8d（T1h-K01，2026-11-20）：8c 的幂等声称必须也触达**生产 ds.js** ----
+// 8c 跑在最小 DOM 桩上，桩自带一份 `bindCheckboxKeys`（含自己的 `__dsCheckboxKeys` 守卫），
+// 所以它证明的是「桩副本幂等 + 页面 init 只调一次」，删掉生产 ds.js 的守卫本门禁照样绿 ——
+// 断言的自我声称超出射程。这里补一条**只读文本断言**钉生产守卫形态（不改 ds.js）：
+// 守卫必须存在，且必须在 addEventListener 之前（写在后面等于没守）。
+{
+  const DS = join(ROOT, 'src', 'scripts', 'ds.js');
+  const extractFn = () => {
+    const src = readFileSync(DS, 'utf8');
+    const at = src.indexOf('ds.bindCheckboxKeys = function');
+    if (at < 0) return '';
+    const open = src.indexOf('{', at);
+    let depth = 0;
+    for (let i = open; i < src.length; i++) {
+      if (src[i] === '{') depth++;
+      else if (src[i] === '}' && --depth === 0) return src.slice(open, i + 1);
+    }
+    return '';
+  };
+  const judge = (body) => {
+    const guardAt = body.search(/\bif\s*\(\s*host\.__dsCheckboxKeys\s*\)\s*return/);
+    const markAt = body.search(/\bhost\.__dsCheckboxKeys\s*=\s*true/);
+    const listenAt = body.search(/\baddEventListener\s*\(/);
+    return guardAt >= 0 && markAt > guardAt && listenAt > guardAt;
+  };
+  const bad = '{ if (!host) return; host.addEventListener("keydown", () => {}); }';
+  const badLate = '{ if (!host) return; host.addEventListener("keydown", () => {}); if (host.__dsCheckboxKeys) return; host.__dsCheckboxKeys = true; }';
+  const good = '{ if (!host) return; if (host.__dsCheckboxKeys) return; host.__dsCheckboxKeys = true; host.addEventListener("keydown", () => {}); }';
+  if (judge(bad) || judge(badLate) || !judge(good)) {
+    fail++;
+    console.error('✗ 8d 正向对照失败：生产 ds.js 幂等判据失真（必须把「无守卫 / 守卫写在注册之后」与「守卫在注册之前」分开）');
+  }
+  const body = extractFn();
+  check(
+    Boolean(body) && judge(body),
+    '8d. 生产 ds.js 的 bindCheckboxKeys 有幂等守卫且在 addEventListener 之前（8c 射程之外的那一半）',
+    !body ? 'ds.bindCheckboxKeys 解析失败（函数被改名/重构）' : '',
+  );
+}
+
 // ---- 断言 10：过渡表双向咬合 ----
 const trV = judgeTransition(scans);
 check(

@@ -274,8 +274,9 @@ if (grow.length) {
 // F4b-L08：清空全部网速报告必须与 diskbench「清空历史」同档（confirmDanger）。
 {
   const rt = readFileSync(join(dir, 'realtime.js'), 'utf8');
-  const at = rt.indexOf(".rt-clear-all");
-  const block = at >= 0 ? rt.slice(at, at + 2200) : '';
+  // T1a-L01：生产判定与对照**共用同一 judge**。旧写法生产走 `block.includes('confirmDanger')`、
+  // 对照另抄一份同形 judge —— 把生产判定退化成 `.includes('confirm')` 后对照仍判绿，
+  // 「对照通过」证明不了生产判据还能判红。
   const judge = (text) => {
     const i = text.indexOf('.rt-clear-all');
     if (i < 0) return false;
@@ -288,7 +289,7 @@ if (grow.length) {
     console.error('✗ 正向对照失败：网速报告清空确认档位判定器失真');
     process.exit(1);
   }
-  if (!block || !block.includes('confirmDanger')) {
+  if (!judge(rt)) {
     console.error('✗ src/scripts/realtime.js — 「清空全部网速报告」仍走普通 confirm（应与测速历史清空同档 confirmDanger）');
     process.exit(1);
   }
@@ -298,8 +299,7 @@ if (grow.length) {
 // F4a2-L47：外设「应用到注册表」与「恢复 Windows 默认」同档（总方案 §9 拍板记录 1）。
 {
   const pt = readFileSync(join(dir, 'peripheral.js'), 'utf8');
-  const at = pt.indexOf('#btnPeriApply');
-  const block = at >= 0 ? pt.slice(at, at + 2200) : '';
+  // T1a-L01：同 F4b-L08 —— 生产与对照喂同一 judge。
   const judge = (text) => {
     const i = text.indexOf('#btnPeriApply');
     if (i < 0) return false;
@@ -311,7 +311,7 @@ if (grow.length) {
     console.error('✗ 正向对照失败：外设应用确认档位判定器失真');
     process.exit(1);
   }
-  if (!block || !block.includes('confirmDanger')) {
+  if (!judge(pt)) {
     console.error('✗ src/scripts/peripheral.js — 「应用到注册表」仍缺少 confirmDanger（应与恢复默认同档）');
     process.exit(1);
   }

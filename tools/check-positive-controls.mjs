@@ -89,6 +89,8 @@ const REGISTRY = [
   { file: 'check-treemap-layout.mjs', reason: 'T1d-L07：squarified 布局数学性质带内置对照（面积和/包含关系/最坏长宽比三组，破坏判据即红）；2026-11-01 从 PENDING 迁入' },
   { file: 'check-silent-catch.mjs', reason: 'P2（A2-L03 / F3-L16 / F4c-L18）：前端空 catch / 仅 console 的失败出口等于「失败无声」——回执丢了、提示没了，用户只看到界面没反应。本门禁钉住「失败出口必须留痕（log / toast）」，带内置 good/bad 正向对照（判据失真即红）' },
   { file: 'check-material-parity.mjs', reason: 'R6b-L24：MATERIALS 去 none ⇄ 四张 data-material 卡片 ⇄ none 与总开关关闭态等价；内置卡片/枚举/开关三类反样本，判据失真即红' },
+  // T1i-K01（2026-11-20）：D4「每条映射命令都有渲染层调用点」补上代码区对照后迁入。
+  { file: 'check-channel-map.mjs', reason: 'T1i-K01：D4 命中点必须在代码区——needledInCode 与真仓扫描共用同一实现，7 组对照（代码调用算接线 / 前缀碰撞不假命中 / 行尾注释 / 字符串字面量 / 块注释 / 纯注释行 四形态不得顶账 / 代码行+注释仍算接线）' },
   { file: 'check-optimizer-subitem-contract.mjs', runtimeControl: true, expectedControlLines: 6, reason: 'T1f-L05：可自选目标契约已有运行时自检对照；PENDING 迁 REGISTRY 后删掉任一自检块必红' },
 ];
 
@@ -98,7 +100,6 @@ const REGISTRY = [
 // 进不了就先在这里登记并写明为什么暂缺 —— 不登记即红。
 const PENDING_CONTROLS = [
   { name: 'check-appearance-prefs', reason: 'P1-W3 Phase2c/d 新开门禁（A 组换算结构签名 ⇄ B 组卸载页偏好白名单与镜像 ⇄ C 组外观域 11 键表两侧对拍 + 迁移口径四条 + 四处同步落点）：判据本体在真源文件上做文本抽取，**尚无内置合成样本**；破坏走的是文件自带的 `--rust/--js/--api/--settings` 盘外副本开关，2026-10-22 主 agent 合并 C 组后实跑两向均判红并点名对象（改渲染层键名 ⇒ C1 报「只在 Rust [bgPosX] / 只在 JS [bgPosXz]」；删 CHANNEL_MAP 一条 ⇒ C7 红），单元代理侧另有六向破坏记录见 uF4a2m1-report.md。补齐合成样本后迁 REGISTRY' },
-  { name: 'check-channel-map', reason: '对拍型：桥接表 ⇄ Rust 通道集合双向比对，缺「删/添一侧必须红」的合成样本' },
   { name: 'check-guard-tiers', reason: '对拍型：档位表 ⇄ 命令体 guard 调用逐条核对，缺合成样本' },
   // check-layering 已于 2026-10-18 v6 P2 配好判定器自检并迁入 REGISTRY（本表只减不增）。
   // check-fail-closed 已于 2026-10-18 v6 P2 配好 A/B 判定器自检并迁入 REGISTRY（本表只减不增）。
@@ -140,12 +141,28 @@ console.log('=== 正向对照管辖门禁 ===\n');
 const missingSelfTest = [];
 const brokenRun = [];
 const runtimeControlMissing = [];
+const missingPlainControl = [];
+let plainChecked = 0;
 // v5 批次 9（门禁候选 4）：manual: true = 该门禁的对照形态是「人工/真破坏验证」
 // （自检形态不在机检识别集内），显式登记而非静默漏判；机检条目数收口见第 1 组断言。
 const manualEntries = [];
+// plain 分支判据（T1a-K01，2026-11-20）：旧实现把 46 条 plain 直接并入「沿用既有机检/
+// 人工验证」——删掉自检块门禁仍绿，「绿灯」来自登记表而不是对照执行。新判据只认剥注释
+// 文本里**贴着断言调用**的对照词：注释里写一句不算（blankNonCode 已抹注释），登记表
+// reason 里的词附近没有断言调用也不算。
+const CONTROL_WORD_RE = /对照|自检|正向/g;
+const ASSERT_CALL_RE =
+  /(?:^|[^\w.$])(?:check|fail|expect|assert|ok|warn)\s*\(|console\s*\.\s*(?:log|error|warn)\s*\(|g\s*\.\s*(?:ok|fail|warn)\s*\(/;
+const hasControlAssertion = (clean) => {
+  for (const m of clean.matchAll(CONTROL_WORD_RE)) {
+    if (ASSERT_CALL_RE.test(clean.slice(Math.max(0, m.index - 400), m.index + 400))) return true;
+  }
+  return false;
+};
 for (const e of REGISTRY) {
   if (e.manual) {
     manualEntries.push(e.file);
+    console.log(`⚠ 对照属人工/真破坏验证，本条未机检（本门禁未执行该条，不计通过）：${e.file}`);
     continue;
   }
   const p = join(ROOT, 'tools', e.file);
@@ -158,7 +175,8 @@ for (const e of REGISTRY) {
   }
   const clean = blankNonCode(text, 'js', { keepStrings: true });
   if (!e.runtimeControl) {
-    manualEntries.push(e.file);
+    if (hasControlAssertion(clean)) plainChecked++;
+    else missingPlainControl.push(`${e.file}（${e.reason}）—— 剥注释后找不到贴着断言调用的对照行`);
     continue;
   }
   const hasExplicitSelfTest =
@@ -189,9 +207,9 @@ for (const e of REGISTRY) {
   }
 }
 check(
-  missingSelfTest.length === 0,
-  `1. ${REGISTRY.filter((e) => e.runtimeControl && !e.manual).length} 道运行时对照门禁均输出统一前缀 对照:（剥注释后可判）+ ${manualEntries.length} 道沿用既有机检/人工验证`,
-  missingSelfTest.join('；'),
+  missingSelfTest.length === 0 && missingPlainControl.length === 0,
+  `1. ${REGISTRY.filter((e) => e.runtimeControl && !e.manual).length} 道运行时对照门禁均输出统一前缀 对照:（剥注释后可判）+ ${plainChecked} 道 plain 门禁剥注释后可机检到对照断言行`,
+  [...missingSelfTest, ...missingPlainControl].join('；'),
 );
 check(
   runtimeControlMissing.length === 0,

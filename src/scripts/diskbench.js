@@ -479,9 +479,9 @@
                 pathInput.value = home.replace(/\\+$/, '') + '\\Downloads';
               }
             }
-          }).catch(() => {});
+          }).catch((e) => { window.app?.log?.('warn', '探测下载目录失败: ' + ((e && e.message) || e)); });
         }
-      } catch (e) {}
+      } catch (e) { window.app?.log?.('warn', '调用应用信息接口异常，下载目录未预填: ' + ((e && e.message) || e)); }
     };
     detectDownloads();
   }

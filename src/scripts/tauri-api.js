@@ -930,7 +930,7 @@
       firstPaintSent = true;
       // app:first-paint 是 onSafe 的 send 通道、不在 invoke 的 CHANNEL_MAP 内：直连 Rust snake_case 命令，
       // 不兑现会走 Rust 兜底超时。（send/invoke 条数以 node tools/check-channel-map.mjs 现算为准，不写死）
-      invokeCore('app_first_paint').catch(function () {});
+      invokeCore('app_first_paint').catch(function (e) { bridgeLog('warn', '首次绘制上报失败: ' + ((e && e.message) || e)); });
     }
     function arm() {
       requestAnimationFrame(function () { requestAnimationFrame(send); });
@@ -945,7 +945,7 @@
 
   // 自绘 caption 三按钮 + 拖动 + 8 向缩放命中区（D3，Phase 0 实测件）
   // 样式注入遵守 CSP：style-src 已含 'unsafe-inline'；脚本仍全部外链。
-  // Phase 2 定稿后样式迁入 main.css 既有 token、命中区改走选定方案（自绘命中区 vs tao 原生 resize 边框），此处为唯一待替换点。
+  // 尺寸仍为字面值、颜色已 token 化；整块迁移（样式并入 main.css、命中区选型：自绘命中区 vs tao 原生 resize 边框）待 Phase 2 裁定。
 
   var EDGE_SIZE = 6;   // 边缘命中厚度 px
   var CORNER_SIZE = 14; // 角区命中 px

@@ -59,6 +59,12 @@ function parseGroups(o) {
   for (const m of blob.matchAll(/\$(?:disabled|manual|svcs|drv|services|storeSvc|apps|keys|names|paths|tasks)\s*=\s*@\(/g)) {
     marks.push({ at: m.index, kind: 'array' });
   }
+  // T1a-K02（2026-11-20）：tf_ai_off / tf_svc_extra5 用 `foreach ($n in @("A","B"))`
+  // 内联数组 + `sc.exe config $n start= disabled`，旧判据只认 `$xxx = @(...)` 变量数组，
+  // want 塌成空集 ⇒ 侧表对拍空转还打 ✓。这里把 foreach 内联数组也纳入解析。
+  for (const m of blob.matchAll(/foreach\s*\(\s*\$\w+\s+in\s+@\(/g)) {
+    marks.push({ at: m.index, kind: 'array' });
+  }
   for (const m of blob.matchAll(/\$p\d*\s*=\s*"[^"]*Services\\([A-Za-z0-9_.\-]+)"/g)) {
     marks.push({ at: m.index, kind: 'single', name: m[1] });
   }
@@ -70,7 +76,11 @@ function parseGroups(o) {
   };
   for (let i = 0; i < marks.length; i++) {
     const seg = blob.slice(marks[i].at, i + 1 < marks.length ? marks[i + 1].at : blob.length);
-    const v = Number((seg.match(/Start\s+-Value\s+(\d)/) || [])[1]);
+    // `sc.exe config $n start= disabled` ⇒ 期望 4；数字形态优先（New-ItemProperty -Name Start -Value N）
+    const num = (seg.match(/Start\s+-Value\s+(\d)/) || [])[1];
+    const scWord = (seg.match(/\bstart=\s*(disabled|demand|auto)\b/i) || [])[1];
+    const v = num !== undefined ? Number(num)
+      : scWord ? ({ disabled: 4, demand: 3, auto: 2 })[scWord.toLowerCase()] : NaN;
     if (Number.isNaN(v)) continue; // 这段没写 Start ⇒ 不是写入段
     if (marks[i].kind === 'single') { add(v, marks[i].name); continue; }
     const arrBody = (seg.match(/@\(([^)]*)\)/) || [])[1] || '';
@@ -90,14 +100,21 @@ function storeFromRust(src = applyRs) {
 /** 该项 pwsh 全文里有没有「写**服务**启动类型」这种写入（反向：该不该在表里） */
 function writesServiceStart(o) {
   const blob = (o.steps || []).map((s) => s.pwsh || '').join('\n');
-  if (!/New-ItemProperty[^\n]*-Name\s+Start\s+-Value\s+\d/.test(blob)) return false;
-  // 必须同时命中「服务键路径」。两个反例（都真出现过）：
+  // 形态①：注册表写法。必须同时命中「服务键路径」。两个反例（都真出现过）：
   //  · `telemetry_optimize` 的 AutoLogger 段也写 `-Name Start -Value 0`，但落在
   //    `...\Control\WMI\Autologger` 下 —— 那是 ETW 会话配置，**不是服务**。
   //  · `audio_disable_service_restart` 落在 `...\Services\Audiosrv` 下，但写的是
   //    `-Name DelayedAutoStart` —— 是服务键，但**不是启动类型**。
   // 所以口径必须**两条都命中**：有服务键路径，且同一条语句里写的是 `-Name Start`。
-  return /Services\\[A-Za-z0-9_.\-$]+/.test(blob);
+  if (/New-ItemProperty[^\n]*-Name\s+Start\s+-Value\s+\d/i.test(blob) && /Services\\[A-Za-z0-9_.\-$]+/.test(blob)) {
+    return true;
+  }
+  // 形态②③（T1a-K02，2026-11-20）：`sc(.exe) config <服务> start=` 与
+  // `Set-Service ... -StartupType`。旧判据只认形态①，这两类写了启动类型却整项漏检
+  // （现盘 `tf_ai_off` / `tf_svc_extra5` 正是 `sc.exe config $n start= disabled`）。
+  // 两种形态自带服务语义，不再要求 `Services\` 路径锚点。
+  return /\bsc(?:\.exe)?\s+config\s+\S+\s+start=/i.test(blob)
+    || /\bSet-Service\b[^\n]*-StartupType/i.test(blob);
 }
 
 // ==================== 共用纯判据（v6-K20） ====================
@@ -966,6 +983,24 @@ check(
     if (hit !== c.expectHit) findings.push(`${c.name}（期望${c.expectHit ? '报红' : '放行'}，实际${hit ? '红' : '绿'}）`);
   }
 
+  // 第二批：writesServiceStart 形态（T1a-K02，2026-11-20）——旧判据只认注册表
+  // New-ItemProperty，sc.exe config / Set-Service 两类写启动类型的项整体漏检。
+  // 五向都要成立：三种真实写入形态必判「写了」，两种非启动类型写入不得误报。
+  const writeShapeCases = [
+    ['注册表 Services 键写 Start', { steps: [{ pwsh: 'New-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\SvcA" -Name Start -Value 4 -Force' }] }, true],
+    ['AutoLogger 写 Start 不是服务', { steps: [{ pwsh: 'New-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\WMI\\Autologger\\X" -Name Start -Value 0 -Force' }] }, false],
+    ['DelayedAutoStart 不是启动类型', { steps: [{ pwsh: 'New-ItemProperty -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Audiosrv" -Name DelayedAutoStart -Value 0 -Force' }] }, false],
+    ['sc.exe config start=', { steps: [{ pwsh: 'sc.exe config $n start= disabled' }] }, true],
+    ['sc config 不带 .exe 且大写 START=', { steps: [{ pwsh: 'SC CONFIG "SvcB" START= demand' }] }, true],
+    ['Set-Service -StartupType', { steps: [{ pwsh: 'Set-Service -Name SvcC -StartupType Disabled -ErrorAction Stop' }] }, true],
+    ['Set-Service 不带 -StartupType 是查询/其它属性', { steps: [{ pwsh: 'Set-Service -Name SvcD -Description "x"' }] }, false],
+    ['sc query 是只读', { steps: [{ pwsh: 'sc.exe query SvcE' }] }, false],
+  ];
+  for (const [name, sample, want] of writeShapeCases) {
+    const got = writesServiceStart(sample);
+    if (got !== want) findings.push(`写形态自检「${name}」（期望${want ? '判为写启动类型' : '不判为写启动类型'}，实际${got ? '判为写' : '未判为写'}）`);
+  }
+
   // 第二批：A4 / A5（键集白名单 / provenance 覆盖）——同样喂生产判据
   const a4Ctx = { optKeys: OPT_KEYS, stepKeys: STEP_KEYS, required: OPT_REQUIRED };
   const m4Cases = [
@@ -1018,7 +1053,7 @@ check(
     if (got !== want) findings.push(`A7 自检「${name}」判据行为不符预期`);
   }
 
-  const total = bdCases.length + m4Cases.length + a7Cases.length;
+  const total = bdCases.length + writeShapeCases.length + m4Cases.length + a7Cases.length;
   check(findings.length === 0, `G. 正向对照：${total} 条样本喂生产同一份判据（违规必须判红 / 干净样本必须放行）`, findings.join('; '));
 })();
 

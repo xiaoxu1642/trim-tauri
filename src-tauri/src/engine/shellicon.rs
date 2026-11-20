@@ -124,10 +124,6 @@ pub fn guard_icon_source(path: &Path) -> Option<&'static str> {
     {
         return Some("UNC / 远程共享路径不作为图标来源");
     }
-    // R6b-M16：UNC（`\\server\share` / `//server/share` / `\\?\UNC\server\share`）
-    // 必须拒 —— 它让外壳去**另一台机器**取图标，既不是本机路径语义，
-    // 也会把「点一下图标」变成一次网络往返（离线时外壳可能长时间挂住）。
-    // 这一条必须拦在归一化之前：归一化会把 UNC 折成「本机 UNC 形态」而放行。
     let n = crate::engine::protect::normalize_for_compare(&raw);
     if !n.ok {
         return Some("路径形态无法判定（设备路径 / 不可折回命名空间），已拒绝");
@@ -560,7 +556,7 @@ mod tests {
             let got = guard_icon_source(Path::new(h));
             assert!(got.is_some(), "命名空间约束放过了 {h:?}");
         }
-        // R6b-M16：UNC 现在属于**被拒**一类（旧口径把它算合法放行，已被本轮取代）——
+        // R6b-M16 的 UNC 形态现在属于**被拒**一类（旧口径把它算合法放行，已被本轮取代）——
         // 图标请求会去另一台机器取，等于把「点一下图标」变成一次网络往返。
         for unc in [r"\\srv\share\app.dll", r"//srv/share/app.dll"] {
             assert!(

@@ -451,6 +451,13 @@ pub fn read_reg_content(file: &Path) -> Result<RegBackupContent, String> {
         ));
     }
     let bytes = std::fs::read(file).map_err(|e| format!("读取 .reg 失败: {e}"))?;
+    // R6d-M03-01：metadata 与实际读入之间文件可被同用户进程换掉（TOCTOU）——
+    // 读入后按**实际字节数**复核上限，超限按拒（纯收紧；摘要仍按实际字节算）。
+    if !within_reg_file_cap(bytes.len() as u64) {
+        return Err(format!(
+            ".reg 文件超过 {MAX_REG_BACKUP_BYTES} 字节上限，已拒绝读取"
+        ));
+    }
     read_reg_bytes(&bytes)
 }
 
@@ -809,6 +816,29 @@ mod reg_backup_common_tests {
             ADMIN_SEAL_SUBKEY,
             &value_name,
         )
+    }
+
+    /// R6d-M03-01：读盘上限必须在 `fs::read` 之后按实际字节数复核（metadata 与实际
+    /// 读入之间文件可被同用户进程换掉）。破坏自证：删掉 `read_reg_content` 里
+    /// `within_reg_file_cap(bytes.len() as u64)` 的复核 ⇒ 本用例红。
+    #[test]
+    fn 读入后必须按实际字节数复核上限() {
+        let src = include_str!("reg_backup.rs");
+        let fn_at = src.find("pub fn read_reg_content").expect("read_reg_content 必须存在");
+        let body = &src[fn_at..];
+        let read_at = body.find("std::fs::read(file)").expect("read_reg_content 必须先 fs::read");
+        let after_read = &body[read_at..];
+        let end = after_read.find("\n}").unwrap_or(after_read.len());
+        assert_eq!(
+            after_read[..end]
+                .matches("if !within_reg_file_cap(bytes.len() as u64)")
+                .count(),
+            1,
+            "fs::read 之后必须按实际字节数复核 32MiB 上限（R6d-M03-01）"
+        );
+        // 上限判据本身的行为面：等于上限放行、超过即拒
+        assert!(within_reg_file_cap(MAX_REG_BACKUP_BYTES));
+        assert!(!within_reg_file_cap(MAX_REG_BACKUP_BYTES + 1));
     }
 
     /// 缺版本头 / 半截写入 / 根本没有键段：三类形状都必须拒，且回执说清是哪一类

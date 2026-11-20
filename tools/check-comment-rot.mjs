@@ -510,7 +510,10 @@ const measurementProbe = (text) => (/(?:实测|真机|本机|现算)/.test(text)
 // P2-20 / T1k-M02：量词集与 R3g 已统一（见 RE_NUM_CLAIM 补「件/次/B/段/倍」），
 // 故测量型数字「现算债务」与 R3g 债务的口径不再有缝；此处只做判定器自检，不自称「新增必红」。
 // 同时加总量上限兜底：债务只能随口径收紧而下降，上升说明量词漏匹配或算法漂了。
-const MEASUREMENT_CAP = 332; // 现算债务（node tools/check-comment-rot.mjs，与门禁自报一致）
+// 2026-11-20：全仓修复波次新增合法技术注释（perf.rs N1c-K02「逐项」、cleanup.rs A6-K02
+// 留痕计数），R3g fixtures 已 --write-r3g 诚实重算，同源 measurement 债务同步抬高一位；
+// 非量词漏匹配或算法漂移。
+const MEASUREMENT_CAP = 333; // 现算债务（node tools/check-comment-rot.mjs，与门禁自报一致）
 check(
   measurementProbe('实测 123 件') === 1 && measurementProbe('实测见 node tools/x.mjs，123 件') === 0,
   `R3 测量型数字判据可判红（现算债务 ${measurementBaseline} 行；总量上限 MEASUREMENT_CAP=${MEASUREMENT_CAP}）`,

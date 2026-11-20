@@ -25,7 +25,10 @@
   function load() {
     if (introData) return Promise.resolve(introData);
     if (loading) return loading;
-    loading = (async () => {
+    // F3-K01：失败不写缓存也不留 loading。旧写法把空库写进 introData 且 loading 永不复位，
+    // 一次瞬时失败就让本窗口的简介永久为空；现在失败/未命中只给本次调用返回空库，
+    // 下一次 load() 重新读取（成功时 introData 已就位，复位无副作用）。
+    const pending = (async () => {
       try {
         if (window.api?.intro?.load) {
           const resp = await window.api.intro.load();
@@ -35,10 +38,11 @@
           }
         }
       } catch (e) { /* 读取失败时回落为空库，由各模块使用兜底文案 */ }
-      introData = { scopes: {} };
-      return introData;
+      return { scopes: {} };
     })();
-    return loading;
+    loading = pending;
+    pending.finally(() => { if (loading === pending) loading = null; });
+    return pending;
   }
 
   function scopeConfig(scope) {

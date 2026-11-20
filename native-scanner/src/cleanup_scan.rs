@@ -881,7 +881,7 @@ pub fn resolve_rule_path(expr: &str) -> Option<String> {
 // ==================== %ENV% 展开（对齐 Expand-EnvPath） ====================
 
 /// 盘符相对路径判定（2026-10-04 审计 §4.10）：以**单个** `\` 或 `/` 开头、且不是
-/// UNC / verbatim 设备前缀（`\\` 开头）的形态。
+/// UNC / verbatim 设备前缀（`\\` 或 `//` 开头）的形态。
 ///
 /// 为什么需要单一判据：Windows 把 `\Foo` 按「当前盘的根」解析（PS Get-ChildItem
 /// 同语义），而 Rust `Path::is_absolute` 对它判 false（无 prefix）⇒ 保护侧
@@ -896,13 +896,15 @@ pub fn is_drive_relative(p: &str) -> bool {
     if b.is_empty() {
         return false; // 空串由调用方各自的空值分支处理
     }
-    // 真正的绝对形态：盘符根（`X:\…`）或 UNC（`\\…`）—— 不属于盘符相对
+    // 真正的绝对形态：盘符根（`X:\…`）或 UNC（`\\…` / `//…`）—— 不属于盘符相对。
+    // N1a-K01：正斜杠 UNC 与反斜杠 UNC 是同一个共享根形态（`is_unc_glob` 早已两样都认）；
+    // 白名单只认 `\\` 会把 `//server/share` 落到下面的单斜杠分支误判成「盘符相对」拒绝。
     let drive_root = b.len() >= 3 && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/');
-    let unc = b.len() >= 2 && b[0] == b'\\' && b[1] == b'\\';
+    let unc = b.len() >= 2 && (b[0] == b'\\' || b[0] == b'/') && b[1] == b[0];
     if drive_root || unc {
         return false;
     }
-    // 前导单 `\` / `/`：当前盘根相对形态（既有判据；`\\` 开头已在上面归 UNC）
+    // 前导单 `\` / `/`：当前盘根相对形态（既有判据；`\\` / `//` 开头已在上面归 UNC）
     if b[0] == b'\\' || b[0] == b'/' {
         return true;
     }
@@ -2261,6 +2263,16 @@ fn checklocked_body(input: &str, cancel: Option<&AtomicBool>) -> i32 {
             skipped += 1;
             continue;
         }
+        // N1a-K03：id 是 @@LOCKED@@ 行回主进程对账计划清单的键 —— 缺失/非字符串视为畸形，
+        // 与缺 path 同形态进 skipped + 留痕。旧写法 `unwrap_or("")` 把缺失静默降级成空串。
+        // **空串本身合法**：`cleanup_query_locked`（占用查询卡）刻意传 id=""（见 scan_execute.rs
+        // 的 query_files_entries：query 域不参与 lockedByItem 记账），若把空串一并拒绝会让
+        // 占用查询恒空（真机探针 cleanup_query_locked_probe_names_locking_process 抓到）。
+        let Some(id) = f.get("id").and_then(|v| v.as_str()) else {
+            skipped += 1;
+            err_line("[cleanup-scan] [DIAG] stage=checklocked mutation=skip 占用检测输入项缺 id，已跳过");
+            continue;
+        };
         scanned += 1;
         // 目录跳过：目录本就无法以独占读打开（属正常），计划清单理论上只含文件，此处双保险
         if Path::new(path).metadata().map(|m| m.is_dir()).unwrap_or(false) {
@@ -2280,7 +2292,6 @@ fn checklocked_body(input: &str, cancel: Option<&AtomicBool>) -> i32 {
             rm_timed_out = true;
             break;
         }
-        let id = f.get("id").and_then(|v| v.as_str()).unwrap_or("");
         // procs 携带 PID：主进程 kill 白名单（仅非 critical）来源；RM 对同一进程重复返回，主进程按 pid 去重
         let procs_json = procs
             .iter()
@@ -3937,12 +3948,10 @@ fn scan_body(argv: &[String], input: &str, cancel: Option<&AtomicBool>) -> i32 {
         // 「当前盘」是 CWD 的偶然属性，不是规则作者的决定。
         // N1a-L01：拒绝形状收编进 [`reject_drive_relative`]，与设置页覆盖值共用同一道闸。
         // P1-01a：主分支也走统一留痕出口（只留痕，方向仍少报不扩大删除面）。
+        // N1a-K02：留痕只走 `report_unexpanded_token` 一处 —— 这里原有一份逐字重复的
+        // err_line，一次未解析会打出两条，按行计数的机检把未解析项数放大一倍。
+        // 回执字段仍由下面的 `unexpanded_token_field` 独立取值。
         report_unexpanded_token("pathPs", cat_id, &evaluated);
-        if let Some(token) = unexpanded_token_field(&evaluated) {
-            err_line(&format!(
-                "[cleanup-scan] 规则 {cat_id} pathPs 路径变量 {token} 未解析，该字段按展开后原文处理"
-            ));
-        }
         if reject_drive_relative("pathPs", cat_id, &evaluated) {
             continue;
         }
@@ -4197,6 +4206,7 @@ mod tests {
     }
 
     /// N1a-U01：UNC 通配必须显式拒绝（留诊断），非通配 UNC 不许被同一条守卫误伤。
+    /// N1a-K01：正斜杠 UNC 与非通配形态同样不被盘符相对闸误拒。
     #[test]
     fn unc_glob_is_rejected_without_touching_plain_unc() {
         assert!(is_unc_glob(r"\\nas\share\*"));
@@ -4204,6 +4214,8 @@ mod tests {
         assert!(!is_unc_glob(r"\\nas\share\folder"));
         assert!(!is_unc_glob(r"\Foo\*"));
         assert!(!is_unc_glob(r"C:\Foo\*"));
+        assert!(!is_drive_relative("//nas/share/folder"), "正斜杠 UNC 不是盘符相对");
+        assert!(!is_drive_relative(r"\\nas\share\folder"), "反斜杠 UNC 不是盘符相对");
 
         let Some(name) = drive_root_dir_with_subdir() else {
             // 不用 eprintln：本文件的「诊断只走 err_line」门禁把测试代码也算语料。
@@ -5632,6 +5644,7 @@ mod n1a_m11_tests {
         assert!(idr(r"\Foo"), "当前盘根相对形态（既有判据）");
         assert!(!idr(r"C:\Foo"), "盘符根放行");
         assert!(!idr(r"\\server\share"), "UNC 放行");
+        assert!(!idr("//server/share"), "正斜杠 UNC 放行（N1a-K01）");
         assert!(!idr(r"\\?\C:\Foo"), "verbatim 前缀放行（另行 fail-closed）");
         assert!(!idr(""), "空串由调用方空值分支处理");
     }
@@ -5655,6 +5668,19 @@ mod n1a_m09_tests {
             "畸形输入项必须进 skipped 计数: {out}"
         );
         assert!(out.contains("@@LOCKED_DONE@@"));
+    }
+
+    /// N1a-K03：缺 id 的输入项必须与缺 path 同形态 —— 进 skipped 计数并留痕。
+    /// 判红自证：恢复 `unwrap_or("")` 静默降级，两条断言都红。
+    #[test]
+    fn 占用检测缺id必须留痕并计入skipped() {
+        let input = r#"{"files":[{"path":"Z:\\TrimMissingProbe\\b.log"}]}"#;
+        let (_code, out, err) = capture(None, || checklocked_body(&input, None));
+        assert!(
+            out.contains(concat!("\"skipped\":", "1")),
+            "缺 id 项必须进 skipped 计数: {out}"
+        );
+        assert!(err.contains("占用检测输入项缺 id"), "缺 id 项必须留痕: {err}");
     }
 
     /// N1a-M09 回归钉：六族站点的畸形输入必须 REPORTED（err_line 留痕在场）。
@@ -5873,7 +5899,9 @@ mod n1a_g6_l_tests {
     }
 
     /// P1-01a：pathPs 主分支的 `%VAR%` 必须同时落 stderr 与回执字段。
-    /// 判红自证：删掉 `unexpanded_token_field` 接线或回执字段，本用例红。
+    /// N1a-K02：同一未解析 token 只许留一条 stderr（configured 与 pathPs 各一条，互不重复）。
+    /// 判红自证：删掉 `unexpanded_token_field` 接线或回执字段，本用例红；
+    /// 恢复 pathPs 分支的重复 err_line，第二条断言红（计数 2）。
     #[test]
     fn pathps_unexpanded_token_is_reported() {
         let cfg = r#"{"tok":"C:\\TrimNoSuchRootP101A\\%TRIM_P1_01A_NO_SUCH_VAR%x"}"#;
@@ -5882,6 +5910,20 @@ mod n1a_g6_l_tests {
         assert_eq!(code, 0, "{err}");
         assert!(err.contains("规则 tok configured 路径变量 %TRIM_P1_01A_NO_SUCH_VAR% 未解析"), "主分支留痕缺失: {err}");
         let item = item_by_id(&out, "tok").expect("pathPs 条目必须出现");
+        assert!(item.contains("\"unexpandedToken\":\"%TRIM_P1_01A_NO_SUCH_VAR%\""), "回执未带 token: {item}");
+
+        // pathPs 主分支：不带 configured 覆盖值，「未解析」留痕只许一条
+        // （路径回显的 DIAG 行也含 token，按留痕句判而非按 token 计数）。
+        // detect 必须给一个必然存在的路径，否则整条规则在安装检测闸就被跳过。
+        let rules = r#"{"groups":[{"items":[{"id":"tok2","name":"token","pathPs":"'C:\\Windows\\%TRIM_P1_01A_NO_SUCH_VAR%'","detect":[{"path":"C:\\Windows"}]}]}]}"#;
+        let (code, out, err) = run_json(&[r#"["tok2"]"#.into(), "{}".into(), String::new()], rules, None, None);
+        assert_eq!(code, 0, "{err}");
+        assert_eq!(
+            err.matches("未解析，该字段按展开后原文处理").count(),
+            1,
+            "同一未解析 token 只许一条留痕（N1a-K02）: {err}"
+        );
+        let item = item_by_id(&out, "tok2").expect("pathPs 条目必须出现");
         assert!(item.contains("\"unexpandedToken\":\"%TRIM_P1_01A_NO_SUCH_VAR%\""), "回执未带 token: {item}");
     }
 

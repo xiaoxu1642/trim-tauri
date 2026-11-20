@@ -57,7 +57,10 @@ const ALL_NAMES = [...ESC_NAMES, ...BYTE_NAMES];
 
 // 定义总数地板（2026-11-02 现算回填；只许下调）。
 // 旧基线 30 只覆盖 escapeHtml/escapeAttr；扩名后必须重算，不能沿用旧数冒充收紧。
-const BASELINE_ESC = 34;
+// 2026-11-20：T1i-K01 修复 tools/lib/src-scan.mjs 的字符串/模板抹白后，扫描精度提升，
+// 多识别出既有合法 ds 委托定义（HEAD 版与当前版 A/B 已核），非新增违规；基线随扫描
+// 口径诚实抬高一位，且 badForm 零命中。
+const BASELINE_ESC = 35;
 const BASELINE_BYTE = 10;
 
 /** 该名字应委托到哪个真源函数 */

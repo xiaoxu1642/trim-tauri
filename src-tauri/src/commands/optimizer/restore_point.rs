@@ -395,6 +395,22 @@ fn fail_with_recycle(base: &str, rec: Result<String, FreqRestoreError>) -> Value
     json!({ "success": false, "message": format!("{base}{tail}") })
 }
 
+/// R3-K03：创建成功后的回执——频率覆写回收失败必须参与结论：`verify` 降为 `partial`
+/// 并显式带 `recycleFailed: true`，不能绿色成功却把 24h 限制解除失败藏在文案里。
+/// `success` 保持 true（创建本身成功；改 false 会让前端把整项当失败并重复建点）。
+fn restore_point_success_receipt(
+    verify: &'static str,
+    message: String,
+    recycle_failed: bool,
+) -> Value {
+    let verify = if recycle_failed { "partial" } else { verify };
+    let mut out = json!({ "success": true, "message": message, "verify": verify });
+    if recycle_failed {
+        out["recycleFailed"] = json!(true);
+    }
+    out
+}
+
 pub(super) fn create_restore_inner() -> Value {
     // R3-M02（v7.2 C04，AGENTS §3）：创建还原点是系统级动作（还可能先写频率覆写值），
     // 动手前把日志强制落盘，防尾部日志丢失。
@@ -561,14 +577,22 @@ Write-Output \"@@DONE@@\"";
     let note = ledger_note("转正", opt_state::mark_applied("tf_restore_point", verify));
     // 无论成败都回收频率覆写值（D2）：成功也要收 —— 别把「解除 24h 限制」留在机器上。
     let rec = recycle_freq_override();
+    let mut recycle_failed = false;
     let tail = match rec {
         Ok(d) => format!("；创建频率覆写已还原（{d}）"),
-        Err(e) => format!(
-            "；但创建频率覆写值回收失败（{e}），请打开「系统还原点」弹窗点「恢复默认创建频率」手动回收"
-        ),
+        Err(e) => {
+            recycle_failed = true;
+            format!(
+                "；但创建频率覆写值回收失败（{e}），请打开「系统还原点」弹窗点「恢复默认创建频率」手动回收"
+            )
+        }
     };
-    log::write_log("info", &format!("已创建系统还原点 ({btxt} -> {atxt}) verify={verify}{tail}"));
-    json!({ "success": true, "message": format!("{msg}{tail}{note}"), "verify": verify })
+    let receipt_verify = if recycle_failed { "partial" } else { verify };
+    log::write_log(
+        "info",
+        &format!("已创建系统还原点 ({btxt} -> {atxt}) verify={receipt_verify}{tail}"),
+    );
+    restore_point_success_receipt(verify, format!("{msg}{tail}{note}"), recycle_failed)
 }
 
 /// 还原点预检的分级判据（纯函数，可测）。
@@ -801,3 +825,22 @@ pub async fn optimizer_restore_frequency<R: Runtime>(window: WebviewWindow<R>) -
     }
 }
 
+#[cfg(test)]
+mod restore_receipt_tests {
+    use super::*;
+
+    /// R3-K03：频率覆写回收失败必须参与结论。破坏自证：删掉
+    /// `restore_point_success_receipt` 里的 verify 降级 ⇒ 第一条断言红；
+    /// 若把 success 一并改 false ⇒ success 断言红（前端会据此重复建点）。
+    #[test]
+    fn 频率覆写回收失败必须降为_partial_并标记() {
+        let failed = restore_point_success_receipt("pass", "已创建系统还原点".into(), true);
+        assert_eq!(failed["success"], json!(true), "创建本身成功，success 不得改 false");
+        assert_eq!(failed["verify"], json!("partial"), "回收失败必须降为 partial");
+        assert_eq!(failed["recycleFailed"], json!(true), "必须显式带 recycleFailed");
+
+        let ok = restore_point_success_receipt("pass", "已创建系统还原点".into(), false);
+        assert_eq!(ok["verify"], json!("pass"), "回收成功保持原 verify");
+        assert!(ok.get("recycleFailed").is_none(), "回收成功不得带 recycleFailed");
+    }
+}

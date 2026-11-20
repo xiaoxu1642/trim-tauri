@@ -4,8 +4,8 @@
 //!   commands::runtimes::runtimes_collect,
 //!   commands::runtimes::runtimes_install,
 //!
-//! 实现体来源：main.js 7500-7704（runRuntimesCollect / downloadRedist / runtimes:install），
-//! 安装包元数据取自 src/scripts-powershell/runtimes-scripts.js 的 INSTALLERS 白名单。
+//! 实现体来源：上游 main.js 7500-7704（runRuntimesCollect / downloadRedist / runtimes:install），
+//! 安装包元数据由本文件的 `INSTALLERS` 常量持有，是运行期唯一真源。
 //!
 //! 安全三闸门（方案 §5，逐条复刻 main.js）：
 //!   ① 来源白名单：URL 初始主机 + **重定向终点主机**都必须在 REDIST_HOST_WHITELIST 内；
@@ -47,7 +47,7 @@ fn redist_cache_dir() -> PathBuf {
     paths::app_data_dir().join("redist")
 }
 
-/// 安装包元数据（url/sha256/bytes 与 runtimes-scripts.js INSTALLERS 同源，改包必须同步）。
+/// 安装包元数据（url/sha256/bytes）：运行期唯一真源，改包只动此处。
 /// 注：包名（name）已烘焙进外置 PS 修复脚本（如「正在安装 VC++ 2015-2022 x64…」），
 /// 故此处不再重复持有。
 struct Installer {

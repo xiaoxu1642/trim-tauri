@@ -208,8 +208,8 @@ const RAW_EXEMPT = [
   },
   {
     file: 'src-tauri/src/engine/testcmd.rs',
-    anchor: 'let listing = Command::new("tasklist")',
-    reason: 'A14（X1-L01）超时后「不留孤儿」自证的观测端：查 ping.exe 是否还在（只读观测，非生产执行面）',
+    anchor: 'let mut probe = Command::new("tasklist")',
+    reason: 'A14（X1-L01）超时后「不留孤儿」自证的观测端：查 ping.exe 是否还在（只读观测，非生产执行面；A5-K02 改 run_test_cmd 超时包装后变量 listing→probe，锚点随代码更新）',
   },
   {
     file: 'src-tauri/src/commands/gameclean.rs',

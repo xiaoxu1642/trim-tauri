@@ -99,9 +99,12 @@
   // 「表头与数据行共用同一组宽度」是 buildLayout 的列对齐不变量：已在场的行带着渲染当时写死的 px，
   // 只刷表头会让行留在旧宽（拖完即错位，再渲染才自愈）。行单元格带 data-cell（cleanup.js 渲染，
   // 与表头 data-col 同 key 同源，check-html-contract 锚定），两侧同步刷。
-  function applyColWidth(key, w) {
+  // nodes 缺省时按 key 查全文档（键盘步进走这条）；拖拽路径传入 mousedown 时查好的命中节点，
+  // rAF flush 只遍历写、不再每帧扫描全文档（F5-K04）。
+  function applyColWidth(key, w, nodes) {
     colWidths[key] = w;
-    document.querySelectorAll(`.xtable-th[data-col="${key}"], .xtable-td[data-cell="${key}"]`).forEach(o => {
+    const targets = nodes || document.querySelectorAll(`.xtable-th[data-col="${key}"], .xtable-td[data-cell="${key}"]`);
+    targets.forEach(o => {
       o.style.width = w + 'px';
       o.style.flex = '0 0 auto';
     });
@@ -186,11 +189,17 @@
         const startW = th.getBoundingClientRect().width;
         // F5-L17：拖拽期间不合帧的话，每个 mousemove 都要整文档查一次表并逐节点写宽 ——
         // 事件率由鼠标回报率决定（高回报率设备即每秒上千次查询+写）。这里只记待写宽度，rAF 里落一次。
+        // F5-K04：命中节点在 mousedown 时查一次并缓存（查询范围与旧路径相同：全文档），
+        // rAF flush 只遍历写、不再每帧扫描全文档。
+        const colNodes = () => document.querySelectorAll(`.xtable-th[data-col="${key}"], .xtable-td[data-cell="${key}"]`);
+        let cachedNodes = colNodes();
         let pendingW = 0, raf = 0;
         const flush = () => {
           raf = 0;
           if (!pendingW) return;
-          applyColWidth(key, pendingW);
+          // 表头被重渲染掉时缓存节点已脱链，重新查一次再写（写脱链节点对画面无效果）
+          if (!th.isConnected) cachedNodes = colNodes();
+          applyColWidth(key, pendingW, cachedNodes);
           syncValue(pendingW);
           pendingW = 0;
         };

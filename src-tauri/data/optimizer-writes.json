@@ -3,6 +3,30 @@
   "_rule": "groups[] 按「期望 Start 值」分组，**不按 steps 切分** —— tf_svc_bulk 只有一步 pwsh，里面却有三段不同期望值的写入（基础 65 个 Start=4 禁用 + wuauserv Start=3 手动 + lfsvc 在基础数组里）。按「一项一个 expectStart」建模会把后两段判成错值，这是门禁 check-optimizer-write-contract.mjs 第一次跑就抓到的。每组的 services 是该期望值下的服务名全集，机械提取自 pwsh 文本的 `$xxx = @(...)` 数组与 `Services\\<名>` 键路径。storeServices 单独列出是因为它们由 apply.rs 的 svc_bulk_append_store **条件追加**（RunParams.includeStore，用户弹窗确认过才执行）—— 混进 groups 会让没勾商店的用户永远判「未生效」。  wuauserv 出现在两个 groups 里：基础段 Start=3（手动，保持 Windows Update 可用）+ 商店段 Start=4（禁用，仅 includeStore 时追加）。**检测侧按「未追加商店段」判3** —— 追加与否不在检测能力内（见 overview.rs 的注释）。  regWrites[] 每条都对着 pwsh 原文人工核实过（不是按记忆写的），门禁 check-optimizer-write-contract.mjs 的 A2 组会逐条对拍键/值/类型。  enum 的集合必须机械来自 apply.rs 的 MEMORY_KB + MEMORY_KB_DEFAULT，timeWindow 的两端键名必须与 wu_pause_steps 里 pwsh 写的键名逐字一致；两条都由 tools/check-optimizer-write-contract.mjs 的 A3 组对拍。",
   "schemaVer": 1,
   "items": {
+    "tf_ai_off": {
+      "groups": [
+        {
+          "expectStart": 4,
+          "services": [
+            "AgentRuntimeService",
+            "AgentActivationRuntimeService"
+          ]
+        }
+      ]
+    },
+    "tf_svc_extra5": {
+      "groups": [
+        {
+          "expectStart": 4,
+          "services": [
+            "SensrSvc",
+            "SensorDataService",
+            "StorSvc",
+            "PcaSvc"
+          ]
+        }
+      ]
+    },
     "tf_svc_bulk": {
       "groups": [
         {

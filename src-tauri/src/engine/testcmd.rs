@@ -183,18 +183,22 @@ mod tests {
         assert!(r.is_err(), "该命令必须超时");
         // 给 Job 收树留一点余量再查：孤儿进程若还在，tasklist 能查到 ping.exe。
         std::thread::sleep(Duration::from_millis(500));
-        let listing = Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq ping.exe", "/NH"])
-            .output();
-        if let Ok(listing) = listing {
-            let text = String::from_utf8_lossy(&listing.stdout);
-            // 本机可能本来就有别的 ping 在跑；只看数量级是否暴增（判据宽松但不假绿：
-            // 真正验的是「收树前有、收树后没有」）。
-            let count = text.matches("ping.exe").count();
-            assert!(
-                count <= 2,
-                "超时后疑似留下孤儿 ping.exe（{count} 个）：{text}"
-            );
+        // A5-K02：探针本身也走 `run_test_cmd` 的超时 + 收树纪律——裸 `.output()`
+        // 在异常系统状态下会挂住整轮测试；探针超时则显式声明未验证，不伪装通过。
+        let mut probe = Command::new("tasklist");
+        probe.args(["/FI", "IMAGENAME eq ping.exe", "/NH"]);
+        match run_test_cmd(&mut probe, Duration::from_secs(10)) {
+            Ok(listing) => {
+                let text = String::from_utf8_lossy(&listing.stdout);
+                // 本机可能本来就有别的 ping 在跑；只看数量级是否暴增（判据宽松但不假绿：
+                // 真正验的是「收树前有、收树后没有」）。
+                let count = text.matches("ping.exe").count();
+                assert!(
+                    count <= 2,
+                    "超时后疑似留下孤儿 ping.exe（{count} 个）：{text}"
+                );
+            }
+            Err(e) => eprintln!("SKIP: tasklist 探针未完成（{e}），孤儿进程数未验证"),
         }
     }
 }

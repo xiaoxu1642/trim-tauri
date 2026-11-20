@@ -124,14 +124,37 @@ pub(super) fn capability_findings(
         }));
     }
     if undecodable > 0 {
-        notes.push(format!("{undecodable} 条授权值名解不出可执行文件路径，本轮不判（这棵树里混着多种非路径格式）"));
+        notes.push(format!(
+            "根 {hive_label}\\{subkey} 有 {undecodable} 条授权值名解不出可执行文件路径，本轮不判（这棵树里混着多种非路径格式）"
+        ));
     }
     if unreadable > 0 {
         notes.push(format!(
-            "{unreadable} 条授权条目的落点读不到元数据（ACL/IO/离线盘），按「无法判断」不判"
+            "根 {hive_label}\\{subkey} 有 {unreadable} 条授权条目的落点读不到元数据（ACL/IO/离线盘），按「无法判断」不判"
         ));
     }
     (out, undecodable, notes)
+}
+
+/// 三根采集结果 → 最终注记集（纯函数，单测可造三根样本）。
+///
+/// R2b-M06-2：此前「解不出」有**内外两份注记** —— 内层按根一条、聚合条一条总数，
+/// 两份措辞不同 ⇒ 去重不生效，用户读到两个数字却无从判断哪个是总数。
+/// 现在只留按根的内层注记（根标识在文案里），不再另起聚合条。
+fn merge_capability_notes(readable_roots: usize, root_notes: &[Vec<String>]) -> Vec<String> {
+    let mut notes: Vec<String> = Vec::new();
+    for inner in root_notes {
+        // 三根共用一份注集，同措辞去重（合并后仍各算一次，不会把一个上限报成三条）
+        for n in inner {
+            if !notes.contains(n) {
+                notes.push(n.clone());
+            }
+        }
+    }
+    if readable_roots == 0 {
+        notes.push(format!("能力授权树读不到（{CONSENT_SUBKEY} 三处根都打不开，或本机 Windows 版本没有这棵树），本组未采集"));
+    }
+    notes
 }
 
 /// 采集：逐根读值名并判落点。返回 (候选, notes)。
@@ -140,10 +163,9 @@ pub(super) fn capability_findings(
 /// 不把「没读到」渲染成「本机无残留」。
 pub(super) unsafe fn collect_capability_findings() -> (Vec<Value>, Vec<String>) {
     use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RegCloseKey};
-    let mut notes = Vec::new();
     let mut all: Vec<Value> = Vec::new();
     let mut readable_roots = 0usize;
-    let mut total_undecodable = 0usize;
+    let mut root_notes: Vec<Vec<String>> = Vec::new();
     for (label, hive, sub) in [
         ("HKLM", HKEY_LOCAL_MACHINE, CONSENT_SUBKEY.to_string()),
         ("HKLM", HKEY_LOCAL_MACHINE, CONSENT_SUBKEY_WOW6432.to_string()),
@@ -156,32 +178,25 @@ pub(super) unsafe fn collect_capability_findings() -> (Vec<Value>, Vec<String>) 
         let _ = RegCloseKey(hk);
         let names: Vec<String> = names.into_iter().take(CONSENT_VALUE_CAP).collect();
         readable_roots += 1;
+        let mut inner: Vec<String> = Vec::new();
         if truncated {
-            notes.push(format!("根 {sub} 的值名数达到枚举上限 {CONSENT_VALUE_CAP}，本轮只判前 {CONSENT_VALUE_CAP} 条（本组结果不完整）"));
+            inner.push(format!("根 {sub} 的值名数达到枚举上限 {CONSENT_VALUE_CAP}，本轮只判前 {CONSENT_VALUE_CAP} 条（本组结果不完整）"));
         }
         if all.len() >= CAPABILITY_FINDING_CAP {
             // R2b-L03：全局额度已用尽 —— 本根整批不采，但必须留痕，
             // 否则用户读到的是「前面几根的 80 条就是全部残留」。
-            notes.push(format!("能力授权候选已达全局上限 {CAPABILITY_FINDING_CAP} 条，根 {sub} 本轮未纳入采集（本组结果不完整）"));
+            inner.push(format!("能力授权候选已达全局上限 {CAPABILITY_FINDING_CAP} 条，根 {sub} 本轮未纳入采集（本组结果不完整）"));
+            root_notes.push(inner);
             continue;
         }
-        let (items, undec, inner_notes) =
+        let (items, _undec, inner_notes) =
             capability_findings(label, &sub, &names, &|p: &str| classify_landing(std::fs::symlink_metadata(p)), CAPABILITY_FINDING_CAP.saturating_sub(all.len()));
-        total_undecodable += undec;
         // R2b-L03：内层 notes 此前被 `_n` 丢掉 ⇒ 截断只发生在采集侧、渲染层看不见。
-        // 三根共用一份注集，同措辞去重（合并后仍各算一次，不会把一个上限报成三条）
-        for n in inner_notes {
-            if !notes.contains(&n) {
-                notes.push(n);
-            }
-        }
+        inner.extend(inner_notes);
+        root_notes.push(inner);
         all.extend(items);
     }
-    if readable_roots == 0 {
-        notes.push(format!("能力授权树读不到（{CONSENT_SUBKEY} 三处根都打不开，或本机 Windows 版本没有这棵树），本组未采集"));
-    } else if total_undecodable > 0 {
-        notes.push(format!("{total_undecodable} 条能力授权值名解不出可执行文件路径，本轮不判"));
-    }
+    let mut notes = merge_capability_notes(readable_roots, &root_notes);
     if all.is_empty() && readable_roots > 0 {
         notes.push("能力授权树读到过，但没有落点已失踪的条目".to_string());
     }
@@ -296,5 +311,57 @@ mod tests {
             matches!(super::super::run_keys::reg_value_gate(run_t), super::super::run_keys::RegValueGate::Allowed),
             "Run 根的具名值应放行（正对照失效说明判据被整体改坏）"
         );
+    }
+
+    /// R2b-M06-2：三根各有「解不出」的注记必须**各一条、数字各归各根**，
+    /// 不得再叠一条措辞不同的聚合条（旧写法两个数字并存，用户判不出哪个是总数）。
+    #[test]
+    fn undecodable_notes_are_per_root_and_carry_their_own_count() {
+        let roots = [
+            ("HKLM", CONSENT_SUBKEY.to_string(), 1usize),
+            ("HKLM", CONSENT_SUBKEY_WOW6432.to_string(), 2),
+            ("HKCU", CONSENT_SUBKEY.to_string(), 3),
+        ];
+        let mut root_notes = Vec::new();
+        for (label, sub, bad) in roots.iter() {
+            let names: Vec<String> = (0..*bad).map(|_| "NotAPath#cap".to_string()).collect();
+            let (_out, undec, notes) =
+                capability_findings(*label, sub.as_str(), &names, &|_: &str| LandingState::Missing, 80);
+            assert_eq!(undec, *bad);
+            root_notes.push(notes);
+        }
+        let merged = merge_capability_notes(3, &root_notes);
+        let undec_notes: Vec<&String> = merged
+            .iter()
+            .filter(|n| n.contains("解不出可执行文件路径"))
+            .collect();
+        assert_eq!(undec_notes.len(), 3, "三根各一条，不得叠聚合条或被去重合并: {merged:?}");
+        for (i, (label, sub, bad)) in roots.iter().enumerate() {
+            assert!(
+                undec_notes[i].contains(&format!("{bad} 条")),
+                "第 {i} 根的数字必须是自己那根的: {merged:?}"
+            );
+            assert!(
+                undec_notes[i].contains(&format!("根 {label}\\{sub}")),
+                "第 {i} 根必须点名自己的根（否则同数不同根会撞成一条）: {merged:?}"
+            );
+        }
+    }
+
+    /// R2b-M06-2 的另一半：两根解不出的条数**相同**时，文案若不带根标识，
+    /// 合并时会被同措辞去重吃掉一条 ⇒ 用户少看到一个根的痕迹。
+    #[test]
+    fn same_count_in_two_roots_survives_dedup() {
+        let names = vec!["NotAPath#cap".to_string()];
+        let (_, _, a) =
+            capability_findings("HKLM", CONSENT_SUBKEY, &names, &|_: &str| LandingState::Missing, 80);
+        let (_, _, b) =
+            capability_findings("HKCU", CONSENT_SUBKEY, &names, &|_: &str| LandingState::Missing, 80);
+        let merged = merge_capability_notes(2, &[a, b]);
+        let n = merged
+            .iter()
+            .filter(|x| x.contains("解不出可执行文件路径"))
+            .count();
+        assert_eq!(n, 2, "同数不同根不得被去重吃掉: {merged:?}");
     }
 }

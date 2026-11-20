@@ -127,7 +127,11 @@ export function blankNonCode(
       let j = i + 1;
       while (j < n) {
         if (text[j] === '\\') { j += 2; continue; }
-        if (text[j] === '${') { const inner = skipBraces(text, j + 1); j = inner; continue; }
+        // 2026-11-20（T1i-K01 施工时发现）：旧写法 `text[j] === '${'` 拿**单字符**与两字符
+        // 串比，恒为假 ⇒ 插值从来没被跳过。插值里出现嵌套模板或 `/` 时外层模板提前收口，
+        // 后续文本整片错位（uninstall.js 曾有 2.2KB 真实代码被当成模板抹掉，D4 据此误报
+        // 13 条孤儿通道）。改用 startsWith 后插值按花括号配平跳过。
+        if (text.startsWith('${', j)) { const inner = skipBraces(text, j + 1); j = inner; continue; }
         if (text[j] === '`') { j++; break; }
         j++;
       }

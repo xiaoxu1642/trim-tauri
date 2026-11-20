@@ -1,5 +1,5 @@
 {
-  "_comment": "隐私自护面板侧表（2026-10-11 用户拍板，WinUtil 借鉴方案 V3）。entryId 驱动主窗入口卡；sections 驱动面板渲染；hiddenFromOptimizer 从优化中心主列表隐藏全部 21 个 id（面板与主列表互斥展示，移动不是复制）。tf_defender 的生效态由 overview.rs::special_item_verdict 特判（WinDefend 服务不存在=已卸载/Start=4=已禁用 均算已禁用），statusLabels 让面板把该项生效标显示为「已禁用」而不是通用的「已优化」。与 optimizer-nara-panel.json 同形、同签名流程（内联 _sig）。",
+  "_comment": "隐私自护面板侧表（2026-10-11 用户拍板，WinUtil 借鉴方案 V3）。entryId 驱动主窗入口卡；sections 驱动面板渲染；hiddenFromOptimizer 从优化中心主列表隐藏它列出的那些 id（面板与主列表互斥展示，移动不是复制）。tf_defender 的生效态由 overview.rs::special_item_verdict 特判（WinDefend 服务不存在=已卸载/Start=4=已禁用 均算已禁用），statusLabels 让面板把该项生效标显示为「已禁用」而不是通用的「已优化」。与 optimizer-nara-panel.json 同形、同签名流程（内联 _sig）。",
   "schemaVer": 1,
   "entryId": "privacy_shield",
   "sections": [
@@ -79,6 +79,6 @@
   },
   "_sig": {
     "alg": "ed25519",
-    "sig": "B/e6t7Ru5fdJOvO3skXj4IBpbRltfBUZKcqQhbUSgQYvS6zHfapRJJaGNqOA8U+srzffoG/mZwumVIDz6b7rAQ=="
+    "sig": "ls8qQBH/pPewR3uJ3tcCmbgTAGfbnd1WjOKJ0Dy5t2spLXoOSDLO5bpZwsgTN1t/g9ucL//WZ/ggXGLpdhZCBA=="
   }
 }

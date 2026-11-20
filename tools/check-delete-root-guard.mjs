@@ -48,6 +48,20 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(ROOT, 'src-tauri', 'src');
 const NATIVE = join(ROOT, 'native-scanner', 'src');
 const GUARD = 'inspect_root(';
+// T1e-K01：守卫必须是**接收者绑定**——真值来自 inspect_root 的结果本身，不许两个独立
+// 子串共存就算判过。两种真实形态都认：① 直接链式 `inspect_root(…).is_trusted()`；
+// ② 绑定后读结果 `let verdict = inspect_root(…); … verdict.is_trusted()`（现盘主流写法）。
+// `let _ = inspect_root(…)` 是丢弃结果，不算读；E1/E3 两条假绿形态见 CONTROLS C15/C16。
+const GUARD_CHAIN = /inspect_root\s*\([^;{}]*\)\s*(?:\?\.)?\.is_trusted\s*\(/;
+function hasRootGuard(body) {
+  if (GUARD_CHAIN.test(body)) return true;
+  for (const m of body.matchAll(/\blet\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*[^;]*inspect_root\s*\(/g)) {
+    const name = m[1];
+    if (name === '_') continue; // 丢弃结果
+    if (new RegExp(`\\b${name}\\s*(?:\\?\\.)?\\.is_trusted\\s*\\(`).test(body)) return true;
+  }
+  return false;
+}
 const READ = 'read_dir(';
 // T1e-M01：native-scanner 的两条根闸腿（`is_protected_path` 与 N1c-Y01 的
 // 「直接子目录 + Trim-DiskBench 名字」双判据）也要与 L05 同口径：结果必须进
@@ -171,10 +185,15 @@ function build(code) {
       deletes: DESTRUCTIVE.some((d) => body.includes(d)),
       // T1e-L05：只出现 `inspect_root(` 不算判过 —— 返回值必须真被读（`is_trusted()`），
       // 否则「调了一下、没看结果」也能把根入口洗白。
+      // T1e-K01（2026-11-20）：两个独立子串共存曾被当判定（`inspect_root(` 与任意
+      // `.is_trusted()` 同时出现在函数体里即放行）——`let _ = inspect_root(p); ... other.is_trusted()`
+      // 与两条互不相干的 let 都能洗白。现在要求**同一条链式表达式**：接收者必须是
+      // inspect_root 的调用结果，且结果进 `if`/`let` 等表达式位（`let _ = …` 仍不算「读」，
+      // 这一层由 C8/C13 形态钉住）。
       // T1e-M04：native-scanner 没有 inspect_root，根/目标闸是
       // `is_protected_path` 与 N1c-Y01 的「直接子目录 + Trim-DiskBench 名字」双判据。
       // T1e-M01：这两条腿同样只认「结果进控制表达式」，不认纯出现。
-      guards: (body.includes(GUARD) && body.includes('is_trusted()'))
+      guards: hasRootGuard(body)
         || GUARD_PROTECTED.test(body)
         || GUARD_BENCH.test(body),
       calls: null,
@@ -333,6 +352,25 @@ const CONTROLS = [
     code: 'fn top(p: &Path) { let _ = std::fs::read_dir(p); let direct_child = true; let bench_name_ok = true; let _ = direct_child && bench_name_ok; let _ = std::fs::remove_file(p); }',
     expectViolation: true,
   },
+  {
+    // T1e-K01（E1 形态）：inspect_root 与一个无关的 .is_trusted() 同函数体共存即放行，
+    // 是本门禁 2026-11-20 前实测的假绿形态。接收者绑定后必须判红。
+    label: 'C15 inspect_root 调用不读结果 + 无关对象上的 is_trusted() ⇒ 必须判红（T1e-K01 E1）',
+    code: 'fn top(p: &Path) { let _ = std::fs::read_dir(p); let _ = crate::engine::protect::inspect_root(p, None); let _ = other_check(p).is_trusted(); let _ = std::fs::remove_file(p); }',
+    expectViolation: true,
+  },
+  {
+    // T1e-K01（E3 形态）：两条互不相干的 let 语句拼凑（真值来自 q 不是 inspect 结果）。
+    label: 'C16 inspect_root 结果与 is_trusted 分属两条语句 ⇒ 必须判红（T1e-K01 E3）',
+    code: 'fn top(p: &Path) { let _ = std::fs::read_dir(p); let _r = crate::engine::protect::inspect_root(p, None); let _t = q.is_trusted(); let _ = std::fs::remove_file(p); }',
+    expectViolation: true,
+  },
+  {
+    // 反向：接收者绑定成立的真实形态必须继续放行（跨行实参 + 进 if 条件）。
+    label: 'C17 跨行实参的 inspect_root(…).is_trusted() 进 if 条件 ⇒ 不判红（接收者绑定正例）',
+    code: 'fn top(p: &Path) {\n  let _ = std::fs::read_dir(p);\n  if crate::engine::protect::inspect_root(\n    p,\n    Some(root),\n  ).is_trusted() {\n    let _ = std::fs::remove_file(p);\n  }\n}',
+    expectViolation: false,
+  },
 ];
 let ctrlBad = 0;
 for (const c of CONTROLS) {
@@ -370,7 +408,9 @@ if (existsSync(WRITE_CHAIN_FILE)) {
     g.fail('W 组判据失效：无复检调用的合成样本竟达到地板（这条断言永远不会红）');
   }
 } else {
-  g.warn(`未校验：${relative(ROOT, WRITE_CHAIN_FILE).split('\\').join('/')} 不在盘上，W 组本节未验证（不算通过）`);
+  // T1e-Q2（2026-11-20 拍板 ①）：还原写回链是**跟踪文件**，不在盘上只可能是被删/搬家 ——
+  // 那正是本门禁要守的形态，静默 SKIP 等于「把文件删了就没人管」。改 fail-closed。
+  g.fail(`${relative(ROOT, WRITE_CHAIN_FILE).split('\\').join('/')} 不在盘上 ⇒ W 组还原写回链复检面整体失守（跟踪文件被删/搬家，不是机器态差异）`);
 }
 
 const pendingTransition = TRANSITION.filter((t) => /^P\d/.test(t.batch)).length;

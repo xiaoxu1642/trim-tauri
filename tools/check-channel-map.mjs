@@ -439,6 +439,21 @@ function parseApiPaths(text) {
   // T1a-M15：used 与 usedIn 同构，共用一份实现；needle 命中处必须止于非标识符
   // 字符才算真接线 —— includes 无前缀边界，`.optimizer.list` 会命中
   // `.optimizer.listRestore`（严格前缀碰撞实测在案，sysrestore.js 曾整批假命中）。
+  //
+  // T1i-K01（2026-11-20）：命中点还必须在**代码区**。旧实现只抹命中点**同行前文**，
+  // 于是 `const x=1; // window.api…`（C）、字符串字面量（D）、块注释（E）三种形态都能
+  // 顶账 —— 现盘 177/177 全接线是运气，不是判据。现在整份文本先抹白一次（blankNonCode
+  // 等长视图：注释与字符串变空格、偏移不变），在抹白视图上找 needle：注释/字符串里的
+  // 路径压根找不到，行尾注释里的前文也不再是白送的「代码前缀」。
+  function needledInCode(text, needle) {
+    const clean = blankNonCode(text, 'js');
+    for (let idx = clean.indexOf(needle); idx >= 0; idx = clean.indexOf(needle, idx + 1)) {
+      const lineStart = text.lastIndexOf('\n', idx) + 1;
+      const codeBefore = blankNonCode(text.slice(lineStart, idx), 'js', { keepStrings: true }).trim();
+      if (!/[\w$]/.test(clean[idx + needle.length] || '') && codeBefore !== '') return true;
+    }
+    return false;
+  }
   const usedIn = (ch, pool) => {
     const path_ = apiPaths.get(ch);
     if (!path_) return false;
@@ -446,13 +461,7 @@ function parseApiPaths(text) {
     const method = rest.join('.');
     const needle = `.${path_}`;
     for (const [, text] of pool) {
-      let idx = text.indexOf(needle);
-      while (idx >= 0) {
-        const lineStart = text.lastIndexOf('\n', idx) + 1;
-        const codeBefore = blankNonCode(text.slice(lineStart, idx), 'js', { keepStrings: true }).trim();
-        if (!/[\w$]/.test(text[idx + needle.length] || '') && codeBefore !== '') return true;
-        idx = text.indexOf(needle, idx + 1);
-      }
+      if (needledInCode(text, needle)) return true;
       if (dynamic.has(domain) && new RegExp(`window\\.api\\.${domain}\\s*\\.?\\s*\\[`).test(text)) return true;
       for (const v of aliases.get(domain) ?? []) {
         if (new RegExp(`\\b${v}\\.${method}\\b`).test(text)) return true;
@@ -460,6 +469,26 @@ function parseApiPaths(text) {
     }
     return false;
   };
+  // D4 对照（T1i-K01）：C/D/E 三种「非代码区命中」必须判红，A/B 两种正确形态必须成立。
+  // 样本走生产同一 needledInCode，不是另写一套判据。
+  {
+    const n = '.demoDomain.demoMethod';
+    const cases = [
+      ['A 代码里调用必须算接线', `const r = window.api${n}(1);`, true],
+      ['B 前缀碰撞（demoMethodX）不得假命中', `const r = window.api${n}X(1);`, false],
+      ['C 行尾注释不得顶账', `const x = 1; // window.api${n}(1)`, false],
+      ['D 字符串字面量不得顶账', `const s = "window.api${n}";`, false],
+      ['E 块注释不得顶账（同行有代码前缀）', `const a = 1; /* window.api${n}(1) */`, false],
+      ['F 纯注释行不得顶账', `// window.api${n}(1)`, false],
+      ['G 代码行里真调用、下一行是注释 ⇒ 仍算接线', `const r = window.api${n}(1);\n// 注释`, true],
+    ];
+    const bad = cases.filter(([, text, want]) => needledInCode(text, n) !== want);
+    check(
+      bad.length === 0,
+      `对照：D4 命中点必须在代码区（${cases.length} 组：A/B/C/D/E/F/G）`,
+      bad.map(([label]) => label).join('；'),
+    );
+  }
   const used = (ch) => usedIn(ch, sources);
   const unmappedPath = [...allChannels.keys()].filter(c => !apiPaths.has(c));
   const orphans = [...allChannels.keys()].filter(c => apiPaths.has(c) && !used(c)).sort();  const dead = [...orphans].filter(o => !D4_ORPHANS.has(o));

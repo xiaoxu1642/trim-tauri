@@ -130,8 +130,8 @@
   /* 极光琉璃 B-P1：曲线与编排时长（新名新值；旧 --duration-* / --ease-* 原样保留，
      存量消费点不动。取值见设计文档 §3.1「曲线与编排时长」）
      B-P2 已接入：expo=扫光 / spring=分段标签按压 / inout=分段标签底色切换 /
-     out-soft=卡片光斑淡入。零消费的 --ease-emph 与 --dur-4/5/6（长档氛围时长）
-     已按反向棘轮删除，B-P3 接入氛围层时再落。 */
+     out-soft=卡片光斑淡入。B-P3 接入氛围层后，--ease-emph 与 --dur-4/5/6
+     （长档氛围时长）四 token 均有消费，反向棘轮无零消费项。 */
   --ease-expo: cubic-bezier(0.16, 1, 0.30, 1);
   --ease-spring: cubic-bezier(0.34, 1.42, 0.52, 1);
   --ease-emph: cubic-bezier(0.20, 0.90, 0.22, 1);
@@ -172,8 +172,8 @@
 
   /* 字体管理：全局字体族 / 字号缩放（基准 16px）/ 字重缩放（基准 400）
      由「设置 → 字体选择」弹窗运行时写入，全部 font-size / font-weight 均经 calc 关联 */
-  /* 2026-09-28 八轮拍板：默认系统字体（MiSans 异步加载导致卡片高度漂移/看板重叠）；
-     MiSans 保留 @font-face 内嵌，仅作为设置页字体选项，由 fontmanager 按需切回 */
+  /* 字体栈口径：MiSans 已于 2026-10-14 整链移除（理由与连带同步面见文件头「内嵌字体」段），
+     默认且唯一系统字体栈，fontmanager 不再有 MiSans 切回项 */
   --app-font-family: 'Segoe UI Variable', 'Segoe UI', 'Microsoft YaHei', '微软雅黑', system-ui, sans-serif;
   /* 审查 v2-L6 + F1a-M06：等宽栈此前只有 var(--font-mono, …) 的引用、全仓无定义 ⇒ 各处恒吃
      各自的 fallback（一处 Consolas 优先、一处 Cascadia 优先，同一诉求两套口径）。补定义并取

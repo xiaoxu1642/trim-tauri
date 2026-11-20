@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use super::dead::{expand_pct, is_remote_or_device_path};
 use super::helpers::{reg_sz, to_wide};
-use super::residue::reg_enum_subkeys;
+use super::residue::{reg_enum_subkeys, NAME_MIN_RULE_WORD};
 use super::residue_update::contribs;
 
 /// 单平台清单读取失败时写进 notes 的措辞（调用方共用，避免三种说法）
@@ -83,16 +83,18 @@ impl PlatformIndex {
         self.roots_lc.iter().any(|r| !r.is_empty() && (pl == *r || pl.starts_with(&format!("{}\\", r))))
     }
 
-    /// 平台清单里是否存在名字可指认的游戏（按互含，阈值走本域 `NAME_MIN_RULE_WORD` 口径：
-    /// 这是「拿已知产品名去撞清单」，不是自由文本猜测，短名也允许）。
+    /// 平台清单里是否存在名字可指认的游戏（按互含，门槛取 `residue::NAME_MIN_RULE_WORD`）。
+    ///
+    /// R2d-K01：此前注释声称走该门槛、实现却只有 `is_empty()` —— 单字符的名字会
+    /// 双向互含命中大量记录（`rl.contains(&n)` 恒真）。两侧名字都过门槛才判。
     pub(super) fn has_game_named(&self, name: &str) -> bool {
         let n = name.trim().to_lowercase();
-        if n.is_empty() {
+        if n.chars().count() < NAME_MIN_RULE_WORD {
             return false;
         }
         self.records.iter().any(|r| {
             let rl = r.name.to_lowercase();
-            !rl.is_empty() && (rl.contains(&n) || n.contains(&rl))
+            rl.chars().count() >= NAME_MIN_RULE_WORD && (rl.contains(&n) || n.contains(&rl))
         })
     }
 
@@ -209,6 +211,19 @@ pub(super) fn epic_install_dir(item: &Value) -> Option<String> {
         .find_map(|k| item.get(*k).and_then(Value::as_str))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Epic 单条 `.item` 的安装目录值 → 候选绝对路径（展开变量 + 本域统一清洗闸）。
+///
+/// R2d-K02：闸的**顺序**要紧 —— 先展开再清洗。先清洗会把 `%ProgramFiles%\…` 这类
+/// 合法安装目录误杀（`clean_install_dir_value` 只认盘符绝对路径）；先展开才能既留得住
+/// 变量形态的目录，又拒掉展开不了的 `%VAR%`（不留死记录）与 UNC/设备路径
+/// （否则下游 `is_dir()` 会触发 SMB 外连）。
+///
+/// 返回 None = 过不了闸，调用方留痕跳过。
+pub(super) fn epic_resolved_dir(raw: &str) -> Option<String> {
+    let expanded = expand_pct(raw)?;
+    clean_install_dir_value(&expanded)
 }
 
 /// Epic `.item` 里的展示名，缺失时退回 AppName（清单名，不是产品名，只用于展示）。
@@ -399,6 +414,44 @@ fn steam_unreadable_note(vdf_read: usize, acf_failed: usize, lib_failed: usize, 
     ))
 }
 
+/// 逐库根采集 Steam 清单（探测可注入 ⇒ 单测能造「库根没有 steamapps」样本）。
+///
+/// 返回 (列到的库根数, 读失败的库根数, acf 读失败数)。
+///
+/// R2d-K04：库根在 `libraryfolders.vdf` 里、却**没有 `steamapps`** 时，旧写法直接
+/// `continue` —— 既不计 listed 也不计 failed，Steam 仍被判「清单读到」。这种库根的
+/// 清单读不到，必须计失败，否则硬规矩①（读不到 ≠ 不存在）在 Steam 上失效。
+fn collect_steam_libraries(
+    index: &mut PlatformIndex,
+    libs: &[String],
+    apps_exists: &dyn Fn(&Path) -> bool,
+    apps_listable: &dyn Fn(&Path) -> bool,
+) -> (usize, usize, usize) {
+    let mut listed = 0usize;
+    let mut failed = 0usize;
+    let mut acf_failed = 0usize;
+    for lib in libs {
+        let norm = PlatformIndex::norm(lib);
+        if !index.roots_lc.contains(&norm) {
+            index.roots_lc.push(norm);
+        }
+        let apps_dir = Path::new(lib).join("steamapps");
+        if !apps_exists(&apps_dir) {
+            failed += 1;
+            continue;
+        }
+        if !apps_listable(&apps_dir) {
+            failed += 1;
+            continue;
+        }
+        listed += 1;
+        let (records, f) = steam_records_of_library(lib);
+        acf_failed += f;
+        index.records.extend(records);
+    }
+    (listed, failed, acf_failed)
+}
+
 /// Steam：库根来自 `libraryfolders.vdf`（新路径优先，退回 `config/`），
 /// 成员来自各库根的 acf。
 unsafe fn collect_steam(index: &mut PlatformIndex, notes: &mut Vec<String>) {
@@ -426,28 +479,12 @@ unsafe fn collect_steam(index: &mut PlatformIndex, notes: &mut Vec<String>) {
         // 读不到 vdf 时至少把 Steam 自身当库根：单库机器的 acf 就在这棵下面
         libs.push(root.clone());
     }
-    let mut listed = 0usize;
-    let mut failed = 0usize;
-    let mut acf_failed = 0usize;
-    for lib in libs {
-        let norm = PlatformIndex::norm(&lib);
-        if !index.roots_lc.contains(&norm) {
-            index.roots_lc.push(norm);
-        }
-        let apps_dir = Path::new(&lib).join("steamapps");
-        if !apps_dir.is_dir() {
-            continue;
-        }
-        match std::fs::read_dir(&apps_dir) {
-            Ok(_) => {
-                listed += 1;
-                let (records, f) = steam_records_of_library(&lib);
-                acf_failed += f;
-                index.records.extend(records);
-            }
-            Err(_) => failed += 1,
-        }
-    }
+    let (listed, failed, acf_failed) = collect_steam_libraries(
+        index,
+        &libs,
+        &|p: &Path| p.is_dir(),
+        &|p: &Path| std::fs::read_dir(p).is_ok(),
+    );
     // 「一个库根都没列成」与「列到了但都没有安装记录」是两回事；acf / vdf 的文件级
     // 读失败同样不能折叠成「没有游戏」（R2b-M03，硬规矩①）。
     if let Some(note) = steam_unreadable_note(vdf_read, acf_failed, failed, listed) {
@@ -483,6 +520,7 @@ fn collect_epic(index: &mut PlatformIndex, notes: &mut Vec<String>) {
     files.sort();
     let mut parsed_any = false;
     let mut item_failed = 0usize;
+    let mut dir_vetoed = 0usize;
     for p in &files {
         if index.records.len() >= COLLECT_HARD_CAP {
             break;
@@ -497,17 +535,27 @@ fn collect_epic(index: &mut PlatformIndex, notes: &mut Vec<String>) {
         };
         parsed_any = true;
         let Some(dir) = epic_install_dir(&v) else { continue };
-        let expanded = expand_pct(&dir).unwrap_or(dir);
-        let norm = PlatformIndex::norm(&expanded);
+        // R2d-K02：目录值过统一清洗闸（展开 → UNC/设备路径/非盘符绝对路径一律不判）。
+        // 过不了闸的不进清单 —— `%VAR%` 死记录永远匹配不上任何目录，只会让人以为读到了。
+        let Some(clean) = epic_resolved_dir(&dir) else {
+            dir_vetoed += 1;
+            continue;
+        };
+        let norm = PlatformIndex::norm(&clean);
         if !index.roots_lc.contains(&norm) {
             index.roots_lc.push(norm.clone());
         }
         index.records.push(LibRecord {
             platform: "Epic",
             name: epic_display_name(&v),
-            dir: expanded.trim_end_matches('\\').to_string(),
+            dir: clean,
             dir_lc: norm,
         });
+    }
+    if dir_vetoed > 0 {
+        notes.push(format!(
+            "Epic 有 {dir_vetoed} 条 .item 的安装目录值过不了本机绝对路径闸（UNC/设备路径/变量展开不了），本轮不判"
+        ));
     }
     if item_failed > 0 || (!parsed_any && !files.is_empty()) {
         if !index.unreadable.iter().any(|x| *x == "Epic") {
@@ -1075,6 +1123,18 @@ mod tests {
         assert!(!idx.has_game_named("Lost Ark"));
     }
 
+    /// R2d-K01：单字符名在互含判定下会命中一大片记录（`rl.contains("a")` 恒真）——
+    /// 两侧都过 `NAME_MIN_RULE_WORD` 门槛才判。
+    #[test]
+    fn one_char_name_never_matches_by_containment() {
+        let idx = index_with(&[("Ace Racing", "D:\\SteamLibrary\\steamapps\\common\\Ace")]);
+        assert!(!idx.has_game_named("A"), "单字符名不得互含命中任何记录");
+        assert!(!idx.has_game_named("中"), "单字符中文名同样不得命中");
+        // 门槛以上照旧双向互含
+        assert!(idx.has_game_named("ace"));
+        assert!(idx.has_game_named("Ace Racing"));
+    }
+
     #[test]
     fn epic_item_falls_back_across_field_names() {
         assert_eq!(epic_install_dir(&json!({ "InstallLocation": "C:\\Games\\A" })).as_deref(), Some("C:\\Games\\A"));
@@ -1082,6 +1142,53 @@ mod tests {
         assert_eq!(epic_install_dir(&json!({ "Path": "C:\\Games\\C" })).as_deref(), Some("C:\\Games\\C"));
         assert_eq!(epic_install_dir(&json!({ "AppName": "Fortnite" })), None);
         assert_eq!(epic_display_name(&json!({ "AppName": "FN" })), "FN");
+    }
+
+    /// R2d-K02：Epic 的安装目录值必须过本机绝对路径闸 —— UNC/设备路径与展开不了的
+    /// `%VAR%` 都不许进清单（前者会在下游 `is_dir()` 触发 SMB 外连，后者是永远
+    /// 匹配不上的死记录）。
+    #[test]
+    fn epic_dir_value_must_pass_the_local_absolute_path_gate() {
+        assert_eq!(epic_resolved_dir(r"\\NAS\share\games"), None, "UNC 必须先于触盘 fail-closed");
+        assert_eq!(epic_resolved_dir(r"\\?\C:\Games\A"), None, "设备路径同样 fail-closed");
+        assert_eq!(
+            epic_resolved_dir(r"%TRIM_NO_SUCH_ENV_VAR%\Epic Games\A"),
+            None,
+            "展开不了的变量不许留死记录"
+        );
+        assert_eq!(epic_resolved_dir("relative\\path"), None);
+        assert_eq!(
+            epic_resolved_dir(r"C:\Program Files\Epic Games\A").as_deref(),
+            Some(r"C:\Program Files\Epic Games\A")
+        );
+        // 变量形态的合法安装目录要留得住 —— 「先展开再清洗」的顺序不能反
+        let expanded = epic_resolved_dir(r"%ProgramFiles%\Epic Games\A");
+        assert!(expanded.is_some(), "变量形态的安装目录必须留得住: {expanded:?}");
+    }
+
+    /// R2d-K04：库根在清单里却没有 `steamapps` ⇒ 该库的清单读不到，必须计失败
+    /// （旧写法静默跳过，Steam 会被判「清单读到」）。
+    #[test]
+    fn steam_library_without_steamapps_counts_as_failure() {
+        let libs = vec!["Z:\\steam-ok\\lib".to_string(), "Z:\\steam-stale\\lib".to_string()];
+        let mut idx = PlatformIndex::default();
+        let (listed, failed, _acf) = collect_steam_libraries(
+            &mut idx,
+            &libs,
+            &|p: &Path| p.to_string_lossy().contains("steam-ok"),
+            &|_: &Path| true,
+        );
+        assert_eq!(listed, 1, "只有真有 steamapps 的库根算列到");
+        assert_eq!(failed, 1, "没有 steamapps 的库根必须计失败");
+        // 失败计数要能触发 unreadable note（Steam 不得被判「清单读到」）
+        let note = steam_unreadable_note(1, 0, failed, listed).expect("有库根读失败就必须留 note");
+        assert!(note.contains("库根 1 个读失败"), "{note}");
+        // 库根仍要登记：清单读不到不等于这个根不在本机
+        assert!(
+            idx.roots_lc.iter().any(|r| r.contains("steam-stale")),
+            "库根仍要登记（在库保护不因清单读不到而失效）: {:?}",
+            idx.roots_lc
+        );
     }
 
     #[test]

@@ -33,6 +33,14 @@ const read = (rel) => {
   return existsSync(abs) ? readFileSync(abs, 'utf8') : null;
 };
 
+// T1j-K01（2026-11-20）：判据必须喂**抹注释视图**。旧写法让 judge 跑在原始源码上，
+// 注释里写一句「有 else / 有 finally / 有清空分支」就能把坏形态洗白（J1 合成样本实测）。
+// keepStrings=true 保留字符串字面量（文案断言如 '清除密钥' / '不进入回收站' 要靠它），只抹注释。
+const readClean = (rel) => {
+  const src = read(rel);
+  return src === null ? null : blankNonCode(src, 'js', { keepStrings: true });
+};
+
 /** 取某个具名函数所在的行段（到下一个同形函数声明为止）。 */
 const funcBlock = (src, name) => {
   const lines = src.split('\n');
@@ -70,7 +78,7 @@ const MIN_CASES = 24;
 
 // ---------- M10：丢包采样失败不得沿用上一拍 ----------
 {
-  const src = read('src/scripts/realtime.js');
+  const src = readClean('src/scripts/realtime.js');
   if (!src) {
     g.fail('M10：src/scripts/realtime.js 不存在（判定对象缺失）');
   } else {
@@ -85,6 +93,11 @@ const MIN_CASES = 24;
     if (!judge(goodSample) || judge(bad)) {
       g.fail('M10 正向对照失败：丢包三态判定器失真（必须能把「有 else 且置 null」与「只有 if」分开）');
     }
+    // 对照（T1j-K01）：坏形态 + 注释里写着「有 else 且置 null」⇒ 判据喂抹注释视图后必须仍判红。
+    const washed = `${bad}\n// } else { state.loss = { lossRate: null }; }`;
+    if (judge(blankNonCode(washed, 'js', { keepStrings: true }))) {
+      g.fail('M10 反向对照失败：注释里的 else 分支把失败态洗白了（判据没跑在抹注释视图上）');
+    }
     if (!good) {
       g.fail('M10：realtime.js 的 lossOnce 缺失败态落地（无 else 分支 / 未把 lossRate 置 null）⇒ 上一拍的陈旧丢包率会被当现行');
     } else {
@@ -96,7 +109,7 @@ const MIN_CASES = 24;
 
 // ---------- M17：时长参数必须先绑定再进对象 ----------
 {
-  const src = read('src/scripts/diskbench.js');
+  const src = readClean('src/scripts/diskbench.js');
   if (!src) {
     g.fail('M17：src/scripts/diskbench.js 不存在（判定对象缺失）');
   } else {
@@ -119,7 +132,7 @@ const MIN_CASES = 24;
 
 // ---------- M18：三处写侧的成功提示必须由成功回执守卫 ----------
 {
-  const src = read('src/scripts/diskbench.js');
+  const src = readClean('src/scripts/diskbench.js');
   if (!src) {
     g.fail('M18：src/scripts/diskbench.js 不存在（判定对象缺失）');
   } else {
@@ -180,7 +193,7 @@ const MIN_CASES = 24;
 
 // ---------- M12：批量执行的上锁必须在 finally 里放 ----------
 {
-  const src = read('src/scripts/optimizer.js');
+  const src = readClean('src/scripts/optimizer.js');
   if (!src) {
     g.fail('M12：src/scripts/optimizer.js 不存在（判定对象缺失）');
   } else {
@@ -238,7 +251,7 @@ const MIN_CASES = 24;
 
 // ---------- M14：清空密钥也要走确认件 ----------
 {
-  const src = read('src/scripts/models-window.js');
+  const src = readClean('src/scripts/models-window.js');
   if (!src) {
     g.fail('M14：src/scripts/models-window.js 不存在（判定对象缺失）');
   } else {

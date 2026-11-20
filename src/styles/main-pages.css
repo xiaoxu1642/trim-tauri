@@ -1258,7 +1258,8 @@
 /* 看板布局（电脑优化中心 / 右键管理 共用）：Grid 自适应列数
    repeat(auto-fill, minmax(单卡最小宽度, 1fr))：1 卡占满整行，2/3/4… 列随内容区宽度
    自动增减；任何状态不出现横向滚动条，单卡不小于最小宽度。
-   重排动画由 xtable.js 暴露的 kanbanFLIP（transform + opacity）实现。 */
+   重排动画由 xtable.js 暴露的 kanbanMasonry 实现（其内部 play() 走 WAAPI，
+   transform + opacity；系统开「减少动态效果」时整体跳过）。 */
 .page-summary {
   font-size: var(--fs-meta);
   font-weight: calc(400*var(--font-weight-scale,1));
@@ -1910,7 +1911,7 @@
 }
 .qc-desc {
   margin-top: 3px;
-  font-size: var(--fs-meta, 11px);
+  font-size: var(--fs-meta);
   font-family: var(--font-mono);
   color: var(--fg-tertiary);
   white-space: nowrap;

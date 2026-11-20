@@ -232,6 +232,14 @@
   // 红线「字节格式化唯一真源」；原实现自带 1024 边界假值的独立舍入口径）。
   function formatSize(bytes) { return window.ds.fmtBytes(bytes); }
 
+  // F4a1-K02 补：后端少数失败臂把绝对路径拼进 reason（如 restore_pack.rs 的 reparse
+  // point 拒绝）。日志只留文件名，不写用户目录。只服务日志，不进 ds（避免扩大真源表面）。
+  function maskReasonPaths(text) {
+    return String(text || '')
+      .replace(/[A-Za-z]:[\\/](?:[^\\/\s]+[\\/])+([^\\/\s]+)/g, '$1')
+      .replace(/(?:^|[\s：:])\/(?:[^\/\s]+\/)+([^\/\s]+)/g, '$1');
+  }
+
   function getItemById(id) {
     const hit = itemIndex.get(id);
     if (!hit) return null;
@@ -372,14 +380,14 @@
         void content.offsetHeight;
         // 虚拟滚动重算：折叠期间容器高度为 0，虚拟列表只渲染了缓冲行，
         // 展开后无滚动事件触发，需主动 render 恢复完整可视行
-        virtualLists.forEach(v => { try { v.render(); } catch (e) {} });
+        virtualLists.forEach(v => { try { v.render(); } catch (e) { window.app?.log?.('warn', `展开后虚拟列表重算失败: ${(e && e.message) || e}`); } });
       });
       // 动画结束后释放 maxHeight，避免内容被固定高度裁剪（grid 布局未完成时 scrollHeight 偏小）
       setTimeout(() => {
         if (!group.classList.contains('collapsed')) {
           content.style.maxHeight = '';
           void content.offsetHeight;
-          virtualLists.forEach(v => { try { v.render(); } catch (e) {} });
+          virtualLists.forEach(v => { try { v.render(); } catch (e) { window.app?.log?.('warn', `折叠动画后虚拟列表重算失败: ${(e && e.message) || e}`); } });
         }
       }, 360);
       return;
@@ -1182,7 +1190,7 @@
           id,
           name: getItemById(id)?.name || id,
           path: MOCK_PATHS[id] || `C:\\Windows\\...\\${id}`,
-          pathSource: MOCK_PATHS[id] ? 'configured' : 'configured',
+          pathSource: 'configured',
           size: MOCK_SIZES[id] || Math.floor(Math.random() * 500) * 1024 * 1024,
           // 审查 7-1：fail-safe——条目在规则表查不到时按高危处理（触发红色二次确认），禁止静默降级为低危
           risk: getItemById(id)?.risk || 'high',
@@ -1624,6 +1632,10 @@
       .map(id => scanResults.get(id))
       .filter(r => r && r.id !== RECYCLE_ID && !FILECLEAN_IDS.includes(r.id)
         && r.risk !== 'high' && r.risk !== 'medium');
+    // F4a1-K01：确认件绑定必须在函数顶层声明一次。旧写法在中风险段与截断段各 `const` 一次，
+    // 而超限确认（本函数后段、两个块之外）引用同一名字 ⇒ 直达该分支即抛 ReferenceError
+    // （真机 V8 已复现：selectedItems.length > EXECUTE_MAX_ITEMS 时确认件整个不可用）。
+    const warningConfirm = window.app?.confirmWarning;
     let confirmedPermanentRisk = false;
 
     // F4a1-M01 的残留射程（2026-10-23 复核）：删除后果此前只出现在行 tooltip 上，
@@ -1664,7 +1676,6 @@
       const deletionNote = hasFileClean
         ? PERMANENT_DELETE_NOTE + FILECLEAN_RECYCLE_NOTE
         : PERMANENT_DELETE_NOTE;
-      const warningConfirm = window.app?.confirmWarning;
       const ok = await warningConfirm(
         '中风险操作确认',
         `您选择了 ${mediumRisk.length} 个中风险项（建议清理前核对用途）：\n${mediumRisk.map(r => '• ' + confirmText(r.name)).join('\n')}`,
@@ -1744,7 +1755,6 @@
       .map(id => scanResults.get(id))
       .filter(r => r && r.filesTruncated);
     if (truncatedItems.length > 0) {
-      const warningConfirm = window.app?.confirmWarning;
       const ok = await warningConfirm(
         '清理清单已截断确认',
         `所选 ${truncatedItems.length} 个条目的文件清单超出单次上限已截断：\n${truncatedItems.map(r => '• ' + confirmText(r.name)).join('\n')}\n实际清理范围可能大于上面列出的清单。`,
@@ -2883,7 +2893,9 @@
             window.app?.toast(bad ? 'warning' : 'success',
               bad ? `已还原 ${d.restored || 0} 项，${bad} 项未还原（详见提示）` : `已还原 ${d.restored || 0} 项`);
             if (bad) {
-              window.app?.log?.('warn', `还原包 ${p.id} 未还原项：${(d.failed || []).slice(0, 3).map((f) => `${f.path}（${f.reason}）`).join('；')}`);
+              // F4a1-K02：日志只记失败条数与原因，不写原始路径（日志不得携带用户绝对路径，真机已复现泄露）；
+              // 逐项路径只留在界面提示里。
+              window.app?.log?.('warn', `还原包 ${p.id} 未还原 ${bad} 项：${(d.failed || []).slice(0, 3).map((f) => maskReasonPaths(f.reason) || '未给出原因').join('；')}`);
             }
           } else {
             window.app?.toast('error', (r && r.message) || '还原失败');
@@ -2978,13 +2990,14 @@
             skipped = resp.data.skipped || 0;
             failed = resp.data.failed || 0;
             (resp.data.results || []).forEach((r, i) => {
-              if (r && r.success === false) failedItems.push(`#${i}：${r.message || '后端拒绝还原'}`);
+              // F4a1-K02：只记失败序号——后端的 message 可能回显原始路径（保护面拒绝文案就带路径），不落日志
+              if (r && r.success === false) failedItems.push(`#${i}`);
             });
             window.app?.toast(
               failed ? 'warning' : (restored ? 'success' : 'info'),
               `还原完成：恢复 ${restored} 个文件，跳过 ${skipped} 个${failed ? `，失败 ${failed} 个` : ''}`
             );
-            if (failed) window.app?.log?.('warn', `文件备份还原失败项：${failedItems.slice(0, 5).join('；')}`);
+            if (failed) window.app?.log?.('warn', `文件备份还原失败 ${failed} 项：${failedItems.slice(0, 5).join('、')}`);
           } else {
             // 整批前置失败（清单缺失/非法/超上限）：一次说清原因，不再逐条刷屏
             window.app?.toast('error', '还原失败: ' + ((resp && resp.message) || '后端拒绝还原'));
@@ -3065,7 +3078,8 @@
         window.app?.toast?.('error', (resp && resp.message) || '清除备份失败');
       } else if (failed.length) {
         window.app?.toast?.('warning', `已清除 ${data.removed || 0} 项，${failed.length} 项未清除（详见日志）`);
-        window.app?.log?.('warn', `备份清除未成功项：${failed.slice(0, 5).map((f) => `${f.name}（${f.reason}）`).join('；')}`);
+        // F4a1-K02：只记条数与原因——f.name 就是用户文件名，不进日志
+        window.app?.log?.('warn', `备份清除未成功 ${failed.length} 项：${failed.slice(0, 5).map((f) => f.reason || '未给出原因').join('；')}`);
       } else {
         window.app?.toast?.('success', `已清除 ${data.removed || 0} 项备份`);
       }
@@ -3263,7 +3277,7 @@
             const cur = r2 && r2.success && r2.data ? Number(r2.data.days) || 0 : 0;
             if (AGE_POLICY_TIERS.includes(cur)) sel.value = String(cur);
             renderAgePolicyHint(cur);
-          }).catch(function () {});
+          }).catch(function (e) { window.app?.log?.('warn', `回读年龄门槛失败: ${(e && e.message) || e}`); });
           window.app?.toast?.('error', (resp && resp.message) || '年龄门槛写入失败');
         }
       }).catch(function (e) {

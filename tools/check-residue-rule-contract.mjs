@@ -32,6 +32,7 @@ const UNINSTALL_DIR = path.join(ROOT, 'src-tauri', 'src', 'commands', 'uninstall
 import { leadingToken, makeTokenChecker } from './rule-tokens.mjs';
 import { list as schemaList, number as schemaNumber, tokens as schemaTokens, file as schemaFile } from './rule-schema.mjs';
 import { blankNonCode } from './lib/src-scan.mjs';
+import { loadRulesPubkey } from './sign-cleanup-rules.mjs';
 const RULES = path.join(ROOT, schemaFile('residue'));
 const FIXTURE = path.join(ROOT, 'tools', 'fixtures', 'residue-contract.json');
 // 词汇与上限取自 `tools/rule-schema.json`（V2 P0-A2，2026-09-30）：同一份字节也被 Rust 装载侧
@@ -452,6 +453,29 @@ if (!sigB64) {
 const PUBKEY_PEMS = {
   current: '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA99tf+9CA7IERwd7lhUtS2zlNg88w5ER8w70A1iH9GY4=\n-----END PUBLIC KEY-----',
 };
+// T1b-K01（2026-11-20）：硬编码副本必须与 Rust 真源逐字相等。此前本文件硬编码一份、
+// check-data-signatures 运行期解析一份，两种口径并存却无对拍 —— 真源换钥后副本没跟上时，
+// 验签失败会把原因指向「内容被篡改」，掩盖「副本过期」。真源解析复用 sign-cleanup-rules
+// 的 loadRulesPubkey（同一份解析实现，不抄第二套）。
+{
+  let rustPem = '';
+  let why = '';
+  try {
+    rustPem = loadRulesPubkey();
+  } catch (e) {
+    why = e.message;
+  }
+  const same = Boolean(rustPem) && rustPem === PUBKEY_PEMS.current;
+  check(
+    same,
+    'D0. 内置公钥副本与 rules_signature.rs 的 RULES_PUBKEY_PEM 逐字相等（T1b-K01）',
+    !rustPem
+      ? `真源解析失败：${why}`
+      : same
+        ? ''
+        : '副本与真源不一致（换钥后两处必须同步：改副本或改真源都要在一次交付里完成）',
+  );
+}
 try {
   const msg = Buffer.from(JSON.stringify(body), 'utf8');
   for (const tag of Object.keys(PUBKEY_PEMS)) {

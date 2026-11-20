@@ -35,6 +35,7 @@
 
   async function sendToMain(level, message) {
     if (!window.api?.log) return;
+    // 落盘失败有意静默：这里就是日志出口，转调 window.app.log 会自递归；原文仍由 write() 打到控制台
     try { await window.api.log.write(level, message); } catch (e) {}
   }
 
@@ -50,6 +51,9 @@
     foldTimer = setTimeout(() => { foldTimer = 0; flushFolded(); }, FOLD_FLUSH_IDLE_MS);
   }
 
+  // F3-K03：控制台按级别分流，DevTools 才能按级别过滤；落盘侧级别本就正确，这里只改控制台呈现
+  const CONSOLE_METHOD = { error: 'error', warn: 'warn' };
+
   async function write(level, message) {
     const now = Date.now();
     if (now - winStart >= WIN_MS) { flushFolded(); winStart = now; winUsed = 0; }
@@ -59,7 +63,7 @@
     } else {
       await sendToMain(level, message);
     }
-    console[level === 'error' ? 'error' : 'log'](`[${level}] ${message}`);
+    console[CONSOLE_METHOD[level] || 'log'](`[${level}] ${message}`);
   }
 
   async function load() {

@@ -931,7 +931,7 @@
     const want = !!toggle.checked;
     if (!window.api?.settings?.cdpSet) {
       window.app?.toast?.('error', 'CDP 开关不可用（适配层未加载）');
-      await refreshCdpRow();
+      await refreshCdpRow().catch(() => { window.app?.log?.('warn', '刷新 CDP 行失败'); });
       return;
     }
     let resp = null;
@@ -939,12 +939,12 @@
     if (!resp || !resp.success) {
       window.app?.toast?.('error', (resp && resp.message) || 'CDP 开关设置失败');
       // 写失败必须回滚界面：留一个和后端不一致的开关，比不显示更糟
-      await refreshCdpRow();
+      await refreshCdpRow().catch(() => { window.app?.log?.('warn', '刷新 CDP 行失败'); });
       return;
     }
     window.app?.toast?.(resp.activeNow === want ? 'success' : 'warning',
       resp.message || '已记录，重启 Trim 后生效');
-    await refreshCdpRow();
+    await refreshCdpRow().catch(() => { window.app?.log?.('warn', '刷新 CDP 行失败'); });
   }
 
   // 关闭流程（v2.7.0）：编排已全部移交主进程 —— 点击 X → 窗口立即隐藏，断开连接/清理临时文件/保存日志
@@ -1156,7 +1156,9 @@
       if (!tab || tab.classList.contains('active')) return;
       const view = tab.dataset.cleanupView;
       // 查找器子视图：统一入口补脚本并 init（P1 2026-11-17 收口，见 ensureCleanupFinder）
-      if (view && view !== 'cleanup') await ensureCleanupFinder();
+      if (view && view !== 'cleanup') {
+        try { await ensureCleanupFinder(); } catch (e) { window.app?.toast?.('error', '清理视图脚本加载失败，请重试'); }
+      }
       setCleanupView(view);
     });
 
@@ -1186,7 +1188,7 @@
       // 审查 7-4：统一用归一化后的变量；switchPage 内部自会处理四合一旧地址。
       // v3.7.0：switchPage 已改 async（要先补齐本页脚本），此处必须 await——
       // 否则恢复的页面是 optimizer 时，下面的 overview.start() 会先跑起来。
-      await switchPage(targetPage);
+      try { await switchPage(targetPage); } catch (e) { window.app?.log?.('warn', '恢复页面切换失败，已留在当前页'); }
     } else if (document.getElementById('page-overview')?.classList.contains('active')) {
       window.overview?.start?.();
     }

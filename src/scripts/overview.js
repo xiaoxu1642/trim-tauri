@@ -11,6 +11,7 @@
     timer: null,
     busy: false,            // 在途闸门（见 tick 的性能 v3 ④ 注释）
     hardwareLoaded: false,
+    hardwareBusy: false,    // 硬件采集在途闸门（见 loadHardware 的 F4b-K03 注释）
     lastErrAt: 0
   };
 
@@ -133,12 +134,17 @@
   }
 
   // 硬件信息（首次扫描缓存，后期手动刷新才更新）
+  // F4b-K03：hardwareLoaded 只在 await 完成后置位，首进页 start() 与首拍 tick() 各调一次
+  // loadHardware —— 硬件采集慢于首拍时 overview:hardware 会并发发两次、整写两次。
+  // hardwareBusy 在途位：进入即置、finally 复位（在途期间的重复调用直接丢弃）。
   async function loadHardware(force) {
     if (state.hardwareLoaded && !force) return;
+    if (state.hardwareBusy) return;
     const el = $('ovHardwareRows');
     if (!el) return;
-    if (!state.hardwareLoaded || force) el.innerHTML = '<div class="empty-state"><p>加载中...</p></div>';
+    state.hardwareBusy = true;
     try {
+      if (!state.hardwareLoaded || force) el.innerHTML = '<div class="empty-state"><p>加载中...</p></div>';
       let data = null;
       let cachedAt = null;
       let degraded = false;
@@ -170,6 +176,8 @@
       state.hardwareLoaded = true;
     } catch (e) {
       el.innerHTML = `<div class="empty-state"><p>硬件信息加载失败：${escapeHtml(e.message)}</p></div>`;
+    } finally {
+      state.hardwareBusy = false;
     }
   }
 
@@ -235,9 +243,9 @@
     window.app?.log('info', '系统概览实时监控停止');
   }
 
-  function refresh() {
-    loadHardware(true);
-    tick();
+  async function refresh() {
+    await loadHardware(true);
+    await tick();
   }
 
   // 系统信息彩蛋（v3.2.1）
@@ -275,7 +283,9 @@
   }
 
   function init() {
-    $('btnOverviewRefresh')?.addEventListener('click', refresh);
+    // F4b-K02：刷新按钮是本页唯一的 async 点击入口，套 ds.guardAsync —— 浮动拒绝不再
+    // 只落全局兜底的通用提示，而是带动作名的可见出口。
+    $('btnOverviewRefresh')?.addEventListener('click', window.ds.guardAsync('刷新系统概览', refresh));
     // 概览卡片整卡跳转：内存卡 → 内存清理，磁盘卡 → 磁盘清理（data-jump 指定目标页）
     document.querySelectorAll('.overview-jump-card').forEach(card => {
       const go = () => {

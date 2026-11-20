@@ -11,13 +11,15 @@
 //! - `fonts:save-config` 在 Rust 侧权威钳制 weight ∈ [100,1000]、size ∈ [12,24]，
 //!   并剥离 family 中的 `'` 与 `\`（防止 CSS 注入与路径误用）。
 //!
-//! # 已知差异（登记，需双跑确认）
+//! # 历史缺口（已闭合，勿按旧结论施工）
 //!
-//! `copyUrl` 与 Electron 同为 `pathToFileURL(copyPath).href`（`file:///...`）。
-//! Tauri 页面源是 `http://tauri.localhost`，Chromium 会拦截从 web 源加载 `file:` 子资源，
-//! 因此该 URL 上的 `@font-face` 可能加载失败（Electron 页面是 file: 源，不受此限）。
-//! 处置与 B3 记载一致：待 asset 协议（`asset:`/`http://asset.localhost`）启用时一并改造
-//! （需同步调整 index.html 的 CSP 与 tauri.conf.json 的 assetProtocol scope）。
+//! `copyUrl` 与 Electron 同为 `pathToFileURL(copyPath).href`（`file:///...`），
+//! Tauri 页源是 `http://tauri.localhost`，Chromium 会拦截从 web 源加载 `file:` 子资源，
+//! 此前该 URL 上的 `@font-face` 会加载失败（Electron 页面是 file: 源，不受此限）。
+//! 现渲染层 `fontmanager.js` 改用原始 `copyPath` 经桥接层 `pathToUrl`（`convertFileSrc`）
+//! 转 `asset:` 加载，配合 `tauri.conf.json` 的 assetProtocol scope（`$APPDATA/fonts/**`）
+//! 与 `lib.rs` 运行期 `allow_directory` 生效，缺口已闭合。
+//! 本模块**保持上游返回契约不变**，仍回传 `copyUrl` 供 Electron 轨兼容。
 //!
 //! 需要加入 lib.rs `generate_handler!` 的完整行：
 //!   commands::fonts::fonts_list,

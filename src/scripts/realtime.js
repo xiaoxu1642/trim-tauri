@@ -49,6 +49,7 @@
     paused: false,        // 是否暂停采集
     adapters: [],         // 本机网卡列表
     adaptersError: '',    // 网卡枚举失败原因（区分「枚举失败」与「确无网卡」）
+    adaptersBusy: false,  // 网卡枚举在途闸门（见 loadAdapters 的 F4b-K03 注释）
     up: 0,                // 当前上传 B/s
     down: 0,              // 当前下载 B/s
     loss: { lossRate: 0, sent: 0, received: 0, latencyMs: 0, gateway: '' },
@@ -81,12 +82,12 @@
           if (typeof obj.paused === 'boolean') state.paused = obj.paused;
         }
       }
-    } catch (e) {}
+    } catch (e) { window.app?.log?.('warn', '读取网络适配器本地偏好失败，已用默认值: ' + ((e && e.message) || e)); }
   }
   function saveStored() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ adapter: state.adapter, paused: state.paused }));
-    } catch (e) {}
+    } catch (e) { window.app?.log?.('warn', '保存网络适配器本地偏好失败: ' + ((e && e.message) || e)); }
   }
 
   // ===== 工具 =====
@@ -153,37 +154,46 @@
   }
 
   // ===== 网卡枚举 =====
+  // F4b-K03：start() 里的网卡枚举没有在途位 —— 快速切页（进本页→离开→再进本页）
+  // 会在上一次枚举还在途时再发一次 realtime.adapters，两次并发 + 两次整写。
+  // adaptersBusy 在途位：进入即置、finally 复位（在途期间的重复调用直接丢弃）。
   async function loadAdapters() {
+    if (state.adaptersBusy) return;
     const sel = $('realtimeAdapter');
     if (!sel) return;
-    if (window.api?.realtime) {
-      try {
-        const resp = await window.api.realtime.adapters();
-        if (resp && resp.success && Array.isArray(resp.adapters)) {
-          state.adapters = resp.adapters;
-          state.adaptersError = '';
-        } else {
+    state.adaptersBusy = true;
+    try {
+      if (window.api?.realtime) {
+        try {
+          const resp = await window.api.realtime.adapters();
+          if (resp && resp.success && Array.isArray(resp.adapters)) {
+            state.adapters = resp.adapters;
+            state.adaptersError = '';
+          } else {
+            state.adapters = [];
+            state.adaptersError = (resp && resp.message) || '网卡枚举无有效回执';
+          }
+        } catch (e) {
           state.adapters = [];
-          state.adaptersError = (resp && resp.message) || '网卡枚举无有效回执';
+          state.adaptersError = (e && e.message) || String(e);
         }
-      } catch (e) {
-        state.adapters = [];
-        state.adaptersError = (e && e.message) || String(e);
+      } else {
+        // 预览模式模拟网卡
+        state.adapters = [
+          { name: 'Realtek PCIe GbE Family Controller', connectionName: '以太网', description: 'Realtek PCIe GbE Family Controller', status: 'Up', mac: 'AA:BB:CC:DD:EE:01', linkSpeed: '1000000000' },
+          { name: 'Intel(R) Wi-Fi 6 AX200', connectionName: 'WLAN', description: 'Intel(R) Wi-Fi 6 AX200', status: 'Up', mac: 'AA:BB:CC:DD:EE:02', linkSpeed: '866700000' }
+        ];
+        state.adaptersError = '';
       }
-    } else {
-      // 预览模式模拟网卡
-      state.adapters = [
-        { name: 'Realtek PCIe GbE Family Controller', connectionName: '以太网', description: 'Realtek PCIe GbE Family Controller', status: 'Up', mac: 'AA:BB:CC:DD:EE:01', linkSpeed: '1000000000' },
-        { name: 'Intel(R) Wi-Fi 6 AX200', connectionName: 'WLAN', description: 'Intel(R) Wi-Fi 6 AX200', status: 'Up', mac: 'AA:BB:CC:DD:EE:02', linkSpeed: '866700000' }
-      ];
-      state.adaptersError = '';
+      // A1-01：失败不能再折成空列表静默——留日志与 toast，下拉框同时保留错误态
+      if (state.adaptersError) {
+        window.app?.log?.('warn', '网卡枚举失败: ' + state.adaptersError);
+        window.app?.toast?.('error', '网卡枚举失败：' + state.adaptersError);
+      }
+      renderAdapterSelect();
+    } finally {
+      state.adaptersBusy = false;
     }
-    // A1-01：失败不能再折成空列表静默——留日志与 toast，下拉框同时保留错误态
-    if (state.adaptersError) {
-      window.app?.log?.('warn', '网卡枚举失败: ' + state.adaptersError);
-      window.app?.toast?.('error', '网卡枚举失败：' + state.adaptersError);
-    }
-    renderAdapterSelect();
   }
 
   function renderAdapterSelect() {

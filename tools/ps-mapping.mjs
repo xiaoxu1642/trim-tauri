@@ -29,8 +29,11 @@
 // MAPPING 直接内联在本文件（项数以 MAPPING 实际内容为准，注释不写数量——v2-R2 口径纪律）。
 // 不要再按旧注释去找分域文件。
 
-export { ORIGIN } from './ps-origin.mjs';
-import { ORIGIN } from './ps-origin.mjs';
+export { ORIGIN, REPO_ROOT } from './ps-origin.mjs';
+// T1c-K01（2026-11-20）：`export { X } from` 只转发、**不创建本地绑定** —— 旧代码只 import 了
+// ORIGIN，relSource() 用 REPO_ROOT 时抛 ReferenceError（唯一 MAPPING 走 vendor 分支不触发，
+// 是潜伏缺陷）。本地绑定必须显式 import。
+import { ORIGIN, REPO_ROOT } from './ps-origin.mjs';
 
 // R1（2026-10-01）去 PowerShell 化：cm_icons 已退役 —— 右键菜单 CLSID 图标改走原生
 // `ExtractIconExW`（engine/shellicon.rs），实机对拍与 .NET ExtractAssociatedIcon 像素和相等。

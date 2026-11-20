@@ -59,7 +59,7 @@ function coordRefs(text, anyLine = false) {
     let m;
     RE_TARGET.lastIndex = 0;
     while ((m = RE_TARGET.exec(s)) !== null) {
-      out.push({ fromLine: i + 1, target: m[1], ln: Number(m[2]) });
+      out.push({ fromLine: i + 1, target: m[1], ln: Number(m[2]), endLn: m[3] ? Number(m[3]) : null });
     }
   });
   return out;
@@ -109,6 +109,25 @@ function resolveTarget(t) {
   return c.length === 1 ? c[0] : null;
 }
 
+/** 单条坐标引用判定（合成对照与真仓扫描共用，T1k-K01）：通过返回 null，判红返回 {to, why}。
+ * 范围坐标的**结束行**同样纳入：`file:10-999999` 与倒序 `file:20-10` 此前被正则捕获后
+ * 又丢弃，越界范围注释照样绿。 */
+function judgeRef(r) {
+  const resolved = resolveTarget(r.target);
+  if (!resolved) {
+    return { to: r.target, why: '坐标里的文件名在仓内同名多份或解析不出 ⇒ 干净克隆按图索骥不到（Z 族形态）' };
+  }
+  const tl = linesOf(resolved);
+  if (r.ln < 1 || r.ln > tl.length) {
+    return { to: `${r.target}:${r.ln}`, why: `行号越界（${resolved} 现共 ${tl.length} 行）` };
+  }
+  if (r.endLn !== null) {
+    if (r.endLn < r.ln) return { to: `${r.target}:${r.ln}-${r.endLn}`, why: '范围坐标倒序（结束行小于起始行）' };
+    if (r.endLn > tl.length) return { to: `${r.target}:${r.ln}-${r.endLn}`, why: `范围结束行越界（${resolved} 现共 ${tl.length} 行）` };
+  }
+  return null;
+}
+
 // 合成样本自检（正反向都要：能判红 + 真样本不假红）
 const CONTROLS = [
   {
@@ -128,20 +147,30 @@ const CONTROLS = [
   },
   {
     label: 'C3 对照：带错误目录前缀但 basename 唯一 ⇒ 必须判红（T1b-M06）',
-    code: '// 见 `src/engine/protect.rs:1`\nfn a() {}',
+    code: '// 见 `src/engine/protect.rs:1`',
     expect: 1,
+  },
+  {
+    label: 'C4 对照：范围结束行越界（10-999999）⇒ 必须判红（T1k-K01）',
+    code: '// 见 `src-tauri/src/engine/protect.rs:10-999999`',
+    expect: 1,
+  },
+  {
+    label: 'C5 对照：范围坐标倒序（20-10）⇒ 必须判红（T1k-K01）',
+    code: '// 见 `src-tauri/src/engine/protect.rs:20-10`',
+    expect: 1,
+  },
+  {
+    label: 'C6 对照：范围坐标界内（1-3）⇒ 不判红',
+    code: '// 见 `src-tauri/src/engine/protect.rs:1-3`',
+    expect: 0,
   },
 ];
 {
   let bad = 0;
   for (const c of CONTROLS) {
-    const n = coordRefs(c.code).filter((r) => !resolveTarget(r.target)).length;
-    // 越界判定需要真行数，这里直接对可解析目标再查一次
-    let total = 0;
-    for (const r of coordRefs(c.code)) {
-      const t = resolveTarget(r.target);
-      if (!t || r.ln < 1 || r.ln > linesOf(t).length) total++;
-    }
+    // 对照与真仓扫描喂**同一份** judgeRef（T1k-K01：此前对照另抄一遍越界判定）。
+    const total = coordRefs(c.code).filter((r) => judgeRef(r) !== null).length;
     if (total !== c.expect) {
       bad++;
       // T1a-M12：对照失败走 g.fail（failed++ ⇒ exit 1），不冒充通过。
@@ -157,23 +186,8 @@ let refs = 0;
 for (const rel of files) {
   for (const r of coordRefs(linesOf(rel).join('\n'), rel.endsWith('.json'))) {
     refs++;
-    const resolved = resolveTarget(r.target);
-    if (!resolved) {
-      bad.push({
-        from: `${rel}:${r.fromLine}`,
-        to: r.target,
-        why: '坐标里的文件名在仓内同名多份或解析不出 ⇒ 干净克隆按图索骥不到（Z 族形态）',
-      });
-      continue;
-    }
-    const tl = linesOf(resolved);
-    if (r.ln < 1 || r.ln > tl.length) {
-      bad.push({
-        from: `${rel}:${r.fromLine}`,
-        to: `${r.target}:${r.ln}`,
-        why: `行号越界（${resolved} 现共 ${tl.length} 行）`,
-      });
-    }
+    const v = judgeRef(r);
+    if (v) bad.push({ from: `${rel}:${r.fromLine}`, to: v.to, why: v.why });
   }
 }
 for (const b of bad) g.fail(`坐标漂移：${b.from} → ${b.to} —— ${b.why}`);

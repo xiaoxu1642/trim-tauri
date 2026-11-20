@@ -787,7 +787,7 @@
 
   function setCategory(cat) {
     activeCategory = optCategories().indexOf(cat) > -1 ? cat : '全部';
-    try { localStorage.setItem(OPT_CATEGORY_KEY, activeCategory); } catch (e) {}
+    try { localStorage.setItem(OPT_CATEGORY_KEY, activeCategory); } catch (e) { window.app?.log?.('warn', '保存优化中心分类偏好失败: ' + ((e && e.message) || e)); }
     // 高亮页内「电脑优化中心」分类分段栏（原侧边栏分类子菜单）
     document.querySelectorAll('#optimizerCatNav .filter-tab').forEach(el => {
       const on = el.dataset.optcat === activeCategory;
@@ -2556,13 +2556,23 @@
       );
       if (!go) return;
       repairBtn.disabled = true;
+      const prevText = repairBtn.textContent;
       repairBtn.textContent = '修复中…';
-      closeOptModal();
-      const ok = await restoreOption(opt);
-      if (!ok) {
-        window.app?.toast?.('error', '修复未完成：' + svcName + ' 启动类型未能改回自动，请稍后重试或用 services.msc 手动处理');
-      } else {
-        window.app?.toast?.('success', '已修复：' + svcName + ' 启动类型已改回自动');
+      // 上锁之后必须整段有 finally —— restoreOption 会向下传播 reject
+      // （runOptionActive 的 createProgressToast 在其 try 之外），异常若不接住，
+      // 按钮会永久停在 disabled + 「修复中…」。异常继续向上抛给 guardAsync
+      // （toast + 日志出口在此），这里只负责复位按钮。
+      try {
+        closeOptModal();
+        const ok = await restoreOption(opt);
+        if (!ok) {
+          window.app?.toast?.('error', '修复未完成：' + svcName + ' 启动类型未能改回自动，请稍后重试或用 services.msc 手动处理');
+        } else {
+          window.app?.toast?.('success', '已修复：' + svcName + ' 启动类型已改回自动');
+        }
+      } finally {
+        repairBtn.disabled = false;
+        repairBtn.textContent = prevText;
       }
     }));
     aiBtn.addEventListener('click', guardAsync('AI 生成优缺点', genAdviceActive));
