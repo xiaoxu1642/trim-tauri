@@ -1328,67 +1328,14 @@
           </div>
           </div>
           <!-- 动效设置独立卡（拆分批次续，2026-10-16 用户点名）：删除「显示」外层白容器与
-               appearance-grid 包裹，动效设置升为与「背景与主题」同级的顶层独立卡；
-               材质卡（v3.0 起隐藏）原位随迁（display:none，零布局影响） -->
+               appearance-grid 包裹，动效设置升为与「背景与主题」同级的顶层独立卡 -->
           <div class="settings-section settings-appearance-section">
             <div class="appearance-card-head">
               <h4>动效设置</h4>
               <p>指针轨迹与界面切换动效</p>
             </div>
-              <!-- 窗口材质与背景模糊度合并卡（v3.0）：横跨整行，display:none 不参与布局 -->
-              <div class="appearance-card appearance-card-wide" id="materialBlurCard">
-                <div class="appearance-card-head">
-                  <h4>窗口材质与背景模糊度</h4>
-                  <p>选择窗口背景的视觉材质效果，并调节面板磨砂强度</p>
-                  <!-- 材质总开关（Motion.Lab toggle-flip 滑动开关改）：关闭 = 暂停原生材质并回落不透明表面，记忆所选材质 -->
-                  <div class="mt-switch on" id="materialMasterToggle" role="switch" aria-checked="true" tabindex="0"
-                       aria-label="窗口材质总开关" data-tip="窗口材质总开关：关闭后窗口恢复不透明表面，重新开启回到所选材质">
-                    <span class="mt-switch-track"><span class="mt-switch-knob"></span></span>
-                  </div>
-                </div>
-                <div class="appearance-merge-grid">
-                  <div class="appearance-merge-col">
-                    <div class="material-grid">
-                      <!-- 色板底色一律由 main.css 的 .material-card[data-material] 规则给：
-                           内联 style 优先级更高，会把那批渐变压成纯色块（曾实际发生，CDP 实测
-                           computed background-image: none）。要改观感只改 CSS，不要在这里补底色。 -->
-                      <div class="material-card" data-material="mica">
-                        <span class="material-swatch"></span>
-                        <span class="material-name">Mica</span>
-                        <span class="material-desc">柔和云母</span>
-                      </div>
-                      <div class="material-card" data-material="mica-alt">
-                        <span class="material-swatch"></span>
-                        <span class="material-name">Mica Alt</span>
-                        <span class="material-desc">层次云母</span>
-                      </div>
-                      <div class="material-card" data-material="acrylic">
-                        <span class="material-swatch"></span>
-                        <span class="material-name">亚克力</span>
-                        <span class="material-desc">磨砂玻璃</span>
-                      </div>
-                      <div class="material-card" data-material="thin-acrylic">
-                        <span class="material-swatch"></span>
-                        <span class="material-name">细亚克力</span>
-                        <span class="material-desc">更透亮的磨砂</span>
-                      </div>
-                    </div>
-                    <!-- 「无材质」卡片已移除（设置页整合4）：与上方材质总开关重复，关闭总开关即无材质观感 -->
-                    <p class="appearance-hint">材质同时作用于主窗口与大模型管理 / 外设优化 / 进程管理窗口；关闭上方总开关即无材质观感；切换后若观感未刷新，重启应用完全生效</p>
-                  </div>
-                  <div class="appearance-merge-col">
-                    <!-- 背景模糊度（设置页整合4）：合并原「皮肤：液态玻璃」与背景磨砂强度，0-100% 无级 -->
-                    <div class="appearance-sub">
-                      <div class="appearance-sub-head">背景模糊度</div>
-                      <div class="bg-opacity-row bg-blur-row">
-                        <span class="bg-opacity-label">磨砂强度</span>
-                        <input type="range" id="bgBlur" min="0" max="100" value="0" />
-                        <span id="bgBlurInputVal">0%</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <!-- 窗口材质与背景磨砂合并卡已随表面实色化退役（方案 v1.6 §5.4/§6.4）：
+                   表面全部实色，材质档与磨砂强度都成了「无效果」的设置项，一并摘除 -->
               <!-- 背景图片卡已并入上方「背景与主题」合并卡（v3.0） -->
               <!-- 动效设置（设置页整合4）：合并原「鼠标拖尾」与「切换动效」两张卡 -->
               <div class="appearance-sub">

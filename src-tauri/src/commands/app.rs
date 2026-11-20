@@ -10,9 +10,11 @@ use crate::engine::{appearance, guard, paths, sysinfo};
 const README_MD: &str = include_str!("../../../readme.md");
 
 /// app:get-info — 字段形状对齐 Electron 版；未迁移字段显式给 null（渲染层已有 N/A 兜底）
+/// 表面实色化（2026-11-21）：子窗唯一的调用点（window-material.js 读 micaEnabled）随材质链
+/// 退役，档位从 readonly 收回 MAIN（D5：只读档放宽必须有子窗消费方支撑）。
 #[tauri::command]
 pub fn app_get_info<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<serde_json::Value, String> {
-    guard::guard_readonly(&window)?;
+    guard::guard(&window, guard::MAIN)?;
     let build = sysinfo::windows_build().unwrap_or(0);
     let username = std::env::var("USERNAME").unwrap_or_default();
     let homedir = std::env::var("USERPROFILE").unwrap_or_default();

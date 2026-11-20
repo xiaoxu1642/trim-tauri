@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::engine::{appearance::MATERIALS, guard, log, paths, protect};
+use crate::engine::{guard, log, paths, protect};
 // 审查 v2-F7：系统工具走绝对路径，不用裸进程名
 use crate::engine::systembin::system_tool;
 
@@ -129,100 +129,10 @@ fn apply_battery_material_swap<R: Runtime>(app: &AppHandle<R>, on_battery: bool)
 
 // ==================== IPC 命令 ====================
 
-/// appearance:get-material
-///
-/// 注意默认值：上游此处回退 **'mica-alt'**（设置页卡片默认选中项），
-/// 而窗口建窗侧 `getSavedMaterial()` 回退 'mica'。两者本就不同，勿"统一"掉。
-#[tauri::command]
-pub fn appearance_get_material<R: Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
-    guard::guard_readonly(&window)?;
-    let (ap, degraded) = crate::engine::appearance::load_appearance_state();
-    Ok(json!({
-        "material": ap.get("material").and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("mica-alt"),
-        "materialEnabled": ap.get("materialEnabled").and_then(|v| v.as_bool()) != Some(false),
-        // A1-M12：外观配置读失败与「没有配置」分开。
-        "degraded": degraded,
-    }))
-}
-
-/// appearance:set-material — 切换材质：校验 → 落盘 → 应用到全窗 → 广播生效值
-#[tauri::command]
-pub fn appearance_set_material<R: Runtime>(
-    window: WebviewWindow<R>,
-    material: Option<String>,
-) -> Result<Value, String> {
-    guard::guard(&window, guard::MAIN)?;
-    let Some(material) = material.filter(|m| MATERIALS.contains(&m.as_str())) else {
-        return Ok(json!({ "success": false, "message": "未知的材质" }));
-    };
-    let app = window.app_handle().clone();
-    // v4 P2-D 尾：读-改-写收口（读取失败拒写，绝不把整份外观配置覆成只剩材质一项）
-    let ap = match crate::engine::appearance::update_appearance(|ap| {
-        if let Some(obj) = ap.as_object_mut() {
-            obj.insert("material".into(), json!(material.as_str()));
-        }
-        Ok(())
-    }) {
-        Ok(v) => v,
-        Err(msg) => return Ok(json!({ "success": false, "message": format!("外观配置写入失败：{msg}") })),
-    };
-    let enabled = ap.get("materialEnabled").and_then(|v| v.as_bool()) != Some(false);
-
-    let effective = effective_of(&material, enabled);
-    let native_applied = apply_material_all(&app, &effective);
-    broadcast_material(&app, &effective);
-    log::write_log(
-        "info",
-        &format!("窗口材质切换: {material}（总开关{}，生效 {effective}）", if enabled { "开" } else { "关" }),
-    );
-    Ok(json!({ "success": true, "nativeApplied": native_applied }))
-}
-
-/// appearance:set-material-enabled — 材质总开关。
-/// 关闭 = 生效材质置 none（各窗口即时不透明），所选材质保留记忆。
-#[tauri::command]
-pub fn appearance_set_material_enabled<R: Runtime>(
-    window: WebviewWindow<R>,
-    enabled: Option<bool>,
-) -> Result<Value, String> {
-    guard::guard(&window, guard::MAIN)?;
-    let on = enabled.unwrap_or(false);
-    let app = window.app_handle().clone();
-    // v4 P2-D 尾：读-改-写收口（同上）；material 从更新后的回执读（该键未被本闭包改）
-    let ap = match crate::engine::appearance::update_appearance(|ap| {
-        if let Some(obj) = ap.as_object_mut() {
-            obj.insert("materialEnabled".into(), json!(on));
-        }
-        Ok(())
-    }) {
-        Ok(v) => v,
-        Err(msg) => return Ok(json!({ "success": false, "message": format!("外观配置写入失败：{msg}") })),
-    };
-    let material = ap
-        .get("material")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("mica")
-        .to_string();
-
-    // 此处回退 'mica'（对齐上游 4243 行），与 get-material 的 'mica-alt' 默认值不同是刻意：
-    // 开关侧要的是「恢复到一个能看的材质」，展示侧要的是「设置页默认高亮项」。
-    let effective = effective_of(&material, on);
-    let native_applied = apply_material_all(&app, &effective);
-    broadcast_material(&app, &effective);
-    log::write_log(
-        "info",
-        &format!("窗口材质总开关: {}（生效材质 {effective}）", if on { "开启" } else { "关闭" }),
-    );
-    Ok(json!({
-        "success": true,
-        "material": effective,
-        "materialEnabled": on,
-        "nativeApplied": native_applied,
-    }))
-}
+// 材质读写三命令（appearance:get-material / set-material / set-material-enabled）已随
+// 表面实色化整链退役（2026-11-21，方案 v1.6 §5.6 + 小旭拍板）：设置页材质 UI 与前端
+// 控制器同撤，D4 棘轮不允许孤儿通道。原生 DWM 应用链与电池降级保留（仅启动/电源事件
+// 驱动）；appearance.json 的 material / materialEnabled 两键自此无 IPC 写入口。
 
 /// appearance:get-env — 环境降级态只读快照（渲染层液态玻璃引擎消费）
 #[tauri::command]
@@ -877,6 +787,8 @@ mod power {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 材质白名单只被测试直接引用（命令层校验已随材质链退役，engine 侧 normalize 仍用它）
+    use crate::engine::appearance::MATERIALS;
 
     #[test]
     fn effective_of_置零_when_disabled() {
@@ -1023,12 +935,13 @@ mod tests {
 
     #[test]
     fn 外观键表与材质键不重叠() {
-        // 外观偏好通道写的是同一份 appearance.json，但材质两键有各自的命令
-        // （写侧还要顺带应用全窗 + 广播）。把它们塞进通用偏好通道 = 绕过材质应用链。
+        // 材质两键（material / materialEnabled）已随表面实色化整链退役（2026-11-21），
+        // appearance.json 里只读不写（原生启动应用还读它们）。外观偏好通道不得收
+        // 这两个键——通用写入口没有「应用全窗 + 广播」的旁路义务，收了就是静默假写。
         for (key, _) in APPEARANCE_PREF_KEYS {
             assert!(!MATERIALS.contains(&key), "{key} 不该同时是材质值");
-            assert_ne!(*key, "material", "material 必须走 appearance:set-material");
-            assert_ne!(*key, "materialEnabled", "materialEnabled 必须走 appearance:set-material-enabled");
+            assert_ne!(*key, "material", "material 已退役，外观偏好通道不得收");
+            assert_ne!(*key, "materialEnabled", "materialEnabled 已退役，外观偏好通道不得收");
         }
     }
 

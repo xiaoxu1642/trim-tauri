@@ -9,12 +9,6 @@
   // 无关；IS_ELECTRON 这个名字会让后来者把就绪判断误读成环境判断。
   const HAS_BRIDGE = !!window.api?.app;
 
-  // 应用 Mica 模式（electron-mica 是历史沿用的类名；桥就绪且系统支持时背景透明，
-  // 让原生 Mica 透出）
-  function applyMicaMode(enabled) {
-    document.body.classList.toggle('electron-mica', enabled);
-  }
-
   function applyTheme() {
     // 档位由 html 类承载（theme-boot 已定级），body 镜像同一档——body 级 token 覆盖
     // html 级，两处必须同档，否则 body 静态类会把深色档静默盖回浅色。
@@ -79,7 +73,6 @@
 
   window.theme = {
     apply: applyTheme,
-    applyMicaMode,
     setTheme
   };
 
@@ -88,18 +81,11 @@
   function applySkinAndPreset() {
     let ap = {};
     try { ap = JSON.parse(localStorage.getItem('trim-appearance') || '{}') || {}; } catch (e) {}
-    // 背景模糊度（设置页整合4）：>0 挂 body[data-skin="glass"] 并按百分比缩放模糊半径（100% = 26px，与原液态玻璃
-    // 一致；与 pathbinding.js 的 GLASS_MAX_BLUR_PX 共用同一约定，改动需两处同步）。v3.0 全局玻璃化：0% 仅表示「无
-    // 磨砂」，容器仍为玻璃 alpha（表面 token 真源即玻璃值），不再有「经典不透明面板」态。旧 skin 键按 glass=100%/classic=0% 折算迁移。
-    let blur = ap.bgBlur;
-    let dirty = blur == null;
-    if (dirty) {
-      blur = 100;
-      ap.bgBlur = blur;
-      delete ap.skin;
-    }
-    // 首次启动（键不存在）的外观默认：预设壁纸 Doll·手办 + 壁纸模糊 20%。判据一律是「键不存在」而不是「值为空」——
-    // 用户显式选过「无背景」存的是 ''、拖到 0% 存的是 0，那是选择不是缺省，覆盖它等于替用户改设置。落默认值同时写回。
+    // 表面实色化（方案 v1.6 §5.6）：背景磨砂链（bgBlur/skin 键、data-skin、--glass-blur）已退役——
+    // 存量键按「无效果」处理，不删除不迁移，避免回读异常；壁纸层模糊走 --bg-blur（wallpaperBlur）。
+    // 首次启动（键不存在）的外观默认：预设壁纸 Doll·手办。判据一律是「键不存在」而不是「值为空」——
+    // 用户显式选过「无背景」存的是 ''，那是选择不是缺省，覆盖它等于替用户改设置。落默认值同时写回。
+    let dirty = false;
     if (ap.presetBg == null) {
       ap.presetBg = window.ds?.DEFAULT_PRESET_BG || '';
       dirty = true;
@@ -110,14 +96,6 @@
     }
     if (dirty) {
       try { localStorage.setItem('trim-appearance', JSON.stringify(ap)); } catch (e) {}
-    }
-    if (blur > 0) {
-      document.body.dataset.skin = 'glass';
-      // 审查 5-5：上限与 pathbinding 共用 ds 常量（GLASS_MAX_BLUR_PX），消除两处硬编码漂移
-      document.documentElement.style.setProperty('--glass-blur', (blur / 100 * (window.ds?.GLASS_MAX_BLUR_PX || 26)).toFixed(1) + 'px');
-    } else {
-      delete document.body.dataset.skin;
-      document.documentElement.style.removeProperty('--glass-blur');
     }
     // 壁纸层模糊（--bg-blur）此前只有设置页脚本 pathbinding.js 会写，而它是进「设置」页才延迟加载 ⇒ 重启后没打开过
     // 设置页，壁纸一直是清晰的（存过的值和默认值都不生效）。启动期按同一套换算补上，设置页拖动时覆盖的是同一个属性。
@@ -150,26 +128,5 @@
     }
     // 后端回读采纳（异步，不阻塞首帧外观）
     reconcileThemeWithBackend();
-
-    // 桥就绪：检测 Mica 支持，启用透明背景
-    if (HAS_BRIDGE && window.api?.app?.getInfo) {
-      try {
-        const info = await window.api.app.getInfo();
-        // 无论系统是否支持 DWM 材质，都同步渲染层状态：不支持时仍使用
-        // 对应的 CSS 表面作为可读回退，支持时再叠加原生 Mica/Acrylic。
-        applyMicaMode(Boolean(info.micaEnabled));
-        try {
-          const resp = await window.api?.appearance?.getMaterial?.();
-          if (resp && resp.material) {
-            // 材质总开关关闭时按「无材质」落 dataset，与手动选择 none 观感一致（窗口界面升级3）
-            document.body.dataset.material = resp.materialEnabled === false ? 'none' : resp.material;
-          }
-        } catch (e) {
-          window.app?.log?.('warn', '读取窗口材质失败: ' + ((e && e.message) || e));
-        }
-      } catch (e) {
-        window.app?.log?.('warn', '读取系统信息失败: ' + ((e && e.message) || e));
-      }
-    }
   }
 })();

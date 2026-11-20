@@ -1,19 +1,18 @@
-// liquid-glass.js - 全局「液态玻璃」引擎 2.0
+// liquid-glass.js - 全局「液态玻璃」引擎 3.0（表面实色化后仅存交互层）
 // 模式（P2-13 起真源在后端 settings.json 的 `liquidMotion` 键；localStorage
 // 'trim-liquid-motion' 仅是首帧镜像/迁移来源；旧值 refract 自动迁移为 standard）。
 // 选项三档（2026-10-09 用户裁定）：full / standard / off —— frost 从选项退役
 // （太不明显），仅保留为环境自适应的内部降级档（电池/系统关透明时自动落入）。
-// 材质语义对齐 Apple Liquid Glass（本机资料区 update/2026-09-14 五方案评估·B1，不入库）：
-//   full ≈ clear+：完整液态玻璃——滑块 + 按钮 + 弹层 SVG 物理折射（斯涅尔定律位移贴图）+ RGB 三通道边缘色散
-//                  + 高光贴图 + 指针弹性形变 + WebGL 弹层焦散高光
-//   standard ≈ regular：覆盖面同 full，但单通道折射、无色散 / 形变 / WebGL
-//   frost = 环境自适应内部档（不在选项里）：磨砂玻璃，仅 backdrop blur（CSS 驱动），无折射滤镜
-//   off = 实底：隐藏滑块、恢复实底按钮，不注入任何滤镜
-// 技术来源：位移贴图与高光参考 liquid实现2（圆角矩形角环 + 斯涅尔折射轮廓：厚度/斜边宽/折射率），
-// 色散与指针弹性形变参考 liquid实现3（R/G/B 三次 feDisplacementMap 不同 scale 后 screen 混合；边缘激活区内方向性缩放 + 平移）。
-// 能力检测失败（backdrop-filter 不支持引用 SVG 滤镜）自动降级 frost。
-// 性能护栏：贴图/滤镜按尺寸缓存复用；折射按环带像素量计费 + 面积兜底（B2）；
-//           折射元素数量与滤镜桶数量有上限；prefers-reduced-motion 时禁用指针形变与 WebGL 动画。
+// 表面实色化（方案 v1.6 §5.6）后各档语义收敛为纯交互差异：
+//   full     = 分段栏弹簧滑块 + 按钮/次级按钮指针弹性形变(.lg-elastic)
+//   standard = 仅分段栏弹簧滑块
+//   frost    = 环境自适应内部档（电池/系统关透明时由 applyEnv 以 persist:false 落入），
+//              与 standard 同效（磨砂/backdrop 写入段已随实色化退役）
+//   off      = 隐藏滑块、摘除弹性形变，恢复实底选中态
+// 折射位移贴图 / SVG 滤镜链 / backdrop-filter 写入 / WebGL 弹层焦散已整链退役：
+// 表面全部实色后按钮与浮层不再「看穿身后内容」，滤镜与焦散失去作用对象。
+// 性能护栏沿用：弹性形变只动 transform 变量（两趟读写纪律），滑块挂载带
+// 120ms 节流与 MutationObserver 跟挂；prefers-reduced-motion 时停用形变。
 (function () {
   'use strict';
 
@@ -22,70 +21,27 @@
   const LEGACY_MODE_MAP = { refract: 'standard' };
 
   // v3.2.0（侧边岛玻璃选中滑块）：#sidebar 纳入滑块引擎，.nav-item 作为 tab——
-  // 点击导航时选中玻璃块从旧项纵向平滑滑到新项（弹簧回弹 + 轻微挤压），替换硬切背景
+  // 点击导航时选中块从旧项纵向平滑滑到新项（弹簧回弹 + 轻微挤压），替换硬切背景
   const BAR_SELECTOR = '.filter-tabs, .maint-tabs, #sidebar';
   const TAB_SELECTOR = '.filter-tab, .maint-tab, .nav-item';
-  // 按钮语义名单：决定「谁是按钮」= full 档的指针弹性形变（.lg-elastic）。2026-10-14 像素实测：位移贴图会把相邻行
-  // 分隔线与文字拽进元素（同页两个色差 14 个单位）；按钮与输入框（2026-10-15 快捷指令搜索框整块发黑，同族）都已退出
-  // 折射——底色只由 CSS 的 --lg-glass-floor 自证（机检 check-contrast F1/F6）。
+  // 弹性形变名单（full 档 .lg-elastic）。2026-10-14 像素实测曾把按钮退出折射——
+  // 实色化后折射已不存在，名单只剩「谁参与指针弹性形变」一个语义。
   const BUTTON_SELECTOR = '.btn-primary, .btn-accent, .btn-secondary';
-  // v3 评估 C/L3：输入框与下拉纳入玻璃体系（field-input 同时挂在 input 与 select 上），归类为 control：无折射
-  //（2026-10-15 退出，与按钮同族的 backdrop 渲染缺陷）、无弹性形变（输入中形变会干扰打字）、无 shimmer
-  const INPUT_SELECTOR = '.field-input';
-  // 折射池全量扫描目标（按钮 + 输入控件 + 浮层）
-  const REFRACT_SELECTOR = BUTTON_SELECTOR + ', ' + INPUT_SELECTOR;
-  // 悬浮玻璃层：统一弹窗 / 右键详情 / ds 下拉菜单（动态创建，由 MutationObserver 跟挂）。v3.0 修复批次（B4 扩覆盖面）：
-  // --bg-card 透明化后 ds-menu 底色改由 CSS floor+blur 兜底（main.css 菜单段），full/standard 档再由本引擎叠加折射与 shimmer
-  const FLOATING_SELECTOR = '.usage-modal, .ctx-detail-modal, .ds-menu';
-  // 折射元素上限：滤镜链是像素级操作，数量失控会掉帧，超出的退化为磨砂
-  const MAX_REFRACT = 28;
-  // 折射预算（v2 评估 B2 环带计费）：位移贴图只在边缘环带非零，主计费按环带像素量 ring ≈ 2×(w+h)×bezel（bezel 与
-  // buildMaps 同式）——宽工具行/大卡片/弹层与方框同权，不再因整面积超限一刀切退化纯 blur（Apple 的玻璃主体恰是大面板）。
-  // 但 feDisplacementMap 仍按元素整面积处理，故保留面积兜底防极端大面板
-  const RING_BEZEL_MAX = 26;        // 与 buildMaps 的 bezel 上限一致
-  const MAX_RING_PIXELS = 96000;    // 环带预算：420² 方框≈44k、1200×160 工具行≈24k、560×420 弹层≈18k
-  const MAX_REFRACT_AREA = 352800;  // 面积兜底（≈594²）：主窗级整面板仍被挡
-
-  function ringBezel(w, h, radius) {
-    const r = Math.min(radius, w / 2, h / 2);
-    return Math.max(3, Math.min(r * 0.9, Math.min(w, h) * 0.4, RING_BEZEL_MAX));
-  }
-  function withinRefractBudget(w, h, radius) {
-    if (w * h > MAX_REFRACT_AREA) return false;
-    return 2 * (w + h) * ringBezel(w, h, radius) <= MAX_RING_PIXELS;
-  }
   // 指针弹性激活区：光标距元素边缘多少 px 内开始形变
   const ELASTIC_ZONE = 160;
   const ELASTICITY = 0.12;
 
   let mode = 'standard';
-  let refractionSupported = true;
   let reduceMotion = false;
-  // v2.8.0：玻璃质感参数（读自 main.css --glass-satur/--glass-bright，init 时取一次）
-  // v3.0 修复批次：默认值与 token 同步收敛到 Apple 消色玻璃档（1.25/1.02）
-  let glassSatur = 1.25;
-  let glassBright = 1.02;
   // v2.8.0：环境自适应状态（会话级降级，不改用户存储的偏好）
   let envBattery = false;        // 电池供电：full/standard → frost
   let envNoTransparency = false; // 系统关闭「透明效果」：强制 frost
 
-  const states = new Map();      // bar -> { thumb, filterId, mapW, mapH }（分段栏滑块）
-  const glassStates = new Map(); // el  -> { kind, w, h, radius, blur, refract }
-  // 容量上限（性能 v3 ①，写法对齐 MAP_CACHE_MAX / FILTER_BUCKETS_MAX）：glassStates 此前没有上限——
-  // MAX_REFRACT 28 只管折射名额、FILTER_BUCKETS_MAX 48 只管滤镜桶，纯磨砂元素照样逐个进 Map 并被 glassRo.observe。
-  // 现算挂载面：index.html 静态命中 92 个候选（btn-primary 14 + btn-accent 7 + btn-secondary 61 + field-input 9 +
-  // usage-modal 1；取数命令：rg -o 'class="[^"]*btn-secondary[^"]*"' src/index.html | wc -l，逐个 class 换名重跑），
-  // 但零尺寸（未激活页/未显示弹窗）在 measureGlass 就被挡下；
-  // 卸载页每应用 3 个 .btn-secondary，百应用即 300+。
-  // 512 给到静态面 6 倍余量，只在「DOM 里同时存在上千克个玻璃候选」时生效。超限的降级是「不再挂新元素」（不 observe、
-  // 不挂弹性、不写行内 backdropFilter），**不回改已挂元素**：已挂元素的视觉终值一个都不动；未挂元素走 main.css 的 CSS floor，
-  // 名额腾出后由 scheduleScan 下一轮补挂（与零尺寸元素延迟入场同一条路径）。
-  const GLASS_STATES_MAX = 512;
+  const states = new Map();      // bar -> { thumb, mo, raf, lastX/Y/W/H, mount }（分段栏滑块）
   const elasticEls = new Set();  // full 模式参与弹性形变的按钮
-  let refractCount = 0;
 
   // P2-13（2026-10-09）：真源迁后端 settings.json 的 `liquidMotion` 键（AGENTS §0.2）；localStorage 降级为「同步初值
-  // + 迁移来源 + 镜像」—— 玻璃档不能在 init 等 IPC，否则首帧闪实底；后端回读只做采纳/迁移，且晚于首帧也不推翻已渲染的档位。
+  // + 迁移来源 + 镜像」—— 档位不能在 init 等 IPC，否则首帧闪默认态；后端回读只做采纳/迁移，且晚于首帧也不推翻已渲染的档位。
   // 2026-10-09 用户裁定：磨砂档从**选项**退役（太不明显，与标准几乎不可辨），选项只剩完整/标准/关闭三档；frost 仍保留为
   // 环境自适应内部档（电池供电/系统关透明时由 applyEnv 以 persist:false 落入，不写用户偏好）。存量 frost 偏好按 standard 归一。
   const USER_MODES = ['full', 'standard', 'off'];
@@ -158,451 +114,41 @@
     return MODES.indexOf(v) > -1 ? v : 'standard';
   }
 
-  // 位移贴图（斯涅尔折射轮廓）
-  const mapCache = new Map(); // 'w x h r' -> { url, specUrl }
-  const MAP_CACHE_MAX = 48;
-
-  // convex squircle 表面高度函数：边缘曲率自然，比圆弧更接近真实玻璃倒角
-  function surfaceHeight(x) {
-    return Math.pow(1 - Math.pow(1 - x, 4), 0.25);
-  }
-
-  // 按斯涅尔定律计算边缘折射轮廓：入射角由表面斜率导出，折射率 ior 控制弯折强度
-  function calculateRefractionProfile(glassThickness, bezelWidth, ior, samples) {
-    samples = samples || 96;
-    const eta = 1 / ior;
-    function refract(nx, ny) {
-      const dot = ny;
-      const k = 1 - eta * eta * (1 - dot * dot);
-      if (k < 0) return null;
-      const sq = Math.sqrt(k);
-      return [-(eta * dot + sq) * nx, eta - (eta * dot + sq) * ny];
-    }
-    const profile = new Float64Array(samples);
-    for (let i = 0; i < samples; i++) {
-      const x = i / samples;
-      const y = surfaceHeight(x);
-      const dx = x < 1 ? 0.0001 : -0.0001;
-      const y2 = surfaceHeight(x + dx);
-      const deriv = (y2 - y) / dx;
-      const mag = Math.sqrt(deriv * deriv + 1);
-      const ref = refract(-deriv / mag, -1 / mag);
-      if (!ref) { profile[i] = 0; continue; }
-      profile[i] = ref[0] * ((y * bezelWidth + glassThickness) / ref[1]);
-    }
-    return profile;
-  }
-
-  // 生成位移贴图：只在圆角矩形边缘环带内有位移，中心保持 128（零位移）
-  function generateDisplacementCanvas(w, h, radius, bezelWidth, profile, maxDisp) {
-    const c = document.createElement('canvas');
-    c.width = Math.max(1, w);
-    c.height = Math.max(1, h);
-    const ctx = c.getContext('2d');
-    const img = ctx.createImageData(c.width, c.height);
-    const d = img.data;
-    for (let i = 0; i < d.length; i += 4) {
-      d[i] = 128; d[i + 1] = 128; d[i + 2] = 0; d[i + 3] = 255;
-    }
-    const r = Math.min(radius, c.width / 2, c.height / 2);
-    const rSq = r * r, r1Sq = (r + 1) * (r + 1);
-    const rBSq = Math.max(r - bezelWidth, 0) ** 2;
-    const wB = c.width - r * 2, hB = c.height - r * 2;
-    const S = profile.length;
-
-    for (let y1 = 0; y1 < c.height; y1++) {
-      for (let x1 = 0; x1 < c.width; x1++) {
-        const x = x1 < r ? x1 - r : x1 >= c.width - r ? x1 - r - wB : 0;
-        const y = y1 < r ? y1 - r : y1 >= c.height - r ? y1 - r - hB : 0;
-        const dSq = x * x + y * y;
-        if (dSq > r1Sq || dSq < rBSq) continue;
-        const dist = Math.sqrt(dSq);
-        const fromSide = r - dist;
-        const op = dSq < rSq ? 1 : 1 - (dist - Math.sqrt(rSq)) / (Math.sqrt(r1Sq) - Math.sqrt(rSq));
-        if (op <= 0 || dist === 0) continue;
-        const cos = x / dist, sin = y / dist;
-        const bi = Math.min(((fromSide / bezelWidth) * S) | 0, S - 1);
-        const disp = profile[bi] || 0;
-        const dX = (-cos * disp) / maxDisp, dY = (-sin * disp) / maxDisp;
-        const idx = (y1 * c.width + x1) * 4;
-        d[idx] = (128 + dX * 127 * op + 0.5) | 0;
-        d[idx + 1] = (128 + dY * 127 * op + 0.5) | 0;
-      }
-    }
-    ctx.putImageData(img, 0, 0);
-    return c.toDataURL();
-  }
-
-  // 生成高光贴图：边缘环带上按固定光照角度高亮（滤镜链内合成，省一层 DOM）
-  function generateSpecularCanvas(w, h, radius, bezelWidth, angle) {
-    angle = angle != null ? angle : Math.PI / 3;
-    const c = document.createElement('canvas');
-    c.width = Math.max(1, w);
-    c.height = Math.max(1, h);
-    const ctx = c.getContext('2d');
-    const img = ctx.createImageData(c.width, c.height);
-    const d = img.data;
-    const r = Math.min(radius, c.width / 2, c.height / 2);
-    const rSq = r * r, r1Sq = (r + 1) * (r + 1);
-    const rBSq = Math.max(r - bezelWidth * 2.5, 0) ** 2;
-    const wB = c.width - r * 2, hB = c.height - r * 2;
-    const sv = [Math.cos(angle), Math.sin(angle)];
-
-    for (let y1 = 0; y1 < c.height; y1++) {
-      for (let x1 = 0; x1 < c.width; x1++) {
-        const x = x1 < r ? x1 - r : x1 >= c.width - r ? x1 - r - wB : 0;
-        const y = y1 < r ? y1 - r : y1 >= c.height - r ? y1 - r - hB : 0;
-        const dSq = x * x + y * y;
-        if (dSq > r1Sq || dSq < rBSq) continue;
-        const dist = Math.sqrt(dSq);
-        const fromSide = r - dist;
-        const op = dSq < rSq ? 1 : 1 - (dist - Math.sqrt(rSq)) / (Math.sqrt(r1Sq) - Math.sqrt(rSq));
-        if (op <= 0 || dist === 0) continue;
-        const cos = x / dist, sin = -y / dist;
-        const dot = Math.abs(cos * sv[0] + sin * sv[1]);
-        const edge = Math.sqrt(Math.max(0, 1 - (1 - fromSide) * (1 - fromSide)));
-        const coeff = dot * edge;
-        const col = (255 * coeff) | 0;
-        const alpha = (col * coeff * op) | 0;
-        const idx = (y1 * c.width + x1) * 4;
-        d[idx] = col; d[idx + 1] = col; d[idx + 2] = col; d[idx + 3] = alpha;
-      }
-    }
-    ctx.putImageData(img, 0, 0);
-    return c.toDataURL();
-  }
-
-  function buildMaps(w, h, radius) {
-    const key = w + 'x' + h + 'r' + Math.round(radius);
-    let entry = mapCache.get(key);
-    if (entry) return entry;
-    const r = Math.min(radius, w / 2, h / 2);
-    const bezel = Math.max(3, Math.min(r * 0.9, Math.min(w, h) * 0.4, 26));
-    const thickness = Math.max(6, Math.min(bezel * 1.6, 40));
-    const profile = calculateRefractionProfile(thickness, bezel, 1.5, 96);
-    // 实际最大位移量：小元素收敛（避免过度扭曲文字），大圆角适度放宽
-    const maxDisp = Math.min(Math.max(r * 0.85, 3), 12);
-    entry = {
-      url: generateDisplacementCanvas(w, h, r, bezel, profile, maxDisp),
-      specUrl: generateSpecularCanvas(w, h, r, bezel)
-    };
-    if (mapCache.size >= MAP_CACHE_MAX) {
-      mapCache.delete(mapCache.keys().next().value);
-    }
-    mapCache.set(key, entry);
-    return entry;
-  }
-
-  // SVG 滤镜装配（共享 defs，按 模式x尺寸x圆角 桶复用）
-  const svgNS = 'http://www.w3.org/2000/svg';
-  const xlinkNS = 'http://www.w3.org/1999/xlink';
-  let sharedDefs = null;
-  const filterBuckets = new Map(); // key -> filterId
-  const filterUsers = new Map(); // filterId -> 引用元素数（LG-1 回收依据）
-
-  function ensureSharedDefs() {
-    if (sharedDefs && document.body.contains(sharedDefs)) return sharedDefs;
-    const svg = document.createElementNS(svgNS, 'svg');
-    svg.setAttribute('width', '0');
-    svg.setAttribute('height', '0');
-    svg.style.cssText = 'position:absolute;width:0;height:0;pointer-events:none;';
-    sharedDefs = document.createElementNS(svgNS, 'defs');
-    svg.appendChild(sharedDefs);
-    document.body.appendChild(svg);
-    return sharedDefs;
-  }
-
-  function fe(name, attrs) {
-    const node = document.createElementNS(svgNS, name);
-    for (const k in attrs) node.setAttribute(k, String(attrs[k]));
-    // feImage 的 href 需要 xlink 命名空间别名才能在所有 Chromium 版本稳定生效
-    if (attrs.href) node.setAttributeNS(xlinkNS, 'xlink:href', attrs.href);
-    return node;
-  }
-
-  // 装配滤镜链：SourceGraphic → 微模糊 → （多通道）位移 → 增艳 → 高光合成
-  // aberration=true 时 R/G/B 以不同 scale 位移后 screen 混合（边缘色散，中心不受影响——
-  // 位移贴图只在边缘环带非零，天然起到 liquid实现3 中 EDGE_MASK 的作用）
-  function buildFilterEl(id, w, h, maps, displaceScale, aberration) {
-    const filter = fe('filter', { id, x: '-20%', y: '-20%', width: '140%', height: '140%', colorInterpolationFilters: 'sRGB' });
-    filter.appendChild(fe('feImage', { href: maps.url, x: 0, y: 0, width: w, height: h, result: 'MAP', preserveAspectRatio: 'none' }));
-    filter.appendChild(fe('feGaussianBlur', { in: 'SourceGraphic', stdDeviation: 0.4, result: 'SRC' }));
-
-    const channelMats = {
-      CHR: '1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0',
-      CHG: '0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0',
-      CHB: '0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0'
-    };
-    let displaced;
-    if (aberration) {
-      // v3 评估 B1：色散差值 6%/12% → 15%/25%——原差值在强边缘几乎不可见，
-      // 拉大后 R/B 边缘出现可辨彩虹边（Apple 色散特征），成本不变（仍 3 次位移）
-      const passes = [
-        ['DISPR', 'CHR', displaceScale],
-        ['DISPG', 'CHG', displaceScale * 0.85],
-        ['DISPB', 'CHB', displaceScale * 0.75]
-      ];
-      passes.forEach(([res, chan, scale]) => {
-        filter.appendChild(fe('feDisplacementMap', { in: 'SRC', in2: 'MAP', scale, xChannelSelector: 'R', yChannelSelector: 'G', result: res }));
-        filter.appendChild(fe('feColorMatrix', { in: res, type: 'matrix', values: channelMats[chan], result: chan }));
-      });
-      filter.appendChild(fe('feBlend', { in: 'CHG', in2: 'CHB', mode: 'screen', result: 'GBC' }));
-      filter.appendChild(fe('feBlend', { in: 'CHR', in2: 'GBC', mode: 'screen', result: 'RGBJ' }));
-      filter.appendChild(fe('feGaussianBlur', { in: 'RGBJ', stdDeviation: 0.35, result: 'SOFT' }));
-      displaced = 'SOFT';
-    } else {
-      filter.appendChild(fe('feDisplacementMap', { in: 'SRC', in2: 'MAP', scale: displaceScale, xChannelSelector: 'R', yChannelSelector: 'G', result: 'DISP' }));
-      displaced = 'DISP';
-    }
-
-    filter.appendChild(fe('feColorMatrix', { in: displaced, type: 'saturate', values: String(glassSatur), result: 'SAT' }));
-    filter.appendChild(fe('feImage', { href: maps.specUrl, x: 0, y: 0, width: w, height: h, result: 'SPEC', preserveAspectRatio: 'none' }));
-    // 高光贴图 alpha 作为遮罩，把增艳后的折射内容裁进高光区
-    filter.appendChild(fe('feComposite', { in: 'SAT', in2: 'SPEC', operator: 'in', result: 'SMASK' }));
-    const specFade = fe('feComponentTransfer', { in: 'SPEC', result: 'SFADE' });
-    specFade.appendChild(fe('feFuncA', { type: 'linear', slope: 0.5 }));
-    filter.appendChild(specFade);
-    filter.appendChild(fe('feBlend', { in: 'SMASK', in2: displaced, mode: 'normal', result: 'WITH' }));
-    filter.appendChild(fe('feBlend', { in: 'SFADE', in2: 'WITH', mode: 'normal', result: 'BASE' }));
-    if (aberration) {
-      // v3 评估 B2：噪点降权（0.06 → 0.02）——噪点是微软 Acrylic 的语汇（MULTIPLY 混合的
-      // 颗粒层），Apple 的 clear glass 是干净的，质感来自折射+镜面+色散；保留极弱一层
-      // 兼顾大平面上的带通抖动抑制，不删（测试断言 feTurbulence 存在）
-      filter.appendChild(fe('feTurbulence', { type: 'fractalNoise', baseFrequency: '0.9', numOctaves: '2', seed: '7', stitchTiles: 'stitch', result: 'NOISE' }));
-      filter.appendChild(fe('feColorMatrix', { in: 'NOISE', type: 'matrix', values: '0 0 0 0 0.55  0 0 0 0 0.55  0 0 0 0 0.58  0 0 0 0.02 0', result: 'GRAIN' }));
-      filter.appendChild(fe('feBlend', { in: 'GRAIN', in2: 'BASE', mode: 'soft-light' }));
-    }
-    return filter;
-  }
-
-  // 滤镜桶上限（修复实锤5 / LG-1 2026-09-15 v7）：桶随 模式x尺寸x圆角 组合增长。
-  // 桶满时先回收「引用计数为 0」的滤镜（元素已 detach 或尺寸变更后遗留的旧桶——
-  // 它们的 backdrop-filter 已不再指向这些节点，删除 SVG 节点无副作用），仍满才退磨砂
-  // 等待回升。原实现只增不减，撞满 48 后本会话永久退化（LG-1）。
-  const FILTER_BUCKETS_MAX = 48;
-
-  function useFilter(id) {
-    filterUsers.set(id, (filterUsers.get(id) || 0) + 1);
-  }
-  function releaseFilter(id) {
-    const n = (filterUsers.get(id) || 0) - 1;
-    if (n <= 0) filterUsers.delete(id);
-    else filterUsers.set(id, n);
-  }
-  function sweepUnusedFilters() {
-    const defs = sharedDefs && document.body.contains(sharedDefs) ? sharedDefs : null;
-    let removed = 0;
-    for (const [key, id] of [...filterBuckets]) {
-      if (filterUsers.has(id)) continue;
-      filterBuckets.delete(key);
-      if (defs) {
-        const node = defs.querySelector('[id="' + id + '"]');
-        if (node) node.remove();
-      }
-      removed++;
-    }
-    return removed;
-  }
-
-  function getFilterId(kind, w, h, radius) {
-    const key = kind + '|' + w + 'x' + h + 'r' + Math.round(radius);
-    let id = filterBuckets.get(key);
-    if (id) return id;
-    if (filterBuckets.size >= FILTER_BUCKETS_MAX && sweepUnusedFilters() === 0) return null;
-    const maps = buildMaps(w, h, radius);
-    id = 'lg-f-' + kind + '-' + Math.random().toString(36).slice(2, 8);
-    const filterEl = buildFilterEl(id, w, h, maps, Math.min(Math.max(radius * 0.85, 3), 12), kind === 'full');
-    ensureSharedDefs().appendChild(filterEl);
-    filterBuckets.set(key, id);
-    return id;
-  }
-
-  function readRadius(el) {
-    const v = parseFloat(getComputedStyle(el).borderTopLeftRadius);
-    return Number.isFinite(v) && v > 0 ? v : 4;
-  }
-
-  function setBackdrop(el, value) {
-    el.style.backdropFilter = value;
-    el.style.webkitBackdropFilter = value;
-  }
-
-  // 元素玻璃挂载（按钮 / 弹层）
-  // 性能 v3 ①：拆成「读趟 measureGlass / 写趟 commitGlass」两趟 —— 旧版单元素直挂路径（已随 F5-L11 删除、零调用方）
-  // 对 N 个候选逐个跑 matches → getBoundingClientRect → getComputedStyle(半径) → 写两条行内 backdropFilter →
-  // classList.add('lg-elastic') → glassRo.observe，同帧读写交错、每次读都被上一元素的写判脏，强制样式重算 + 回流 N 次；
-  // 两趟化后读全部发生在写之前，整趟只脏一次布局。
-  // 等价性前提（改任一写法都要复核这条）：本引擎的写不改布局终值——.lg-elastic 的 transform 变量默认恒等
-  // （--lg-tx/ty 0px、--lg-sx/sy 1、--lg-press 1），加 class 前后 getBoundingClientRect 同一个盒子；shimmer 画布与
-  // sharedDefs 的 <svg> 都是 position:absolute 不入流、不改宿主尺寸；backdrop-filter 不参与布局。
-  // 读趟：只做几何/样式读取（rect + computed 圆角），一律不碰 DOM
-  function measureGlass(el) {
-    if (glassStates.has(el) || !el.isConnected) return null;
-    const kind = el.matches(FLOATING_SELECTOR) ? 'floating' : (el.matches(BUTTON_SELECTOR) ? 'button' : 'control');
-    const rect = el.getBoundingClientRect();
-    const w = Math.round(rect.width), h = Math.round(rect.height);
-    if (!w || !h) return null; // 隐藏中（未激活页 / 未显示弹窗），后续扫描再挂
-    const radius = readRadius(el);
-    return { el, kind, w, h, radius, blur: kind === 'floating' ? 9 : 2 };
-  }
-
-  // 写趟：折射名额（refractCount）与滤镜桶按元素逐个结算。遍历顺序与旧版 forEach 一致，
-  // 所以 MAX_REFRACT / FILTER_BUCKETS_MAX 下「谁抢到名额」的归属结果不变。
-  function commitGlass(m) {
-    if (glassStates.size >= GLASS_STATES_MAX) return; // 容量闸门（见 GLASS_STATES_MAX 注释）
-    const el = m.el;
-    const overBudget = !withinRefractBudget(m.w, m.h, m.radius);
-    // kind==='button'/'control' 永远不进折射（两次真机实测见 BUTTON_SELECTOR 注释）；
-    // 折射名额全留给浮层——只有它们「要看穿身后内容」，其余走纯磨砂。
-    const wantRefract = m.kind === 'floating' && mode !== 'frost' && mode !== 'off' && refractionSupported && !overBudget && refractCount < MAX_REFRACT;
-    const st = { kind: m.kind, w: m.w, h: m.h, radius: m.radius, blur: m.blur, refract: false };
-    if (m.kind === 'button' || m.kind === 'control') {
-      st.noFilter = true;
-    } else if (wantRefract) {
-      const id = getFilterId(mode, m.w, m.h, st.radius);
-      if (id) {
-        st.refract = true;
-        st.filterId = id;
-        useFilter(id);
-        refractCount++;
-        setBackdrop(el, `url(#${id}) blur(${m.blur}px) saturate(${glassSatur}) brightness(${glassBright})`);
-      } else {
-        // 滤镜桶满（上限护栏）：退化为磨砂，scheduleScan 会在容量腾出后升级
-        setBackdrop(el, `blur(${m.kind === 'floating' ? 18 : m.blur}px) saturate(${glassSatur}) brightness(${glassBright})`);
-      }
-    } else {
-      // 超预算 / 不支持折射：纯磨砂（弹层面积大，磨砂力度比按钮更高）
-      setBackdrop(el, `blur(${m.kind === 'floating' ? 18 : m.blur}px) saturate(${glassSatur}) brightness(${glassBright})`);
-    }
-    glassStates.set(el, st);
-    // 全量观察（含磨砂元素）：尺寸变化后可重新评估折射资格（实锤6 资格回升）
-    glassRo.observe(el);
-    if (m.kind === 'button') {
-      if (mode === 'full' && !reduceMotion) {
+  // 弹性形变层：按档位把 .lg-elastic 收敛到名单成员上（幂等，可反复调用）。
+  // 旧引擎经 commitGlass 逐元素挂载；实色化后没有滤镜要配额，直接全量收敛。
+  // 动态渲染的按钮（优化中心看板等）由 MutationObserver 触发本函数补挂。
+  function syncElastics() {
+    const want = mode === 'full' && !reduceMotion;
+    document.querySelectorAll(BUTTON_SELECTOR).forEach((el) => {
+      const has = el.classList.contains('lg-elastic');
+      if (want && !has) {
         el.classList.add('lg-elastic');
         elasticEls.add(el);
+      } else if (!want && has) {
+        el.classList.remove('lg-elastic');
+        elasticEls.delete(el);
+        resetElasticVars(el);
+        el.__lgActive = false;
       }
-    } else if (m.kind === 'floating' && mode === 'full') {
-      // control（输入控件）不挂 shimmer：弹层点睛属于浮层，输入区不做焦散
-      shimmer.attach(el);
-    }
-  }
-
-  // 一趟读几何、再一趟写样式（批量挂载入口；单个元素传 [el] 即可）
-  function attachGlassAll(els) {
-    const measured = [];
-    for (const el of els) {
-      const m = measureGlass(el);
-      if (m) measured.push(m);
-    }
-    for (const m of measured) commitGlass(m);
-  }
-
-    // 折射资格回升（修复实锤6）：元素缩小回预算内 / 折射名额或滤镜桶腾出后，
-    // 把停在纯 blur 的元素升回折射。只升不降，降级路径在 glassRo 回调与
-    // scheduleScan 的 tryUpgradeGlass 重估（F5-L11：原注释指向已删除的 attachGlass）
-  function tryUpgradeGlass(el, st) {
-    if (st.refract || st.noFilter || el.isConnected === false) return;
-    if (mode !== 'full' && mode !== 'standard') return;
-    if (!refractionSupported || refractCount >= MAX_REFRACT) return;
-    if (st.w * st.h > MAX_REFRACT_AREA) return;
-    if (2 * (st.w + st.h) * ringBezel(st.w, st.h, st.radius) > MAX_RING_PIXELS) return;
-    const id = getFilterId(mode, st.w, st.h, st.radius);
-    if (!id) return; // 桶满，等下一轮扫描
-    st.refract = true;
-    st.filterId = id;
-    useFilter(id);
-    refractCount++;
-    setBackdrop(el, `url(#${id}) blur(${st.blur}px) saturate(${glassSatur}) brightness(${glassBright})`);
-  }
-
-  function detachGlass(el, st) {
-    if (st && st.refract) refractCount = Math.max(0, refractCount - 1);
-    if (st && st.filterId) { releaseFilter(st.filterId); st.filterId = null; }
-    glassRo.unobserve(el);
-    setBackdrop(el, '');
-    el.classList.remove('lg-elastic');
-    resetElasticVars(el);
-    glassStates.delete(el);
-  }
-
-  function detachAllGlass() {
-    glassStates.forEach((st, el) => {
-      if (st.refract) refractCount = Math.max(0, refractCount - 1);
-      if (st.filterId) releaseFilter(st.filterId);
-      glassRo.unobserve(el);
-      setBackdrop(el, '');
-      el.classList.remove('lg-elastic');
-      resetElasticVars(el);
     });
-    glassStates.clear();
-    elasticEls.clear();
-    shimmer.destroyAll();
-    refractCount = 0;
-  }
-
-  // 清理已脱离文档的元素，防止 states 泄漏
-  function sweepDetached() {
-    glassStates.forEach((st, el) => {
-      if (!el.isConnected) detachGlass(el, st);
-    });
+    // 已脱离文档的成员就地出册（避免 Set 无界增长）
     elasticEls.forEach((el) => {
-      if (!el.isConnected) elasticEls.delete(el);
+      if (!el.isConnected) { elasticEls.delete(el); return; }
+      if (!want && el.classList.contains('lg-elastic')) {
+        el.classList.remove('lg-elastic');
+        resetElasticVars(el);
+        el.__lgActive = false;
+      }
     });
   }
 
-  const glassRo = new ResizeObserver((entries) => {
-    if (mode !== 'full' && mode !== 'standard') return;
-    entries.forEach((entry) => {
-      const el = entry.target;
-      const st = glassStates.get(el);
-      if (!st) return;
-      // F5-M01：尺寸读数必须与 measureGlass 同一口径（getBoundingClientRect = border-box）。原 entry.contentRect 是
-      // content-box——全局 box-sizing:border-box 下带 border/padding 的玻璃元素（.usage-modal 的 1px 边、.ds-menu 的
-      // padding）初始通知必与首挂读数不等，每个浮层一挂就白拆白建一次滤镜（同步重跑两张位移/高光贴图），还留下引用
-      // 计数 0 的死桶占 FILTER_BUCKETS_MAX 名额，折射名额比上限更早被占满。隐藏中量得 0 时跳过，等可见后再结算。
-      const rect = el.getBoundingClientRect();
-      const w = Math.round(rect.width), h = Math.round(rect.height);
-      if (!w || !h) return;
-      if (w === st.w && h === st.h) return;
-      st.w = w; st.h = h;
-      if (st.refract) {
-        // 尺寸变化：重选桶（滤镜随尺寸重建，位移贴图走缓存）；超预算则降回磨砂
-        refractCount = Math.max(0, refractCount - 1);
-        st.refract = false;
-        if (st.filterId) { releaseFilter(st.filterId); st.filterId = null; }
-        if (withinRefractBudget(w, h, st.radius)) {
-          const id = getFilterId(mode, w, h, st.radius);
-          if (id) {
-            st.refract = true;
-            st.filterId = id;
-            useFilter(id);
-            refractCount++;
-            setBackdrop(el, `url(#${id}) blur(${st.blur}px) saturate(${glassSatur}) brightness(${glassBright})`);
-            return;
-          }
-        }
-        setBackdrop(el, `blur(${st.blur}px) saturate(${glassSatur}) brightness(${glassBright})`);
-      } else {
-        // 修复实锤6：磨砂元素尺寸变化后重新评估折射资格（缩小回预算内可回升）
-        tryUpgradeGlass(el, st);
-      }
-    });
-  });
-
-  // 动态 UI 跟挂：弹窗 / 各页动态渲染的按钮（优化中心分类栏等）延迟出现后补挂
-  let scanTimer = 0;
-  function scheduleScan() {
-    if (scanTimer) return;
-    scanTimer = setTimeout(() => {
-      scanTimer = 0;
-      if (mode !== 'full' && mode !== 'standard') return;
-      sweepDetached();
-      attachGlassAll(document.querySelectorAll(REFRACT_SELECTOR + ',' + FLOATING_SELECTOR));
-      // 修复实锤6：折射名额/滤镜桶腾出后，回收此前降级为磨砂的元素
-      glassStates.forEach((st, el) => {
-        if (el.isConnected) tryUpgradeGlass(el, st);
-      });
+  // 动态 UI 跟挂节流：弹窗 / 各页动态渲染的按钮出现后补收敛（与旧 scheduleScan 同 120ms）
+  let elasticScanTimer = 0;
+  function scheduleElasticScan() {
+    if (elasticScanTimer) return;
+    elasticScanTimer = setTimeout(() => {
+      elasticScanTimer = 0;
+      syncElastics();
     }, 120);
   }
 
@@ -620,7 +166,7 @@
 
   // F5-M07：两趟化——先把所有可见成员的盒子读完，再统一写 CSS 变量。
   // 旧版每个元素「读 rect → 写 --lg-sx/sy/tx/ty」交错，下一圈次的读会被上一圈次的写判脏，
-  // N 个可见按钮就是每帧 N 次同步样式重算（同 measureGlass/commitGlass 的两趟纪律、xtable 的批量写）。
+  // N 个可见按钮就是每帧 N 次同步样式重算（xtable 的批量写同款纪律）。
   // 等价性前提：--lg-* 只参与 .lg-elastic 的 transform（main.css），transform 不参与布局，
   // 元素 i 的行内写不会改变元素 j 的 rect ⇒ 两趟与逐元素交错读到同一组盒子，形变终值不变。
   // 保留阅读顺序与早退分支：脱离文档的成员就地出册，零宽（隐藏页）元素跳过不写。
@@ -670,9 +216,8 @@
   }
 
   // 指针高光曾走 CSS 变量：onPointerOver 往 .lg-elastic 写 --lg-mx/--lg-my，但全仓 var()
-  // 消费 0 次（光斑实际由 spotlight.js 的 --spot-x/--spot-y 驱动），弹层光效由 WebGL
-  // shimmer 承担——写入点与 pointerover 监听整条退役（审查 F1a-L08：死跨语言 API 会骗过
-  // 「引用−定义」正向差集，还每次 pointerover 都同步读一次 getBoundingClientRect）。
+  // 消费 0 次（光斑实际由 spotlight.js 的 --spot-x/--spot-y 驱动）——写入点与 pointerover
+  // 监听整条退役（审查 F1a-L08：死跨语言 API 会骗过「引用−定义」正向差集）。
   function onPressIn(e) {
     const el = e.target && e.target.closest ? e.target.closest('.lg-elastic') : null;
     if (el) el.style.setProperty('--lg-press', '0.96');
@@ -682,157 +227,7 @@
     if (el) el.style.removeProperty('--lg-press');
   }
 
-  // WebGL 弹层焦散高光（full 模式，弹层点睛）
-  const shimmer = {
-    items: new Map(), // el -> { canvas, gl, glState, raf, ro, last }
-
-    vertSrc: [
-      'attribute vec2 aPos;',
-      'void main() { gl_Position = vec4(aPos, 0.0, 1.0); }'
-    ].join('\n'),
-
-    fragSrc: [
-      'precision mediump float;',
-      'uniform vec2 uRes;',
-      'uniform float uTime;',
-      'uniform float uRadius;',
-      'float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }',
-      'float noise(vec2 p) {',
-      '  vec2 ip = floor(p), fp = fract(p);',
-      '  vec2 u = fp * fp * (3.0 - 2.0 * fp);',
-      '  return mix(mix(hash(ip), hash(ip + vec2(1.0, 0.0)), u.x),',
-      '             mix(hash(ip + vec2(0.0, 1.0)), hash(ip + vec2(1.0, 1.0)), u.x), u.y);',
-      '}',
-      'float fbm(vec2 p) {',
-      '  float v = 0.0, a = 0.5;',
-      '  for (int i = 0; i < 4; i++) { v += a * noise(p); p *= 2.03; a *= 0.5; }',
-      '  return v;',
-      '}',
-      'void main() {',
-      '  vec2 pos = gl_FragCoord.xy;',
-      '  vec2 hf = uRes * 0.5;',
-      '  vec2 p = pos - hf;',
-      '  float r = min(uRadius, min(hf.x, hf.y));',
-      '  vec2 q = abs(p) - (hf - r);',
-      '  float d = length(max(q, 0.0)) - r;',
-      '  float edge = smoothstep(-16.0, 0.0, d);',
-      '  float t = uTime * 0.35;',
-      '  float n1 = fbm(gl_FragCoord.xy / uRes * 3.0 + vec2(t * 0.6, -t * 0.4));',
-      '  float n2 = fbm(gl_FragCoord.xy / uRes * 4.5 - vec2(t * 0.35, t * 0.5));',
-      '  float caustic = pow(clamp(1.0 - abs(n1 - n2) * 3.2, 0.0, 1.0), 6.0);',
-      '  float glow = caustic * (0.35 + 0.65 * edge) * 0.5 + edge * 0.16;',
-      '  gl_FragColor = vec4(vec3(1.0) * glow, clamp(glow, 0.0, 1.0) * 0.85);',
-      '}'
-    ].join('\n'),
-
-    attach(el) {
-      if (this.items.has(el) || reduceMotion) return;
-      let gl = null;
-      const canvas = document.createElement('canvas');
-      canvas.className = 'lg-shimmer-canvas';
-      try {
-        gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: true, antialias: false });
-      } catch (e) { gl = null; }
-      if (!gl) return;
-
-      const compile = (type, src) => {
-        const sh = gl.createShader(type);
-        // F5-L16：上下文丢失时 createShader 返回 null，而 shaderSource/shaderParameter 的入参同样是
-        // 非空 IDL 类型——不在这里挡住，异常就发生在「编译判空」之前，判空形同虚设。
-        if (!sh) return null;
-        gl.shaderSource(sh, src);
-        gl.compileShader(sh);
-        return gl.getShaderParameter(sh, gl.COMPILE_STATUS) ? sh : null;
-      };
-      const vs = compile(gl.VERTEX_SHADER, this.vertSrc);
-      const fs = compile(gl.FRAGMENT_SHADER, this.fragSrc);
-      // F5-L16：compile 失败返回 null，而 attachShader 的入参是非空 IDL 类型 —— 传 null 抛 TypeError，
-      // 异常会从 attach → commitGlass → attachGlassAll 一路冒出 setTimeout 批次，同批剩余元素全被跳过。
-      // 这里与后面的 LINK_STATUS 判据配成一对：装配失败只放弃本元素，不外溢。
-      if (!vs || !fs) return;
-      const prog = gl.createProgram();
-      if (!prog) return; // 同上：上下文丢失时 createProgram 也返回 null
-      gl.attachShader(prog, vs);
-      gl.attachShader(prog, fs);
-      gl.linkProgram(prog);
-      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return;
-      gl.useProgram(prog);
-
-      const buf = gl.createBuffer();
-      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-      const loc = gl.getAttribLocation(prog, 'aPos');
-      gl.enableVertexAttribArray(loc);
-      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
-      const uRes = gl.getUniformLocation(prog, 'uRes');
-      const uTime = gl.getUniformLocation(prog, 'uTime');
-      const uRadius = gl.getUniformLocation(prog, 'uRadius');
-      gl.enable(gl.BLEND);
-      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-
-      const item = { canvas, gl, prog, uRes, uTime, uRadius, raf: 0, last: 0, dead: false };
-      this.items.set(el, item);
-      el.insertBefore(canvas, el.firstChild);
-      // F5-L18：上下文丢失后 draw 的退出条件（dead / isConnected / mode）都不成立，rAF 会继续对着
-      // 失效的上下文 clear/drawArrays，画布停在空白或上一帧残影。丢失即销毁自身，destroy 置 dead 并
-      // cancelAnimationFrame，rAF 链就此断开。此后本元素不再自动重挂：measureGlass 对已在册元素直接
-      // 返回 null（见其首行早退），scheduleScan 只升折射、不碰焦散——要等切档（attachedMode 变化触发
-      // detachAllGlass 清册后重新挂载）或元素重建，才能再次进入 commitGlass。
-      canvas.addEventListener('webglcontextlost', (ev) => {
-        ev.preventDefault();
-        this.destroy(el);
-      });
-
-      const draw = (now) => {
-        if (item.dead || !el.isConnected || mode !== 'full') {
-          this.destroy(el);
-          return;
-        }
-        item.raf = requestAnimationFrame(draw);
-        // 火眼眼审查 2026-09-14（MED）：后台/失焦时暂停 shimmer 重绘（rAF 先行续排保证
-        // 恢复可见后自动续跑），不再空耗 GPU/CPU
-        if (document.hidden) return;
-        if (now - item.last < 33) return; // ~30fps 足够
-        item.last = now;
-        const w = canvas.width, h = canvas.height;
-        gl.viewport(0, 0, w, h);
-        gl.uniform2f(item.uRes, w, h);
-        gl.uniform1f(item.uTime, now / 1000);
-        gl.uniform1f(item.uRadius, readRadius(el));
-        gl.clearColor(0, 0, 0, 0);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.drawArrays(gl.TRIANGLES, 0, 3);
-      };
-
-      const resize = () => {
-        if (item.dead) return;
-        const r = el.getBoundingClientRect();
-        const dpr = Math.min(window.devicePixelRatio || 1, 1.5) * 0.5; // 半分辨率：噪声纹理无需全清
-        canvas.width = Math.max(2, Math.round(r.width * dpr));
-        canvas.height = Math.max(2, Math.round(r.height * dpr));
-      };
-      item.ro = new ResizeObserver(resize);
-      item.ro.observe(el);
-      resize();
-      item.raf = requestAnimationFrame(draw);
-    },
-
-    destroy(el) {
-      const item = this.items.get(el);
-      if (!item) return;
-      item.dead = true;
-      if (item.raf) cancelAnimationFrame(item.raf);
-      item.ro?.disconnect();
-      item.canvas.remove();
-      this.items.delete(el);
-    },
-
-    destroyAll() {
-      Array.from(this.items.keys()).forEach((el) => this.destroy(el));
-    }
-  };
-
-  // 分段栏滑块（原有机制，贴图换成物理折射版）
+  // 分段栏滑块（贴图换成物理折射版的时代已结束，保留弹簧跟随）
   // v3.2.0：#sidebar 也是 bar，active 查找同步覆盖 .nav-item
   function findActiveTab(bar) {
     // 侧边栏：测速父项在其子页（diskbench/netcheck/netspeed）也带 .active（分组高亮），
@@ -845,7 +240,7 @@
     return bar.querySelector('.filter-tab.active, .maint-tab.active');
   }
 
-  // 侧边栏 bar（纵向滑动、小圆角、不开折射贴图——性能护栏见 placeThumb）
+  // 侧边栏 bar（纵向滑动、小圆角）
   function isSidebarBar(bar) { return bar && bar.id === 'sidebar'; }
 
   function createThumb(bar, state) {
@@ -857,49 +252,26 @@
     mount.appendChild(thumb);
     state.thumb = thumb;
     state.mount = mount; // placeThumb 判「active 是否在本包含块内」用
-    // F5-M06：「关闭」档建节点时就收起——挂载到位到首个 rAF 之间不许露出空壳玻璃块。
+    // F5-M06：「关闭」档建节点时就收起——挂载到位到首个 rAF 之间不许露出空壳滑块。
     // 之后的可见性一律由 placeThumb 单点决定，这里只给初始态。
     if (mode === 'off') thumb.style.display = 'none';
     return thumb;
   }
 
-  // 每个滑块一个独立滤镜（尺寸随标签变化时重建，位移贴图走缓存）
-  function ensureFilter(state, w, h, radius) {
-    // v2-L4P-51（F-9②）：玻璃档位切换也必须重建。此前 needRebuild 只看尺寸——
-    // full ↔ standard 切档时尺寸不变，旧滤镜（standard 时代建的三色散或不带
-    // mode 位移贴图）原样留着，滑块继续按旧档位渲染。
-    const needRebuild = !state.filterEl
-      || state.filterMode !== mode
-      || Math.abs(state.mapW - w) > 1
-      || Math.abs(state.mapH - h) > 1;
-    if (!needRebuild) return;
-    if (!state.filterId) state.filterId = 'lg-thumb-' + Math.random().toString(36).slice(2, 9);
-    state.mapW = w;
-    state.mapH = h;
-    state.filterMode = mode;
-    const maps = buildMaps(w, h, radius);
-    const filterEl = buildFilterEl(state.filterId, w, h, maps, Math.min(Math.max(radius * 0.85, 3), 12), mode === 'full');
-    if (state.filterEl) state.filterEl.remove();
-    ensureSharedDefs().appendChild(filterEl);
-    state.filterEl = filterEl;
-  }
-
   function placeThumb(bar, state, animate) {
     const thumb = state.thumb;
     if (!thumb) return;
-    // F5-M06：「关闭」档必须整枚撤掉滑块，且已写入的行内 backdrop-filter 一并清空。
-    // 只清滤镜不够——.lg-thumb 自带 CSS 玻璃底（--lg-glass-floor + tint + 高光描边），
-    // 留着 display 就是一枚实心胶囊，与「off = 隐藏滑块、不注入任何滤镜」的档位语义相反。
+    // F5-M06：「关闭」档必须整枚撤掉滑块。.lg-thumb 自带 CSS 实底胶囊，
+    // 留着 display 就是一枚实心块，与「off = 隐藏滑块」的档位语义相反。
     // 判据放这里、先于下面的常态 display 复位：refreshBars / init 曾各自写 display=none，
     // 都被本函数的 display='' 掀开，关闭态因此长期复现。
     if (mode === 'off') {
       thumb.style.display = 'none';
-      setBackdrop(thumb, '');
       return;
     }
     const tab = findActiveTab(bar);
     const vertical = isSidebarBar(bar);
-    // 2026-10-15（目检：「设置」页底部多出游离玻璃块）：「设置」在 footer、不在滑块
+    // 2026-10-15（目检：「设置」页底部多出游离滑块）：「设置」在 footer、不在滑块
     // 包含块 .nav-scroll 内，offsetTop 按 .sidebar 口径算出的越界坐标会把滑块摆到列表
     // 底部并撑出可滚动溢出。目标不在包含块里 = 无位可贴：隐藏；回到普通项时恢复。
     if (vertical && (!tab || !(state.mount || bar).contains(tab))) {
@@ -917,7 +289,7 @@
     const radius = vertical ? 10 : h / 2;
 
     // v3.2.1（滑块误挤压修复·方案A）：目标坐标与尺寸与上次完全一致时不加挤压类——
-    // 修复「点磁盘清理子分段时 refreshAll(true) 让 #sidebar 玻璃块无意义鼓一下」：
+    // 修复「点磁盘清理子分段时 refreshAll(true) 让 #sidebar 滑块无意义鼓一下」：
     // 位置零位移却从 scaleX(1) 过渡到 scaleX(1.05) 再回弹。切菜单项时坐标必变，动画照旧。
     const unchanged = state.lastX === x && state.lastY === y &&
                       state.lastW === w && state.lastH === h;
@@ -950,19 +322,8 @@
     state.lastW = w;
     state.lastH = h;
 
-    // 性能护栏（AGENTS §7 / 方案三-3）：侧边栏菜单项面积约为横向 tab 两倍，
-    // 折射滤镜像素级开销翻倍——侧栏滑块只开普通磨砂（blur+saturate），不开 SVG 折射贴图
-    if (!vertical && refractionSupported && (mode === 'full' || mode === 'standard')) {
-      ensureFilter(state, Math.round(w), Math.round(h), radius);
-      // 质感参数读 token（修复实锤2：原 1.55/1.07 硬编码与 --glass-satur/--glass-bright 漂移）
-      const bd = `url(#${state.filterId}) blur(1px) saturate(${glassSatur}) brightness(${glassBright})`;
-      thumb.style.backdropFilter = bd;
-      thumb.style.webkitBackdropFilter = bd;
-    } else if (mode !== 'off') {
-      const bd = `blur(12px) saturate(${glassSatur}) brightness(${glassBright})`;
-      thumb.style.backdropFilter = bd;
-      thumb.style.webkitBackdropFilter = bd;
-    }
+    // backdrop-filter 写入段已随表面实色化退役（方案 v1.6 §5.6）：
+    // 滑块底色由 .lg-thumb 的实色 CSS 自证，这里只管位置与弹簧。
 
     if (!animate) {
       void thumb.offsetWidth; // 跳过一次过渡后再恢复动画
@@ -1029,15 +390,12 @@
   }
 
   // 审查 v2-M22（v1 L14 未修部分）：states 此前**全文无 delete** —— 维护页/快捷指令页每次重渲染都会换掉整条 bar，旧条目
-  //（连同 bar、thumb 子树、MutationObserver、sharedDefs 里的滤镜节点）被 Map 永久持有，切页越多攒越多。
-  // 回收必须与 mountBar 严格配对：取消在途 rAF → 断观察者 → 摘滤镜节点 → 摘 thumb → 删条目。
-  // 刻意不动的护栏（AGENTS §7 / 报告 §7 点名保留）：MAX_REFRACT 28、420px/环带像素预算、MAP_CACHE_MAX 48、
-  // FILTER_BUCKETS_MAX 48、scheduleScan 的 120ms 节流——这里只补配对，不放开任何上限。
+  //（连同 bar、thumb 子树、MutationObserver）被 Map 永久持有，切页越多攒越多。
+  // 回收必须与 mountBar 严格配对：取消在途 rAF → 断观察者 → 摘 thumb → 删条目。
   function detachBar(bar, state) {
     if (state.raf) cancelAnimationFrame(state.raf);
     state.raf = 0;
     if (state.mo) { state.mo.disconnect(); state.mo = null; }
-    if (state.filterEl) { state.filterEl.remove(); state.filterEl = null; }
     if (state.thumb) state.thumb.remove();
     state.thumb = null;
     bar.classList.remove('lg-bar');
@@ -1056,15 +414,13 @@
     // 补挂迟渲染的栏（如优化中心分类栏由 API 回调后渲染，init 时还没有标签）
     mountAll();
     // 审查 v2-M22：先回收已离开文档的栏（切页会整条换掉 bar 节点）。
-    // 挂在这里而不是 sweepDetached 里，是因为 sweepDetached 只在 scheduleScan 的
-    // full/standard 分支跑，而 frost/off 档下 refreshBars 照样会被调 —— 放这儿五种档位都不漏。
     states.forEach((state, bar) => {
       if (!bar.isConnected) detachBar(bar, state);
     });
     states.forEach((state, bar) => {
       if (!state.thumb) return;
       // F5-M06：这里曾经写 display=none（off 档），但紧接着 schedulePlace 的 placeThumb
-      // 在常态分支无条件写 display=''，把关闭态掀开。可见性与行内滤镜改由 placeThumb 单点决定。
+      // 在常态分支无条件写 display=''，把关闭态掀开。可见性由 placeThumb 单点决定。
       schedulePlace(bar, animate !== false);
     });
   }
@@ -1075,36 +431,14 @@
     MODES.forEach((m) => body.classList.toggle('lg-mode-' + m, mode === m));
   }
 
-  function detectRefractionSupport() {
-    try {
-      // Chromium 支持 backdrop-filter 引用 SVG 滤镜；不支持的环境自动降级磨砂
-      return CSS.supports('backdrop-filter', 'url(#lg-probe)') ||
-             CSS.supports('-webkit-backdrop-filter', 'url(#lg-probe)');
-    } catch (e) { return false; }
-  }
-
-  let attachedMode = null; // 当前已挂折射玻璃的模式（full/standard），跨档切换需重建滤镜链
-
   function setMode(next, opts) {
     mode = normalizeMode(next);
     // v2.8.0：环境自适应降级走 persist:false——用户存的偏好不被覆盖，环境恢复后自动回弹
     if (!opts || opts.persist !== false) persistMode(mode);
     applyModeClass();
-
-    if (mode === 'off' || mode === 'frost') {
-      // off/frost：移除所有 JS 注入滤镜（含折射），交给 CSS（off 无样式、frost 磨砂）
-      detachAllGlass();
-      attachedMode = null;
-    } else {
-      // full↔standard 滤镜链不同（色散差异），先清后挂
-      if (attachedMode && attachedMode !== mode) detachAllGlass();
-      // 不支持折射时滑块/按钮自动退化为磨砂（placeThumb 内处理；玻璃元素走
-      // attachGlassAll → commitGlass 的纯磨砂分支，F5-L11：原注释指向已删除的 attachGlass）
-      attachGlassAll(document.querySelectorAll(REFRACT_SELECTOR + ',' + FLOATING_SELECTOR));
-      attachedMode = mode;
-    }
+    // off/frost 不再需要拆滤镜（折射段已退役）：弹性收敛 + 滑块重定位即可
+    syncElastics();
     refreshBars(false);
-    scheduleScan();
   }
 
   // v2.8.0：环境自适应——按电池/系统透明开关计算生效档位并应用
@@ -1118,15 +452,6 @@
     const eff = effectiveMode();
     if (eff !== mode) setMode(eff, { persist: false });
   }
-  function readGlassParams() {
-    try {
-      const cs = getComputedStyle(document.body);
-      const s = parseFloat(cs.getPropertyValue('--glass-satur'));
-      const b = parseFloat(cs.getPropertyValue('--glass-bright'));
-      if (Number.isFinite(s) && s >= 1) glassSatur = s;
-      if (Number.isFinite(b) && b >= 1) glassBright = b;
-    } catch (e) { /* 读不到用默认值 */ }
-  }
 
   function getMode() { return mode; }
 
@@ -1137,8 +462,7 @@
   let offEnvState = null;
 
   // LG-5（2026-09-15）：reduced-motion 实时求值——原实现 init 时读一次固化，
-  // 运行中切换系统「减少动态效果」偏好永不生效（与同库 spotlight v4-M1 修复口径一致，
-  // 也消掉本文件 934/975/372/605/757 五种读取各管一段的口径分裂）。
+  // 运行中切换系统「减少动态效果」偏好永不生效（与同库 spotlight v4-M1 修复口径一致）。
   function bindReducePointerListeners(add) {
     if (add) {
       document.addEventListener('pointermove', onPointerMove, { passive: true });
@@ -1152,35 +476,18 @@
       document.removeEventListener('pointercancel', onPressOut, true);
     }
   }
-  // F5-L15：reduce 关闭后的补挂必须自己做 —— commitGlass 只对 measureGlass 返回非空的新元素执行，
-  // 而 measureGlass 对已在册元素（glassStates.has）直接返回 null；scheduleScan / tryUpgradeGlass
-  // 只升折射、不碰焦散与弹性。原注释写「下一轮扫描自然回来」，对本情形不成立。
-  // 判据与 commitGlass 同一口径：只有 full 档的 floating 挂焦散、button 挂弹性。
-  function restoreMotionEffects() {
-    if (mode !== 'full') return;
-    glassStates.forEach((st, el) => {
-      if (!el.isConnected) return;
-      if (st.kind === 'floating') shimmer.attach(el);
-      else if (st.kind === 'button') { el.classList.add('lg-elastic'); elasticEls.add(el); }
-    });
-  }
   function syncReduceMotion() {
     const was = reduceMotion;
     reduceMotion = prefersReduceMotion();
     document.body.classList.toggle('lg-reduce-motion', reduceMotion);
     if (reduceMotion !== was) bindReducePointerListeners(!reduceMotion);
-    // F5-M02：成对回收——翻到 reduce 时在途 WebGL 焦散画布必须销毁。CSS 的 @media reduce 只 display:none 藏画布，
-    // rAF 循环与 shader 照跑（无效 GPU/CPU 功耗，与本文件自带的电池降级口径不对等）；shimmer.attach 已拒绝新元素，
-    // 这里补齐存量回收。反向（reduce 关闭）由 restoreMotionEffects 补挂，见该函数注释。
-    if (reduceMotion && !was) shimmer.destroyAll();
-    else if (!reduceMotion && was) restoreMotionEffects();
+    // reduce 翻转两个方向都由 syncElastics 收敛（want = full && !reduce）
+    if (reduceMotion !== was) syncElastics();
   }
 
   function init() {
     mode = readStoredMode();
-    refractionSupported = detectRefractionSupport();
     reduceMotion = prefersReduceMotion();
-    readGlassParams();
     document.documentElement.classList.add('lg-init');
     applyModeClass();
 
@@ -1225,7 +532,7 @@
     }
 
     // 点击任意分段标签：栏内 active 切换完成后，滑块带弹簧动画跟随；
-    // 点击也可能切换页面/渲染新按钮，顺带调度一次玻璃扫描
+    // 点击也可能渲染新按钮（优化中心等），顺带调度一次弹性收敛
     document.addEventListener('click', (e) => {
       const tab = e.target && e.target.closest ? e.target.closest(TAB_SELECTOR) : null;
       if (tab) {
@@ -1233,7 +540,7 @@
         // LG-5：同上，统一读 reduceMotion 状态量
         if (bar && states.has(bar)) schedulePlace(bar, !reduceMotion);
       }
-      scheduleScan();
+      scheduleElasticScan();
     }, true);
 
     // LG-5（2026-09-15）：统一走 syncReduceMotion 同一口径——按初始值挂指针监听，
@@ -1243,36 +550,29 @@
 
     // 字体加载完成会改变标签/按钮尺寸，重新对齐
     if (document.fonts && document.fonts.ready) {
-      document.fonts.ready.then(() => { refreshBars(false); scheduleScan(); });
+      document.fonts.ready.then(() => { refreshBars(false); });
     }
 
-    window.addEventListener('resize', () => { refreshBars(false); scheduleScan(); });
+    window.addEventListener('resize', () => { refreshBars(false); });
 
-    // 动态 UI 跟挂（弹窗 / 动态渲染的按钮）
-    bodyMo = new MutationObserver(scheduleScan);
+    // 动态 UI 跟挂（弹窗 / 动态渲染的按钮）：只喂弹性收敛，不再有玻璃扫描
+    bodyMo = new MutationObserver(scheduleElasticScan);
     bodyMo.observe(document.body, { childList: true, subtree: true });
 
     mountAll();
-    if (mode === 'full' || mode === 'standard') {
-      attachGlassAll(document.querySelectorAll(REFRACT_SELECTOR + ',' + FLOATING_SELECTOR));
-      attachedMode = mode;
-    }
-    // F5-M06：这里原有一次 states.forEach 写 display（off ⇒ none），但它在 mountAll 排出的
-    // placeThumb rAF 之前执行，rAF 后置又写回 ''——冷启动偏好即 off 也照样露出滑块。
-    // 关闭态的可见性现由 placeThumb 的 off 分支负责，此处不再重复。
+    syncElastics();
+    // F5-M06：关闭态的可见性现由 placeThumb 的 off 分支负责，init 不再重复写 display。
   }
 
   window.liquidBar = {
     init, mountAll, refreshAll: refreshBars, setMode, getMode, getUserMode,
-    // 2.0 扩展：手动触发扫描（供动态渲染模块调用，可选项）
-    rescan: scheduleScan,
-    // 诊断：内部状态快照（ refract 计数 / 能力检测 / 滤镜桶 / 环境自适应 ）
+    // 2.0 扩展：手动触发收敛（供动态渲染模块调用，可选项）
+    rescan: scheduleElasticScan,
+    // 诊断：内部状态快照（弹性成员 / 栏位 / 环境自适应）
     debug: () => ({
-      mode, attachedMode, refractionSupported, reduceMotion, refractCount,
-      glassStates: glassStates.size, elastic: elasticEls.size,
-      buckets: filterBuckets.size, bars: states.size,
-      mapCache: mapCache.size,
-      env: { battery: envBattery, noTransparency: envNoTransparency, glassSatur, glassBright }
+      mode, reduceMotion, elastic: elasticEls.size,
+      bars: states.size,
+      env: { battery: envBattery, noTransparency: envNoTransparency }
     })
   };
 

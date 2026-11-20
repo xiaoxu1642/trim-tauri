@@ -91,33 +91,11 @@
     }, BG_FADE_MS);
   }
 
-  // ---- UI 设计系统：背景模糊度 + 预设背景（设置页整合4） ----
-  // 原「皮肤：经典/液态玻璃」二选一下拉与背景磨砂合并为 0-100% 无级「背景模糊度」滑块：
-  // >0% = 液态玻璃面板，模糊半径按百分比线性缩放
-  // （100% = 26px，与原液态玻璃一致；theme.js 启动期应用共用同一常量约定，改动需两处同步）。
-  // v3.0 全局玻璃化：0% 仅表示「无磨砂」（移除 data-skin），容器表面仍为玻璃 alpha——
-  // 表面 token 真源（main.css --surface-tint + 统一 alpha 表）本身就是玻璃值，无实心态。
-  // 审查 5-5：上限常量收敛到 window.ds（theme.js 同源读取），ds 未加载时退回同值兜底
-  const GLASS_MAX_BLUR_PX = window.ds?.GLASS_MAX_BLUR_PX || 26;
-  function applyBgBlur(pct) {
-    const v = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
-    if (v > 0) {
-      document.body.dataset.skin = 'glass';
-      document.documentElement.style.setProperty('--glass-blur', ((v / 100) * GLASS_MAX_BLUR_PX).toFixed(1) + 'px');
-    } else {
-      delete document.body.dataset.skin;
-      document.documentElement.style.removeProperty('--glass-blur');
-    }
-  }
-  // 旧值迁移：仅存有 skin 键的历史配置按 glass=100% / classic=0% 折算为 bgBlur
-  function migrateSkinToBlur(stored) {
-    if (stored.bgBlur == null) {
-      stored.bgBlur = stored.skin === 'glass' ? 100 : 0;
-      delete stored.skin;
-      window.pathbindingAppearance.save(stored);
-    }
-    return stored;
-  }
+  // ---- UI 设计系统：预设背景（设置页整合4） ----
+  // 背景磨砂链（「背景模糊度」滑杆 #bgBlur、data-skin、--glass-blur、skin 键迁移）
+  // 已随表面实色化退役（方案 v1.6 §5.6）：容器表面全部实色，磨砂只剩壁纸层
+  // （#bgBlurRange → --bg-blur，见 initWallpaperBlur）。存量 bgBlur/skin 键按「无效果」
+  // 保留在存储里，不删除不迁移。
   // applyPresetBg：body[data-preset-bg="graphite|wp-*"] 设置底层渐变/实拍墙纸
   // v3.2.0：白名单校验——已下架预设（aurora/sunset/wp-mountain）残留旧值时静默回落「无」，
   // 避免 body 挂着无 CSS 定义的 data-preset-bg 造成空白覆盖层
@@ -327,11 +305,9 @@
     setBlur(typeof ap2.wallpaperBlur === 'number' ? ap2.wallpaperBlur : defBlur);
   }
 
-  // 绑定背景图面全部控件；返回 skin→模糊迁移后的镜像，供外观层接着做雾化度迁移。
+  // 绑定背景图面全部控件；返回读到的镜像，供外观层接着做雾化度迁移。
   function init() {
-    // 批次：雾化度语义反转 —— 皮肤键迁移后由外观层接着做雾化度一次性迁移；
-    // 本面先做 skin→bgBlur，是因为背景模糊滑块与背景图读的是同一份镜像。
-    const ap = migrateSkinToBlur(window.pathbindingAppearance.load());
+    const ap = window.pathbindingAppearance.load();
 
     // 背景图片（初始展示走外观层登记的重放钩子）
     document.getElementById('btnBgImport')?.addEventListener('click', async () => {
@@ -452,27 +428,8 @@
       crossfadeBg('--preset-bg-fade', () => applyPresetBg(ap2.presetBg));
     });
 
-    // 背景模糊度滑块（位于「背景图片」卡内，预设背景/导入图片均可叠加）。
-    // P2-4（v4）：本读数 span 原与自定义滑块（#bgBlurRange 的 .bbr-val）**撞 id**，
-    // getElementById 恒取文档里第一个 ⇒ 原生滑块读数写进了另一套控件的 span、自己恒 0%。
-    // 原生滑块这一侧改用专属 id `bgBlurInputVal`（勿用 bgOpacityVal——那是「雾化度」滑块的读数）。
-    const blurSlider = document.getElementById('bgBlur');
-    const blurVal = document.getElementById('bgBlurInputVal');
-    if (blurSlider) {
-      // 审查 3-3：视觉即时生效，存储防抖 150ms——一次拖动不再产生上百次同步 localStorage 写
-      let blurSaveTimer = null;
-      blurSlider.addEventListener('input', () => {
-        const v = parseInt(blurSlider.value, 10) || 0;
-        if (blurVal) blurVal.textContent = v + '%';
-        applyBgBlur(v);
-        clearTimeout(blurSaveTimer);
-        blurSaveTimer = setTimeout(() => {
-          const ap2 = migrateSkinToBlur(window.pathbindingAppearance.load());
-          ap2.bgBlur = v;
-          window.pathbindingAppearance.save(ap2);
-        }, 150);
-      });
-    }
+    // 背景磨砂滑杆（#bgBlur）已随表面实色化退役（方案 v1.6 §5.6）；
+    // 壁纸层模糊走 #bgBlurRange（initWallpaperBlur），与容器表面无关。
 
     window.pathbindingAppearance.registerApply(function (cur) {
       refreshBgCurrent(cur);
@@ -481,15 +438,6 @@
       const pSel = document.getElementById('presetBgSelect');
       if (pSel) pSel.value = cur.presetBg || '';
       applyPresetBg(cur.presetBg);
-      const bSlider = document.getElementById('bgBlur');
-      if (bSlider) {
-        bSlider.value = cur.bgBlur == null ? 0 : cur.bgBlur;
-        const bVal = document.getElementById('bgBlurInputVal');
-        if (bVal) bVal.textContent = bSlider.value + '%';
-        // 编程式赋值不触发 input 事件，手动同步轨道填充（ds.slider）
-        window.ds?.slider?.sync?.(bSlider);
-        applyBgBlur(bSlider.value);
-      }
       // 壁纸层模糊的自定义滑块（#bgBlurRange）的读数与轨道由 initWallpaperBlur 自己管，
       // 这里只调它登记的出口，不再抄一份位置计算。
       if (typeof wpBlurApply === 'function') {

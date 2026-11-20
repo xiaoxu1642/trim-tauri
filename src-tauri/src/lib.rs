@@ -744,9 +744,6 @@ pub fn build_app<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builde
         commands::peripheral::peripheral_apply,
         commands::peripheral::peripheral_restore_backup,
         // ---- E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好） ----
-        commands::appearance::appearance_get_material,
-        commands::appearance::appearance_set_material,
-        commands::appearance::appearance_set_material_enabled,
         commands::appearance::appearance_get_env,
         commands::appearance::appearance_bg_import,
         commands::appearance::appearance_bg_delete,

@@ -8,7 +8,7 @@
 // 加载顺序（两个清单都必须列全且同序）：
 //   pathbinding-appearance.js  外观偏好的镜像与真源口径、重放登记（最先，各面只读它）
 //   pathbinding-background.js  背景图（铺底 / 列表 / 视角雾化 / 预设背景 / 壁纸层模糊）
-//   pathbinding-material.js    窗口材质（卡片 + 总开关 + 主进程广播）
+//   pathbinding-material.js    （已随表面实色化退役：材质卡与总开关，方案 v1.6 §5.6）
 //   pathbinding-wallpaper.js   实拍壁纸轮换（wp-*）
 //   pathbinding.js             本文件：路径绑定面 + 入口装配（必须最后）
 // 本文件必须最后：它装配各面，提前执行会让 `init` 在面板模块还没求值时就跑。
@@ -537,9 +537,9 @@
   }
 
   // ==================== 外观面装配（各面在各自文件里） ====================
-  // 本入口只负责顺序与失败出口；背景图 / 材质 / 壁纸轮换的实现分别在
-  // `pathbinding-background.js` / `pathbinding-material.js` /
-  // `pathbinding-wallpaper.js`，外观偏好的镜像与真源口径在 `pathbinding-appearance.js`。
+  // 本入口只负责顺序与失败出口；背景图 / 壁纸轮换的实现分别在
+  // `pathbinding-background.js` / `pathbinding-wallpaper.js`，
+  // 外观偏好的镜像与真源口径在 `pathbinding-appearance.js`。
 
   // 背景图列表的两条失败出口。文案必须留在本文件：Rust 侧源码形状断言
   // （A1-L01/L02、A2-L02 用例）按本文件的字节判「读取失败不得与没有数据同形」，
@@ -577,12 +577,11 @@
   }
 
   // 外观侧的总装配：各面只负责自己的控件与重放钩子，这里只定顺序。
-  // 顺序约束：先做 skin→模糊迁移（背景图面 init 内），再做雾化度迁移，最后才允许重放；
+  // 顺序约束：背景图面 init 先读镜像，再做雾化度迁移，最后才允许重放；
   // 壁纸层模糊滑块的初值读在首帧重放之后（首帧时它还没登记出口，与拆分前一致）。
   function initAppearance() {
     const ap = window.pathbindingBackground.init();
     initSystemInfoSection();
-    window.pathbindingMaterial.init();
     window.pathbindingWallpaper.init();
     window.pathbindingAppearance.applyAll(window.pathbindingAppearance.migrateBgOpacityToFog(ap));
     window.pathbindingBackground.initWallpaperBlur();

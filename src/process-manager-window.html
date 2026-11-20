@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="styles/main.css" />
   <link rel="stylesheet" href="styles/ds.css" />
 </head>
-<body class="mw-window theme-light" data-skin="glass">
+<body class="mw-window theme-light">
   <div class="mw-shell">
     <div class="pw-topbar">
       <div class="pw-topbar-copy">
@@ -46,7 +46,7 @@
   <!-- Tauri 适配层（迁移方案 D1）：脚本链最前加载——窗口材质件与业务件在加载期就会读
        window.api，必须先生效；桥未就绪时自动 no-op -->
   <script src="scripts/tauri-api.js"></script>
-  <!-- 子窗口材质/主题同步：electron-mica + data-material + 主题类（窗口清单以
+  <!-- 子窗口主题同步：主题类镜像 + 失焦纱 win-inactive（窗口清单以
        engine::guard::APP_WINDOWS 的子窗集合为准，不在此点名例外，F3-M02） -->
   <script src="scripts/window-material.js"></script>
   <!-- ds.js：data-tip 委托等设计系统基础件（复核 LG-2：子窗缺此件时 data-tip 永不出现） -->
@@ -58,7 +58,7 @@
        文档级事件委托、无初始化依赖；RM 求值读 window.ds（缺件自带兜底）。
        家族序随主窗 IDLE 清单：tilt 在 liquid-glass 之前、spotlight 在其后。 -->
   <script src="scripts/tilt.js"></script>
-  <!-- 液态玻璃引擎：子窗口与主窗共用四档效果（按钮折射/弹性形动），分段栏等选择器在子窗无命中自动跳过 -->
+  <!-- 液态玻璃引擎：子窗口与主窗共用（full 档按钮弹性形变 + 分段栏弹簧滑块），分段栏等选择器在子窗无命中自动跳过 -->
   <script src="scripts/liquid-glass.js"></script>
   <script src="scripts/spotlight.js"></script>
   <!-- NEW-6：子窗轻量提示共用件（各窗 toast 薄委托至此，须先于主脚本加载） -->

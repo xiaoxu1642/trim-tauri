@@ -199,7 +199,7 @@
     // 设置页：路径绑定 + 三个外观面。顺序即依赖序（外观层最先，入口最后装配）；
     // 两个清单（本表与 IDLE_SCRIPTS）必须同序列全，见 IDLE_SCRIPTS 上方的说明。
     settings: ['scripts/pathbinding-appearance.js',
-      'scripts/pathbinding-background.js', 'scripts/pathbinding-material.js',
+      'scripts/pathbinding-background.js',
       'scripts/pathbinding-wallpaper.js', 'scripts/pathbinding.js'],
     // Windows设置 页：syspanel.js + 「Windows 更新」三态（走 optimizer.js 的 executeOption；看板渲染依赖 xtable，须前置同注入）。
     'windows-settings': ['scripts/xtable.js', 'scripts/optimizer.js', 'scripts/syspanel.js']
@@ -233,7 +233,6 @@
     'scripts/updater-ui.js',
     'scripts/pathbinding-appearance.js',
     'scripts/pathbinding-background.js',
-    'scripts/pathbinding-material.js',
     'scripts/pathbinding-wallpaper.js',
     'scripts/pathbinding.js'
   ];

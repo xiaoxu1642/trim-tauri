@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="styles/main.css" />
   <link rel="stylesheet" href="styles/ds.css" />
 </head>
-<body class="mw-window rs-window theme-light" data-skin="glass">
+<body class="mw-window rs-window theme-light">
   <div class="mw-shell">
     <div class="pw-topbar">
       <div class="pw-topbar-copy">
@@ -55,7 +55,7 @@
   <!-- Tauri 适配层（迁移方案 D1）：脚本链最前加载——业务件在加载期就会读 window.api；
        桥未就绪时自动 no-op -->
   <script src="scripts/tauri-api.js"></script>
-  <!-- 子窗口材质/主题同步：与其余子窗同一件（窗口清单以 engine::guard::APP_WINDOWS
+  <!-- 子窗口主题同步：与其余子窗同一件（窗口清单以 engine::guard::APP_WINDOWS
        的子窗集合为准，不在此点名例外，F3-M02） -->
   <script src="scripts/window-material.js"></script>
   <!-- ds.js：data-tip 委托 + window.ds.esc（本窗所有插值一律走它，见复核 LG-2）。

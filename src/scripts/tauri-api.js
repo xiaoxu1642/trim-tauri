@@ -268,9 +268,6 @@
     'peripheral:apply': 'peripheral_apply',
     'peripheral:restore-backup': 'peripheral_restore_backup',
     // E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好）
-    'appearance:get-material': 'appearance_get_material',
-    'appearance:set-material': 'appearance_set_material',
-    'appearance:set-material-enabled': 'appearance_set_material_enabled',
     'appearance:get-env': 'appearance_get_env',
     'appearance:bg-import': 'appearance_bg_import',
     'appearance:bg-delete': 'appearance_bg_delete',
@@ -632,10 +629,8 @@
     },
 
     appearance: {
-      getMaterial: function () { return invokeChannel('appearance:get-material'); },
-      setMaterial: function (material) { return invokeChannel('appearance:set-material', { material: material }); },
-      setMaterialEnabled: function (enabled) { return invokeChannel('appearance:set-material-enabled', { enabled: enabled }); },
-      onMaterialChanged: function (callback) { return onEvent('appearance:material-changed', callback); },
+      // 材质读写与广播（getMaterial / setMaterial / setMaterialEnabled / onMaterialChanged）
+      // 已随表面实色化整链退役（方案 v1.6 §5.6 + check-channel-map RETIRED 2026-11-21）。
       getEnv: function () { return invokeChannel('appearance:get-env'); },
       onEnvState: function (callback) { return onEvent('appearance:env-state', callback); },
       importBg: function () { return invokeChannel('appearance:bg-import'); },
