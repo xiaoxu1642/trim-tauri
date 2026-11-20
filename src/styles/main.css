@@ -5352,6 +5352,19 @@ body.bg-image-on .main-content {
 body.aurora-ready .aurora-field {
   opacity: var(--aurora-op);
 }
+/* 壁纸态关极光（2026-11-21 小旭裁定）：壁纸本身就是环境感来源，青/品红三团 blob
+   与 conic 光带叠在人物上成彩虹斑、抢主体。无壁纸时极光保留（星云画布承担氛围）。
+   特异性 (0,3,0) 压过上面的 ready 规则；用 opacity 0 而非 display:none，保留
+   aurora.js 的挂载/漂移与入场时序，壁纸清除后原样淡回。 */
+body[data-preset-bg] .aurora-field,
+body.bg-image-on .aurora-field {
+  opacity: 0 !important;
+}
+/* 星云画布同理：它也是环境光层，壁纸态一并让位（避免另一路彩色氛围透上来）。 */
+body[data-preset-bg] .nebula-canvas,
+body.bg-image-on .nebula-canvas {
+  opacity: 0 !important;
+}
 .aurora-field .aurora-blob {
   position: absolute;
   border-radius: 50%;
