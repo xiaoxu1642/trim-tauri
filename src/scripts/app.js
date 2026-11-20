@@ -391,7 +391,7 @@
   let navSeq = 0;
 
   // 提案 V1 落地：切页编排收类定时器。快速连点时先撤销上一次回调，防中途摘类截断错峰动画。
-  let pageLeaveTimer = 0;
+  // （离场幽灵层已按真机调优退役——旧页瞬时隐藏，不再有离场收尾。）
   let pageEnterTimer = 0;
 
   // v3.7.0：switchPage 改 async（需先 await 本页脚本加载）。外层吞掉异常，
@@ -425,8 +425,8 @@
       const next = document.getElementById('page-' + name);
       const prev = document.querySelector('.page.active');
       // 清残留编排类（幂等）；子项 --i 不清：仅 is-entering 消费，且每次进入整组覆写。
-      document.querySelectorAll('.page.is-leaving, .page.is-entering').forEach(el => {
-        el.classList.remove('is-leaving', 'is-entering');
+      document.querySelectorAll('.page.is-entering').forEach(el => {
+        el.classList.remove('is-entering');
       });
       document.querySelectorAll('.nav-item').forEach(el => {
         el.classList.toggle('active', el.dataset.page === name);
@@ -441,13 +441,9 @@
       const sp = document.querySelector('[data-nav-toggle="speed"]');
       if (sp) sp.classList.toggle('active', name === 'netspeed' || name === 'diskbench' || name === 'netcheck');
 
-      // 编排：仅真实换页时播（同页点击不重播）；类只加在前后两页，不遍历全表写类。
+      // 编排：仅真实换页时播（同页点击不重播）。旧页按既有语义瞬时隐藏（幽灵层已退役，
+      // 见 main.css 切页编排段）；新页内容错峰入场。
       if (next && prev && prev !== next) {
-        prev.classList.add('is-leaving');
-        clearTimeout(pageLeaveTimer);
-        pageLeaveTimer = setTimeout(() => {
-          if (!prev.classList.contains('active')) prev.classList.remove('is-leaving');
-        }, 260);
         next.classList.add('is-entering');
         // --i 错峰序号：上限 6 与 main.css 步长相配，摘类须晚于最后一档动画收尾。
         Array.prototype.forEach.call(next.children, (child, i) => {

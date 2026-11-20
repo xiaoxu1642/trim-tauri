@@ -895,23 +895,13 @@ body {
   display: block;
 }
 
-/* 提案 V1 落地：切页编排。旧页绝对定位幽灵层淡出（display:none 不可见、留流内会与新页竖向堆叠）；
-   新页内容子项错峰入场。2026-11-12「标题立即到位」仍有效：整页淡入沿用 .page 既有 fadeIn，
-   本段不给 .page 另挂动画（收类时 animation-name 变化会令其重播闪烁）、.page-header 豁免错峰；
-   错峰步长/档位较提案收紧——提案值下子项最多的页面（cleanup）最后一档在摘类时仅约六成透明度，可见跳变。 */
-.page.is-leaving {
-  display: block;
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  overflow: hidden;
-  pointer-events: none;
-  animation: pageLeave var(--dur-2) var(--ease-expo) forwards;
-}
-@keyframes pageLeave {
-  to { opacity: 0; transform: translateY(-8px); filter: blur(3px); }
-}
+/* 提案 V1 落地（真机调优）：切页编排只保留「新页内容错峰入场」。
+   原设计的旧页幽灵层（绝对定位 + blur 淡出）真机实测两宗罪：①blur 把半透明暗卡片与
+   缝隙里透出的浅色系统材质混成白雾，切页瞬间整窗白闪；②旧标题以虚影叠在新标题上，
+   与「标题立即到位」裁定冲突——幽灵层整体退役，旧页沿用既有瞬时隐藏。
+   该裁定仍有效：整页淡入沿用 .page 既有 fadeIn，本段不给 .page 另挂动画（收类时
+   animation-name 变化会令其重播闪烁）、.page-header 豁免错峰；错峰步长/档位较提案收紧
+   ——提案值下子项最多的页面（cleanup）最后一档在摘类时仅约六成透明度，可见跳变。 */
 .page.is-entering > :not(.page-header) {
   animation: pageEnterChild var(--dur-3) var(--ease-expo) both;
   animation-delay: calc(var(--i, 0) * 40ms);
@@ -2351,10 +2341,10 @@ body.win-maximized .splash-overlay {
   border-radius: 0;
 }
 
-/* 提案 V1：深色档压暗壁纸——浅色壁纸在暗色玻璃下会把面板衬得发灰（真机截图实证），
-   壁纸层是 pointer-events:none 的纯装饰，filter 压暗不动任何交互面；无壁纸态零影响。 */
+/* 提案 V1：深色档压暗壁纸（真机调优：上一档仍偏灰白，加深到近隐，深色档的环境感
+   交给星云层；壁纸层是 pointer-events:none 纯装饰，无壁纸态零影响） */
 body.theme-dark[data-preset-bg] .app-wallpaper::before {
-  filter: brightness(0.55) saturate(0.85);
+  filter: brightness(0.32) saturate(0.7);
 }
 
 body.electron-mica.win-maximized .layout {
@@ -5434,14 +5424,17 @@ body.bg-image-on.theme-light { --lg-glass-floor: rgba(255, 255, 255, 0.58); }
   --lg-tint-primary: rgba(255, 255, 255, 0.10);
   --lg-tint-secondary: rgba(255, 255, 255, 0.08);
   --lg-tint-tertiary: rgba(255, 255, 255, 0.06);
-  --lg-glass-floor: rgba(15, 17, 21, 0.55);
+  /* 真机调优（小旭反馈「白白的、叠底块不配合」）：半透明暗面叠浅色壁纸/浅色系统材质
+     混出来永远是灰白——深色档表面改为近实暗底（OpsMusic 式近黑画布，玻璃感只留
+     描边/高光/低 alpha 白光泽），画布归环境层（星云）管。 */
+  --lg-glass-floor: rgba(15, 17, 21, 0.85);
   --lg-glass-border: rgba(255, 255, 255, 0.14);
   --lg-glass-highlight: rgba(255, 255, 255, 0.16);
 }
 body[data-preset-bg].theme-dark,
-body.bg-image-on.theme-dark { --lg-glass-floor: rgba(15, 17, 21, 0.66); }
+body.bg-image-on.theme-dark { --lg-glass-floor: rgba(15, 17, 21, 0.90); }
 @media (prefers-contrast: more) {
-  .theme-dark { --lg-glass-floor: rgba(15, 17, 21, 0.70); }
+  .theme-dark { --lg-glass-floor: rgba(15, 17, 21, 0.92); }
 }
 
 /* ---------- 材质面纱分级（dark=碳墨浓度 / light=浅玻璃色板） ----------
