@@ -301,9 +301,11 @@ body[data-preset-bg] .app-wallpaper::before {
   pointer-events: none;
   background-size: cover;
   background-position: center;
-  /* v2.0：预设背景整体透明度下调约 15%，确保文字/控件对比度
-     v3.0：乘 --preset-bg-fade（pathbinding 切换壁纸时先淡出后淡入）；transition 既有 */
-  opacity: calc(0.85 * var(--preset-bg-fade, 1));
+  /* 预设背景整体透明度下调约 15%，确保文字/控件对比度
+     v3.0：乘 --preset-bg-fade（pathbinding 切换壁纸时先淡出后淡入）；transition 既有
+     2026-11-21：容器零底色后壁纸直接承托文字，opacity 从 0.85 提到 1；可读性由各预设
+     自己的白色渐变（wp-* 的 0.30→0.55）承担，属背景柔化而非容器叠加。 */
+  opacity: calc(1 * var(--preset-bg-fade, 1));
   transition: opacity var(--duration-slow) var(--ease-emphasized);
 }
 body[data-preset-bg="graphite"] .app-wallpaper::before {
@@ -4656,6 +4658,59 @@ body.theme-light .settings-section,
 body.theme-light .appearance-card,
 body.theme-light .empty-state { background: var(--bg-card); color: var(--fg-primary); }
 body.theme-light .summary-card:hover { background: var(--bg-card-hover); }
+
+/* ==================== 壁纸态：容器零底色，壁纸贯通整窗（2026-11-21 小旭裁定） ====================
+   实色化 v1.6 把 --bg-card 定成 #FFFFFF，卡片因此把壁纸全挡住——这是实色化的直接代价，
+   不能靠调回半透明解决（会退回五层相乘的灰带/白斑老问题）。正解是「减法」：
+   壁纸激活时**取消所有容器的底色**，只留描边 + 圆角 + 阴影表达边界；文字可读性交给
+   壁纸层自己的柔化遮罩（见 .app-wallpaper::before 的 opacity 与各预设的白色渐变）——
+   遮罩属于背景处理，不是叠加在内容上的半透明容器块。
+   高特异性 (0,3,0) 一次性压过上面所有 .card / body.theme-light .card 等 (0,1,0)/(0,2,0) 覆写，
+   不留遗漏点。无壁纸态完全不受影响（卡片仍是实色）。 */
+body[data-preset-bg] .summary-card,
+body[data-preset-bg] .card,
+body[data-preset-bg] .table-card,
+body[data-preset-bg] .settings-section,
+body[data-preset-bg] .appearance-card,
+body[data-preset-bg] .empty-state,
+body[data-preset-bg] .maint-output,
+body[data-preset-bg] .row-card,
+body[data-preset-bg] .maint-card,
+body[data-preset-bg] .startup-item,
+body[data-preset-bg] .device-info-row,
+body[data-preset-bg] .opt-col,
+body[data-preset-bg] .ctx-col,
+body[data-preset-bg] .realtime-chart-panel,
+body[data-preset-bg] .rt-sr-panel,
+body[data-preset-bg] .mem-panel,
+body[data-preset-bg] .external-test-panel,
+body[data-preset-bg] .un-app-card,
+body[data-preset-bg] .nara-card,
+body[data-preset-bg] .peri-card,
+body[data-preset-bg] .benchmark-panel,
+body[data-preset-bg] .benchmark-result-group,
+body[data-preset-bg] .finder-group-header,
+body[data-preset-bg] .restore-item,
+body[data-preset-bg] .ctx-detail-modal,
+body[data-preset-bg] .usage-modal,
+body[data-preset-bg] .settings-entry-card,
+body[data-preset-bg] .process-entry-card,
+body[data-preset-bg] .pw-group,
+body[data-preset-bg] .pw-topbar,
+body[data-preset-bg] .mw-card,
+body[data-preset-bg] .mw-footer,
+body[data-preset-bg] .sidebar {
+  background: transparent;
+}
+/* 悬停态同样取消实色填充，只抬描边与投影（交互反馈不靠底色块） */
+body[data-preset-bg] .row-card:hover,
+body[data-preset-bg] .maint-card:hover,
+body[data-preset-bg] .startup-item:hover,
+body[data-preset-bg] .summary-card:hover,
+body[data-preset-bg] .settings-entry-card:hover,
+body[data-preset-bg] .process-entry-card:hover,
+body[data-preset-bg] .nav-item:hover { background: transparent; }
+body[data-preset-bg] .nav-item.active { background: transparent; }
 body.theme-light .page-title,
 body.theme-light .health-title,
 body.theme-light .ov-res-label,
@@ -4686,18 +4741,10 @@ body.theme-light[data-preset-bg] .main-content {
   background: transparent;
 }
 
-/* 3) 覆盖 final 视觉层的硬编码白底（.card 等下层 specificity 同为 (0,2,1)，
-      此处以 (0,3,1) 更高特异性 + 后置顺序确保生效），并叠加磨砂模糊。 */
-body.theme-light[data-preset-bg] .card,
-body.theme-light[data-preset-bg] .table-card,
-body.theme-light[data-preset-bg] .summary-card,
-body.theme-light[data-preset-bg] .overview-card,
-body.theme-light[data-preset-bg] .settings-section,
-body.theme-light[data-preset-bg] .appearance-card,
-body.theme-light[data-preset-bg] .empty-state,
-body.theme-light[data-preset-bg] .maint-output {
-  background-color: var(--bg-card);
-}
+/* 3) 预设壁纸态的旧实色覆写（body.theme-light[data-preset-bg] … { background-color:
+   var(--bg-card) }）已随「容器零底色」裁定删除——它特异性 (0,3,1) 会压过上一段的
+   透明化规则，正是"白色卡片挡住壁纸"的根因。壁纸态卡片底统一由上方壁纸态块给
+   transparent，文字可读性交给壁纸层柔化遮罩。 */
 
 /* 4) 看板/卡片依赖 var(--bg-card) 令牌（v3.0 已透明化）。v3.0 修复批次：原「预设
    壁纸下按容器补磨砂」的规则退役——壁纸模糊由 .app-wallpaper::before（--bg-blur 滑块）
