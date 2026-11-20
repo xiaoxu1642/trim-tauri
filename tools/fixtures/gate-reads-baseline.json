@@ -34,13 +34,13 @@
     "check-native-hygiene": "d43526d9d759e21c",
     "check-handle-lifecycle": "4313924ba71fe08c",
     "check-comment-coords": "6fff15c052161c3a",
-    "check-css-tokens": "895c7b9f63f8c218",
+    "check-css-tokens": "2c11964036bf7781",
     "check-css-hygiene": "30c86d5d7f2a8c1e",
     "check-assets-used": "2aee5e7cad5b131d",
     "check-asset-size": "a3904ba3bcd55a1c",
     "check-artifact-size": "ddcdb671a4dc8c97",
     "check-first-paint": "54b601c348a05bcd",
-    "check-contrast": "43e229bdf4fa517c",
+    "check-contrast": "7c27a4cbe8a4a0cd",
     "check-subwindow-css": "4629e05fd3d05b6e",
     "check-idle-scripts": "c9ea50dec0f9d6ea",
     "check-escape-delegation": "fd9829e973cd4c58",
@@ -550,5 +550,5 @@
       "M-12"
     ]
   },
-  "bodyHash": "46469d887b71c3bb"
+  "bodyHash": "fca266683646f06a"
 }

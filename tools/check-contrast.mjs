@@ -2252,6 +2252,10 @@ const OPACITY_UNMODELED = [
   { sel: '.aurora-field .aurora-grain', reason: '噪点纹理（装饰层，无文本）' },
   { sel: '.an-tm-cell-size', reason: '树图尺寸元信息；宿主 .an-tm-cell 属语义染层族，按 v2 R3/F6 射程边界不在近黑底硬判（登记待办）' },
   { sel: '.ds-menu-item[aria-disabled="true"]', reason: '非活动菜单项' },
+  // 提案 V1 落地（2026-11-21）：清理行离场。终态 .35 是「已被清理、即将随重渲染消失」的
+  // 瞬时离场态，不承载可读文本；RM 段同值是同一终态的静态降级。
+  { sel: 'to', reason: 'rowCleared 关键帧终态（清理行离场瞬时态，行即将随重渲染消失）' },
+  { sel: '#categoryList .xtable-row.is-cleared', reason: 'RM 降级终态（已清理行弱化，即将消失）' },
 ];
 const opacityDecls = [];
 for (const r of ALL_RULES) {

@@ -2039,6 +2039,9 @@
         const remains = (Number(d.residual) || 0) + failedFiles
           + (Number(d.protectedBlocked) || 0) + (Number(d.nameShapeBlocked) || 0);
         if (d.status === 'ok' && remains === 0) {
+          // 提案 V1 落地：清理行离场——复用同一套「完全成功」判据，重渲染前播淡出上移。
+          const row = document.querySelector(`#categoryList .xtable-row[data-id="${CSS.escape(d.id)}"]`);
+          if (row) row.classList.add('is-cleared');
           scanResults.delete(d.id);
           selectedIds.delete(d.id);
         } else if (remains > 0) {

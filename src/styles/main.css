@@ -134,6 +134,8 @@
      （长档氛围时长）四 token 均有消费，反向棘轮无零消费项。 */
   --ease-expo: cubic-bezier(0.16, 1, 0.30, 1);
   --ease-spring: cubic-bezier(0.34, 1.42, 0.52, 1);
+  /* 提案 V1 对拍（2026-11-21）：提案 out .22,1,.36,1 / spring .34,1.56,.64,1 均不采纳——
+     现网出速更缓，1.56 过冲溢出 14px 卡片；提案 inout 与现网一致。 */
   --ease-emph: cubic-bezier(0.20, 0.90, 0.22, 1);
   --ease-inout: cubic-bezier(0.65, 0, 0.35, 1);
   --ease-out-soft: cubic-bezier(0.33, 1, 0.68, 1);
@@ -716,6 +718,10 @@ body {
 .nav-item.active .nav-icon {
   color: var(--fg-primary);
 }
+/* 提案 V1 落地：选中项图标辉光。只挂阴影层不改色（A3 管的是颜色走中性），用既有 --accent-glow，折叠态同样生效。 */
+.sidebar .nav-item.active > .nav-icon {
+  filter: drop-shadow(0 0 6px var(--accent-glow));
+}
 .nav-icon {
   color: var(--fg-secondary);
   flex-shrink: 0;
@@ -879,6 +885,32 @@ body {
 }
 .page.active {
   display: block;
+}
+
+/* 提案 V1 落地：切页编排。旧页绝对定位幽灵层淡出（display:none 不可见、留流内会与新页竖向堆叠）；
+   新页内容子项错峰入场。2026-11-12「标题立即到位」仍有效：整页淡入沿用 .page 既有 fadeIn，
+   本段不给 .page 另挂动画（收类时 animation-name 变化会令其重播闪烁）、.page-header 豁免错峰；
+   错峰步长/档位较提案收紧——提案值下子项最多的页面（cleanup）最后一档在摘类时仅约六成透明度，可见跳变。 */
+.page.is-leaving {
+  display: block;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  overflow: hidden;
+  pointer-events: none;
+  animation: pageLeave var(--dur-2) var(--ease-expo) forwards;
+}
+@keyframes pageLeave {
+  to { opacity: 0; transform: translateY(-8px); filter: blur(3px); }
+}
+.page.is-entering > :not(.page-header) {
+  animation: pageEnterChild var(--dur-3) var(--ease-expo) both;
+  animation-delay: calc(var(--i, 0) * 40ms);
+}
+@keyframes pageEnterChild {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
 }
 
 .page-title {
@@ -2831,6 +2863,18 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 /* 已禁用行（取消勾选禁用）：整行弱化，勾选态仍清晰可辨 */
 .xtable-row.disabled-row { opacity: 0.55; }
 .xtable-row.disabled-row .xtable-cell-text { text-decoration: line-through; text-decoration-color: var(--fg-tertiary); }
+
+/* 提案 V1 落地：清理行离场。清理成功的行在重渲染前淡出上移（≤6px），失败/残留行不动；
+   RM 下只留弱化终态。 */
+#categoryList .xtable-row.is-cleared {
+  animation: rowCleared var(--dur-2) var(--ease-expo) forwards;
+}
+@keyframes rowCleared {
+  to { opacity: .35; transform: translateY(-6px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #categoryList .xtable-row.is-cleared { animation: none; opacity: .35; }
+}
 
 /* 单元格 */
 .xtable-td {
