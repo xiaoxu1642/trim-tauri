@@ -103,20 +103,11 @@ const AA_NORMAL = 4.5;
 // 现算 458 组（拆分前 main.css 408 + ds.css 32 + 正文 18 = 458，分箱无损已实测对拍），
 // 留约 6% 余量。这样「整族选择器写法变了、解析吃掉一批」会在总量上先红，而不是只靠三份地板。
 //
-// 2026-10-14 口径 v2（按钮底与玻璃兜底统一）后重设：现算 **330** 组，留约 6% ⇒ 下限 310。
-// （改前基线取 HEAD 实测 **376**；上一版登记的 390 是其间的其他提交又带走 14 组前的旧值，
-//   本次一律以 HEAD 实跑值为对拍起点，不从旧注释抄数。）
-// 归因闭合同样是**实测**的，不是放宽：拿本文件同一套解析器跑改前/改后两份 CSS
-// （scratch 副本 + `git show HEAD:` 的三份样式文件），逐选择器对拍得到
-//   376 − 330 = **46 组**，全部落在改前产出组合、改后不再产出的 **21 条选择器**上，
-//   而这 21 条正是本次被改成 floor 栈的那批（.btn / .btn:hover / .btn-secondary 亮色支路 /
-//   .btn-opt-* / .filter-tab* / .maint-tab* / .peri-explain-btn / .an-tm-cell / .drive-chip /
-//   .fileclean-preview-btn / .opt|ctx-col-selectall / .btn-opt-ai）；
-//   我没动过的 main-pages.css 58→58、ds.css 32→32 逐组无损（改的 .ds-menu 本就无前景声明、
-//   原本就不产组合）⇒ 差异全部来自「shorthand 首层变成 linear-gradient，readValues 白名单
-//   不再吃它」，不存在解析退化形态（真退化时未触碰的文件也会跟着掉）。
-// 这批面离开 A 组解析后的对比度覆盖由 **F6/F6b** 用同一套 source-over 合成补回（见该段）。
-const BASELINE_MIN = 310;
+// 2026-11-21 表面实色化后重设：现算 **380** 组，留约 6% ⇒ 下限 357。
+// 归因：floor/tint 渐变栈整批离开 shorthand 解析（A 组不再产组合）+ 材质卡/半透明合成体系
+// 消失，是**真实减少**而非解析退化——未触碰的 litebox.css 组合数不变、B 组 18 组照算；
+// 实色面覆盖由 F6（token × 前景两主题）与 H（宿主栈工位）补回。
+const BASELINE_MIN = 357;
 // 审查 L-28：**每一份**在扫描面里的 CSS 都必须至少产出 N 组组合。
 // 为什么需要：总量下限挡不住「两份文件里有一份整体解析失败」（比如 ds.css
 // 某次重构把 background 全改成 shorthand 之外的形式），总量仍可能靠别的文件
@@ -133,7 +124,9 @@ const BASELINE_MIN = 310;
 // 消失的**只有** `.syspanel-note` 一条（两主题各 1 组）——它是被删掉的死规则
 // （唯一消费方「自定义方案仅展示不可选」那行提示随面板改版一起退役），
 // 其余 28 条选择器产出一字未变 ⇒ 属真实减少，不是解析退化。地板按 ≈7% 余量落到 52。
-const SCAN_FLOOR = { 'main.css': 208, 'main-pages.css': 52, 'ds.css': 24, 'litebox.css': 1 };
+// 2026-11-21 表面实色化后现算：main.css 254 / main-pages.css 80 / ds.css 26 / litebox.css 2。
+// 地板按 ≈6% 余量重设（实色化删掉的是半透明栈组合，属真实减少；未触碰文件照算佐证）。
+const SCAN_FLOOR = { 'main.css': 238, 'main-pages.css': 74, 'ds.css': 24, 'litebox.css': 1 };
 // T1d-M02：扫描面 = src/styles 全量（漏登记/多登记都红），不再只靠人手加三份清单。
 {
   const disk = readdirSync(new URL('../src/styles', import.meta.url)).filter((f) => f.endsWith('.css')).sort();
@@ -334,6 +327,23 @@ function parseColor(raw, vars) {
     // 而那正是变量缺失时的真实渲染结果，方向正确（不是乐观放行）。
     if (fallback.trim()) { s = fallback.trim(); continue; }
     return null;
+  }
+  // 表面实色化（2026-11-21）后 -soft 族改为 color-mix(语义档 %, var(--bg-card))：
+  // 解析器必须吃通用 color-mix（in srgb）形态，否则徽章/染底组合整批静默失明。
+  // transparent 第二分量按「alpha 归零的色层」处理，交给 flattenBg 合成到页面底。
+  {
+    const cm = s.match(/^color-mix\(\s*in\s+srgb\s*,\s*([\s\S]+?)\s+([\d.]+)%\s*,\s*([\s\S]+?)\s*\)$/i);
+    if (cm) {
+      const a = parseColor(cm[1].trim(), vars);
+      const p = parseFloat(cm[2]) / 100;
+      const rest = cm[3].trim();
+      const b = rest === 'transparent' ? { r: 0, g: 0, b: 0, a: 0 } : parseColor(rest, vars);
+      if (a && b) {
+        const mix = (x, y) => x * p + y * (1 - p);
+        return { r: mix(a.r, b.r), g: mix(a.g, b.g), b: mix(a.b, b.b), a: mix(a.a, b.a) };
+      }
+      return null;
+    }
   }
   let m = s.match(/^#([0-9a-f]{3})$/i);
   if (m) return { r: parseInt(m[1][0] + m[1][0], 16), g: parseInt(m[1][1] + m[1][1], 16), b: parseInt(m[1][2] + m[1][2], 16), a: 1 };
@@ -687,13 +697,9 @@ for (const r of rules) {
 const TEXT_FG = ['--fg-primary', '--fg-secondary', '--fg-tertiary'];
 const TEXT_BG = ['--bg-app', '--surface-solid'];
 function compositeCard(vars) {
-  const tint = (vars.get('--surface-tint') || '').trim().match(/^(\d+)\s+(\d+)\s+(\d+)$/);
-  const alpha = parseFloat(vars.get('--surface-alpha-elevated') || '');
-  const base = parseColor('var(--bg-app)', vars);
-  if (!tint || !isFinite(alpha) || !base) return null;
-  const over = { r: +tint[1], g: +tint[2], b: +tint[3] };
-  const mix = (x, y) => x * alpha + y * (1 - alpha);
-  return { r: mix(over.r, base.r), g: mix(over.g, base.g), b: mix(over.b, base.b), a: 1 };
+  // 表面实色化（2026-11-21）：卡片底已是实色 token，无需 tint×alpha 合成；
+  // 保留函数形态是为了 B 组「合成底」工位的连续性（现直接解析 --bg-card）。
+  return parseColor('var(--bg-card)', vars);
 }
 const textRows = [];
 for (const t of THEMES) {
@@ -777,8 +783,8 @@ const weak = solidRows.filter((r) => r.ratio < AA_NORMAL);
 // 2026-10-03 现算：收口 SOLID_SKIP 盲区后 +144 组，只有 1 组落到 4.5~3 之间 ——
 // `.bg-list-del:hover`（✕ 删除按钮，src/styles/main.css 的 .bg-list-del:hover，**纯图标无文本**）实测 4.16:1。
 const ICON_ONLY_MIN = 3.0;
+// .bg-list-del:hover 已随 danger 染底实色化达标（≥4.5），登记移除（2026-11-21，只减不增）。
 const ICON_ONLY_ALLOW = [
-  '.bg-list-del:hover',
   '.splash-badge',
 ];
 const iconRows = solidRows.filter((r) => r.ratio >= ICON_ONLY_MIN && r.ratio < AA_NORMAL);
@@ -882,41 +888,19 @@ check(
       : '',
 );
 
-// ---- F. 玻璃面必须消费 --lg-glass-floor（P3-2，2026-10-09） ----
-//
-// 为什么要有这一组：F5 探针的 8 条 FAIL 全落在「tint 栈没垫 floor」的滑块/玻璃按钮上
-//（导入图 + 雾化=0 + 像素近黑时纯 tint 栈只有 ~3.4:1，垫 floor 后 ≥6.7:1）。
-// 弹层/菜单早就消费 floor，滑块与玻璃按钮没有 —— 护栏不对称就是这条缺口的形状。
-// 判据：任何用 `--lg-tint-*` 画底（background/background-color）的声明，必须同声明
-// 含 `--lg-glass-floor`。新增玻璃面漏垫 floor 即红。
-const TINT_LAYER = /background(-color)?\s*:[^;]*--lg-tint-/;
-const floorViolations = (text) =>
-  text
-    .split(';')
-    .filter((decl) => TINT_LAYER.test(decl) && !decl.includes('--lg-glass-floor'))
-    .map((decl) => decl.trim().replace(/\s+/g, ' ').slice(0, 100));
-const tintNoFloor = [];
-let tintSites = 0;
-for (const part of CSS_PARTS) {
-  tintSites += (part.text.match(/--lg-tint-/g) || []).length;
-  for (const decl of floorViolations(part.text)) tintNoFloor.push(`${part.label}: ${decl}`);
-}
-// 正向对照自检：判定器必须能对「tint 无 floor」样本判红、对「tint+floor」样本放行
+// ---- F. 玻璃 tint/floor 栈已整链退役（表面实色化 v1.6 §6.1，2026-11-21） ----
+// 原「凡 tint 画底必须垫 floor」（F/F0，P3-2）随 floor/tint 渐变栈一并退役；
+// 防回流由 check-css-tokens 的 S3（叠加族零回流）常驻。这里保留收口断言：
+// 扫描面 --lg-tint- 命中必须为 0——不为 0 即叠加栈回流。
 {
-  const POSITIVE_CONTROLS = {
-    bad: 'background: linear-gradient(165deg, var(--lg-tint-primary), var(--lg-tint-secondary));',
-    good: 'background: linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)), linear-gradient(165deg, var(--lg-tint-primary), var(--lg-tint-secondary));',
-  };
+  let tintSites = 0;
+  for (const part of CSS_PARTS) tintSites += (part.text.match(/--lg-tint-/g) || []).length;
   check(
-    floorViolations(POSITIVE_CONTROLS.bad).length === 1 && floorViolations(POSITIVE_CONTROLS.good).length === 0,
-    'F0. 正向对照自检：tint 无 floor 判红、tint+floor 放行',
+    tintSites === 0,
+    `F. 玻璃 tint 栈退役收口：扫描面 --lg-tint- 命中必须为 0（实算 ${tintSites}）`,
+    tintSites ? 'tint 引用回流（与 check-css-tokens S3 同判，先修 CSS 再来）' : '',
   );
 }
-check(
-  tintSites >= 6 && tintNoFloor.length === 0,
-  `F. 玻璃面底必须消费 --lg-glass-floor（tint 声明命中 ${tintSites} 处）`,
-  tintSites < 6 ? '扫描面疑似失明（tint 命中 < 6）' : tintNoFloor.join('；'),
-);
 
 // ---- F1~F6. 操作面 floor 登记台账（《按钮底与玻璃兜底统一口径 v2》M9，2026-10-14）----
 //
@@ -929,12 +913,17 @@ check(
 // （主动，清单触发）。删掉一条按钮规则 F 看不见，F1 看得见。
 //
 // 四类表面模型（v2 §3）：A 独立中性操作面 / B 宿主承载面 → SURFACE_LEDGER；
-// C 语义实底 → SEMANTIC_SOLID（禁止被中性降级名单覆盖）；D 文本与轻量 → 不进 floor 判据。
-const FLOOR_TOKEN = '--lg-glass-floor';
+// C 语义实底 → SEMANTIC_SOLID（禁止被中性降级名单覆盖）；D 文本与轻量 → 不进底判据。
+// 表面实色化（v1.6 §6.1，2026-11-21）：FLOOR_TOKEN（--lg-glass-floor）随玻璃栈退役，
+// 「合规底」改为**实色表面/语义染底 token**——它们自身不透明、自带可读性。
+const FLOOR_TOKEN = '--lg-glass-floor'; // 仅存于历史注释与 F5 对照样本说明，不再有消费判据
 const SOLID_TOKEN = '--surface-solid';
 
-// 底色合规 = 声明里带 floor 护栏，或本身就是不透明实底 token（两者都「自身可读」）。
-const FLOOR_OK = (decl) => decl.includes(FLOOR_TOKEN) || decl.includes(SOLID_TOKEN);
+// 底色合规 = 声明引用实色表面 token（四级表面 + hover/input 档）或实色语义染底
+// （-soft/-light 已 color-mix 化为实色宿主，见 B2 token 终表）。半透明/transparent 一律不合规。
+const SURFACE_SOLID_RE =
+  /var\(--(?:bg-card|bg-card-hover|bg-elevated|bg-input|bg-hover|bg-base|bg-app|surface-solid|accent-soft|accent-light|success-soft|warning-soft|danger-soft|info-soft)\)/;
+const FLOOR_OK = (decl) => SURFACE_SOLID_RE.test(decl);
 
 // kind:
 //   stack   —— 常态底自身成立：至少一条带 floor/实底的底，且任何状态的底都不得是裸透明
@@ -954,7 +943,7 @@ const SURFACE_LEDGER = [
   // .maint-tabs 是无衬底的换行 pill 行（无 padding/描边、宽度铺满内容行），floor 只能打在
   // pill 本体上；给它铺 floor 会画出一整块白底。故不注册为 host，只注册 .maint-tab。
   { sel: '.maint-tab', kind: 'stack' },
-  { sel: '.material-card', kind: 'stack' },
+  // .material-card 已随材质 UI 整链退役（2026-11-21），台账条目同撤（只减不增）。
   { sel: '.opt-col-selectall', kind: 'stack' },
   { sel: '.ctx-col-selectall', kind: 'stack' },
   { sel: '.fileclean-preview-btn', kind: 'stack' },
@@ -963,13 +952,14 @@ const SURFACE_LEDGER = [
   { sel: '.drive-chip', kind: 'stack' },
   // 电源计划小块（2026-10-14 面板改版）：每块都是独立命中区，且可能落在设置页卡片上
   { sel: '.syspanel-power-tile', kind: 'stack' },
-  // 宿主承载面：菜单不是按钮，靠逐项加 floor 解决不了（v2 §1 补充发现）。
-  // minFloor=2 钉「无材质态（ds.css）与材质态（main.css）两条路径各自都要成立」。
-  { sel: '.ds-menu', kind: 'host', minFloor: 2 },
+  // 宿主承载面：菜单不是按钮，逐项加底解决不了整张菜单透出的问题。
+  // 材质态路径（body.electron-mica .ds-menu）已随材质链退役，minFloor 2→1（只剩 ds.css 一条路径）。
+  { sel: '.ds-menu', kind: 'host', minFloor: 1 },
 ];
-// 台账条数下限（防「清空登记表就全绿」）：只数带 floor 的规则条数不算覆盖证明，
-// 每个类都要逐条点名判定（见下方 ledgerVerdicts）。2026-10-14 现算 19 条。
-const LEDGER_MIN = 19;
+// 台账条数下限（防「清空登记表就全绿」）：只数合规底的规则条数不算覆盖证明，
+// 每个类都要逐条点名判定（见下方 ledgerVerdicts）。2026-11-21 现算 18 条
+// （材质卡条目随材质 UI 退役摘除，19−1）。
+const LEDGER_MIN = 18;
 
 // C 类：底色承载执行级别/危险语义，中性 floor 与 reduced-transparency 都不许碰。
 const SEMANTIC_SOLID = ['.btn-primary', '.btn-accent', '.btn-danger', '.btn-warning'];
@@ -1091,8 +1081,9 @@ check(
 );
 check(ledger.bad.length === 0, `F1. 登记面常态底必须自身可读（逐条点名：${ledger.verdicts.join(' / ')}）`, ledger.bad.join('；'));
 
-// F2. 语义实底保护：reduced-transparency 段里既不得点名 C 类，中性 .btn 降级也必须带
-// 四条 :not() 排除（v2 §1 P0：`.btn` 无差别降级会把 danger/warning 刷成白底丢语义）。
+// F2. reduced-transparency 降级段已随表面实色化整链退役（2026-11-21，方案 v1.6 §6.1）：
+// 常态即实色，系统关「透明效果」不再需要回退面。旧判据（只降中性面 + :not() 排除
+// 语义实底）随降级段失去宿主；改为「残留即回流」的收口断言。
 function reducedBlock(text) {
   const key = '@media (prefers-reduced-transparency: reduce)';
   const i = text.indexOf(key);
@@ -1107,24 +1098,7 @@ function reducedBlock(text) {
   }
   return text.slice(i);
 }
-function judgeReducedSolid(blockText) {
-  const bad = [];
-  if (!blockText) return ['reduced-transparency 段整体消失（中性降级名单失去了宿主）'];
-  for (const r of parseSurfaceRules(blockText)) {
-    const positive = positiveSel(r.selector);
-    const sem = SEMANTIC_SOLID.find((c) => subjectHas(positive, c));
-    if (sem) {
-      bad.push(`降级段点名了语义实底 ${sem}（${r.selector}）`);
-      continue;
-    }
-    if (subjectHas(positive, '.btn') && !SEMANTIC_SOLID.every((c) => r.selector.includes(`:not(${c})`))) {
-      bad.push(`降级段的 .btn 未用 :not() 排除全部语义实底：${r.selector}`);
-    }
-  }
-  return bad;
-}
-const reducedBad = judgeReducedSolid(reducedBlock(MAIN.text));
-check(reducedBad.length === 0, 'F2. reduced-transparency 只降中性面、显式排除语义实底', reducedBad.join('；'));
+check(!reducedBlock(MAIN.text), 'F2. reduced-transparency 降级段必须保持退役（残留即回流）');
 
 // F3. 运行时单向对拍：折射白名单只服务 28 个名额，不是按钮完整性清单。
 // 只做单向包含（白名单 ⊆ 登记表 ∪ 语义实底），反向不要求 —— 扩白名单会动性能护栏。
@@ -1143,55 +1117,43 @@ check(
   refractBad.join('；'),
 );
 
-// F3b. 按钮不得再被写 backdrop-filter（2026-10-14 真机像素实测后新增）。
-// 现象：卸载页同类 .btn-secondary 抢到折射名额的行是 #EEEDED、没抢到的行是 #FDFCFC，
-// 差 14 个单位——位移贴图把行分隔线与相邻文字拽进按钮里，而 28 个名额先到先得，
-// 于是「同一页一部分灰一部分白」。底色已经由 CSS 的 floor 自证，滤镜再参与就是第二次
-// 把可读性交给运行时预算。判据是 commitGlass 里那三条锚点（禁行号，AGENTS §5.19）：
-// wantRefract 必须仅放行浮层（按钮 2026-10-14、输入框 2026-10-15 两次真机实测退出）、
-// 排除分支必须置 noFilter、回升路径必须挡住 noFilter。
-const GLASS_ANCHORS = [
-  { name: "wantRefract 仅浮层（按钮/输入框均排除）", re: /const wantRefract = m\.kind === 'floating'/ },
-  { name: "按钮/输入框分支置 noFilter", re: /st\.noFilter = true;/ },
-  { name: "资格回升挡住 noFilter", re: /if \(st\.refract \|\| st\.noFilter/ },
-];
-function judgeGlassAnchors(src, anchors) {
-  return anchors.filter((a) => !a.re.test(src)).map((a) => `锚点缺失：${a.name}`);
+// F3b. liquid-glass 零 backdrop 写入（表面实色化 v1.6 §6.1，2026-11-21）。
+// 折射/磨砂段整链退役后，实色表面不再「看穿身后内容」，任何 backdrop-filter 写入
+// 都是被退役的叠加面回流。判据 = 源码内不得出现 setBackdrop / 行内 backdropFilter 写入。
+const BACKDROP_WRITE_RE = /setBackdrop|\.style\.backdropFilter|\.style\.webkitBackdropFilter|backdropFilter\s*=/;
+function judgeBackdropWrites(src) {
+  return BACKDROP_WRITE_RE.test(src)
+    ? ['liquid-glass.js 仍存在 backdrop-filter 写入（折射/磨砂段未摘干净）']
+    : [];
 }
-const glassBad = judgeGlassAnchors(LG_JS, GLASS_ANCHORS);
+const glassBad = judgeBackdropWrites(LG_JS);
 check(
   glassBad.length === 0,
-  `F3b. liquid-glass 只给浮层写折射滤镜（三条锚点齐备：${GLASS_ANCHORS.map((a) => a.name).join(' / ')}）`,
+  'F3b. liquid-glass 零 backdrop 写入（折射/磨砂段已退役）',
   glassBad.join('；'),
 );
 {
-  // 正向对照：把排除条件抹掉，锚点判定必须立刻判红（否则这条门禁只是装饰）。
-  const stripped = LG_JS.replace(/const wantRefract = m\.kind === 'floating'/, 'const wantRefract = true');
-  const ctrl = judgeGlassAnchors(stripped, GLASS_ANCHORS);
+  // 正向对照：注入一条 backdrop 写入样本，判定必须立刻判红（否则这条门禁只是装饰）。
+  const stripped = LG_JS + "\nconst setBackdrop = (el, v) => { el.style.backdropFilter = v; };";
+  const ctrl = judgeBackdropWrites(stripped);
   check(
-    ctrl.length === 1 && ctrl[0].includes('wantRefract'),
-    'F3b 对照：抹掉 wantRefract 的浮层限定后必须判红',
-    ctrl.length === 1 ? '' : `实算 ${ctrl.length} 条：${ctrl.join('；')}`,
+    ctrl.length === 1,
+    'F3b 对照：注入 backdrop 写入的变异样本必须判红',
+    ctrl.length === 1 ? '' : `实算 ${ctrl.length} 条`,
   );
 }
 
-// F3c（v6-K17）：材质无档时 .ds-tooltip 必须有不透明 floor。
-// 浮层 floor 此前只挂在 body.electron-mica 前件下（见 main.css 该段注释），
-// mica 不可用/手动关（body[data-material="none"]）时 .ds-tooltip 退回半透明
-// --bg-elevated，压在任意内容上对比度随背景漂移。判据：main.css 必须存在
-// `body[data-material="none"] .ds-tooltip { … background: … }`。
-const TOOLTIP_FLOOR = /body\[data-material="none"\]\s+\.ds-tooltip\s*\{[^}]*background\s*:/;
-check(
-  TOOLTIP_FLOOR.test(MAIN.text),
-  'F3c. 材质无档 .ds-tooltip 必须有不透明 floor（data-material="none" 分支）',
-);
+// F3c. 浮层底必须实色（v6-K17 的实色化续篇，2026-11-21）。
+// 旧判据（材质无档时给 .ds-tooltip 垫不透明 floor）随材质前件退役；
+// ds.css 的 .ds-tooltip / .ds-menu 底现直接是实色 --bg-elevated。
+// 判据：ds.css 的 .ds-tooltip 规则必须 background: var(--bg-elevated)。
+const DS_TEXT = CSS_PARTS[2].text;
+const TOOLTIP_SOLID = /\.ds-tooltip\s*\{[^}]*background\s*:\s*var\(--bg-elevated\)/;
+check(TOOLTIP_SOLID.test(DS_TEXT), 'F3c. .ds-tooltip 底为实色 token（--bg-elevated，材质前件已退役）');
 {
-  // 正向对照：把该规则整块删掉，判定必须立刻判红（否则这条门禁只是装饰）。
-  const stripped = MAIN.text.replace(/body\[data-material="none"\]\s+\.ds-tooltip\s*\{[^}]*\}/, '');
-  check(
-    !TOOLTIP_FLOOR.test(stripped),
-    'F3c 对照：删掉 tooltip floor 的变异样本必须判红',
-  );
+  // 正向对照：把实底声明换回半透明旧值，判定必须立刻判红。
+  const stripped = DS_TEXT.replace(/\.ds-tooltip\s*\{([^}]*)background\s*:\s*var\(--bg-elevated\)/, '.ds-tooltip {$1background: rgba(255, 255, 255, 0.4)');
+  check(!TOOLTIP_SOLID.test(stripped), 'F3c 对照：tooltip 退回半透明底的变异样本必须判红');
 }
 
 // F4. 新增类必须进四类登记之一：扫全部规则选择器里的 `.btn*` 命名域（不用 *-card/*-tab
@@ -1208,26 +1170,32 @@ check(
   unregisteredBtn.length ? `新增未登记的按钮类 ${JSON.stringify(unregisteredBtn)}：先归入 A/B/C/D 四类之一` : '',
 );
 
-// F5. 正向对照自检（§6.3）：四组 bad/good 样本喂给**同一个**判定器，
-// 特别是「前面有 floor、后面同特异性又写透明」这种级联覆写必须判红。
+// F5. 正向对照自检（§6.3）：bad/good 样本喂给**同一个**判定器，
+// 特别是「前面有实底、后面同特异性又写透明」这种级联覆写必须判红。
 {
-  const G = `linear-gradient(var(${FLOOR_TOKEN}), var(${FLOOR_TOKEN})), linear-gradient(165deg, var(--lg-tint-primary), var(--lg-tint-secondary))`;
+  const G = `linear-gradient(var(--bg-elevated), var(--bg-elevated))`;
   const S = [
     {
-      name: '裸 --bg-card 判红',
-      css: `.btn { background: var(--bg-card); }`,
+      name: '裸透明判红',
+      css: `.btn { background: transparent; }`,
       entries: [{ sel: '.btn', kind: 'stack' }],
       expectBad: 1,
     },
     {
-      name: 'floor + tint 放行',
-      css: `.btn { background: ${G}; }`,
+      name: '半透明字面判红',
+      css: `.btn { background: rgba(255, 255, 255, 0.45); }`,
+      entries: [{ sel: '.btn', kind: 'stack' }],
+      expectBad: 1,
+    },
+    {
+      name: '实底 token 放行',
+      css: `.btn { background: var(--bg-elevated); }`,
       entries: [{ sel: '.btn', kind: 'stack' }],
       expectBad: 0,
     },
     {
       name: '后级覆写判红',
-      css: `.btn { background: ${G}; }\nbody.theme-light .btn { background: var(--bg-card); }`,
+      css: `.btn { background: ${G}; }\nbody.theme-light .btn { background: transparent; }`,
       entries: [{ sel: '.btn', kind: 'stack' }],
       expectBad: 1,
     },
@@ -1246,14 +1214,14 @@ check(
     {
       // 第二写法：`background-image` 画近透明渐变 + `background-color` 留空，
       // 取值器只认 `background` 的话这条整族从台账上消失。
-      name: 'background-image 绕开 floor 判红',
-      css: `.btn { background-image: linear-gradient(165deg, var(--lg-tint-primary), var(--lg-tint-secondary)); background-color: transparent; }`,
+      name: 'background-image 半透明绕开判红',
+      css: `.btn { background-image: linear-gradient(rgba(255,255,255,.4), rgba(255,255,255,.4)); background-color: transparent; }`,
       entries: [{ sel: '.btn', kind: 'stack' }],
       expectBad: 1,
     },
     {
-      name: 'background-image 带 floor 放行',
-      css: `.btn { background-image: linear-gradient(var(${FLOOR_TOKEN}), var(${FLOOR_TOKEN})); }`,
+      name: 'background-image 实底放行',
+      css: `.btn { background-image: linear-gradient(var(--bg-elevated), var(--bg-elevated)); }`,
       entries: [{ sel: '.btn', kind: 'stack' }],
       expectBad: 0,
     },
@@ -1265,44 +1233,21 @@ check(
     // 合规样本必须 0 条，否则等于把判据写成了永远放行。
     if (s.expectBad > 0 ? n < s.expectBad : n !== 0) ctrlBad.push(`${s.name}：判定器给出 ${n} 条，期望 ${s.expectBad > 0 ? '≥' : ''}${s.expectBad} 条`);
   }
-  const reducedCtlBad = [
-    judgeReducedSolid(`@media (prefers-reduced-transparency: reduce) { .btn { background: var(${SOLID_TOKEN}); } }`).length !== 1
-      ? '未排除语义实底的 .btn 降级样本没判红'
-      : '',
-    judgeReducedSolid(
-      `@media (prefers-reduced-transparency: reduce) { .btn${SEMANTIC_SOLID.map((c) => `:not(${c})`).join('')} { background: var(${SOLID_TOKEN}); } }`,
-    ).length !== 0
-      ? '带四条 :not() 排除的干净样本被误判红'
-      : '',
-    judgeReducedSolid(`@media (prefers-reduced-transparency: reduce) { .btn-danger { background: var(${SOLID_TOKEN}); } }`).length !== 1
-      ? '点名语义实底的样本没判红'
-      : '',
-  ].filter(Boolean);
   const refractCtlBad = [
-    judgeRefractUnion('.btn-primary, .btn-newthing', SURFACE_LEDGER).length !== 1 ? '未登记的折射类样本没判红' : '',
+    judgeRefractUnion('.btn-primary, .btn-newthing', SURFACE_LEDGER).length !== 1 ? '未登记的弹性名单类样本没判红' : '',
     judgeRefractUnion('', SURFACE_LEDGER).length !== 1 ? 'BUTTON_SELECTOR 解析为空时没判红' : '',
   ].filter(Boolean);
   check(
-    ctrlBad.length === 0 && reducedCtlBad.length === 0 && refractCtlBad.length === 0,
-    'F5. 正向对照自检：裸底/后级覆写/修饰类另写底/台账过期/background-image 绕开/语义实底被中性降级/折射白名单含未登记类 七类样本必判红；floor+tint 完整栈、background-image 带 floor、带四条 :not() 排除的降级样本 必放行',
-    [...ctrlBad, ...reducedCtlBad, ...refractCtlBad].join('；'),
+    ctrlBad.length === 0 && refractCtlBad.length === 0,
+    'F5. 正向对照自检：裸透明/半透明字面/后级覆写/修饰类另写底/台账过期/background-image 半透明绕开/弹性名单含未登记类 必判红；实底 token、background-image 实底 必放行',
+    [...ctrlBad, ...refractCtlBad].join('；'),
   );
 }
 
-// F6. 中性操作面换成 floor 栈之后**离开了 A 组解析**：readValues 的白名单只吃
-// var()/color-mix()/字面色，shorthand 首层是 linear-gradient 的一律不产组合。
-// 不补一条就是覆盖面失明（本文件 K1/L-28 两条失明源的同族形态），所以这里按栈的
-// **真实合成顺序**算一次：页面底 ← floor ← tint 两档，再与前景比。
-// 主题只取亮色档：floor/tint 是「固定浅色」产品决策下的中性白玻璃（main.css 液态玻璃
-// token 段说明），暗色档的对应 token 已于 v2.8.0 作为死代码删除，拿它算只会产出一条
-// 渲染不到的假违规。
-// 底取**近黑**而不是 --bg-app：护栏要防的是「身后是导入图/壁纸的暗像素」那一档
-// （P3-2 的 A5 探针同口径）。拿 --bg-app 当底时，空栈样本会算出 12.6:1 的「达标」，
-// 正向对照就变成永远打印 ✓ 的那类断言（§4.1）。
-// **射程边界**（如实标注）：本断言只覆盖中性 R1/R2 栈。语义染层族（.btn-opt-toggle/del/loc、
-// .peri-explain-btn、.an-tm-cell、.drive-chip.active 这类「floor + ≤14% 染底」）不在这里判——
-// v2 R3 明写「n 以现有可读浓度为准，先经 check-contrast 与真机决定，不在方案里另造新档」。
-// 按近黑底硬算它们只有 ≈3.5:1，真要收到 AA 得整体推翻既有语义浓度，那是单独的观感裁定，不属本口径。
+// F6. 实色操作面 token × 前景（两主题，表面实色化 v1.6 §6.1，2026-11-21）。
+// 旧判据（floor 栈在近黑底上的 source-over 合成）随 floor/tint 渐变栈退役：
+// 实色表面自身成立，不再有「栈合成」一档；改为直接对四级操作面底 token 算前景对比。
+// 判据 = --bg-elevated / --bg-card-hover / --bg-input × --fg-primary/--fg-secondary ≥ 4.5。
 let stackRatios = [];
 function judgeStackContrast(vars, baseExpr, layers, fgs, minRatio) {
   const page = parseColor(baseExpr, vars);
@@ -1332,41 +1277,31 @@ function judgeStackContrast(vars, baseExpr, layers, fgs, minRatio) {
   return bad;
 }
 const lightVars = (THEMES.find((t) => t.name === '亮色(.theme-light)') || {}).vars;
-const NEUTRAL_STACK = [`var(${FLOOR_TOKEN})`, '--lg-tint-secondary', '--lg-tint-tertiary'];
-const HOVER_STACK = [`var(${FLOOR_TOKEN})`, '--lg-tint-primary', '--lg-tint-secondary'];
 const WORST_BASE = '#000000';
+const SURFACE_TOKENS = ['--bg-card', '--bg-elevated', '--bg-card-hover', '--bg-input'];
 stackRatios = [];
-const stackBad = lightVars
-  ? [...judgeStackContrast(lightVars, WORST_BASE, NEUTRAL_STACK, ['--fg-primary', '--fg-secondary'], AA_NORMAL),
-     ...judgeStackContrast(lightVars, WORST_BASE, HOVER_STACK, ['--fg-primary', '--fg-secondary'], AA_NORMAL)]
-  : ['亮色(.theme-light) 主题表缺失'];
+const stackBad = THEMES.flatMap((t) =>
+  SURFACE_TOKENS.flatMap((tok) =>
+    judgeStackContrast(t.vars, `var(${tok})`, [], ['--fg-primary', '--fg-secondary'], AA_NORMAL)));
 const stackWorst = stackRatios.length ? Math.min(...stackRatios).toFixed(2) : 'n/a';
 check(
   stackBad.length === 0,
-  `F6. 中性操作面 floor 栈在近黑底上合成后仍 ≥ ${AA_NORMAL}:1（最低一档实测 ${stackWorst}:1；常态档 ${NEUTRAL_STACK.slice(1).join('/')} + hover 档 ${HOVER_STACK.slice(1).join('/')}，亮色档实算）`,
+  `F6. 中性操作面实色 token × 前景两主题 ≥ ${AA_NORMAL}:1（最低一档实测 ${stackWorst}:1；底 ${SURFACE_TOKENS.join('/')}，${THEMES.length} 主题实算）`,
   stackBad.join('；'),
 );
 {
-  // 正向对照四件：① 「什么底都不垫」（= 改之前 --bg-card alpha 0 的真实形态）必须判红；
-  // ② 只垫 floor 单层也必须判红——这条是本仓「floor 单独不够、必须叠 tint/elevated」的
-  //    数值依据（floor 0.45 单层对 --fg-secondary 在近黑底上 1.46:1，比 alpha 0 的 3.04:1 还差）；
-  // ③ 完整 floor 栈必须放行；④ token 名拼错必须判红而不是静默少算一层。
-  // 刻意**不**拿「只抽掉 floor、留两档 tint」当反例——实测那种组合在近黑底上是 7.02:1，
-  // 本来就达标，用它当对照只会把判据写成永远放行（§4.1「只会打印 ✓ 的断言不算验收」）。
+  // 正向对照三件：① 近黑底对正文前景必须判红（防「底猜错」的假绿）；
+  // ② 实色底样本放行；③ token 名拼错必须判红而不是静默少算。
   const ctrl = [];
   if (lightVars) {
-    const noFloor = judgeStackContrast(lightVars, WORST_BASE, [], ['--fg-primary'], AA_NORMAL);
-    if (noFloor.length !== 1) ctrl.push(`空栈（alpha=0 常态底）样本给出 ${noFloor.length} 条，期望 1 条：${noFloor.join('；')}`);
-    const floorOnly = judgeStackContrast(lightVars, WORST_BASE, [`var(${FLOOR_TOKEN})`], ['--fg-secondary'], AA_NORMAL);
-    if (floorOnly.length !== 1) ctrl.push(`只垫 floor 的样本给出 ${floorOnly.length} 条，期望 1 条：${floorOnly.join('；')}`);
-    const tintOnly = judgeStackContrast(lightVars, WORST_BASE, ['--lg-tint-secondary', '--lg-tint-tertiary'], ['--fg-primary'], AA_NORMAL);
-    if (tintOnly.length !== 0) ctrl.push(`tint 双档（无 floor）被误判红：${tintOnly.join('；')}`);
-    const withFloor = judgeStackContrast(lightVars, WORST_BASE, NEUTRAL_STACK, ['--fg-primary'], AA_NORMAL);
-    if (withFloor.length !== 0) ctrl.push(`完整 floor 栈被误判红：${withFloor.join('；')}`);
-    const tokenTypo = judgeStackContrast(lightVars, WORST_BASE, ['--lg-tint-typo'], ['--fg-primary'], AA_NORMAL);
+    const nearBlack = judgeStackContrast(lightVars, WORST_BASE, [], ['--fg-primary'], AA_NORMAL);
+    if (nearBlack.length !== 1) ctrl.push(`近黑底样本给出 ${nearBlack.length} 条，期望 1 条：${nearBlack.join('；')}`);
+    const solidOk = judgeStackContrast(lightVars, 'var(--bg-elevated)', [], ['--fg-primary'], AA_NORMAL);
+    if (solidOk.length !== 0) ctrl.push(`实色底样本被误判红：${solidOk.join('；')}`);
+    const tokenTypo = judgeStackContrast(lightVars, 'var(--bg-typo)', [], ['--fg-primary'], AA_NORMAL);
     if (tokenTypo.length === 0) ctrl.push('token 名写错时判定器静默返回 0 条（等于少算一层还不红）');
   }
-  check(ctrl.length === 0, 'F6b. floor 栈合成断言的正向对照：空栈与只垫 floor 必判红、完整栈与 tint 双档放行、token 拼错必判红', ctrl.join('；'));
+  check(ctrl.length === 0, 'F6b. 实色面合成断言的正向对照：近黑底必判红、实色底放行、token 拼错必判红', ctrl.join('；'));
 }
 
 // ---------- G 组（P2-D 对比度，2026-10-25）：非文本控件「勾形 / 三态横杠」× 控件底色 ----------
@@ -1603,20 +1538,18 @@ const noBgRule = (rule) => {
 // 每个条目是一个真实宿主（不是手填色值）：底栈从宿主自己的 background 现读，
 // 内容前景从内容规则现读。`why` 写它守的是哪条既有结论/修复面。
 const HOST_STACK_SITES = [
-  { host: '.filter-tabs', fgFrom: '.filter-tab', why: 'F1a-M01 修复面：轨道 floor + tint + elevated' },
-  { host: '.filter-tab:hover', fgFrom: '.filter-tab', why: '分段标签 hover 自铺 floor + 双档渐变' },
-  { host: '.filter-tab.active', fgFrom: '.filter-tab.active', why: '分段标签选中态' },
+  { host: '.filter-tabs', fgFrom: '.filter-tab', why: '分段轨道实底 --bg-input（实色化后）' },
+  { host: '.filter-tab:hover', fgFrom: '.filter-tab', why: '分段标签 hover 实底 --bg-card-hover' },
+  { host: '.filter-tab.active', fgFrom: '.filter-tab.active', why: '分段标签选中态实底 --bg-elevated' },
   { host: '.maint-tab', fgFrom: '.maint-tab', why: '维护页 pill（A 类独立操作面）' },
-  { host: '.ds-tooltip', fgFrom: '.ds-tooltip', why: 'tooltip floor：floor + --bg-elevated' },
-  { host: 'body[data-material="none"] .ds-tooltip', fgFrom: '.ds-tooltip', why: '材质无档 tooltip 实底（F3c 的数值面）' },
-  { host: '.ds-menu', fgFrom: '.ds-menu-item', why: '菜单宿主 floor + elevated' },
-  { host: 'body.electron-mica .ds-menu', fgFrom: '.ds-menu-item', why: 'mica 菜单路径' },
-  { host: 'body.electron-mica .ds-tooltip', fgFrom: '.ds-tooltip', why: 'mica tooltip 路径' },
+  { host: '.ds-tooltip', fgFrom: '.ds-tooltip', why: 'tooltip 实底 --bg-elevated' },
+  { host: '.ds-menu', fgFrom: '.ds-menu-item', why: '菜单宿主实底 --bg-elevated' },
   { host: '.btn', fgFrom: '.btn', why: '中性按钮常态（F6 同族，按真实层序复算）' },
-  { host: '.btn:hover:not(:disabled)', fgFrom: '.btn', why: '中性按钮 hover（R2 同栈加深一档）' },
+  { host: '.btn:hover:not(:disabled)', fgFrom: '.btn', why: '中性按钮 hover（同 token 加深一档）' },
+  // body[data-material="none"] / body.electron-mica 三条 tooltip/menu 路径已随材质链退役（2026-11-21）
 ];
-// 台账条数下限：删登记项等于放开判据（与 F1a/LEDGER_MIN 同一条纪律）。
-const HOST_STACK_MIN = 10;
+// 台账条数下限：删登记项等于放开判据（与 F1a/LEDGER_MIN 同一条纪律）。2026-11-21 现算 8 条。
+const HOST_STACK_MIN = 8;
 // 只取亮色档：本仓玻璃 tint/floor 是「固定浅色」产品决策（main.css 液态玻璃 token 段），
 // 暗色档对应 token 已随 v2.8.0 删除，应用也恒挂 theme-light。拿暗色 fg（浅灰字）
 // 去配这套浅色玻璃会算出 1.1:1 的渲染不到假违规 —— 与 F6 同一条射程说明。
@@ -1764,11 +1697,7 @@ const GRADIENT_NONTEXT = new Map([
   ['main.css#.progress-fill', '进度条填充层，无文本'],
   ['main.css#.progress-fill[data-level="warning"]', '进度条填充层（警示档），无文本'],
   ['main.css#.progress-fill[data-level="danger"]', '进度条填充层（危险档），无文本'],
-  ['main.css#.lg-thumb', '玻璃滑块拇指，无文本'],
-  ['main.css#.material-card[data-material="mica"] .material-swatch', '材质色块预览，无文本'],
-  ['main.css#.material-card[data-material="mica-alt"] .material-swatch', '材质色块预览，无文本'],
-  ['main.css#.material-card[data-material="acrylic"] .material-swatch', '材质色块预览，无文本'],
-  ['main.css#.material-card[data-material="thin-acrylic"] .material-swatch', '材质色块预览，无文本'],
+  // .lg-thumb 已改实底（无渐变）、材质样块四条已随材质 UI 退役（2026-11-21），登记同撤（只减不增）
   ['main.css#.intro-ai-skeleton span', '骨架屏占位条，无文本'],
   ['main.css#.splash-overlay .splash-bg', '开屏背景层，无文本'],
   ['main-pages.css#.bench-progress-fill', '基准进度条填充层，无文本'],
@@ -1789,8 +1718,10 @@ const GRADIENT_TINT_ACCEPTED = new Map();
 const HOST_SELECTOR_SET = new Set(HOST_STACK_SITES.map((s) => s.host));
 const isHHost = (selector) => selParts(selector).some((p) => HOST_SELECTOR_SET.has(p));
 
-const GRADIENT_COLOR_FLOOR = 40;
-const GRADIENT_INHERITED_MIN = 8;
+// 渐变规则总数与继承色下限：floor/tint 渐变栈退役后（2026-11-21）渐变只剩 8 条纯装饰层
+// （进度条/骨架屏/开屏/滑块轨道），全部走非文本登记；继承色可算 0 条是当前真实形态。
+const GRADIENT_COLOR_FLOOR = 8;
+const GRADIENT_INHERITED_MIN = 0;
 const gradientColorRules = ALL_RULES.filter((r) => {
   if (/::(before|after)\b/.test(r.selector)) return false;
   if (r.opacity === 0) return false;
@@ -1969,16 +1900,18 @@ check(
   const ctrl = [];
   const curRule = ruleFor('.filter-tabs', 'bg');
   const curLayers = bgLayersOf(curRule);
-  const OLD_HOST_STACK = [`var(${FLOOR_TOKEN})`, 'var(--bg-elevated)'];
-  const MID_STACK = [`var(${FLOOR_TOKEN})`, 'var(--lg-tint-secondary)'];
+  // 旧宿主形态样本：半透明双栈（玻璃退役前的 floor+elevated 语义等价物）在最坏底上必红
+  const LEGACY_STACK = ['rgba(255, 255, 255, 0.45)', 'rgba(21, 23, 33, 0.6)'];
+  // 大字号分支样本：单层 0.75 白在近黑底上落在 3.0~4.5 之间（对 --fg-secondary）
+  const MID_STACK = ['rgba(255, 255, 255, 0.75)'];
   if (!lightVars || !curLayers) {
     ctrl.push('亮色主题表或 .filter-tabs 底栈缺失，H 组对照无法构造');
   } else {
     const fixed = evalStack(lightVars, WORST_BASE, curLayers, 'var(--fg-secondary)', AA_NORMAL);
-    const old = evalStack(lightVars, WORST_BASE, OLD_HOST_STACK, 'var(--fg-secondary)', AA_NORMAL);
+    const legacy = evalStack(lightVars, WORST_BASE, LEGACY_STACK, 'var(--fg-secondary)', AA_NORMAL);
     if (fixed.error || fixed.ok !== true) ctrl.push(`修复后的 .filter-tabs 宿主栈被误判红：${fixed.error || fixed.ratio}`);
-    if (old.error || old.ok !== false) ctrl.push(`旧宿主栈（floor + --bg-elevated）未判红：${old.error || old.ratio}`);
-    // 大字号分支：floor + 单档 tint 对 --fg-secondary 落在 3~4.5 之间
+    if (legacy.error || legacy.ok !== false) ctrl.push(`半透明旧宿主栈样本未判红：${legacy.error || legacy.ratio}`);
+    // 大字号分支：0.75 白单层对 --fg-secondary 落在 3~4.5 之间
     const large = evalStack(lightVars, WORST_BASE, MID_STACK, 'var(--fg-secondary)', AA_LARGE);
     const largeAsNormal = evalStack(lightVars, WORST_BASE, MID_STACK, 'var(--fg-secondary)', AA_NORMAL);
     if (large.error || large.ok !== true) ctrl.push(`大字号 3:1 样本被误判红：${large.error || large.ratio}`);
@@ -2159,29 +2092,22 @@ check(
 // 未登记的低于 4.5 一律判红（新增违例不许静默混进来）。
 // 这里只登记门槛值，不改产品代码；每条理由说明它为什么本波不动。
 const TRANSITION = [
-  {
-    key: 'main.css#.filter-tab:hover',
-    reason: 'hover 态标签前景 --fg-secondary 叠 floor + 单条双档渐变，近黑壁纸真栈本波实算 3.35:1；本波只修了常态轨道，hover 未纳入产品改动范围（登记待办）',
-  },
-  {
-    key: 'main.css#.maint-tab',
-    reason: '维护页 pill 前景 --fg-secondary 叠 floor + 单条双档渐变，近黑壁纸本波实算 3.09:1；与 .filter-tabs 同族，不在本波产品改动范围（登记待办）',
-  },
+  // filter-tab:hover / maint-tab 两条已随实色化达标（现算 ≥4.5），登记移除（只减不增）。
   {
     key: 'main.css#.startup-item.disabled',
-    reason: '非活动启动项整块 0.62 压暗：标题本波实算 4.20、发布者 2.11（后者再乘自身 0.85）；WCAG 1.4.3 对非活动组件豁免，弱化语义保留（登记）',
+    reason: '非活动启动项整块 0.62 压暗：标题本波实算 4.20、发布者 2.21（后者再乘自身 0.85）；WCAG 1.4.3 对非活动组件豁免，弱化语义保留（登记）',
   },
   {
     key: 'main.css#.startup-item.ghost',
-    reason: '已消失（ghost）项 0.62 + 标题 --fg-tertiary，本波实算 2.46:1；「幽灵项」弱化是刻意状态，图标与位置仍可辨识（登记）',
+    reason: '已消失（ghost）项 0.62 + 标题 --fg-tertiary，本波实算 2.60:1；「幽灵项」弱化是刻意状态，图标与位置仍可辨识（登记）',
   },
   {
     key: 'main.css#.startup-item-pub',
-    reason: '发布者元信息 0.85 把 --fg-tertiary 压到 3.75:1；与 F1c-M02 同族但本轮不在产品改动面（登记待办）',
+    reason: '发布者元信息 0.85 把 --fg-tertiary 压到 4.04:1；与 F1c-M02 同族但本轮不在产品改动面（登记待办）',
   },
   {
     key: 'main.css#.opt-row.optimized .category-risk',
-    reason: '已优化行风险徽章整枚 0.65 压暗（含徽章文字），本波实算最差 2.54:1；本波不动产品代码（登记待办）',
+    reason: '已优化行风险徽章整枚 0.65 压暗（含徽章文字），本波实算最差 2.51:1；本波不动产品代码（登记待办）',
   },
   {
     key: 'main.css#.nara-checkrow.is-optimized',
@@ -2240,14 +2166,11 @@ const OPACITY_UNMODELED = [
   { sel: '.maint-detail-title::before', reason: '标题竖条（::before 装饰）' },
   { sel: '.maint-batch-selall input:disabled', reason: '非文本控件 + 非活动态' },
   { sel: '.maint-check input:disabled', reason: '非文本控件 + 非活动态' },
-  { sel: '.appearance-card.material-off .material-grid', reason: '总开关关闭时的非活动态（pointer-events:none，整块不可操作）' },
   { sel: '.rt-sweep', reason: '扫描扫光（装饰动画）' },
-  // 极光琉璃 B-P3 氛围场：四层都是 pointer-events:none 的纯装饰件，不承载任何文本，
-  // 其不透明度是「观感强度」而非「文字压暗」。它们对正文可读性的真实影响已由
-  // --aurora-veil 回压 + 现算守住（见 main.css :root 令牌注释；现算：node tools/check-contrast.mjs）。
+  // 极光琉璃 B-P3 氛围场：纯装饰件，不承载文本；不透明度是「观感强度」而非「文字压暗」。
+  // aurora-veil 回压层已随表面实色化退役（2026-11-21），material-off 工位随材质 UI 退役，登记同撤。
   { sel: 'body.aurora-ready .aurora-field', reason: '极光层入场淡入终态（装饰层，无文本；同 .aurora-field）' },
   { sel: '.aurora-field .aurora-ribbon', reason: 'conic 光带（装饰层，无文本）' },
-  { sel: '.aurora-field .aurora-veil', reason: '极光回压层（本身即对比度护栏，无文本）' },
   { sel: '.aurora-field .aurora-grain', reason: '噪点纹理（装饰层，无文本）' },
   { sel: '.an-tm-cell-size', reason: '树图尺寸元信息；宿主 .an-tm-cell 属语义染层族，按 v2 R3/F6 射程边界不在近黑底硬判（登记待办）' },
   { sel: '.ds-menu-item[aria-disabled="true"]', reason: '非活动菜单项' },

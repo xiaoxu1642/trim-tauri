@@ -5,7 +5,7 @@
       "name": "app_get_info",
       "module": "app",
       "channel": "app:get-info",
-      "tier": "readonly",
+      "tier": "main",
       "group": "A 批：app"
     },
     {
@@ -1141,27 +1141,6 @@
       "channel": "peripheral:restore-backup",
       "tier": "main",
       "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
-    },
-    {
-      "name": "appearance_get_material",
-      "module": "appearance",
-      "channel": "appearance:get-material",
-      "tier": "readonly",
-      "group": "E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好）"
-    },
-    {
-      "name": "appearance_set_material",
-      "module": "appearance",
-      "channel": "appearance:set-material",
-      "tier": "main",
-      "group": "E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好）"
-    },
-    {
-      "name": "appearance_set_material_enabled",
-      "module": "appearance",
-      "channel": "appearance:set-material-enabled",
-      "tier": "main",
-      "group": "E 批：appearance（材质读写与广播 / 环境自适应 / 背景图管理 / 外观域偏好）"
     },
     {
       "name": "appearance_get_env",

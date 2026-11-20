@@ -10,7 +10,8 @@ const g = gate(import.meta.url);
 
 const SITES = [
   { file: 'src/scripts/fontmanager.js', fn: 'restore', needToast: '字体恢复失败，已用默认字体', needLog: '字体恢复失败' },
-  { file: 'src/scripts/theme.js', fn: 'initAppearance', needToast: '读取窗口材质失败', needLog: '读取系统信息失败' },
+  // theme.js:initAppearance 站点已随材质链退役删除（2026-11-21）：
+  // 「读取窗口材质失败 / 读取系统信息失败」两个 catch 随材质读取整链摘除，登记同撤。
 ];
 
 // 生产判据：单站点函数体必须含 catch 出口且两条留痕都到位。

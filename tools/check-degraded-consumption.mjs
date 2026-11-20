@@ -89,10 +89,8 @@ const TABLE = [
     via: 'cleanup_item_detail',
     anchor: { file: 'src/scripts/cleanup.js', fn: 'openItemDetail', text: 'resp.data?.degraded' } },
   // ---- pending：收紧后现存违例，逐条带理由与归属，只减不增 ----
-  { file: 'src-tauri/src/commands/appearance.rs', fn: 'appearance_get_material', status: 'pending',
-    batch: 'B3/P1-6',
-    reason: '材质面未见消费方：window-material.js 现算无 degraded；归 B3/P1-6 展示层分态',
-    anchor: { file: 'src/scripts/window-material.js', text: 'degraded' } },
+  // appearance_get_material 过渡条目已随材质链退役删除（2026-11-21，方案 v1.6）：
+  // 命令整链摘除后不再构造 degraded。
   { file: 'src-tauri/src/commands/optimizer/overview.rs', fn: 'optimizer_state_overview', status: 'consumed',
     anchor: { file: 'src/scripts/optimizer.js', fn: 'loadStateOverview', text: 'resp.degraded' } },
   { file: 'src-tauri/src/commands/optimizer/catalog.rs', fn: 'catalog_load_failure', status: 'exempt',

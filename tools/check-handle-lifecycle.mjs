@@ -270,10 +270,9 @@ const JS_SUB_SITES = [
   { file: 'src/scripts/residue-window.js', anchor: 'window.api.residueWindow.onTarget(', label: 'residueWindow.onTarget' },
   { file: 'src/scripts/finder.js', anchor: 'window.api.finder.onProgress(', label: 'finder.onProgress' },
   { file: 'src/scripts/optimizer.js', anchor: 'window.api.optimizer.onProgress(', label: 'optimizer.onProgress' },
-  { file: 'src/scripts/window-material.js', anchor: 'window.api.appearance?.onMaterialChanged?.(', label: 'window-material.onMaterialChanged' },
   { file: 'src/scripts/window-material.js', anchor: 'window.api.window?.onFocusState?.(', label: 'window-material.onFocusState' },
   { file: 'src/scripts/maintenance.js', anchor: 'window.api.maintenance.onOutput(', label: 'maintenance.onOutput' },
-  { file: 'src/scripts/pathbinding-material.js', anchor: 'window.api?.appearance?.onMaterialChanged?.(', label: 'pathbinding-material.onMaterialChanged' },
+  // pathbinding-material.js / window-material.onMaterialChanged 两条订阅已随材质链退役（2026-11-21）
 ];
 const JS_SUB_TRANSITION = new Map([
 ]);
@@ -308,7 +307,7 @@ const readFileSafe = (abs) => (existsSync(abs) ? readFileSync(abs, 'utf8') : nul
       jsBad++;
     }
   }
-  if (JS_SUB_SITES.length < 11) g.fail(`A2-L04：JS 订阅站点只登记 ${JS_SUB_SITES.length} 处（地板 11）⇒ 判据形状漂移`);
+  if (JS_SUB_SITES.length < 9) g.fail(`A2-L04：JS 订阅站点只登记 ${JS_SUB_SITES.length} 处（地板 9）⇒ 判据形状漂移`);
   if (jsBad === 0) g.ok(`A2-L04：JS 订阅台账 ${JS_SUB_SITES.length} 处（${JS_SUB_TRANSITION.size} 处 C-W2 在途豁免）全部收账`);
 }
 

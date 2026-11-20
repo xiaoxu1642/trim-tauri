@@ -128,6 +128,14 @@ const RETIRED = {
   'contextmenu:backup': '2026-10-09（用户裁定 D3）：删除/备份/恢复整链退役（启停保留）',
   'contextmenu:remove': '2026-10-09（用户裁定 D3）：同上',
   'contextmenu:restore': '2026-10-09（用户裁定 D3）：同上',
+  // 2026-11-21（表面实色化方案 v1.6，小旭拍板整链退役）：表面全部实色后材质档与磨砂
+  // 成了「无效果」的设置项，设置页卡片/总开关与 pathbinding-material.js 控制器同撤；
+  // 前端零调用后 D4 棘轮不允许孤儿，三条读写通道 + 广播订阅整链摘除（命令 fn + lib.rs
+  // 注册 + CHANNEL_MAP + api 包装 + manifest + 本表登记）。原生 DWM 应用链
+  // （apply_material_outcome / 电池降级 / 启动应用）保留，深度退役留下一版。
+  'appearance:get-material': '2026-11-21（表面实色化 v1.6）：材质 UI 整链退役后零调用方，读侧随写侧一并摘除',
+  'appearance:set-material': '2026-11-21（表面实色化 v1.6）：材质卡与总开关退役，写侧应用链失去唯一驱动',
+  'appearance:set-material-enabled': '2026-11-21（表面实色化 v1.6）：同上，材质总开关退役',
 };
 
 /**

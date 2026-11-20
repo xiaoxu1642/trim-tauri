@@ -26,6 +26,24 @@
 
 **五处超红线（提案 §06，2026-11-21 用户裁定全部落地，见下一节提交）**：① 暗色主题——`main.css :root` 的 v2.0「碳墨×薰衣草」暗档重新可达，浅色仍缺省；档位真源入外观域（appearance.json `theme` 键，两侧白名单同批扩展），设置页「背景与主题」卡新增「界面主题」下拉，子窗经跨窗 storage 事件实时跟随；对比度门禁持续核算的暗色组合原样可用。② 全屏星云环境层——`nebula.js` 照 aurora 纪律挂载（JS 插 DOM、IDLE 清单、零首屏字节，百毫秒级节拍重绘，hidden 暂停、RM 静态单帧）。③ 彗星拖尾——mouse-trail 渲染端升级单 canvas lighter 渐隐圆点，偏好键/开关/RM 链路不动。④ 粒子散射——清理成功后碎片从离场行飞入「可释放空间」卡 + 到站彩点爆发（WAAPI，RM 跳过）。⑤ 20px 窗体圆角——`--radius-window` 档，主窗壳层（body/壁纸/开屏/星云画布）四角，最大化归零；子窗保留原生装饰。
 
+## 未发布（2026-11-21 表面实色化 v1.6：翻案 v3.0「全局玻璃化」）
+
+> 本节对应 `docs/设计提案/表面实色化方案-v1.6.md`，正式替代 v3.0（2026-09-13）「全局玻璃化 + 透明表面叠原生材质」决策。翻案理由：真机剥离实验（CDP + 洋红垫底法）证明标题栏灰带、内容区发灰、卡片隐形三症状同源——全应用没有一块实色表面，颜色由 body 面纱 × layout 底 × aurora 回压 × floor/tint 渐变 × 卡片 alpha 五层半透明相乘得出，任一层的适用条件不同就在交界处露出桌面。基线 HEAD cbd2386。
+
+① **表面四级实色化、同层同色** —— 症状：同一扇窗标题栏 α 0.376、内容区 0.690、卡片 0.75–0.89，失焦还整窗发灰。根因：标题栏不在 `.layout` 内吃不到 aurora 回压，只剩 body 35% 面纱；`body` 的 `background-image` 与 `.layout` 的 88% 实底两条声明早被更高特异性规则覆盖成死声明。修法：`--bg-base/--bg-card/--bg-card-hover/--bg-elevated/--bg-input/--bg-hover` 及新增 `--bg-sidebar` 一律改实色（暗档 `--bg-card` #171A21、浅色 #FFFFFF），`body`/`.layout`/`.titlebar`/`.sidebar` 同层同色；先改 `body.electron-mica:not(.win-maximized)` 的 `!important` 持有者再删备胎规则（顺序反了会得到全透明窗）；删两条死声明与最大化暗色标题栏 `#f7f8fb` 回退 bug。
+
+② **玻璃叠加链整链退役** —— floor/tint 渐变栈 34 个选择器、`data-skin="glass"` 皮肤、`electron-mica` 材质链 41 处、`--mat-veil` 分级、`aurora-veil` 回压层、`prefers-reduced-transparency` 降级段全撤；保留 aurora/nebula 环境光（只在画布层，不再承担可读性回压）、描边/阴影、litebox 2 处刻意 backdrop 与失焦纱。窗口仍 `transparent(true)` 以保 20px 圆角，实色 `body` 即「永不缺席」的不透明保障点。
+
+③ **材质 UI 与三条 IPC 通道退役** —— 设置页材质卡与磨砂滑杆移除；`appearance:get-material`/`appearance:set-material`/`appearance:set-material-enabled` 按 `check-channel-map` 的 RETIRED 流程整链摘除（命令 fn + lib.rs 注册 + CHANNEL_MAP + api 包装 + manifest + 退役登记）；原生 DWM 应用链（apply_material_outcome/电池降级/启动应用）保留，深度退役留下一版。
+
+④ **liquid-glass 收敛为纯交互层** —— 折射与 `commitGlass` 的 backdrop 写入段退役（零 backdrop 写入）；保留 full 档指针弹性与分段栏弹簧滑块，off 档隐藏滑块，既有交互不回归。
+
+⑤ **门禁与视觉验收** —— `check-gate-roster --run` 74/74 全过；`check-css-tokens` 新增 S1 画布实色 / S2 同层同色 / S3 叠加族零回流 / S4 无死声明四条常驻断言（每条做过故意打红再还原）；对比度与覆盖率地板按实算净减后重设，不保留旧下限（否则成假绿）。视觉验收：标题栏与内容区像素差 ≤2/255、无断层，壁纸/导入图仍可见；真机六态（暗/浅 × 无壁纸/预设/导入图 + 最大化/还原 + 子窗三扇）CDP 截图结果见 docs/临时文件/_探针-表面实色化/verify-conclusion.md（不入库）。
+
+### 本版未做的验证（如实标注）
+
+- OS 级真实悬停/拖拽、125%/150%/200% 缩放四角裁切、导入图高 DPI 表现本版未覆盖。
+
 ## 版本 0.9.11（2026-11-20 全仓审查修复落地）
 
 > 本版落地全仓审查的全部发现：13 条中危全修，并把逐条处置方案写入仓库资料区；涉及永久删还原凭据、门禁可信度、前端隐私日志与还原链回执。

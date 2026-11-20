@@ -26,7 +26,6 @@
 //   startup_openlocation · models_save / models_test / models_set_scope ·
 //   fonts_import / fonts_remove_imported / fonts_save_config ·
 //   log_write / log_export · paths_save ·
-//   appearance_set_material / appearance_set_material_enabled ·
 //   bench_history_add / bench_history_clear / bench_history_delete ·
 //   realtime_report_save / realtime_report_clear / realtime_report_delete ·
 //
@@ -81,6 +80,7 @@ const MUST_MAIN = [
   // ⚓ 生成区 must-main：begin/end 之间由 tools/command-manifest.json（tier=main）经
   // node tools/gen-command-manifest.mjs --write 生成 —— 生成物勿手改，改档先改清单再重跑生成器。
   // command-manifest:begin must-main
+  'app_get_info',
   'app_open_external',
   'app_read_usage',
   'appearance_bg_delete',
@@ -88,8 +88,6 @@ const MUST_MAIN = [
   'appearance_bg_list',
   'appearance_bg_open_dir',
   'appearance_get_prefs',
-  'appearance_set_material',
-  'appearance_set_material_enabled',
   'appearance_set_pref',
   'bench_history_add',
   'bench_history_clear',
@@ -203,7 +201,7 @@ const MUST_MAIN = [
 // appearance_get_prefs / appearance_set_pref：
 // 外观域偏好（真源从 localStorage 迁到 appearance.json）：现算消费方只有
 // `src/scripts/pathbinding.js`，而它只被 `src/index.html` 加载（三个子窗挂的是
-// `window-material.js`，只管材质）⇒ 按 AGENTS §3「没有子窗调用点就不给放宽」判 MAIN。
+// `window-material.js`，只做主题镜像与失焦纱）⇒ 按 AGENTS §3「没有子窗调用点就不给放宽」判 MAIN。
 // 判成 readonly 会同时撞 check-channel-map 的 D5 棘轮（只读档却无子窗调用点即红）。
 // cleanup_age_policy：G-2 全局年龄策略：读写都只从主窗设置页发起（同 finder_ignore_* 三命令口径）
 // cleanup_recycle_stats：G-4（2026-10-07）回收站清空改 Shell API：查询条目数与体积（幂等只读，但消费方
@@ -603,10 +601,8 @@ const MUST_READONLY = [
   // node tools/gen-command-manifest.mjs --write 生成 —— 生成物勿手改，改档先改清单再重跑生成器。
   // command-manifest:begin must-readonly
   'aidesc_get',
-  'app_get_info',
   'app_open_doc',
   'appearance_get_env',
-  'appearance_get_material',
   'cleanup_check_locked',
   'cleanup_file_backup_list',
   'cleanup_item_detail',

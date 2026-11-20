@@ -15,8 +15,8 @@
     "M-12"
   ],
   "srcHash": {
-    "check-channel-map": "9f3fd5f3718ec180",
-    "check-guard-tiers": "b26212ede09385f6",
+    "check-channel-map": "a406449561e3f6aa",
+    "check-guard-tiers": "1611cd1f623a5c67",
     "check-layering": "2eafd617abcf47b6",
     "check-delete-exits": "c7c3b79a79f4928d",
     "check-delete-callsites": "fd8c5fb7da03595d",
@@ -30,25 +30,25 @@
     "check-ps-extraction": "842c51ea10d3b307",
     "check-html-contract": "da877b2f4f947020",
     "check-csp-consistency": "28a811b4ade815c8",
-    "check-a11y": "2e70d99f923c5366",
+    "check-a11y": "e076823adb8ba408",
     "check-native-hygiene": "d43526d9d759e21c",
-    "check-handle-lifecycle": "4313924ba71fe08c",
+    "check-handle-lifecycle": "02b1b39a04ac7489",
     "check-comment-coords": "6fff15c052161c3a",
-    "check-css-tokens": "2c11964036bf7781",
+    "check-css-tokens": "b29df6fbda7372fc",
     "check-css-hygiene": "30c86d5d7f2a8c1e",
     "check-assets-used": "2aee5e7cad5b131d",
     "check-asset-size": "a3904ba3bcd55a1c",
     "check-artifact-size": "ddcdb671a4dc8c97",
-    "check-first-paint": "54b601c348a05bcd",
-    "check-contrast": "7c27a4cbe8a4a0cd",
+    "check-first-paint": "a8fb9478040707c9",
+    "check-contrast": "017ae7afa3bd4ab2",
     "check-subwindow-css": "4629e05fd3d05b6e",
     "check-idle-scripts": "c9ea50dec0f9d6ea",
     "check-escape-delegation": "fd9829e973cd4c58",
     "check-appearance-prefs": "76b2bd7c5919e9c2",
     "check-subwindow-init": "a4959febadd502e0",
     "check-confirm-danger": "c951e838acd5f016",
-    "check-silent-catch": "5b036529922ee201",
-    "check-material-parity": "b7a4b6fffc8dbeb0",
+    "check-silent-catch": "6450412966f4fbb8",
+    "check-material-parity": "9f486edd434c6795",
     "check-treemap-layout": "37630f30b2b71f3b",
     "check-item-intro": "dbcf84a50a79270d",
     "check-desktop-entry": "8eec3b36ed2d2215",
@@ -83,7 +83,7 @@
     "check-delete-root-guard": "2fa28c81abc5c6ce",
     "check-ignored-isolation": "844fd88546a4f779",
     "check-async-exits": "d0ef6d3ef5513994",
-    "check-degraded-consumption": "2088eb956d156cff",
+    "check-degraded-consumption": "f0763b1cecbabe31",
     "check-test-sandbox": "7111cb54a357bb89",
     "check-finder-scan-notes": "d353cb678acc30e3",
     "check-registry-delete-guard": "54ea1923bdedbbd4",
@@ -304,13 +304,12 @@
       "M-02"
     ],
     "check-silent-catch": [
-      "M-01",
       "M-02"
     ],
     "check-material-parity": [
       "M-01",
-      "M-02",
-      "M-03"
+      "M-03",
+      "M-05"
     ],
     "check-treemap-layout": [
       "M-01",
@@ -550,5 +549,5 @@
       "M-12"
     ]
   },
-  "bodyHash": "fca266683646f06a"
+  "bodyHash": "91e474741350189d"
 }

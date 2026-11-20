@@ -173,7 +173,7 @@ const NAME_TRANSITION = [
   ['src/index.html#bgPosY', '「垂直位置」在兄弟 span.bg-opacity-label'],
   ['src/index.html#wallpaperRotateToggle', '开关 label 内无文字，「自动轮换」在兄弟 span'],
   ['src/index.html#wallpaperIntervalSelect', '「轮换间隔」在兄弟 span.skin-row-label'],
-  ['src/index.html#bgBlur', '「磨砂强度」在兄弟 span.bg-opacity-label'],
+  // #bgBlur（磨砂强度滑杆）已随表面实色化退役（2026-11-21），登记条目同撤（只减不增）
   ['src/index.html#mouseTrailToggle', '开关 label 内无文字，「启用鼠标拖尾」在兄弟 span'],
   ['src/index.html#liquidMotionSelect', '「效果」在兄弟 span.skin-row-label'],
   ['src/index.html#cdpToggle', '开关 label 内无文字，「远程调试 (CDP)」在兄弟 span'],

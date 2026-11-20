@@ -131,22 +131,16 @@ const COLOR_PROPS = new Set(['color', 'background', 'background-color', 'border-
 const COLOR_ALLOW = [
   // LiteBox 是图片对比专用独立调色板（纯黑底/白色控件），AGENTS §2 明确保留，整文件登记。
   { file: 'src/styles/litebox.css', fileWide: true, why: 'LiteBox 图片对比独立调色板（纯黑底/白色控件，AGENTS §2 刻意设计）' },
-  { file: 'src/styles/main.css', anchor: 'linear-gradient(135deg, rgba(255, 255, 255, 0.10) 0%, rgba(255, 255, 255, 0.02) 34%, transparent 60%)', why: '液态玻璃白纱（玻璃皮肤 floor 之上的高光层）' },
   { file: 'src/styles/main.css', anchor: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent)', why: '进度条流光高光（动效前景，非容器表面）' },
-  { file: 'src/styles/main.css', anchor: 'background: #f7f8fb', why: 'electron-mica 标题栏与原生按钮覆盖层的回退色（恒浅色）' },
   { file: 'src/styles/main.css', anchor: 'color-mix(in srgb, var(--bg-app) 60%, rgba(0, 0, 0, 0.4))', why: '全屏遮罩的压暗层（叠加在主题底上）' },
-  { file: 'src/styles/main.css', anchor: 'linear-gradient(145deg, #F9F9F9 0%, #E9E9E9 100%)', why: '材质样块：云母观感预览（刻意独立于玻璃档位）' },
-  { file: 'src/styles/main.css', anchor: 'linear-gradient(145deg, #F2F2F2 0%, #DFDFDF 62%, #D2D2D2 100%)', why: '材质样块：层次云母观感预览' },
-  { file: 'src/styles/main.css', anchor: 'linear-gradient(145deg, #DADADA 0%, #BFBFBF 100%)', why: '材质样块：轻磨砂观感预览' },
-  { file: 'src/styles/main.css', anchor: 'background-color: #C9C9C9', why: '材质样块：轻磨砂底色' },
-  { file: 'src/styles/main.css', anchor: 'linear-gradient(145deg, #5A5A5A 0%, #2E2E2E 100%)', why: '材质样块：透亮深色观感预览' },
   { file: 'src/styles/main.css', anchor: 'background: rgba(255, 255, 255, 0.28)', why: '按钮涟漪高光（动效前景）' },
-  { file: 'src/styles/main.css', anchor: 'rgba(255, 255, 255, 0.55)', why: '液态玻璃边框高光（玻璃皮肤专用）' },
   { file: 'src/styles/main.css', anchor: 'rgba(255, 255, 255, .38)', why: '启动页独立覆盖层的白色暗角（不随玻璃皮肤联动）' },
   { file: 'src/styles/main.css', anchor: 'background: rgba(255, 255, 255, .78)', why: '启动页徽章底色（启动页独立调色板）' },
   { file: 'src/styles/main.css', anchor: 'color: #fff', why: '启动页进入按钮文字（启动页独立调色板）' },
   { file: 'src/styles/main.css', anchor: 'background: rgba(0, 0, 0, 0.04)', why: 'win-inactive 纱（后绘制覆盖层，不破坏玻璃采样）' },
   { file: 'src/styles/main.css', anchor: 'background: #ffffff', why: '滑块旋钮恒白（保证任意强调色/壁纸上可见）' },
+  // 表面实色化（2026-11-21）摘除的条目：液态玻璃白纱、electron-mica 恒浅色标题栏回退、
+  // 四块材质样块渐变与底色、玻璃边框高光 0.55 —— 对应源码已退役，登记只减不增。
 ];
 
 /** 去掉 var(...) 与其 fallback、以及 rgba(var(--x-rgb), a) 整段，剩下的才是硬编码色。 */
@@ -502,23 +496,10 @@ if (curveSites === 0) {
   curveBad.push('扫描面失明');
 }
 
-// ---- 数值双真源逐值对拍（P3-5 / F5-G-3）：--glass-blur 基准 ⇄ ds.GLASS_MAX_BLUR_PX ----
-// （`--bg-blur` 由 theme/pathbinding 运行时写入，无静态定义面，不在本对拍内——如实标注。）
-{
-  const mainCss = readFileSync(join(REPO_ROOT, 'src', 'styles', 'main.css'), 'utf8');
-  const dsJs = readFileSync(join(REPO_ROOT, 'src', 'scripts', 'ds.js'), 'utf8');
-  const cssBlur = mainCss.match(/--glass-blur:\s*(\d+)px/);
-  const jsBlur = dsJs.match(/GLASS_MAX_BLUR_PX\s*=\s*(\d+)/);
-  if (!cssBlur || !jsBlur) {
-    console.log('✗ 数值双真源：--glass-blur 或 GLASS_MAX_BLUR_PX 找不到（改名/删除？）');
-    curveBad.push('数值双真源解析失明');
-  } else if (cssBlur[1] !== jsBlur[1]) {
-    console.log(`✗ 数值双真源漂移：--glass-blur=${cssBlur[1]}px ⇄ ds.GLASS_MAX_BLUR_PX=${jsBlur[1]}（两处必须同值）`);
-    curveBad.push('--glass-blur ⇄ GLASS_MAX_BLUR_PX 漂移');
-  } else {
-    console.log(`✓ 数值双真源同值：--glass-blur = GLASS_MAX_BLUR_PX = ${cssBlur[1]}px`);
-  }
-}
+// ---- 数值双真源逐值对拍（P3-5 / F5-G-3）已随玻璃磨砂链退役（2026-11-21）----
+// 原 --glass-blur ⇄ ds.GLASS_MAX_BLUR_PX 对拍随 token 与 ds 常量一并删除；
+// 壁纸层 --bg-blur 由 theme/pathbinding 运行时写入、上限真源 ds.WALLPAPER_MAX_BLUR_PX，
+// 无静态 CSS 定义面，不在静态对拍内（如实标注）。
 
 // ---- 反向棘轮（T1d-M01）：定义但全仓零消费的 token 必须逐条登记理由 ----
 // 与 ALLOW_UNDECLARED（引用无定义）方向相反；新增死 token 不在表内即红。
@@ -597,9 +578,13 @@ function judgeTriplets(defs) {
     const want = [0, 2, 4].map((i) => parseInt(hm[1].slice(i, i + 2), 16)).join(',');
     const gotRgb = rgb.split(',').map((x) => x.trim()).join(',');
     if (want !== gotRgb) bad.push(`${base}-rgb=${rgb} 与 ${hex} 不同源`);
-    const sm = soft.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
-    if (!sm) bad.push(`${base}-soft 不是 rgba()：${soft}`);
-    else if ([sm[1], sm[2], sm[3]].join(',') !== want) bad.push(`${base}-soft=${soft} 与 ${hex} 不同源`);
+    // 表面实色化（2026-11-21）后 -soft 不再是 rgba() 而是实色宿主的 color-mix：
+    // 判据改为「染层基色必须是同名语义档、宿主必须是实色表面家族（--bg-card/--bg-app，
+    // 暗色 danger-soft 因亮红对卡底不达 AA 用更深的 --bg-app，check-contrast A1 现算在案）」。
+    const sm = soft.match(/^color-mix\(in srgb,\s*var\((--[\w-]+)\)\s+([\d.]+)%,\s*var\((--[\w-]+)\)\)$/i);
+    if (!sm) bad.push(`${base}-soft 不是 color-mix(语义档 %, 实色宿主)：${soft}`);
+    else if (sm[1] !== base) bad.push(`${base}-soft 染层基色是 ${sm[1]}，与 ${base} 不同源`);
+    else if (sm[3] !== '--bg-card' && sm[3] !== '--bg-app') bad.push(`${base}-soft 宿主是 ${sm[3]}，必须是 --bg-card/--bg-app 家族`);
   }
   return bad;
 }
@@ -619,16 +604,17 @@ const tripletProblems = [];
     tripletProblems.push(...judgeTriplets(defsOf(rootM[1])));
     tripletProblems.push(...judgeTriplets(defsOf(lightM[1])));
   }
-  // 对照：一个错三元组必须判红、干净样本必须放行。
+  // 对照：错三元组必须判红、干净样本（color-mix 形态）必须放行。
   const good = {
-    '--warning': '#F0B24D', '--warning-rgb': '240, 178, 77', '--warning-soft': 'rgba(240, 178, 77, 0.14)',
-    '--success': '#3DBE7B', '--success-rgb': '61, 190, 123', '--success-soft': 'rgba(61, 190, 123, 0.14)',
-    '--danger': '#F0524D', '--danger-rgb': '240, 82, 77', '--danger-soft': 'rgba(240, 82, 77, 0.14)',
-    '--info': '#4DA3F0', '--info-rgb': '77, 163, 240', '--info-soft': 'rgba(77, 163, 240, 0.14)',
+    '--warning': '#F0B24D', '--warning-rgb': '240, 178, 77', '--warning-soft': 'color-mix(in srgb, var(--warning) 14%, var(--bg-card))',
+    '--success': '#3DBE7B', '--success-rgb': '61, 190, 123', '--success-soft': 'color-mix(in srgb, var(--success) 14%, var(--bg-card))',
+    '--danger': '#F0524D', '--danger-rgb': '240, 82, 77', '--danger-soft': 'color-mix(in srgb, var(--danger) 14%, var(--bg-app))',
+    '--info': '#4DA3F0', '--info-rgb': '77, 163, 240', '--info-soft': 'color-mix(in srgb, var(--info) 14%, var(--bg-card))',
   };
   const bad = { ...good, '--danger-rgb': '240, 82, 78' };
-  if (judgeTriplets(good).length !== 0 || judgeTriplets(bad).length !== 1) {
-    console.error('✗ 三值同步判定器自检失败（干净样本误报 / 错三元组未判红）');
+  const badHost = { ...good, '--info-soft': 'color-mix(in srgb, var(--info) 14%, var(--bg-base))' };
+  if (judgeTriplets(good).length !== 0 || judgeTriplets(bad).length !== 1 || judgeTriplets(badHost).length !== 1) {
+    console.error('✗ 三值同步判定器自检失败（干净样本误报 / 错三元组或错宿主未判红）');
     process.exit(1);
   }
 }
@@ -832,11 +818,174 @@ for (const v of motionBad) console.log(`✗ ${v}`);
   console.log('✓ 新增判据正向对照 11 组全部命中（①~③、⑤ 注入违例必红 + 合规必放行）');
 }
 
+// ==================== 表面实色化防回流（S1–S4，方案 v1.6 §6.8，2026-11-21） ====================
+// 退役只靠人记必然复发：叠加块回流、异层异色、写了不生效的死声明，肉眼都查不出来。
+// 四条断言常驻，判据全部带可判红的合成对照（见下方自检）。
+const solidBad = [];
+
+/** 复合选择器的「主体」：按连接符切开后最后一段（`.a > .b::x` 的主体是 `.b`）。 */
+const surfaceSubject = (seg) => seg.trim().split(/[\s>+~]+/).pop() || '';
+/** 主体是否命中某表面（body / .layout / .titlebar；伪元素规则不计——那是装饰层不是表面本体）。 */
+const surfaceHits = (prelude, re) =>
+  prelude.split(',').some((seg) => !/::/.test(seg) && re.test(surfaceSubject(seg)));
+const BODY_RULE = /^body(?:[.[:]|$)/;
+const LAYOUT_RULE = /^\.layout(?:[.[:]|$)/;
+const TITLEBAR_RULE = /^\.titlebar(?:[.[:]|$)/;
+// 同层同色允许的 token 家族：--bg-app 与 --bg-base 两档同值（弹窗遮罩依赖 --bg-app 的独立名，
+// main.css :root 注释在案），视为同一家族。
+const SURFACE_FAMILY = /^var\(--(bg-base|bg-app)\)$/;
+// 刻意透明的白名单：壁纸贯通（标题栏 / 布局层在壁纸激活时放行壁纸，方案 §3.2 层序）。
+// 这些状态的 transparent 是「让画布/壁纸透出」的刻意设计，不是叠加块回流。
+const SURFACE_SEE_THROUGH = /data-preset-bg|bg-image-on/;
+
+/** 抽取规则块里的 background / background-color 声明（末条生效；shorthand 与 longhand 都收）。 */
+function surfaceBackgrounds(ruleBody) {
+  const out = [];
+  for (const m of ruleBody.matchAll(/(?:^|[;{])\s*(background(?:-color)?)\s*:\s*([^;}]+)/g)) {
+    out.push({ prop: m[1], value: m[2].trim() });
+  }
+  return out;
+}
+
+// ---- S1+S2：body / .layout / .titlebar 的底色必须实色且同源 ----
+// S1（画布不透明）：出现 alpha<1 字面色 / color-mix(…, transparent) / transparent 即红。
+// S2（同层同色）：底色必须是 SURFACE_FAMILY（--bg-base/--bg-app）；transparent 只许
+//   出现在壁纸贯通白名单（data-preset-bg / bg-image-on）的规则里。
+{
+  for (const rel of ['src/styles/main.css', 'src/styles/main-pages.css']) {
+    const rules = cssRules(blankComments(readFileSync(join(REPO_ROOT, rel), 'utf8')));
+    for (const rule of rules) {
+      const isBody = surfaceHits(rule.prelude, BODY_RULE);
+      const isLayout = surfaceHits(rule.prelude, LAYOUT_RULE);
+      const isTitlebar = surfaceHits(rule.prelude, TITLEBAR_RULE);
+      if (!isBody && !isLayout && !isTitlebar) continue;
+      for (const d of surfaceBackgrounds(rule.body)) {
+        const v = d.value;
+        // S1（画布不透明）：color-mix 混透明 / 字面 alpha<1 即红；bare transparent 归 S2 管辖
+        const alphaM = /rgba?\(\s*[^()]*(?:\([^()]*\)[^()]*)*,\s*([\d.]+)\s*\)/i.exec(v);
+        const alpha = alphaM ? parseFloat(alphaM[1]) : null;
+        const semi = /color-mix\([^)]*transparent/i.test(v) || (alpha !== null && alpha < 1);
+        if (semi) {
+          solidBad.push(`S1 表面非实色：${rel} « ${rule.prelude} » { ${d.prop}: ${v} }`);
+          continue;
+        }
+        // S2（同层同色）：transparent 只许出现在壁纸贯通白名单里；其余取值必须实色家族
+        if (/^\s*transparent\s*$/i.test(v)) {
+          if (!SURFACE_SEE_THROUGH.test(rule.prelude) && !isBody) {
+            solidBad.push(`S2 异层透明：${rel} « ${rule.prelude} » { ${d.prop}: transparent }（非壁纸贯通白名单）`);
+          }
+          continue;
+        }
+        if (!SURFACE_FAMILY.test(v) && !/^var\(--/.test(v) && !/^color-mix\(/i.test(v)) {
+          solidBad.push(`S2 异层异色：${rel} « ${rule.prelude} » { ${d.prop}: ${v} }（须为 --bg-base/--bg-app 家族）`);
+        }
+      }
+    }
+  }
+}
+
+// ---- S3 叠加族零回流：退役叠加 token / 材质类不得以任何生效声明回流（注释不算） ----
+// 与「rg 归零」的验收等价，但机器常驻：加回一条 var(--lg-glass-floor) 必红。
+const RETIRED_OVERLAY =
+  /--lg-glass-floor|--lg-tint-|--lg-glass-border|--lg-glass-highlight|--mat-veil|--surface-alpha|--surface-tint|\.electron-mica|data-skin="glass"|--glass-blur|--glass-satur|--glass-bright|--aurora-veil/;
+{
+  const cssFiles = ['src/styles/main.css', 'src/styles/main-pages.css', 'src/styles/ds.css', 'src/styles/litebox.css'];
+  const htmlFiles = ['src/index.html', 'src/models-window.html', 'src/process-manager-window.html', 'src/residue-window.html'];
+  for (const rel of [...cssFiles, ...htmlFiles]) {
+    const text = blankComments(readFileSync(join(REPO_ROOT, rel), 'utf8'));
+    text.split('\n').forEach((line, i) => {
+      if (RETIRED_OVERLAY.test(line)) solidBad.push(`S3 叠加族回流：${rel}:${i + 1} ${line.trim().slice(0, 90)}`);
+    });
+  }
+}
+
+// ---- S4 无死声明：background-image 末段必须是图像函数；颜色收尾 = 整条声明无效（§1.7 幽灵层） ----
+// 「写了但没生效」肉眼查不出：body 的两条光晕当年就是这么静默失效的。
+const IMAGE_TAIL = /^(none|url\(|linear-gradient\(|radial-gradient\(|conic-gradient\(|repeating-)/i;
+// var() 引用已知颜色 token 家族 ⇒ 末段是颜色，整条声明无效（方案对照样本：`…, var(--bg-base)` 必红）；
+// 其余 var 名（--glass-top-hi / --glass-sweep / --app-bg-image 等图像令牌）静态不可判，放行。
+const COLOR_VAR_TAIL = /^var\(--(bg|fg|accent|success|warning|danger|info|surface|border|shadow|knob-bg)[\w-]*\)/;
+const LITERAL_COLOR_TAIL = /^(#[0-9a-fA-F]{3,8}\b|rgba?\(|color-mix\()/i;
+function backgroundImageTailViolations(ruleBody) {
+  const out = [];
+  for (const m of ruleBody.matchAll(/(?:^|[;{])\s*background-image\s*:\s*([^;}]+)/gi)) {
+    const segs = [];
+    let depth = 0, buf = '';
+    for (const ch of m[1]) {
+      if (ch === '(') depth++;
+      if (ch === ')') depth--;
+      if (ch === ',' && depth === 0) { segs.push(buf); buf = ''; continue; }
+      buf += ch;
+    }
+    segs.push(buf);
+    const tail = segs[segs.length - 1].trim();
+    const imageish = IMAGE_TAIL.test(tail) || (/^var\(/.test(tail) && !COLOR_VAR_TAIL.test(tail));
+    if (!imageish && (COLOR_VAR_TAIL.test(tail) || LITERAL_COLOR_TAIL.test(tail))) {
+      out.push(`background-image 末段不是图像：${tail}`);
+    }
+  }
+  return out;
+}
+{
+  for (const rel of ['src/styles/main.css', 'src/styles/main-pages.css', 'src/styles/ds.css', 'src/styles/litebox.css']) {
+    const rules = cssRules(blankComments(readFileSync(join(REPO_ROOT, rel), 'utf8')));
+    for (const rule of rules) {
+      for (const msg of backgroundImageTailViolations(rule.body)) {
+        solidBad.push(`S4 死声明：${rel} « ${rule.prelude} » ${msg}`);
+      }
+    }
+  }
+}
+
+{
+  // 正向对照：合成样本必判红 / 合规样本放行（每条断言都能翻红才算数）。
+  const expect = (name, got, want) => { if (got !== want) solidBad.push(`S 组对照失败：${name}（got ${got}，want ${want}）`); };
+  // S1：半透明 body 必红；实色 var 放行
+  {
+    const rules = cssRules('body.electron-mica:not(.win-maximized) { background: rgba(15, 17, 21, 0.35) !important; }');
+    const hit = rules.some((r) => surfaceHits(r.prelude, BODY_RULE) &&
+      surfaceBackgrounds(r.body).some((d) => /rgba?\([^)]*,\s*0?\.35\s*\)/.test(d.value)));
+    expect('S1 半透明 body 判红', hit, true);
+    const ok = cssRules('body { background: var(--bg-base); }').every((r) =>
+      surfaceBackgrounds(r.body).every((d) => SURFACE_FAMILY.test(d.value)));
+    expect('S1 实色 body 放行', ok, true);
+  }
+  // S2：无壁纸状态的 .titlebar transparent 判红；壁纸白名单放行
+  {
+    const rules = cssRules('.titlebar { background: transparent; }');
+    const hit = rules.some((r) => surfaceHits(r.prelude, TITLEBAR_RULE) &&
+      surfaceBackgrounds(r.body).some((d) => /^\s*transparent\s*$/i.test(d.value)) &&
+      !SURFACE_SEE_THROUGH.test(r.prelude));
+    expect('S2 异层 transparent 判红', hit, true);
+    const ok = cssRules('body[data-preset-bg] .titlebar { background: transparent; }').every((r) =>
+      surfaceBackgrounds(r.body).every((d) => /^\s*transparent\s*$/i.test(d.value) && SURFACE_SEE_THROUGH.test(r.prelude)));
+    expect('S2 壁纸贯通放行', ok, true);
+  }
+  // S3：回流样本判红；装饰层（spot/sweep/top-hi）与弹簧变量放行
+  expect('S3 floor 回流判红',
+    RETIRED_OVERLAY.test('.btn { background: linear-gradient(var(--lg-glass-floor), var(--lg-glass-floor)); }'), true);
+  expect('S3 装饰层放行',
+    RETIRED_OVERLAY.test('.card::after { background-image: var(--glass-spot), var(--glass-sweep); }'), false);
+  // S4：颜色收尾判红；图像收尾放行
+  expect('S4 颜色收尾判红',
+    backgroundImageTailViolations('background-image: radial-gradient(1px, red), var(--bg-base);').length, 1);
+  expect('S4 图像收尾放行',
+    backgroundImageTailViolations("background-image: linear-gradient(180deg, rgba(247,248,251,.3), rgba(247,248,251,.55)), url('../a.jpg');").length, 0);
+  expect('S4 none 收尾放行',
+    backgroundImageTailViolations('background-image: none;').length, 0);
+}
+
+if (solidBad.length) {
+  console.error('✗ 表面实色化防回流（S1–S4）缺口：');
+  for (const s of solidBad) console.error(`  ${s}`);
+}
+
 if (
   !bad.length && !radiusBad.length && !curveBad.length && !tripletProblems.length && !colorBad.length
-  && !radiusDupBad.length && !dsLiteralBad.length && !layoutBad.length && !motionBad.length
+  && !radiusDupBad.length && !dsLiteralBad.length && !layoutBad.length && !motionBad.length && !solidBad.length
 ) {
   console.log('✓ 全部引用的自定义属性都有定义（无静默 fallback、无被丢弃的声明）；硬编码颜色均有登记');
+  console.log('✓ 表面实色化防回流 S1–S4：画布实色 / 同层同色 / 叠加族零回流 / 无死声明（含 7 组可判红对照）');
   process.exit(0);
 }
 
