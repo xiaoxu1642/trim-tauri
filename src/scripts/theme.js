@@ -1,11 +1,12 @@
-// theme.js - 主题管理（恒浅色）
-// v2.1（2026-09-10 需求变更）：应用固定为浅色模式，删除深浅切换与系统跟随；
-// 保留 Mica 材质检测与外观设置（背景模糊度/预设背景/强调色渐变）。
+// theme.js - 主题管理（提案 V1：浅色缺省 + 外观镜像 theme 键可切深色）
+// v2.1 曾固定浅色；2026-11-21 用户裁定恢复深色档（main.css :root 碳墨暗档重新可达）。
+// 档位真源：appearance.json 的 theme 键（'light'|'dark'，经 pathbinding-appearance 族写），
+// localStorage 镜像供首帧（theme-boot）；本文件负责 body 层同步、meta 跟随与后端回读采纳。
 (function () {
   'use strict';
 
-  // F3-L08：真实语义是「桥是否就绪」—— Tauri 轨下桥就绪即 true，与「是不是 Electron」无关，
-  // 旧名会让后来者把就绪判断误读成环境判断。
+  // F3-L08：真实语义是「桥是否就绪」—— Tauri 轨下桥就绪即 true，与「是不是 Electron」
+  // 无关；IS_ELECTRON 这个名字会让后来者把就绪判断误读成环境判断。
   const HAS_BRIDGE = !!window.api?.app;
 
   // 应用 Mica 模式（electron-mica 是历史沿用的类名；桥就绪且系统支持时背景透明，
@@ -15,11 +16,13 @@
   }
 
   function applyTheme() {
-    // 恒浅色：只挂 theme-light（v2.8.0 清理死代码：无效的 theme-dark 移除语句已删除，
-    // main.css 暗色玻璃 token 已同步删除）
-    document.body.classList.add('theme-light');
+    // 档位由 html 类承载（theme-boot 已定级），body 镜像同一档——body 级 token 覆盖
+    // html 级，两处必须同档，否则 body 静态类会把深色档静默盖回浅色。
+    const dark = document.documentElement.classList.contains('theme-dark');
+    document.body.classList.toggle('theme-dark', dark);
+    document.body.classList.toggle('theme-light', !dark);
 
-    // 标题栏是独立系统表面，固定浅色。F3-L12：主题色只有一个真源 —— main.css 的 --bg-app；
+    // 标题栏是独立系统表面。F3-L12：主题色只有一个真源 —— main.css 的 --bg-app；
     // 这里从计算样式读出来再写 meta，不再在本文件里抄一份色值（抄一份 = 两处各说各话）。
     // 4 份 HTML 的静态 meta 由 theme-boot 之外的首帧路径供给，其值与 --bg-app 的对拍由
     // tools/check-css-tokens.mjs 断言（meta 与 token 不等即判红）。
@@ -30,9 +33,54 @@
     }
   }
 
+  // 设置页「界面主题」下拉入口。镜像+增量推真源走外观族出口；族未就位的异常时序才直写
+  // 镜像兜底（boot 侧同款例外，见 theme-boot.js 头注）。
+  function setTheme(name) {
+    const dark = name === 'dark';
+    document.documentElement.classList.toggle('theme-dark', dark);
+    document.documentElement.classList.toggle('theme-light', !dark);
+    applyTheme();
+    syncThemeSelect();
+    try {
+      if (window.pathbindingAppearance?.save) {
+        const ap = window.pathbindingAppearance.load();
+        ap.theme = dark ? 'dark' : 'light';
+        window.pathbindingAppearance.save(ap);
+        return;
+      }
+    } catch (_) {}
+    try {
+      const ap = JSON.parse(localStorage.getItem('trim-appearance') || '{}') || {};
+      ap.theme = dark ? 'dark' : 'light';
+      localStorage.setItem('trim-appearance', JSON.stringify(ap));
+    } catch (_) {}
+  }
+
+  function syncThemeSelect() {
+    const sel = document.getElementById('themeSelect');
+    if (sel) sel.value = document.documentElement.classList.contains('theme-dark') ? 'dark' : 'light';
+  }
+
+  // 后端回读采纳（启动期一次）：真源与镜像分叉（镜像被清理 / 手改）时采纳真源。
+  // 与 pathbinding-appearance 的 settings-enter 回读同口径：后端优先。
+  async function reconcileThemeWithBackend() {
+    if (!HAS_BRIDGE || !window.api?.appearance?.getPrefs) return;
+    try {
+      const resp = await window.api.appearance.getPrefs();
+      const t = resp && resp.success === true ? resp.data?.theme : null;
+      if ((t === 'dark' || t === 'light') &&
+          !document.documentElement.classList.contains('theme-' + t)) {
+        setTheme(t);
+      }
+    } catch (e) {
+      window.app?.log?.('warn', '主题真源回读失败: ' + ((e && e.message) || e));
+    }
+  }
+
   window.theme = {
     apply: applyTheme,
-    applyMicaMode
+    applyMicaMode,
+    setTheme
   };
 
   // 全局应用「设计系统」外观（背景模糊度 + 预设背景）：跨页面/启动即生效，
@@ -93,6 +141,15 @@
   async function initAppearance() {
     applyTheme();
     applySkinAndPreset();
+
+    // 提案 V1：设置页主题下拉的初值与绑定（静态节点，首屏脚本期内已存在）。
+    const themeSelect = document.getElementById('themeSelect');
+    if (themeSelect) {
+      syncThemeSelect();
+      themeSelect.addEventListener('change', () => setTheme(themeSelect.value));
+    }
+    // 后端回读采纳（异步，不阻塞首帧外观）
+    reconcileThemeWithBackend();
 
     // 桥就绪：检测 Mica 支持，启用透明背景
     if (HAS_BRIDGE && window.api?.app?.getInfo) {

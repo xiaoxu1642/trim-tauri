@@ -117,6 +117,9 @@
   --radius-btn: 8px;
   --radius-medium: 10px;
   --radius-large: 14px;
+  /* 提案 V1 落地（2026-11-21 用户裁定突破 14px 上限）：主窗壳层四角，消费方=body/壁纸/开屏/
+     星云画布（子窗保留原生装饰）；最大化由 win-maximized 段归零。 */
+  --radius-window: 20px;
 
   /* 间距 Token 刻度（1=4px 的 4px 网格）整表零消费已删：本仓布局间距历来写实测值，
      留一张没人吃的栅格只会让「改栅格=改全局」的假设失真。 */
@@ -369,6 +372,9 @@ body.mw-window .usage-modal {
   inset: 0;
   z-index: -1;
   pointer-events: none;
+  /* fixed 层不被 body 圆角裁到，壳层圆角在此自裁（提案 V1：--radius-window） */
+  border-radius: var(--radius-window);
+  overflow: hidden;
 }
 
 /* 预设壁纸：铺满整窗（贯通标题栏），明确不再避开窗口顶部。 */
@@ -422,6 +428,8 @@ body {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  /* 提案 V1：窗体圆角裁 body 自绘底；壁纸/开屏/星云等 fixed 全幅层各自裁 */
+  border-radius: var(--radius-window);
   display: flex;
   flex-direction: column;
 }
@@ -2336,6 +2344,19 @@ body.win-maximized[data-preset-bg] .app-wallpaper::before {
   opacity: 1 !important;
 }
 
+/* 提案 V1：最大化回到系统矩形，壳层圆角归零（与不透明护栏同口径） */
+body.win-maximized,
+body.win-maximized .app-wallpaper,
+body.win-maximized .splash-overlay {
+  border-radius: 0;
+}
+
+/* 提案 V1：深色档压暗壁纸——浅色壁纸在暗色玻璃下会把面板衬得发灰（真机截图实证），
+   壁纸层是 pointer-events:none 的纯装饰，filter 压暗不动任何交互面；无壁纸态零影响。 */
+body.theme-dark[data-preset-bg] .app-wallpaper::before {
+  filter: brightness(0.55) saturate(0.85);
+}
+
 body.electron-mica.win-maximized .layout {
   /* 最大化与还原同一层序：壁纸垫底、内容透明、极光场继续可见。
      不再给 layout 单独垫 bg-base —— 那会把壁纸压掉，也就是用户截图里的症状。 */
@@ -2874,6 +2895,26 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 }
 @media (prefers-reduced-motion: reduce) {
   #categoryList .xtable-row.is-cleared { animation: none; opacity: .35; }
+}
+
+/* 提案 V1 落地：清理 fly 碎片与统计卡脉冲（粒子散射红线解除，2026-11-21 用户裁定）。
+   碎片由 JS 生成、WAAPI 驱动、onfinish 自毁，无静态宿主节点；脉冲与 rm 行离场同段管理。 */
+.fly-chip {
+  position: fixed;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent-glow);
+  pointer-events: none;
+  z-index: 130;
+}
+.summary-card.is-pulsed {
+  animation: cardPulse var(--dur-3) var(--ease-spring);
+}
+@keyframes cardPulse {
+  45% { transform: scale(1.05); }
+  100% { transform: none; }
 }
 
 /* 单元格 */
@@ -5386,6 +5427,23 @@ body.bg-image-on.theme-light { --lg-glass-floor: rgba(255, 255, 255, 0.58); }
   .theme-light { --lg-glass-floor: rgba(255, 255, 255, 0.62); }
 }
 
+/* 提案 V1（2026-11-21 用户裁定恢复深色档）：液态玻璃暗色组。深色档操作面前景是白
+   （--fg-primary），:root 白地板会把白前景洗没（真机实证：filter-tab 白底白字不可读）——
+   地板翻转为暗实底保白前景 AA，tint 降为低 alpha 白光泽，描边/高光走白 hairline。 */
+.theme-dark {
+  --lg-tint-primary: rgba(255, 255, 255, 0.10);
+  --lg-tint-secondary: rgba(255, 255, 255, 0.08);
+  --lg-tint-tertiary: rgba(255, 255, 255, 0.06);
+  --lg-glass-floor: rgba(15, 17, 21, 0.55);
+  --lg-glass-border: rgba(255, 255, 255, 0.14);
+  --lg-glass-highlight: rgba(255, 255, 255, 0.16);
+}
+body[data-preset-bg].theme-dark,
+body.bg-image-on.theme-dark { --lg-glass-floor: rgba(15, 17, 21, 0.66); }
+@media (prefers-contrast: more) {
+  .theme-dark { --lg-glass-floor: rgba(15, 17, 21, 0.70); }
+}
+
 /* ---------- 材质面纱分级（dark=碳墨浓度 / light=浅玻璃色板） ----------
    v3.0 全局玻璃化：表面 token 由 :root 真源统一供玻璃 alpha，
    原 body.electron-mica 的两套 rgba 覆写已删除，材质层只保留 --mat-veil 面纱分级。 */
@@ -5725,6 +5783,15 @@ body.lg-mode-full .ds-menu > *:not(.lg-shimmer-canvas) {
    性能口径（方案 §3.4）：blur 只给两团 blob，且每团固定尺寸、只动 transform；
    conic 光带用极低不透明度 + blur，不参与布局；噪点是内联 SVG turbulence 平铺，
    只做静态叠加。三者都 pointer-events:none，不拦截任何交互。 */
+/* 提案 V1 落地：星云环境层画布（nebula.js 挂载于 .layout、内容之下；颜色实时取主题 token） */
+.nebula-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
 .aurora-field {
   position: absolute;
   inset: 0;
@@ -6122,6 +6189,9 @@ body.electron-mica.win-maximized.bg-image-on .layout {
   position: fixed;
   inset: 0;
   z-index: 9999;
+  /* 开屏遮罩也是 fixed 全幅层，壳层圆角在此自裁（提案 V1：--radius-window） */
+  border-radius: var(--radius-window);
+  overflow: hidden;
   background: transparent;
 }
 .splash-overlay .splash-bg {

@@ -1955,8 +1955,9 @@
   user-select: text;
 }
 
-/* 鼠标拖尾动效（Motion.Lab · cursor-trail）
-   作用范围限定在当前窗口（position: fixed 相对视口），图层 pointer-events: none 不拦截交互。 */
+/* 鼠标拖尾动效（提案 V1 · 彗星拖尾：单 canvas lighter 合成，渐隐圆点）
+   作用范围限定在当前窗口（position: fixed 相对视口），图层 pointer-events: none 不拦截交互；
+   画布尺寸/合成/取色（--accent，主题感知）全部在 mouse-trail.js，这里只管宿主层。 */
 .mouse-trail-layer {
   position: fixed;
   inset: 0;
@@ -1965,24 +1966,10 @@
   pointer-events: none;
   contain: strict;
 }
-.mouse-trail-dot {
+.mouse-trail-layer canvas {
   position: absolute;
+  inset: 0;
   display: block;
-  margin-left: 0;
-  border-radius: 50%;
-  /* v6-K18：走主题 accent token——旧实现用三字面 rgba 写死暗色档的 #8B8EE0
-     （= --accent 的暗色值），亮色主题下拖尾色与强调色脱节；径向渐变与
-     box-shadow 的离表发光一并摘除，光点语义由 opacity/scale 过渡承担。 */
-  background: var(--accent);
-  opacity: 0.9;
-  transform: translate(-50%, -50%) scale(1);
-  will-change: transform, opacity;
-  /* 520ms 消散时长保留字面：--duration-* 最大 320ms，拖尾淡出需要更长余韵（审查 F1c-L03） */
-  transition: opacity 520ms var(--ease-standard), transform 520ms var(--ease-standard);
-}
-.mouse-trail-dot.is-fading {
-  opacity: 0;
-  transform: translate(-50%, -50%) scale(0.25);
 }
 /* 未开启时彻底隐藏图层 */
 body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }

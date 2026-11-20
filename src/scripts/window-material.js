@@ -33,12 +33,23 @@
   }
 
   function applyTheme() {
-    // v2.8.0：清理死代码——应用恒挂 theme-light（「固定浅色」产品决策），
-    // 不再执行无效的 theme-dark 移除语句（main.css 暗色玻璃 token 已同步删除）
-    // 口径 v2·M6：三个子窗的 <body> 现在**静态**挂 theme-light（本行退成兜底，幂等）。
-    // 原先只靠这里挂，首帧落的是 :root 暗色 token，子窗按钮会闪一帧深灰再变透明——
-    // 「脚本必须及时执行才有的底」正是本次要消掉的时序依赖。
-    document.body.classList.add('theme-light');
+    // 提案 V1：子窗跟随外观镜像 theme 键（'dark' ⇒ theme-dark，其余恒浅色）。html 层在
+    // head 同步脚本求值期定级；body 静态 theme-light 在 init（DOMContentLoaded）镜像同一档
+    // ——body 级 token 覆盖 html 级，两处必须同档。主窗改主题经跨窗 storage 事件实时联动。
+    var dark = readThemeMirror() === 'dark';
+    document.documentElement.classList.toggle('theme-dark', dark);
+    document.documentElement.classList.toggle('theme-light', !dark);
+    if (document.body) {
+      document.body.classList.toggle('theme-dark', dark);
+      document.body.classList.toggle('theme-light', !dark);
+    }
+  }
+
+  // 首帧时序例外（theme-boot.js 头注同款）：head 求值期外观族未加载，直读镜像键；子窗只读。
+  function readThemeMirror() {
+    try {
+      return (JSON.parse(localStorage.getItem('trim-appearance') || '{}') || {}).theme || '';
+    } catch (_) { return ''; }
   }
 
   // material='none' 或系统不支持 DWM 材质时移除透明化类，回落不透明 CSS 表面
@@ -83,6 +94,11 @@
 
   function init() {
     applyTheme();
+    // 主窗「界面主题」切换 → 镜像更新 → 跨窗 storage 事件 → 子窗实时跟随。
+    // e.key 为空（clear）也重读一次：镜像整清意味着回到缺省浅色。
+    window.addEventListener('storage', function (e) {
+      if (!e.key || e.key === 'trim-appearance') applyTheme();
+    });
     if (!HAS_BRIDGE) {
       return;
     }

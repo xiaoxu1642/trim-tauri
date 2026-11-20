@@ -497,6 +497,8 @@ enum PrefShape {
     Preset,
     /// 壁纸轮换间隔秒数（闭区间）
     Seconds,
+    /// 界面主题（'light' | 'dark'；提案 V1 暗色裁定 2026-11-21）
+    Theme,
 }
 
 /// 外观域键白名单。渲染层 `src/scripts/pathbinding-appearance.js` 的 `APPEARANCE_PREF_KEYS`
@@ -505,6 +507,8 @@ enum PrefShape {
 /// 2026-10-22 用户裁定删除自定义强调色，`accent` 已从两侧同批移除；存量 appearance.json
 /// 里的该键是未知键，读取侧不返回、写入侧不迁移（Value 形状天然容忍）。
 const APPEARANCE_PREF_KEYS: &[(&str, PrefShape)] = &[
+    // 提案 V1：界面主题。渲染层首帧定级在 theme-boot（读镜像），运行时写经外观族增量推上来
+    ("theme", PrefShape::Theme),
     ("bgPath", PrefShape::BgPath),
     ("bgOpacity", PrefShape::Percent),
     // 与 bgOpacity 同键两套语义（旧=图片不透明度，新=雾化强度）的历史标记；
@@ -584,6 +588,10 @@ fn appearance_pref_reject(key: &str, value: &Value) -> Option<String> {
                 None
             }
             _ => expect("整数秒数的壁纸轮换间隔"),
+        },
+        PrefShape::Theme => match value.as_str() {
+            Some(s) if s == "light" || s == "dark" => None,
+            _ => expect("'light' 或 'dark' 的主题档"),
         },
     }
 }

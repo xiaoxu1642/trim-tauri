@@ -417,6 +417,7 @@ fn appearance_get_prefs_shape_covers_every_declared_key() {
             "bgPosX",
             "bgPosY",
             "presetBg",
+            "theme",
             "wallpaperBlur",
             "wallpaperInterval",
             "wallpaperRotate",

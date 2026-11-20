@@ -2242,7 +2242,6 @@ const OPACITY_UNMODELED = [
   { sel: '.maint-check input:disabled', reason: '非文本控件 + 非活动态' },
   { sel: '.appearance-card.material-off .material-grid', reason: '总开关关闭时的非活动态（pointer-events:none，整块不可操作）' },
   { sel: '.rt-sweep', reason: '扫描扫光（装饰动画）' },
-  { sel: '.mouse-trail-dot', reason: '鼠标拖尾（装饰）' },
   // 极光琉璃 B-P3 氛围场：四层都是 pointer-events:none 的纯装饰件，不承载任何文本，
   // 其不透明度是「观感强度」而非「文字压暗」。它们对正文可读性的真实影响已由
   // --aurora-veil 回压 + 现算守住（见 main.css :root 令牌注释；现算：node tools/check-contrast.mjs）。

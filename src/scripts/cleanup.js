@@ -1835,6 +1835,72 @@
     }
   }
 
+  // 提案 V1 落地：清理庆祝粒子（2026-11-21 用户裁定解除粒子散射红线）。成功回执后从
+  // 离场行飞碎片进「可释放空间」卡（fly），全部到站爆一次彩点并让卡片弹一记弹簧脉冲。
+  // 只播真正成功的条目（is-cleared 行为准）；RM 下整段跳过——装饰不参与失败/降级路径。
+  // WAAPI 的 easing 不认 var()，曲线值从 --ease-expo 现取，避免在 JS 里抄第二份字面量。
+  const CELEBRATION_FLY_MAX = 12;
+  const flyChipHost = () => document.body;
+  function celebrateEase() {
+    return getComputedStyle(document.documentElement).getPropertyValue('--ease-expo').trim() || 'ease-out';
+  }
+  function playCleanupCelebration() {
+    if (window.ds?.reducedMotion?.()) return;
+    const rows = Array.from(document.querySelectorAll('#categoryList .xtable-row.is-cleared'));
+    if (!rows.length) return;
+    const card = document.getElementById('totalSize')?.closest('.summary-card');
+    if (!card) return;
+    const target = card.getBoundingClientRect();
+    const tx = target.left + target.width / 2;
+    const ty = target.top + target.height / 2;
+    const step = Math.max(1, Math.floor(rows.length / CELEBRATION_FLY_MAX));
+    const picked = rows.filter((_, i) => i % step === 0).slice(0, CELEBRATION_FLY_MAX);
+    let landing = 0;
+    picked.forEach((row, i) => {
+      const r = row.getBoundingClientRect();
+      const chip = document.createElement('span');
+      chip.className = 'fly-chip';
+      chip.style.left = (r.left + r.width / 2) + 'px';
+      chip.style.top = (r.top + r.height / 2) + 'px';
+      flyChipHost().appendChild(chip);
+      const dx = tx - (r.left + r.width / 2);
+      const dy = ty - (r.top + r.height / 2);
+      chip.animate([
+        { transform: 'translate(-50%,-50%) scale(1)', opacity: 1 },
+        { transform: 'translate(' + dx + 'px,' + dy + 'px) scale(0.3)', opacity: 0.9 }
+      ], { duration: 520 + i * 40, easing: celebrateEase() }).onfinish = () => {
+        chip.remove();
+        landing += 1;
+        if (landing === picked.length) {
+          burstAt(tx, ty, 18);
+          card.classList.add('is-pulsed');
+          setTimeout(() => card.classList.remove('is-pulsed'), 500);
+        }
+      };
+    });
+  }
+  function burstAt(x, y, count) {
+    const colors = ['--accent', '--success', '--info']
+      .map((n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim())
+      .filter(Boolean);
+    if (!colors.length) return;
+    for (let i = 0; i < count; i++) {
+      const chip = document.createElement('span');
+      const size = 4 + Math.random() * 5;
+      const angle = Math.random() * Math.PI * 2;
+      const dist = 34 + Math.random() * 58;
+      chip.style.cssText = 'position:fixed;left:' + x + 'px;top:' + y + 'px;width:' + size + 'px;height:' + size +
+        'px;border-radius:999px;background:' + colors[i % colors.length] + ';pointer-events:none;z-index:130;';
+      document.body.appendChild(chip);
+      const dx = Math.cos(angle) * dist;
+      const dy = Math.sin(angle) * dist - 10;
+      chip.animate([
+        { transform: 'translate(-50%,-50%) scale(1)', opacity: 1 },
+        { transform: 'translate(' + (dx - 3) + 'px,' + (dy - 3) + 'px) scale(0.15)', opacity: 0 }
+      ], { duration: 620 + Math.random() * 380, easing: celebrateEase() }).onfinish = () => chip.remove();
+    }
+  }
+
   async function clean(opts) {
     // P0-05：入口同步置位，确认段也在同一把锁内；入口早退绝不吞错，
     // 由调用方决定提示方式（按钮点击给出「正在确认或清理」提示）。
@@ -2050,6 +2116,9 @@
       }
 
       // 上述命令并未真正执行；按审查结论 B6 删除该假日志，日志库只记录真实发生的操作。
+
+      // 提案 V1 落地：庆祝粒子。离场行已就位（上方循环），碎片从它们飞向统计卡。
+      playCleanupCelebration();
 
       setTimeout(() => {
         hideProgress();

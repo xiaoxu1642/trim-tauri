@@ -28,6 +28,8 @@
   // 存量镜像与 appearance.json 里的历史 `accent` 键不进这张表 ⇒ 回读不采纳、写入不迁移，
   // 也不会被推回后端（未知键对 localStorage 对象与 serde_json::Value 都是天然容忍）。
   const APPEARANCE_PREF_KEYS = [
+    // 提案 V1：界面主题（'light'|'dark'，镜像与真源同形；首帧定级在 theme-boot，写走这里）
+    { key: 'theme' },
     { key: 'bgPath' },
     { key: 'bgOpacity' },
     { key: 'bgOpacityFog' },

@@ -1,5 +1,7 @@
 // Motion.Lab-inspired cursor trail（鼠标拖尾）
-// 软件范围内轻量紫色光点轨迹：节流生成、CSS 过渡淡出、双重保障移除节点。
+// 提案 V1 落地（2026-11-21 用户裁定）：光点轨迹升级为彗星拖尾——单 canvas + lighter
+// 合成的渐隐圆点（640ms 生命期），颜色实时取 --accent（主题感知）；偏好键 / 开关 /
+// RM 降级链路一字未动，只换渲染端。
 (function () {
   'use strict';
 
@@ -7,14 +9,9 @@
   // 配置真源在 %APPDATA%，localStorage 只是镜像）；KEY 那套本地键降级为同步初值 +
   // 迁移来源 + 镜像。
   const KEY = 'trim-mouse-trail';
-  const THROTTLE_MS = 22;      // 生成节流
-  // F5-L14（2026-10-21）：淡出时长不在本文件留第二本账——真源是 main-pages.css
-  // `.mouse-trail-dot` 的 transition（旧注释写的 main.css 是错的文件名，且 520 与 CSS
-  // 各写一份，任一侧改动都会静默漂移，症状是光点早摘（看得见半透明的点被抠掉）或晚摘）。
-  // 改为首次生成时量一次 computed style 并缓存；FALLBACK 只在量不到时兜底，取值刻意
-  // 偏大：晚摘不可见（此时 opacity 已归零）、早摘可见，所以宁长勿短。
-  const FADE_FALLBACK_MS = 1500;
-  let fadeMs = 0;
+  const THROTTLE_MS = 22;      // 生成节流（R3b 正控钉此常量；彗星 45Hz 采样形态足够）
+  const POINT_LIFE_MS = 640;   // 单点生命期：渐隐总时长，出画即回收
+  const MAX_POINTS = 48;       // 同屏点数上限：高速划圈时封顶，防 rAF 追积压
   // 审查v4-M1：reduced-motion 必须使用时实时求值，禁止模块加载时固化快照
   // （固化会导致运行中切换系统「减少动态效果」偏好永不生效，9.6-B8 / v4-M1）
   function isReducedMotion() {
@@ -22,25 +19,19 @@
     if (window.ds && typeof window.ds.reducedMotionFallback === 'function') return !!window.ds.reducedMotionFallback();
     return true;
   }
-  // 逗号分隔的 transition-duration 逐项解析取最长一段（多属性过渡要等最慢的那个）；
-  // 单位可能是 s 也可能是 ms，必须按结尾单位换算，否则 0.52s 会算成 520000ms。
-  function maxTransitionMs(spec) {
-    let max = 0;
-    String(spec || '').split(',').forEach((part) => {
-      const s = part.trim();
-      const v = parseFloat(s);
-      if (!Number.isFinite(v) || v <= 0) return;
-      const ms = /ms$/.test(s) ? v : v * 1000;
-      if (ms > max) max = ms;
-    });
-    return max > 0 ? Math.round(max) : 0;
-  }
 
   let enabled = false;
   let enabledPref = readLsPref();
   let prefDirty = false;
   let layer = null;
+  let canvas = null;
+  let ctx = null;
+  let points = [];
+  let rafId = 0;
   let last = 0;
+  // 拖尾色缓存：--accent 是主题 token（暗/浅两套值），html 类名一变即失效重取。
+  let trailColor = '106, 89, 201';
+  let colorHostClass = '';
 
   function readLsPref() {
     try { return localStorage.getItem(KEY) === 'true'; } catch (_) { return false; }
@@ -76,8 +67,57 @@
     layer = document.createElement('div');
     layer.className = 'mouse-trail-layer';
     layer.setAttribute('aria-hidden', 'true');
+    canvas = document.createElement('canvas');
+    ctx = canvas.getContext('2d');
+    layer.appendChild(canvas);
     document.body.appendChild(layer);
+    sizeCanvas();
     return layer;
+  }
+  function sizeCanvas() {
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.round(window.innerWidth * dpr));
+    canvas.height = Math.max(1, Math.round(window.innerHeight * dpr));
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  // --accent 形如 "#6A59C9"；解析失败沿用上次值（拖尾是装饰，取色失败不该炸）
+  function refreshTrailColor() {
+    const host = document.documentElement;
+    const cls = host.className;
+    if (cls === colorHostClass) return;
+    colorHostClass = cls;
+    const v = getComputedStyle(host).getPropertyValue('--accent').trim();
+    const m = /^#([0-9a-f]{6})$/i.exec(v);
+    if (m) {
+      const n = parseInt(m[1], 16);
+      trailColor = ((n >> 16) & 255) + ', ' + ((n >> 8) & 255) + ', ' + (n & 255);
+    }
+  }
+  function drawFrame() {
+    rafId = 0;
+    if (!ctx || !enabled) { points = []; return; }
+    const now = performance.now();
+    refreshTrailColor();
+    ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    points = points.filter((p) => now - p.t < POINT_LIFE_MS);
+    if (points.length) {
+      // lighter 合成：圆点叠亮成彗星尾（提案 V1 形态；透明度按剩余生命期线性衰减）
+      ctx.globalCompositeOperation = 'lighter';
+      for (const p of points) {
+        const k = 1 - (now - p.t) / POINT_LIFE_MS;
+        ctx.fillStyle = 'rgba(' + trailColor + ', ' + (0.4 * k).toFixed(3) + ')';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 1 + 7 * k, 0, 6.283);
+        ctx.fill();
+      }
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    // 无点即停 rAF：拖尾是纯装饰，空转循环是对电池的浪费（aurora.js 同款纪律）
+    if (points.length) rafId = requestAnimationFrame(drawFrame);
+    else if (canvas) ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
   }
   // F5-M04：勾选框显示的是**用户偏好**，生效态另算。旧实现把 checked 绑到生效态
   // （= !reduceMotion && 偏好），偏好为 ON 而系统开着「减少动态效果」时勾选框显示 OFF，
@@ -100,8 +140,13 @@
     syncToggleUi();
     if (!enabled && layer) {
       // C6：关闭时彻底移除图层（原来只清空光点，空 div 一直挂在 DOM 里）
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = 0;
+      points = [];
       layer.remove();
       layer = null;
+      canvas = null;
+      ctx = null;
     }
   }
   function spawn(x, y) {
@@ -109,28 +154,10 @@
     const now = performance.now();
     if (now - last < THROTTLE_MS) return;
     last = now;
-    const host = ensureLayer();
-    const dot = document.createElement('span');
-    dot.className = 'mouse-trail-dot';
-    const size = 4 + Math.random() * 4;
-    dot.style.width = size + 'px';
-    dot.style.height = size + 'px';
-    dot.style.left = x + 'px';
-    dot.style.top = y + 'px';
-    host.appendChild(dot);
-
-    const remove = () => { if (dot.parentNode) dot.remove(); };
-    dot.addEventListener('transitionend', remove, { once: true });
-    // 兜底：过渡被跳过（后台窗口、极端节流）时仍能回收节点，杜绝 DOM 累积。
-    // 时长量一次即记账（含量不到的情形），避免每个光点都付一次 computed style 读。
-    if (fadeMs === 0) {
-      const measured = maxTransitionMs(getComputedStyle(dot).transitionDuration);
-      fadeMs = measured > 0 ? measured : FADE_FALLBACK_MS;
-    }
-    setTimeout(remove, fadeMs + 260);
-    // 强制回流，确保初始态被绘制后再切到淡出态，否则 transition 不会触发
-    void dot.offsetWidth;
-    dot.classList.add('is-fading');
+    ensureLayer();
+    points.push({ x, y, t: now });
+    if (points.length > MAX_POINTS) points.shift();
+    if (!rafId) rafId = requestAnimationFrame(drawFrame);
   }
   function init() {
     setEnabled(readEnabled());
@@ -145,6 +172,8 @@
       if (e.pointerType && e.pointerType !== 'mouse') return;
       spawn(e.clientX, e.clientY);
     }, { passive: true });
+    // 彗星画布跟随窗口尺寸（DPR 换算在 sizeCanvas 内；图层不存在时是空操作）
+    window.addEventListener('resize', sizeCanvas, { passive: true });
     const toggle = document.getElementById('mouseTrailToggle');
     toggle && toggle.addEventListener('change', () => {
       writeEnabled(toggle.checked);
