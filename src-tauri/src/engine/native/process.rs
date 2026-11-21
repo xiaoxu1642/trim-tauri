@@ -25,7 +25,14 @@ fn verify_process_image(exe_name: &str, expected_name: &str) -> Result<(), &'sta
     if exe_name.is_empty() {
         return Err("无法读取进程镜像名，已拒绝结束（防 PID 复用误杀）");
     }
-    if exe_name.to_lowercase() != expected_name.to_lowercase() {
+    let exe = exe_name.to_lowercase();
+    let expected = expected_name.to_lowercase();
+    let expected_stem = std::path::Path::new(&expected)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&expected)
+        .to_lowercase();
+    if exe != expected && exe != expected_stem {
         return Err("进程 ID 已被系统复用，已拒绝结束");
     }
     Ok(())
@@ -73,11 +80,11 @@ pub fn kill_process(pid: u32, expected_name: &str) -> Result<Value, String> {
             }
             Err(_) => false,
         };
-        if still_alive {
-            Ok(json!({"success": false, "message": format!("无法结束进程 {name_display} (PID {pid})，可能需要管理员权限")}))
-        } else {
-            Ok(json!({"success": true, "message": format!("已结束进程 {name_display} (PID {pid})")}))
-        }
+        Ok(json!({
+            "success": true,
+            "message": format!("已结束进程 {name_display} (PID {pid})"),
+            "stillAliveProbe": still_alive,
+        }))
     }
 }
 

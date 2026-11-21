@@ -818,9 +818,9 @@ for (const v of motionBad) console.log(`✗ ${v}`);
   console.log('✓ 新增判据正向对照 11 组全部命中（①~③、⑤ 注入违例必红 + 合规必放行）');
 }
 
-// ==================== 表面实色化防回流（S1–S4，方案 v1.6 §6.8，2026-11-21） ====================
+// ==================== 表面实色化防回流（S1–S8，方案 v1.6 §6.8 + 材质优化 v1 §7，2026-11-21） ====================
 // 退役只靠人记必然复发：叠加块回流、异层异色、写了不生效的死声明，肉眼都查不出来。
-// 四条断言常驻，判据全部带可判红的合成对照（见下方自检）。
+// 八条断言常驻，判据全部带可判红的合成对照（见下方自检）。
 const solidBad = [];
 
 /** 复合选择器的「主体」：按连接符切开后最后一段（`.a > .b::x` 的主体是 `.b`）。 */
@@ -926,6 +926,176 @@ function backgroundImageTailViolations(ruleBody) {
   }
   return out;
 }
+
+/** 声明值末尾的 `!important` 不参与材质判定。 */
+const stripImportant = (value) => value.replace(/\s*!important\s*$/i, '').trim();
+
+/** `var(--x)` 取引用名；带 fallback 的 `var(--x, …)` 静态不可证明，返回 null 由调用方裁决。 */
+function asPlainVar(value) {
+  const m = /^var\(\s*(--[A-Za-z0-9_-]+)\s*\)$/.exec(stripImportant(value));
+  return m ? m[1] : null;
+}
+
+/** rgba()/rgb() 的 alpha；`rgb()` 与裸十六进制按 1 计，透明按 0 计。 */
+function declaredAlpha(value) {
+  const v = stripImportant(value);
+  if (/^transparent$/i.test(v)) return 0;
+  const rgba = /^rgba\(\s*[^()]*,\s*([\d.]+)\s*\)$/i.exec(v);
+  if (rgba) return Number(rgba[1]);
+  return /^rgb\(|^#[0-9a-fA-F]{3,8}$/i.test(v) ? 1 : null;
+}
+
+/** 自定义属性的定义值；只有唯一的字面量定义才可静态裁决（多处定义或运行时写入不算证据）。 */
+function tokenDefinitions(cssText) {
+  const out = new Map();
+  for (const m of cssText.matchAll(/(--[A-Za-z0-9_-]+)\s*:\s*([^;{}]+)/g)) {
+    const name = m[1];
+    const value = m[2].trim();
+    if (!out.has(name)) out.set(name, new Set([value]));
+    else out.get(name).add(value);
+  }
+  for (const [name, values] of out) if (values.size !== 1) out.delete(name);
+  return out;
+}
+
+/** 自定义属性的确定性 alpha：沿 var() 链解析到字面颜色；循环引用与不可判值返回 null。 */
+function tokenAlpha(token, definitions, stack = new Set()) {
+  if (stack.has(token)) return null;
+  const raw = definitions.get(token);
+  if (!raw) return null;
+  const next = stack.add(token);
+  const value = [...raw][0];
+  const literal = declaredAlpha(value);
+  if (literal !== null) return literal;
+  const nested = asPlainVar(value);
+  return nested ? tokenAlpha(nested, definitions, next) : null;
+}
+
+/**
+ * S5–S7 共用：选择器的主体是否属于目标表面。
+ * 伪元素（::before/::after）是装饰层，不承载容器背景，不计入。
+ */
+function surfaceRuleHits(prelude, pattern) {
+  return prelude.split(',').some((seg) => !/::/.test(seg) && pattern.test(surfaceSubject(seg)));
+}
+/** 只认状态修饰的复合选择器（`.toast.info` / `.toast:hover`），不认后代件（`.toast-close`）。 */
+function surfaceStateHits(prelude, base) {
+  const matcher = new RegExp(`^${base}(?:(?:\\[[^\\]]+\\]|[:.][\\w-]+)+)$`);
+  return prelude.split(',').some((seg) => !/::/.test(seg) && (seg.trim() === base || matcher.test(seg.trim())));
+}
+
+const USAGE_MODAL_RULE = /\.usage-modal\b/;
+// 方案 §3.2：弹窗主体与内容列表必须自成高对比表面；内容项按已知内容类名收口。
+const MODAL_LIST_RULE = /\.(?:usage-body|model-picker-item|card|settings-entry-card|process-entry-card|row-card|field-input)\b/;
+// 方案 §3.4：info 信息是短时反馈，禁止跟随壁纸态透明 token。
+const INFO_WALLPAPER_TOKEN = /^--glass-l[12](?:-tint)?$|^--bg-(?:card|card-hover|elevated|input|hover|sidebar|surface)/;
+// 方案 §3.3 修订：原生子窗主容器必须实色或全透明；半透明会产生叠色。
+// `.mw-card` 是模型项一级透明承载层，不再强制 alpha=1；图标/状态徽章等非主容器不在射程内。
+const NATIVE_CONTAINER_RULE = /^\.(?:mw-(?:shell|content|group|footer|topbar)|pw-(?:topbar|group))(?![-\w])/;
+const NATIVE_TRANSPARENT_RULE = /^\.mw-card(?![-\w])/;
+// 方案 §3.1：壁纸态 L1/L2 的 alpha 地板；多主题定义必须全部达标。
+const L1_TOKEN = /^--glass-l1(?:-tint)?$/;
+const L2_TOKEN = /^--glass-l2(?:-tint)?$/;
+const L1_FLOOR = 0.28;
+const L2_FLOOR = 0.42;
+
+/** S5：自绘弹窗主体与内容列表在壁纸态不得低于 .94；禁止用低透明容器 token 充当弹窗实色。 */
+function usageModalAlphaViolations(cssText, cssRel = 'main.css') {
+  const out = [];
+  const definitions = tokenDefinitions(cssText);
+  for (const rule of cssRules(cssText)) {
+    const isModal = surfaceRuleHits(rule.prelude, USAGE_MODAL_RULE);
+    const isList = surfaceRuleHits(rule.prelude, MODAL_LIST_RULE);
+    if (!isModal && !isList) continue;
+    for (const declaration of surfaceBackgrounds(rule.body)) {
+      const value = stripImportant(declaration.value);
+      const token = asPlainVar(value);
+      const alpha = token ? tokenAlpha(token, definitions) : declaredAlpha(value);
+      // 静态不可判值（color-mix / 运行时写入 / 带 fallback 的 var）不装作能证明合规。
+      if (alpha === null) continue;
+      if (alpha < 0.94) {
+        out.push(`S5 ${cssRel} « ${rule.prelude} » { ${declaration.prop}: ${declaration.value} } alpha=${alpha} < .94`);
+      }
+      if (token && /^--bg-card(?:-hover)?$/.test(token)) {
+        out.push(`S5 ${cssRel} « ${rule.prelude} » 直接复用低透明容器 token ${token}（弹窗须用独立高 alpha token）`);
+      }
+    }
+  }
+  return out;
+}
+
+/** S6：.toast 背景 alpha 不得低于 .92，且不得引用壁纸态透明 token。 */
+function toastAlphaViolations(cssText, cssRel = 'main.css') {
+  const out = [];
+  const definitions = tokenDefinitions(cssText);
+  for (const rule of cssRules(cssText)) {
+    if (!surfaceStateHits(rule.prelude, '.toast')) continue;
+    for (const declaration of surfaceBackgrounds(rule.body)) {
+      const value = stripImportant(declaration.value);
+      const token = asPlainVar(value);
+      const alpha = token ? tokenAlpha(token, definitions) : declaredAlpha(value);
+      if (alpha !== null && alpha < 0.92) {
+        out.push(`S6 ${cssRel} « ${rule.prelude} » { ${declaration.prop}: ${declaration.value} } alpha=${alpha} < .92`);
+      }
+      const refs = [...value.matchAll(/var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,|\))/g)].map((m) => m[1]);
+      if (refs.some((ref) => INFO_WALLPAPER_TOKEN.test(ref) || tokenAlpha(ref, definitions) === 0)) {
+        out.push(`S6 ${cssRel} « ${rule.prelude} » { ${declaration.prop}: ${declaration.value} } 跟随壁纸态透明 token`);
+      }
+    }
+  }
+  return out;
+}
+
+/** S7：Rust 原生子窗主容器的背景不得出现 alpha<1。 */
+function nativeContainerAlphaViolations(cssText, cssRel = 'main.css') {
+  const out = [];
+  const definitions = tokenDefinitions(cssText);
+  for (const rule of cssRules(cssText)) {
+    const isTransparentHost = surfaceRuleHits(rule.prelude, NATIVE_TRANSPARENT_RULE);
+    if (!isTransparentHost && !surfaceRuleHits(rule.prelude, NATIVE_CONTAINER_RULE)) continue;
+    for (const declaration of surfaceBackgrounds(rule.body)) {
+      const value = stripImportant(declaration.value);
+      const token = asPlainVar(value);
+      const alpha = token ? tokenAlpha(token, definitions) : declaredAlpha(value);
+      if (isTransparentHost) {
+        if (alpha !== null && alpha !== 0) {
+          out.push(`S7 ${cssRel} « ${rule.prelude} » 模型项一级承载层须全透明或全实色，当前 alpha=${alpha}`);
+        }
+      } else if (alpha !== null && alpha < 1) {
+        out.push(`S7 ${cssRel} « ${rule.prelude} » { ${declaration.prop}: ${declaration.value} } alpha=${alpha} < 1`);
+      }
+    }
+  }
+  return out;
+}
+
+/** S8：壁纸态 L1/L2 token 的每个字面定义都必须守住 alpha 地板。 */
+function wallpaperFloorViolations(cssText) {
+  const out = [];
+  for (const rule of cssRules(cssText)) {
+    if (!/^body(?:\[data-preset-bg\]|\.bg-image-on)/.test(rule.prelude.trim())) continue;
+    for (const m of rule.body.matchAll(/(--[A-Za-z0-9_-]+)\s*:\s*([^;{}]+)/g)) {
+      const token = m[1];
+      const family = L1_TOKEN.test(token) ? 'L1' : L2_TOKEN.test(token) ? 'L2' : null;
+      if (!family) continue;
+      const alpha = declaredAlpha(m[2]);
+      if (alpha === null) {
+        out.push(`S8 ${token} 值 ${m[2].trim()} 静态不可判 alpha（地板断言失明）`);
+      } else if (alpha < (family === 'L1' ? L1_FLOOR : L2_FLOOR)) {
+        out.push(`S8 ${token} alpha=${alpha} < ${family} 地板 ${family === 'L1' ? L1_FLOOR : L2_FLOOR}`);
+      }
+    }
+  }
+  return out;
+}
+
+// ---- S5–S8：四类表面的 alpha 地板常驻断言（方案 v1 §7.1–7.4） ----
+const MATERIAL_CSS = blankComments(readFileSync(join(REPO_ROOT, 'src', 'styles', 'main.css'), 'utf8'));
+solidBad.push(...usageModalAlphaViolations(MATERIAL_CSS, 'main.css'));
+solidBad.push(...toastAlphaViolations(MATERIAL_CSS, 'main.css'));
+solidBad.push(...nativeContainerAlphaViolations(MATERIAL_CSS, 'main.css'));
+solidBad.push(...wallpaperFloorViolations(MATERIAL_CSS));
+
 {
   for (const rel of ['src/styles/main.css', 'src/styles/main-pages.css', 'src/styles/ds.css', 'src/styles/litebox.css']) {
     const rules = cssRules(blankComments(readFileSync(join(REPO_ROOT, rel), 'utf8')));
@@ -973,10 +1143,42 @@ function backgroundImageTailViolations(ruleBody) {
     backgroundImageTailViolations("background-image: linear-gradient(180deg, rgba(247,248,251,.3), rgba(247,248,251,.55)), url('../a.jpg');").length, 0);
   expect('S4 none 收尾放行',
     backgroundImageTailViolations('background-image: none;').length, 0);
+  // S5：弹窗主体低 alpha / 复用低透明容器 token 必红；独立高 alpha token 放行
+  expect('S5 弹窗低 alpha 判红',
+    usageModalAlphaViolations(':root{--surface-modal:rgba(255,255,255,.9)} .usage-modal{background:var(--surface-modal)}').length > 0, true);
+  expect('S5 复用 bg-card 判红',
+    usageModalAlphaViolations(':root{--bg-card:rgba(255,255,255,.4)} .usage-modal{background:var(--bg-card)}').length > 0, true);
+  expect('S5 内容列表低 alpha 判红',
+    usageModalAlphaViolations('.usage-modal .model-picker-item{background:rgba(255,255,255,0.8)}').length > 0, true);
+  expect('S5 独立高 alpha 放行',
+    usageModalAlphaViolations(':root{--surface-modal:rgba(255,255,255,.96)} .usage-modal{background:var(--surface-modal)}').length, 0);
+  // S6：toast 低 alpha / 跟随壁纸 token 必红；近实色独立 token 放行
+  expect('S6 低 alpha 判红',
+    toastAlphaViolations('.toast{background:rgba(255,255,255,.8)}').length > 0, true);
+  expect('S6 壁纸 token 判红',
+    toastAlphaViolations(':root{--glass-l1-tint:rgba(255,255,255,.6)} .toast{background:var(--glass-l1-tint)}').length > 0, true);
+  expect('S6 高 alpha 放行',
+    toastAlphaViolations(':root{--bg-toast:rgba(255,255,255,.95)} .toast{background:var(--bg-toast)}').length, 0);
+  // S7：原生主容器半透明必红；实色放行；非主容器不误报
+  expect('S7 原生容器半透明判红',
+    nativeContainerAlphaViolations('.mw-card{background:rgba(255,255,255,.9)}').length > 0, true);
+  expect('S7 原生容器实色放行',
+    nativeContainerAlphaViolations(':root{--bg-card:#fff} .pw-group{background:var(--bg-card)}').length, 0);
+  expect('S7 模型项一级透明放行',
+    nativeContainerAlphaViolations('.mw-card{background:transparent}').length, 0);
+  expect('S7 非主容器不命中',
+    nativeContainerAlphaViolations('body.mw-window .pw-group-ico:hover{background:rgba(255,255,255,.5)}').length, 0);
+  // S8：L1/L2 低于地板必红；达标放行
+  expect('S8 L1 地板判红',
+    wallpaperFloorViolations('body[data-preset-bg]{--glass-l1-tint:rgba(255,255,255,0.2)}').length > 0, true);
+  expect('S8 L2 地板判红',
+    wallpaperFloorViolations('body.bg-image-on{--glass-l2-tint:rgba(255,255,255,0.4)}').length > 0, true);
+  expect('S8 双档达标放行',
+    wallpaperFloorViolations('body[data-preset-bg]{--glass-l1-tint:rgba(255,255,255,0.28);--glass-l2-tint:rgba(255,255,255,0.42)}').length, 0);
 }
 
 if (solidBad.length) {
-  console.error('✗ 表面实色化防回流（S1–S4）缺口：');
+  console.error('✗ 表面实色化防回流与四类表面材质（S1–S8）缺口：');
   for (const s of solidBad) console.error(`  ${s}`);
 }
 
@@ -985,7 +1187,7 @@ if (
   && !radiusDupBad.length && !dsLiteralBad.length && !layoutBad.length && !motionBad.length && !solidBad.length
 ) {
   console.log('✓ 全部引用的自定义属性都有定义（无静默 fallback、无被丢弃的声明）；硬编码颜色均有登记');
-  console.log('✓ 表面实色化防回流 S1–S4：画布实色 / 同层同色 / 叠加族零回流 / 无死声明（含 7 组可判红对照）');
+  console.log('✓ 表面实色化防回流与四类表面材质 S1–S8：画布实色 / 同层同色 / 叠加族零回流 / 无死声明 / 弹窗语义表面 / 信息条近实色 / 原生弹窗语义表面 / 壁纸态 L1-L2 地板（含 20 组可判红对照）');
   process.exit(0);
 }
 

@@ -11,6 +11,71 @@
   let keyword = '';
 
   function escapeHtml(s) { return window.ds.esc(s); }
+  const CMD_META = {
+    'sys-cmd-admin': {
+      risk: 'high',
+      label: '高风险',
+      desc: '请求管理员授权；在管理员命令行中的操作会影响整台电脑。',
+      hint: '以管理员权限打开 CMD；请确认理解命令用途后再执行。'
+    },
+    'sys-powershell': {
+      risk: 'medium',
+      label: '需谨慎',
+      desc: '可执行命令；请只在理解命令用途后使用。',
+      hint: '打开 PowerShell 命令行；请确认理解输入命令的用途。'
+    },
+    'sys-msconfig': {
+      risk: 'medium',
+      label: '需谨慎',
+      desc: '可修改启动与服务配置；误操作可能影响系统启动。',
+      hint: '打开系统配置；误改启动或服务配置可能影响系统启动。'
+    },
+    'sys-regedit': {
+      risk: 'high',
+      label: '高风险',
+      desc: '可修改注册表；误操作可能影响系统稳定性。',
+      hint: '打开注册表编辑器；错误修改可能影响系统稳定性。'
+    },
+    'sys-envvar': {
+      risk: 'medium',
+      label: '需谨慎',
+      desc: '影响程序查找命令与依赖；修改前请确认原有值。',
+      hint: '编辑环境变量；修改前请记录原有值，避免影响程序启动。'
+    },
+    'hw-diskmgmt': {
+      risk: 'high',
+      label: '高风险',
+      desc: '可调整分区和卷；误操作可能导致数据丢失。',
+      hint: '打开磁盘管理；调整分区或卷前请备份重要数据。'
+    },
+    'sys-rstrui': {
+      risk: 'high',
+      label: '高风险',
+      desc: '会进入恢复流程；操作前请确认已备份重要数据。',
+      hint: '进入系统还原；操作前请确认已备份重要数据。'
+    },
+    'sys-sdclt': {
+      risk: 'high',
+      label: '高风险',
+      desc: '会进入恢复流程；操作前请确认已备份重要数据。',
+      hint: '进入备份与还原；操作前请确认重要数据已备份。'
+    }
+  };
+
+  const NAME_OVERRIDES = {
+    'sys-sysdm': '系统属性（系统信息与高级设置）',
+    'sys-winupdate': 'Windows 更新（检查更新与更新历史）',
+    'hw-devmgmt': '设备管理器（查看和管理硬件设备）'
+  };
+
+  function cardMeta(item) {
+    const meta = CMD_META[item.id];
+    return meta || null;
+  }
+
+  function displayName(item) {
+    return NAME_OVERRIDES[item.id] || item.name;
+  }
 
   // 分类图标（卡片左侧色块统一走 .qc-icon 的 token 底色）
   // 审查 M20：原先每项还带 `color`（8 个离表 hex，全仓无人读）与 `grad`（8 条
@@ -39,7 +104,7 @@
     return all.filter(c => {
       if (activeCat !== '全部' && c.cat !== activeCat) return false;
       if (!kw) return true;
-      return c.name.toLowerCase().includes(kw) || c.desc.toLowerCase().includes(kw) || c.cat.includes(kw);
+      return c.name.toLowerCase().includes(kw) || displayName(c).toLowerCase().includes(kw) || c.desc.toLowerCase().includes(kw) || c.cat.includes(kw);
     });
   }
 
@@ -78,16 +143,20 @@
 
     el.innerHTML = list.map(c => {
       const meta = CAT_META[c.cat] || CAT_META['系统工具'];
+      const cmdMeta = cardMeta(c);
+      const name = displayName(c);
+      const openTip = `打开「${name}」`;
+      const openLabel = `${openTip}${cmdMeta ? `；${cmdMeta.hint}` : ''}`;
       return `
-        <div class="qc-card" data-id="${escapeHtml(c.id)}" data-tip="${window.ds.escAttr(c.cmd)}">
+        <div class="qc-card" data-id="${window.ds.escAttr(c.id)}" data-tip="${window.ds.escAttr(c.cmd)}">
           <div class="qc-icon">${catIcon(c.cat)}</div>
           <div class="qc-body">
-            <div class="qc-name">${escapeHtml(c.name)}</div>
+            <div class="qc-name">${escapeHtml(name)}${cmdMeta ? ` <span class="category-risk ${window.ds.escAttr(cmdMeta.risk)}" role="note" aria-label="${window.ds.escAttr(cmdMeta.label)}：${window.ds.escAttr(cmdMeta.desc)}" data-tip="${window.ds.escAttr(cmdMeta.desc)}">${escapeHtml(cmdMeta.label)}</span>` : ''}</div>
             <div class="qc-desc">${escapeHtml(c.desc)}</div>
           </div>
           <div class="qc-actions">
-            <button class="btn btn-secondary btn-small" data-qcopy="${escapeHtml(c.id)}" data-tip="复制命令到剪贴板">复制</button>
-            <button class="btn btn-primary btn-small" data-qrun="${escapeHtml(c.id)}" data-tip="打开「${escapeHtml(c.name)}」">打开</button>
+            <button class="btn btn-secondary btn-small" data-qcopy="${window.ds.escAttr(c.id)}" aria-label="次要操作：复制「${window.ds.escAttr(name)}」的命令" data-tip="次要操作：复制命令到剪贴板">复制</button>
+            <button class="btn btn-primary btn-small" data-qrun="${window.ds.escAttr(c.id)}" aria-label="主要操作：${window.ds.escAttr(openLabel)}" data-tip="${window.ds.escAttr(openLabel)}">打开</button>
           </div>
         </div>`;
     }).join('');

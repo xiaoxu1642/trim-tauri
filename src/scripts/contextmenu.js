@@ -15,7 +15,7 @@
   let iconMap = {};        // clsid 或 reg:regPath -> dataUrl（iconKey 规则见下）
   let ctxModalCtrl = null; // v3.2.0：详情弹窗工厂 ctrl（焦点陷阱/Esc 由工厂统一管理）
   let kanbanMasonry = null; // 瀑布流布局引擎（resize 防抖 + FLIP）
-  let kanbanEngineWarned = false; // 引擎缺失只报第一次（见 renderKanban 里的 window.kanbanMasonry 守卫）
+  let kanbanEngineWarned = false; // 引擎缺失只报第一次
   let checkboxKeysBound = false; // P3-1：容器级键盘激活委托（一次性，看板每次重建）
 
   // 分类定义（顺序固定）。批次 C 起补齐三个原本「有 tab 无数据源」的分类：
@@ -354,18 +354,13 @@
       });
     });
 
-    // 瀑布流布局：重新渲染后立即放置；窗口 resize 由 attach 内部防抖 + FLIP 动画重排
-    // 注意：布局容器是每次重渲染重建的 .ctx-kanban，须用 getter 动态获取
-    // maxCols:2 —— 用户裁定「默认一行两列，最大限度展示信息」：软件组要放得下
-    // 「挂在哪些位置」这一列信息，列数一多就被挤回原来的窄条样子。
+    // 分组卡由透明承载层 + kanbanMasonry 排布：只负责位置，不添加额外容器边界。
     if (!kanbanMasonry) {
       if (window.kanbanMasonry) {
         kanbanMasonry = window.kanbanMasonry.attach(
-          () => container.querySelector('.ctx-kanban'), '.ctx-col', { gap: 14, minCard: 380, maxCols: 2 }
+          () => container.querySelector('.ctx-kanban'), '.ctx-col', { gap: 18, minCard: 380, maxCols: 2 }
         );
       } else if (!kanbanEngineWarned) {
-        // 静默跳过 = .ctx-col 全叠在原点，症状看起来像 GPU 花屏（2026-10-14 就是这么绕了一大圈）。
-        // 引擎没就位必须落日志，不许再靠人目检发现。
         kanbanEngineWarned = true;
         window.app?.log('error', '看板布局引擎未就位：xtable.js 未随「右键菜单管理」页注入，列会全部叠在一起');
       }
@@ -400,6 +395,10 @@
       const start = offset;
       offset += part.length;
       const disabledCount = part.filter(it => it.enabled === false).length;
+      const enabledCount = part.length - disabledCount;
+      const scopeText = parts.length > 1 ? `本栏已启用 ${enabledCount}/${part.length}` : `已启用 ${enabledCount}/${part.length}`;
+      const selectedText = `${scopeText}（勾选代表当前状态）`;
+      const selectAllScope = `该软件全部 ${total} 项`;
       const whereCount = new Set(part.map(it => it.category || '其他')).size;
       const bits = [`${part.length} 项`, `${whereCount} 个位置`];
       if (disabledCount > 0) bits.push(`${disabledCount} 已禁用`);
@@ -407,12 +406,15 @@
       return `
       <div class="ctx-col" data-owner="${escapeHtml(g.label)}">
         <div class="ctx-col-head">
-          <span class="ctx-col-title">${icon}${escapeHtml(g.label)}${headRisk ? ` ${headRisk}` : ''}</span>
-          <span class="ctx-col-count">${escapeHtml(bits.join(' · '))}${note ? ` · ${escapeHtml(note)}` : ''}</span>
+          <div class="ctx-col-title">${icon}${escapeHtml(g.label)}${headRisk ? ` ${headRisk}` : ''}</div>
+          <div class="ctx-col-subhead">
+            <span class="ctx-col-count">${escapeHtml(bits.join(' · '))}</span>
+            <span class="ctx-col-meta">${escapeHtml(selectedText)}${note ? ` · ${escapeHtml(note)}` : ''}</span>
+          </div>
         </div>
         <div class="ctx-col-body">${part.map((item, i) => renderKanbanRow(item, start + i + 1, { hideRisk: uniform })).join('')}</div>
         <div class="ctx-col-foot">
-          <button type="button" class="ctx-col-selectall" data-owner-selectall="${escapeHtml(g.label)}" data-tip="批量启用/禁用该软件的全部 ${total} 个菜单项（切换可逆）">全选本软件</button>
+          <button type="button" class="ctx-col-selectall" data-owner-selectall="${escapeHtml(g.label)}" data-tip="按当前状态批量反转${escapeHtml(selectAllScope)}；不可操作项自动跳过（切换可逆）">全选本软件</button>
         </div>
       </div>`;
     }).join('');
@@ -868,7 +870,7 @@
       if (demoMode) {
         window.app?.toast('warning', `当前为演示数据，未读写系统（${items.length} 项，属于 ${ownerCount} 个软件）`);
       } else {
-        window.app?.toast('success', `扫描完成，共发现 ${items.length} 项，属于 ${ownerCount} 个软件（含未识别组）`);
+        window.app?.toast('success', `右键菜单扫描完成，共发现 ${items.length} 项，属于 ${ownerCount} 个软件（含未识别组）`);
       }
     } catch (e) {
       window.app?.toast('error', '扫描失败: ' + e.message);

@@ -89,6 +89,21 @@
   --bg-input: #12151C;
   /* 表面阶梯别名（v2.0 命名，与上方等价）：只留在用的这一档，新增消费方再补档 */
   --bg-surface-2: var(--bg-elevated);
+  --seg-border: var(--border-strong);
+  /* 独立浮层 / 信息条表面（白色容器材质优化 v1）：壁纸态容器透明化不得改这两档，
+     否则任务中断点与短时反馈会被背景文字穿透。面积最大的白色容器才吃壁纸态 token。 */
+  --bg-modal: var(--bg-card);
+  --bg-modal-header: var(--bg-elevated);
+  --bg-toast: var(--bg-elevated);
+  --toast-surface-solid: #1B1F29;
+  /* 第一阶段语义表面层：自绘弹窗与原生子窗统一走同一组近实色底，
+     避免各页面继续直接消费 --bg-card 造成白实色孤岛。 */
+  --surface-dialog-bg: var(--bg-card);
+  --surface-dialog-header: var(--bg-card-hover);
+  --surface-l1-bg: var(--bg-card);
+  --surface-l2-bg: var(--bg-card-hover);
+  --surface-l1-line: var(--border-default);
+  --surface-l2-line: var(--border-strong);
   /* 开关/复选圆钮前景（v3.0 收敛：原 3 处写死 white/#ffffff） */
   --knob-bg: #ffffff;
 
@@ -205,6 +220,17 @@
   --bg-elevated: #FFFFFF;
   --bg-input: #F2F0F8;
   --bg-surface-2: var(--bg-elevated);
+  --seg-border: var(--border-strong);
+  --bg-modal: var(--bg-card);
+  --bg-modal-header: var(--bg-card-hover);
+  --bg-toast: var(--bg-card);
+  --toast-surface-solid: #FFFFFF;
+  --surface-dialog-bg: var(--bg-card);
+  --surface-dialog-header: var(--bg-card-hover);
+  --surface-l1-bg: var(--bg-card);
+  --surface-l2-bg: var(--bg-card-hover);
+  --surface-l1-line: var(--border-default);
+  --surface-l2-line: var(--border-strong);
 
   --fg-primary: #292536;
   --fg-secondary: #5C5770;
@@ -544,7 +570,7 @@ body {
   transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
 }
 .sidebar-toggle-btn:hover {
-  background: var(--bg-card-hover);
+  background: var(--surface-l2-bg);
   color: var(--fg-primary);
 }
 .sidebar-toggle-btn .toggle-icon-expand {
@@ -666,7 +692,7 @@ body {
   transition: background 160ms var(--ease-standard), color 160ms var(--ease-standard);
 }
 .nav-parent-toggle:hover {
-  background: var(--bg-card-hover);
+  background: var(--surface-l2-bg);
   color: var(--fg-primary);
 }
 .nav-parent-toggle:active {
@@ -737,7 +763,7 @@ body {
   transition: background 180ms var(--ease-standard), color 180ms var(--ease-standard), transform 120ms var(--ease-standard);
 }
 .nav-subitem + .nav-subitem { margin-top: 2px; }
-.nav-subitem:hover { background: var(--bg-card-hover); color: var(--fg-primary); }
+.nav-subitem:hover { background: var(--surface-l2-bg); color: var(--fg-primary); }
 .nav-subdot {
   position: absolute;
   left: 15px;
@@ -761,7 +787,7 @@ body {
   transform: scale(1.25);
 }
 .nav-subitem:active { transform: scale(0.98); }
-.nav-subitem.active { background: var(--bg-card-hover); color: var(--fg-primary); font-weight: calc(600 * var(--font-weight-scale, 1)); }
+.nav-subitem.active { background: var(--surface-l2-bg); color: var(--fg-primary); font-weight: calc(600 * var(--font-weight-scale, 1)); }
 
 .sidebar-footer {
   margin-top: auto;
@@ -850,8 +876,7 @@ body {
   gap: 6px;
   padding: 0 14px;
   border: 1px solid transparent;
-  /* 表面实色化（方案 v1.6 §5.3）：操作面常态底走实色 --bg-elevated（自身可读，
-     不依赖任何叠加层），与 hover 同一套 token、只差一档；floor/tint 渐变栈已退役。 */
+  /* 操作面常态底保持门禁认可的实色 token；壁纸态由 L2 宿主规则统一覆盖。 */
   background: var(--bg-elevated);
   color: var(--fg-primary);
   font-family: inherit;
@@ -863,7 +888,7 @@ body {
 }
 .btn:hover:not(:disabled) {
   background: var(--bg-card-hover);
-  border-color: var(--border-strong);
+  border-color: var(--surface-l2-line);
 }
 .btn:disabled {
   opacity: 0.4;
@@ -911,10 +936,10 @@ body {
    它原本在中段 / 亮色段 / 材质段各写一份常态底（三份互相覆盖、净结果取决于源码顺序），
    任何一处增删行都会翻转结论——这就是「每次遇到就开新分支」的结构性原因。 */
 .btn-secondary {
-  border-color: var(--border-default);
+  border-color: var(--surface-l1-line);
 }
 .btn-secondary:hover:not(:disabled) {
-  border-color: var(--border-strong);
+  border-color: var(--surface-l2-line);
 }
 
 /* 审查 E3-1：实底危险按钮的前景走 --danger-text（两主题各自的对比达标档），
@@ -1128,7 +1153,7 @@ body {
   align-items: center;
   gap: 8px;
   padding: 12px 16px;
-  background: var(--bg-elevated);
+  background: var(--surface-l2-bg);
   font-weight: calc(600 * var(--font-weight-scale, 1));
   font-size: var(--fs-secondary);
   cursor: pointer;
@@ -1197,7 +1222,7 @@ body {
   align-items: center;
   gap: 10px;
   padding: 10px 16px 10px 28px;
-  background: var(--bg-elevated);
+  background: var(--surface-l2-bg);
   font-size: var(--fs-secondary);
   font-weight: calc(600 * var(--font-weight-scale, 1));
   cursor: pointer;
@@ -1330,10 +1355,13 @@ body {
   display: flex;
   gap: 4px;
   margin-bottom: 16px;
+  /* 分段轨道跟随宿主表面：普通主题是白面，壁纸态由 .filter-tabs 一级规则把
+     --bg-card 改成一级玻璃；这里只做变量转接，不自己写死颜色。 */
+  --bg-input: var(--bg-card);
   /* 口径 v2·B 类（宿主承载面）：轨道尺寸贴合内容、自带 padding 与描边，底打在**轨道**上、
      子项常态保持 transparent —— 若给每个 .filter-tab 都铺底，.lg-thumb 弹簧滑块
      （z-index:0，子项 z-index:1）会被自己身后那层底盖掉，分段选中指示就没了。
-     表面实色化（方案 v1.6 §5.3）：轨道走实色 --bg-input，选中胶囊由 .lg-thumb/.active 承担。 */
+      表面实色化（方案 v1.6 §5.3）：轨道走实色 --bg-input，选中胶囊由 .lg-thumb/.active 承担。 */
   background: var(--bg-input);
   padding: 4px;
   border: 1px solid var(--border-default);
@@ -1387,11 +1415,11 @@ body {
   left: 0;
   z-index: 0;
   pointer-events: none;
-  /* 表面实色化（方案 v1.6 §5.3）：滑块改实底胶囊（与轨道 --bg-input 拉开一档），
-     floor/tint 渐变栈退役；弹簧位移/挤压与 off 档隐藏逻辑保留（liquid-glass.js）。 */
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-strong);
-  box-shadow: var(--shadow-card);
+  /* 选中滑块是一枚独立浮层：不继承二级小容器的半透明变量，直接由宿主级
+     --bg-modal 供色；壁纸态由下方规则切到二级玻璃 token。 */
+  background: var(--bg-modal);
+  border: 1px solid var(--seg-border);
+  box-shadow: 0 1px 3px rgba(41, 37, 54, 0.10);
   /* v3.2.0（侧边岛滑块）：双轴 translate——横向 tab 栏只用 X，侧边栏纵向滑块走 Y（GPU 加速） */
   transform: translate(var(--lg-x, 0px), var(--lg-y, 0px));
   /* v3.5.1 动效审查 M1：过冲曲线 cubic-bezier(0.34,1.56,0.64,1) 是刻意的
@@ -1530,7 +1558,7 @@ body.lg-reduce-motion .lg-thumb {
   align-items: center;
   gap: 10px;
   padding: 10px 16px;
-  background: var(--bg-elevated);
+  background: var(--surface-l2-bg);
   font-size: var(--fs-secondary);
   font-weight: calc(600 * var(--font-weight-scale, 1));
   cursor: pointer;
@@ -1777,7 +1805,7 @@ body.lg-reduce-motion .lg-thumb {
   padding: 4px 8px;
   font-size: var(--fs-meta);
   color: var(--fg-primary);
-  background: var(--bg-card);
+  background: var(--surface-l2-bg);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-btn);
 }
@@ -1845,7 +1873,7 @@ body.lg-reduce-motion .lg-thumb {
   .about-row { align-items: flex-start; flex-direction: column; gap: 10px; }
 }
 .btn-small { min-height: 30px; padding: 6px 10px; font-size: var(--fs-meta); }
-.benchmark-panel, .benchmark-result-group { background: var(--bg-card); border: 1px solid var(--border-default); border-radius: var(--radius-medium); padding: 18px; }
+.benchmark-panel, .benchmark-result-group { background: var(--surface-l1-bg); border: 1px solid var(--surface-l1-line); border-radius: var(--radius-medium); padding: 18px; }
 .field-label { display: grid; gap: 6px; color: var(--fg-secondary); font-size: var(--fs-meta); }
 .field-input { width: 100%; min-height: 34px; padding: 7px 10px; border: 1px solid var(--border-default); border-radius: var(--radius-small); background: var(--bg-input); color: var(--fg-primary); font: inherit; transition: border-color 180ms var(--ease-standard), box-shadow 180ms var(--ease-standard), background 180ms var(--ease-standard); }
 .field-input:hover { border-color: var(--border-strong); }
@@ -1855,10 +1883,10 @@ select.field-input { cursor: pointer; appearance: auto; }
 .external-site-select .field-input { min-height: 32px; }
 .benchmark-result-group h3 { margin: 0 0 14px; font-size: var(--fs-body); }
 .benchmark-result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.benchmark-result-grid div { padding: 12px; border: 1px solid var(--border-default); border-radius: var(--radius-small); background: var(--bg-elevated); }
+.benchmark-result-grid div { padding: 12px; border: 1px solid var(--border-default); border-radius: var(--radius-small); background: var(--surface-l2-bg); }
 .benchmark-result-grid span { display: block; color: var(--fg-tertiary); font-size: calc(11px * var(--font-size-scale, 1)); margin-bottom: 5px; }
 .benchmark-result-grid strong { color: var(--fg-primary); font-size: var(--fs-section); font-variant-numeric: tabular-nums; }
-.external-test-panel { margin-top: 16px; background: var(--bg-card); border: 1px solid var(--border-default); border-radius: var(--radius-medium); padding: 16px; }
+.external-test-panel { margin-top: 16px; background: var(--surface-l1-bg); border: 1px solid var(--surface-l1-line); border-radius: var(--radius-medium); padding: 16px; }
 .external-test-panel iframe { width: 100%; height: 560px; border: 1px solid var(--border-default); border-radius: var(--radius-small); background: var(--surface-solid); }
 
 .info-row {
@@ -2041,10 +2069,10 @@ select.field-input { cursor: pointer; appearance: auto; }
   align-items: center;
   gap: 10px;
   padding: 10px 14px;
-  background: var(--bg-elevated);
+  background: var(--bg-toast);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-medium);
-  box-shadow: var(--shadow-flyout);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
   font-size: var(--fs-secondary);
   min-width: 240px;
   max-width: 360px;
@@ -2095,7 +2123,7 @@ select.field-input { cursor: pointer; appearance: auto; }
   line-height: 1;
   transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
 }
-.toast-close:hover { background: var(--bg-card-hover); color: var(--fg-primary); }
+.toast-close:hover { background: var(--toast-surface-solid); color: var(--fg-primary); }
 
 @keyframes toastSlideIn {
   from { transform: translateY(-120%); opacity: 0; }
@@ -2254,8 +2282,7 @@ input[type="radio"]:focus-visible {
   padding: 3px 8px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-small);
-  /* 表面实色化（方案 v1.6 §5.3）：操作面实底 --bg-elevated（floor 栈退役）。 */
-  background: var(--bg-elevated);
+  background: var(--surface-l2-bg);
   color: var(--fg-secondary);
   font-size: calc(11px * var(--font-size-scale, 1));
   font-weight: calc(500 * var(--font-weight-scale, 1));
@@ -2318,7 +2345,7 @@ input[type="radio"]:focus-visible {
   margin: 6px 0;
   padding: 6px 10px;
   border-left: 3px solid var(--border-strong);
-  background: var(--bg-card);
+  background: var(--surface-l2-bg);
   border-radius: 0 var(--radius-small) var(--radius-small) 0;
   font-size: var(--fs-meta);
 }
@@ -2338,7 +2365,7 @@ input[type="radio"]:focus-visible {
 .guide-content .guide-table th {
   text-align: left;
   padding: 5px 8px;
-  background: var(--bg-card);
+  background: var(--surface-l2-bg);
   color: var(--fg-primary);
   font-weight: calc(600 * var(--font-weight-scale, 1));
   border-bottom: 1px solid var(--border-strong);
@@ -2355,7 +2382,7 @@ input[type="radio"]:focus-visible {
   font-size: calc(11px * var(--font-size-scale, 1));
   padding: 1px 5px;
   border-radius: var(--radius-badge);
-  background: var(--bg-card);
+  background: var(--surface-l2-bg);
   color: var(--accent);
 }
 
@@ -2367,7 +2394,7 @@ input[type="radio"]:focus-visible {
 .bench-history-table th {
   position: sticky;
   top: 0;
-  background: var(--bg-elevated);
+  background: var(--surface-l2-bg);
   text-align: left;
   padding: 8px 10px;
   color: var(--fg-primary);
@@ -2382,7 +2409,7 @@ input[type="radio"]:focus-visible {
   white-space: nowrap;
 }
 .bench-history-table tr:hover td {
-  background: var(--bg-card);
+  background: var(--surface-l2-bg);
 }
 
 .bench-history-delete {
@@ -2431,7 +2458,7 @@ input[type="radio"]:focus-visible {
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-small);
-  background: var(--bg-elevated);
+  background: var(--surface-l2-bg);
   border: 1px solid var(--border-default);
 }
 .ctx-detail-icon-wrap .ctx-item-icon,
@@ -2508,7 +2535,7 @@ input[type="radio"]:focus-visible {
   display: flex;
   align-items: stretch;
   padding: 0 8px;
-  background: var(--bg-elevated);
+  background: var(--surface-l2-bg);
   border-bottom: 1px solid var(--border-default);
   user-select: none;
   -webkit-user-select: none;
@@ -2531,7 +2558,7 @@ input[type="radio"]:focus-visible {
 .xtable-th.sortable { cursor: pointer; }
 .xtable-th.sortable:hover {
   color: var(--fg-primary);
-  background: var(--bg-card-hover);
+  background: var(--surface-l2-bg);
 }
 .xtable-th.sorted { color: var(--accent); }
 .xtable-th-label {
@@ -2585,7 +2612,7 @@ body.xtable-resizing * { cursor: col-resize !important; }
   transition: background var(--duration-fast) var(--ease-standard);
 }
 .xtable-row:last-child { border-bottom: none; }
-.xtable-row:hover { background: var(--bg-card-hover); }
+.xtable-row:hover { background: var(--surface-l2-bg); }
 
 /* 虚拟滚动（windowing）：容器限高可滚动；行高由 --vrow 统一（与 scroll 数学对齐） */
 .xtable.xtable-virtual .xtable-body {
@@ -2916,7 +2943,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   margin: 0 32px;
   display: flex;
   flex-direction: column;
-  background: var(--bg-card);
+  background-color: var(--surface-dialog-bg);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-btn);
   box-shadow: 0 20px 60px -20px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.04);
@@ -2930,6 +2957,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   justify-content: space-between;
   padding: 14px 20px;
   border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-dialog-header);
   flex-shrink: 0;
 }
 .usage-header h2 {
@@ -3028,8 +3056,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   color: var(--fg-secondary);
 }
 .markdown-body th {
-  /* v3.0 统一白容器参数（原 --bg-secondary 未定义、声明失效） */
-  background: var(--bg-card);
+  background: var(--bg-modal-header);
   color: var(--fg-primary);
   font-weight: calc(600 * var(--font-weight-scale, 1));
 }
@@ -3238,7 +3265,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   gap: 10px;
   padding: 12px 20px;
   border-top: 1px solid var(--border-subtle, var(--border-default));
-  background: transparent;
+  background: var(--surface-dialog-header);
   flex-shrink: 0;
 }
 .model-picker-spacer { flex: 1 1 auto; }
@@ -3267,7 +3294,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg-card-hover);
+  background: var(--surface-l2-bg);
   color: var(--fg-secondary);
 }
 
@@ -3343,7 +3370,7 @@ input[type="range"].fm-slider::-webkit-slider-thumb,
   margin-top: -6px;
   border-radius: 50%;
   border: 4px solid var(--accent);
-  background: var(--bg-card);
+  background: var(--surface-l2-bg);
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
   transition: transform var(--duration-fast) var(--ease-standard);
 }
@@ -3364,7 +3391,7 @@ input[type="range"].fm-slider:disabled,
   border: 1px solid var(--border-default);
   border-radius: var(--radius-medium);
   padding: 10px 12px;
-  background: var(--bg-card-hover);
+  background: var(--surface-l2-bg);
 }
 .intro-block-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .intro-block-title { font-size: var(--fs-meta); font-weight: calc(600 * var(--font-weight-scale, 1)); color: var(--fg-primary); }
@@ -3466,7 +3493,7 @@ input[type="range"].fm-slider:disabled,
   padding: 2px 8px;
   border-radius: 999px;
   font-size: calc(11px * var(--font-size-scale, 1));
-  background: var(--bg-elevated);
+  background: var(--surface-l2-bg);
   color: var(--fg-tertiary);
 }
 .model-picker-state.ok { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
@@ -3485,7 +3512,7 @@ input[type="range"].fm-slider:disabled,
   border-radius: var(--radius-medium);
   margin-bottom: 12px;
   overflow: hidden;
-  background: var(--bg-card);
+  background: var(--surface-dialog-bg);
 }
 .pw-group-ico {
   width: 32px;
@@ -3495,7 +3522,7 @@ input[type="range"].fm-slider:disabled,
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg-card-hover);
+  background: var(--surface-l2-bg);
   color: var(--fg-secondary);
   overflow: hidden;
 }
@@ -3534,7 +3561,7 @@ body.mw-window {
   justify-content: space-between;
   gap: 16px;
   padding: 14px 18px;
-  background: var(--bg-card);
+  background: var(--surface-dialog-bg);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-medium);
 }
@@ -3550,8 +3577,8 @@ body.mw-window {
   overflow-y: auto;
 }
 .mw-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border-default);
+  background: transparent;
+  border-color: transparent;
   border-radius: var(--radius-medium);
   padding: 12px 14px 14px;
 }
@@ -3562,7 +3589,7 @@ body.mw-window {
   flex-wrap: wrap;
   padding: 0 2px 10px;
   margin-bottom: 10px;
-  border-bottom: 1px solid var(--border-default);
+  border-bottom-color: var(--surface-l1-line);
 }
 .mw-card-title { font-size: var(--fs-secondary); font-weight: calc(600 * var(--font-weight-scale, 1)); color: var(--fg-primary); }
 .mw-card-desc { font-size: calc(11px * var(--font-size-scale, 1)); color: var(--fg-tertiary); }
@@ -3574,11 +3601,14 @@ body.mw-window {
 .mw-group:nth-child(4) { animation-delay: 130ms; }
 .mw-group:nth-child(5) { animation-delay: 160ms; }
 .mw-group {
-  border: 1px solid var(--border-default);
+  border: 1px solid var(--surface-l1-line);
   margin-bottom: 10px;
   overflow: hidden;
-  background: var(--bg-card);
+  background: var(--surface-l2-bg);
   animation: modalScaleIn var(--duration-base) var(--ease-emphasized) backwards;
+}
+.mw-group + .mw-group {
+  border-top-color: var(--surface-l1-line);
 }
 .mw-group:last-child { margin-bottom: 0; }
 .mw-group-head {
@@ -3599,7 +3629,7 @@ body.mw-window {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg-card-hover);
+  background: var(--surface-l2-bg);
   color: var(--fg-secondary);
 }
 .mw-group-title { font-size: var(--fs-secondary); font-weight: calc(600 * var(--font-weight-scale, 1)); color: var(--fg-primary); }
@@ -3659,7 +3689,7 @@ body.mw-window {
   padding: 2px 8px;
   border-radius: 999px;
   font-size: calc(11px * var(--font-size-scale, 1));
-  background: var(--bg-elevated);
+  background: var(--surface-l2-bg);
   color: var(--fg-tertiary);
 }
 .mw-state.ok { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
@@ -3668,7 +3698,7 @@ body.mw-window {
   margin-top: 8px;
   padding: 8px 10px;
   border-radius: var(--radius-small);
-  background: var(--bg-elevated);
+  background: var(--surface-l2-bg);
   font-size: calc(11px * var(--font-size-scale, 1));
   line-height: 1.6;
   color: var(--fg-secondary);
@@ -3678,12 +3708,12 @@ body.mw-window {
 .mw-footer {
   flex-shrink: 0;
   padding: 12px 18px;
-  border: 1px solid var(--border-default);
+  border: 1px solid var(--surface-l1-line);
   border-radius: var(--radius-medium);
   display: flex;
   align-items: center;
   gap: 10px;
-  background: var(--bg-card);
+  background: var(--surface-l2-bg);
 }
 .mw-footer .mw-foot-hint { margin-right: auto; font-size: calc(11px * var(--font-size-scale, 1)); color: var(--fg-tertiary); }
 
@@ -3698,7 +3728,7 @@ body.mw-window {
   padding: 12px 12px 6px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-medium);
-  background: var(--bg-card);
+  background: var(--surface-l1-bg);
 }
 .rt-sr-panel {
   border: 1px solid var(--border-default);
@@ -3829,7 +3859,7 @@ body.mw-window {
   background: color-mix(in srgb, var(--accent) 6%, transparent);
   flex-shrink: 0;
 }
-.mem-child-row { background: var(--bg-card-hover); }
+.mem-child-row { background: var(--surface-l2-bg); }
 .mem-child-row .mem-tree-child {
   padding-left: 22px;
   position: relative;
@@ -3888,14 +3918,15 @@ body.mw-window {
   flex-direction: column;
   background: var(--bg-card);
   border: 1px solid var(--border-default);
-  border-top: 3px solid var(--c, var(--accent));
+  border-top: 3px solid var(--c, var(--border-accent));
+  isolation: isolate;
   border-radius: var(--radius-medium);
   box-shadow: var(--shadow-card);
   transition: box-shadow var(--duration-slow) var(--ease-standard), border-color var(--duration-slow) var(--ease-standard);
 }
 .opt-col:hover,
 .ctx-col:hover {
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+  box-shadow: var(--shadow-card), 0 4px 14px rgba(0, 0, 0, 0.14);
 }
 .ctx-col-icon { font-size: var(--fs-body); }
 /* 按软件分组后组头放的是该软件的真实图标（提取自它的 DLL/EXE），
@@ -3908,11 +3939,11 @@ img.ctx-col-icon {
 }
 .opt-col-count,
 .ctx-col-count {
-  margin-left: auto;
+  margin-left: 0;
   flex: 0 0 auto;
   font-size: calc(11px * var(--font-size-scale, 1));
   color: var(--fg-tertiary);
-  background: var(--bg-card-hover);
+  background: var(--surface-l2-bg);
   border: 1px solid var(--border-subtle);
   padding: 2px 9px;
   border-radius: var(--radius-btn);
@@ -4003,9 +4034,7 @@ img.ctx-col-icon {
   /* 审查 M-13（2026-10-03 L4）：--accent-text 是 accent 实底专用墨色，配 -soft 染底
      合成后暗 1.13/亮 1.17:1 两主题不可见；--accent 在同底上暗 5.14/亮 4.60:1 达标 */
   color: var(--accent);
-  /* 表面实色化（方案 v1.6 §5.3）：实底 --bg-elevated（floor 栈退役），
-     accent 前景对 bg-elevated 现算仍过 AA（方案 §4.1）。 */
-  background: var(--bg-elevated);
+  background: var(--surface-l2-bg);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-btn);
   cursor: pointer;
@@ -4091,8 +4120,7 @@ img.ctx-col-icon {
   padding: 3px 12px;
   border-radius: var(--radius-btn);
   border: 1px solid var(--border-strong);
-  /* 表面实色化（方案 v1.6 §5.3）：列头「全选」是独立命中区，实底 --bg-elevated。 */
-  background: var(--bg-elevated);
+  background: var(--surface-l2-bg);
   color: var(--fg-secondary);
   cursor: pointer;
   transition: color var(--duration-slow) var(--ease-standard), border-color var(--duration-slow) var(--ease-standard), background-color var(--duration-slow) var(--ease-standard);
@@ -4149,7 +4177,7 @@ img.ctx-col-icon {
   border-radius: 999px; /* 状态胶囊例外（AGENTS §2 允许） */
   white-space: nowrap;
   color: var(--fg-tertiary);
-  background: var(--bg-card-hover);
+  background: var(--surface-l2-bg);
   border: 1px solid var(--border-default);
 }
 .rt-badge.ok { color: var(--success); background: color-mix(in srgb, var(--success) 10%, transparent); border-color: color-mix(in srgb, var(--success) 35%, transparent); }
@@ -4190,7 +4218,7 @@ img.ctx-col-icon {
   padding: 8px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-small);
-  background: var(--bg-card-hover);
+  background: var(--surface-l2-bg);
 }
 .bg-current img {
   width: 64px;
@@ -4371,12 +4399,12 @@ body.theme-light .path-blocked-tag { background: rgba(var(--warning-rgb), 0.12);
      这里每个 tab 自带描边与圆角、本来就是独立胶囊，所以底只能打在 pill 本体上
      （表面实色化：实底 --bg-elevated，floor 栈退役）。 */
   background: var(--bg-elevated);
-  border: 1px solid var(--border-default);
+  border: 1px solid var(--surface-l1-line);
   border-radius: var(--radius-btn);
   cursor: pointer;
   transition: color 180ms var(--ease-standard), border-color 180ms var(--ease-standard), background-color 180ms var(--ease-standard);
 }
-.maint-tab:hover { border-color: var(--border-strong); color: var(--fg-primary); }
+.maint-tab:hover { border-color: var(--surface-l2-line); color: var(--fg-primary); }
 .maint-tab.active {
   color: var(--accent);
   border-color: var(--accent);
@@ -4657,7 +4685,7 @@ body.theme-light .table-card,
 body.theme-light .settings-section,
 body.theme-light .appearance-card,
 body.theme-light .empty-state { background: var(--bg-card); color: var(--fg-primary); }
-body.theme-light .summary-card:hover { background: var(--bg-card-hover); }
+body.theme-light .summary-card:hover { background: var(--surface-l2-bg); }
 
 /* ==================== 壁纸态：液态玻璃（透明 + 边缘高光，壁纸清晰不被遮挡） ====================
    小旭裁定：毛玻璃的 blur 把壁纸虚化了，不要。参考液态玻璃观感——容器**透明**，
@@ -4667,51 +4695,225 @@ body.theme-light .summary-card:hover { background: var(--bg-card-hover); }
 body[data-preset-bg],
 body.bg-image-on {
   /* —— 可调参数 —— */
-  --glass-l1-tint: rgba(255, 255, 255, 0.10); /* 一级（大容器）染色：越淡越透 */
-  --glass-l2-tint: rgba(255, 255, 255, 0.18); /* 二级（嵌套容器）染色 */
-  --glass-edge: rgba(255, 255, 255, 0.55);    /* 边缘高光强度（液态玻璃的"厚度"） */
+  --glass-l1-tint: rgba(255, 255, 255, 0.34); /* 一级（大容器）染色：正文地板 0.28 */
+  --glass-l2-tint: rgba(255, 255, 255, 0.50); /* 二级（嵌套容器）染色：正文地板 0.42 */
+  --surface-l1-bg: var(--glass-l1-tint);
+  --surface-l2-bg: var(--glass-l2-tint);
+  --surface-l1-line: var(--border-default);
+  --surface-l2-line: var(--border-strong);
+  --surface-dialog-bg: var(--glass-l1-tint);
+  --surface-dialog-header: var(--glass-l2-tint);
+  --glass-edge: rgba(255, 255, 255, 0.65);    /* 边缘高光强度（液态玻璃的"厚度"） */
   --glass-edge-dark: rgba(255, 255, 255, 0.10); /* 暗色档边缘高光 */
 }
+
+/* 壁纸态弹窗遮罩必须让壁纸层透出来：只留极淡压暗，不再用 --bg-app 把整窗糊成纯色。 */
+body[data-preset-bg] .usage-backdrop,
+body.bg-image-on .usage-backdrop {
+  background: transparent;
+}
+
+/* 弹窗本体复用当前壁纸层图案，按 L1/L2 叠加，既显示壁纸又保持内容可读。 */
+body[data-preset-bg] .usage-modal,
+body.bg-image-on .usage-modal {
+  background-image: var(--dialog-wallpaper-image, var(--app-bg-image, none));
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+body[data-preset-bg="wp-winter"] { --dialog-wallpaper-image: linear-gradient(180deg, rgba(247,248,251,.12), rgba(247,248,251,.28)), url('../assets/bg/wp-winter.jpg'); }
+body[data-preset-bg="wp-gaming"] { --dialog-wallpaper-image: linear-gradient(180deg, rgba(247,248,251,.12), rgba(247,248,251,.30)), url('../assets/bg/wp-gaming.jpg'); }
+body[data-preset-bg="wp-anime"] { --dialog-wallpaper-image: linear-gradient(180deg, rgba(247,248,251,.12), rgba(247,248,251,.28)), url('../assets/bg/wp-anime.jpg'); }
+body[data-preset-bg="wp-doll"] { --dialog-wallpaper-image: linear-gradient(180deg, rgba(247,248,251,.12), rgba(247,248,251,.30)), url('../assets/bg/wp-doll.jpg'); }
 body.theme-dark[data-preset-bg],
 body.theme-dark.bg-image-on {
-  --glass-l1-tint: rgba(15, 17, 21, 0.18);
-  --glass-l2-tint: rgba(15, 17, 21, 0.28);
+  --glass-l1-tint: rgba(15, 17, 21, 0.48);
+  --glass-l2-tint: rgba(15, 17, 21, 0.62);
+  --surface-l1-bg: var(--glass-l1-tint);
+  --surface-l2-bg: var(--glass-l2-tint);
+  --surface-l1-line: var(--border-default);
+  --surface-l2-line: var(--border-strong);
+  --surface-dialog-bg: var(--glass-l1-tint);
+  --surface-dialog-header: var(--glass-l2-tint);
   --glass-edge: var(--glass-edge-dark);
 }
 /* 一级：大容器。透明染色 + 边缘高光（无 blur，壁纸清晰）。 */
 body[data-preset-bg] :is(.settings-section, .summary-card, .overview-card, .card,
-  .table-card, .appearance-card, .progress-section, .category-group, .mem-panel,
-  .realtime-chart-panel, .rt-sr-panel, .external-test-panel, .opt-col, .ctx-col,
-  .nara-card, .peri-card, .pw-group, .mw-card, .usage-modal, .ctx-detail-modal,
-  .benchmark-panel, .benchmark-result-group, .maint-output, .sidebar),
+  .table-card, .appearance-card, .progress-section, .category-group,
+  .realtime-chart-panel, .rt-sr-panel, .rt-intro-card, .rt-radar-wrap, .rt-item,
+  .external-test-panel, .opt-col, .ctx-col,
+  .syspanel-card, .maint-batchbar, .startup-defend-bar, .backup-purge-bar,
+  .nara-card, .peri-card, .pw-group, .mw-card,
+  .usage-modal, .ctx-detail-modal,
+  .benchmark-panel, .benchmark-result-group, .maint-output, .sidebar, .filter-tabs),
 body.bg-image-on :is(.settings-section, .summary-card, .overview-card, .card,
-  .table-card, .appearance-card, .progress-section, .category-group, .mem-panel,
-  .realtime-chart-panel, .rt-sr-panel, .external-test-panel, .opt-col, .ctx-col,
-  .nara-card, .peri-card, .pw-group, .mw-card, .usage-modal, .ctx-detail-modal,
-  .benchmark-panel, .benchmark-result-group, .maint-output, .sidebar) {
-  --bg-card: var(--glass-l1-tint);
-  --bg-card-hover: var(--glass-l1-tint);
-  --bg-elevated: var(--glass-l1-tint);
-  --bg-sidebar: var(--glass-l1-tint);
+  .table-card, .appearance-card, .progress-section, .category-group,
+  .realtime-chart-panel, .rt-sr-panel, .rt-intro-card, .rt-radar-wrap, .rt-item,
+  .external-test-panel, .opt-col, .ctx-col,
+  .syspanel-card, .maint-batchbar, .startup-defend-bar, .backup-purge-bar,
+  .nara-card, .peri-card, .pw-group, .mw-card,
+  .usage-modal, .ctx-detail-modal,
+  .benchmark-panel, .benchmark-result-group, .maint-output, .sidebar, .filter-tabs) {
+  --bg-card: var(--surface-l1-bg);
+  --bg-card-hover: var(--surface-l1-bg);
+  --bg-elevated: var(--surface-l1-bg);
+  --bg-sidebar: var(--surface-l1-bg);
   box-shadow: inset 0 1px 0 var(--glass-edge);
 }
+body[data-preset-bg] .mem-panel,
+body.bg-image-on .mem-panel {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  padding-left: 0;
+  padding-right: 0;
+}
+body[data-preset-bg] :is(.opt-col, .ctx-col, .syspanel-card),
+body.bg-image-on :is(.opt-col, .ctx-col, .syspanel-card) {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-island), inset 0 1px 0 var(--glass-edge);
+}
+
+/* Windows 设置页：一级容器只提供结构，不提供底色和边界；二级内容贴到容器边界上限。 */
+body[data-preset-bg] #page-windows-settings > .syspanel-card,
+body.bg-image-on #page-windows-settings > .syspanel-card {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+body[data-preset-bg] #page-windows-settings > .syspanel-card > .syspanel-card-body,
+body.bg-image-on #page-windows-settings > .syspanel-card > .syspanel-card-body {
+  margin-left: -16px;
+  margin-right: -16px;
+  width: calc(100% + 32px);
+}
+
+/* 分区分隔线：只给后两个一级容器显示上边框，保持第一项顶部干净。 */
+body[data-preset-bg] #page-windows-settings > .syspanel-card + .syspanel-card,
+body.bg-image-on #page-windows-settings > .syspanel-card + .syspanel-card {
+  border-top-color: var(--surface-l1-line);
+  border-top-style: solid;
+  border-top-width: 1px;
+}
 /* 二级：嵌套小容器。略浓染色 + 边缘高光（无 blur）。 */
-body[data-preset-bg] :is(.settings-entry-card, .process-entry-card, .row-card,
+body[data-preset-bg] :is(.settings-entry-card, .process-entry-card, .row-card, .qc-card, .syspanel-pf-table th,
   .maint-card, .startup-item, .device-info-row, .restore-item, .un-app-card,
-  .finder-group-header, .btn, .field-input, .filter-tab, .maint-tab, .nav-item,
+  .finder-group-header, .btn, .field-input, .maint-tab, .nav-item,
   .nav-submenu.expanded, .drive-picker .drive-chip, .syspanel-power-tile,
-  .lg-thumb, .ds-tooltip, .ds-menu),
-body.bg-image-on :is(.settings-entry-card, .process-entry-card, .row-card,
+  .ds-tooltip, .ds-menu),
+body.bg-image-on :is(.settings-entry-card, .process-entry-card, .row-card, .qc-card, .syspanel-pf-table th,
   .maint-card, .startup-item, .device-info-row, .restore-item, .un-app-card,
-  .finder-group-header, .btn, .field-input, .filter-tab, .maint-tab, .nav-item,
+  .finder-group-header, .btn, .field-input, .maint-tab, .nav-item,
   .nav-submenu.expanded, .drive-picker .drive-chip, .syspanel-power-tile,
-  .lg-thumb, .ds-tooltip, .ds-menu) {
-  --bg-card: var(--glass-l2-tint);
-  --bg-card-hover: var(--glass-l2-tint);
-  --bg-elevated: var(--glass-l2-tint);
-  --bg-input: var(--glass-l2-tint);
-  --bg-hover: var(--glass-l2-tint);
+  .ds-tooltip, .ds-menu) {
+  --bg-card: var(--surface-l2-bg);
+  --bg-card-hover: var(--surface-l2-bg);
+  --bg-elevated: var(--surface-l2-bg);
+  --bg-input: var(--surface-l2-bg);
+  --bg-hover: var(--surface-l2-bg);
   box-shadow: inset 0 1px 0 var(--glass-edge);
+}
+body[data-preset-bg] .filter-tabs,
+body.bg-image-on .filter-tabs {
+  --seg-border: var(--surface-l2-line);
+}
+
+/* 普通主题滑块是白面二级；壁纸态才由下方规则切成二级玻璃。 */
+body:not([data-preset-bg]):not(.bg-image-on) .lg-thumb {
+  --bg-card-hover: var(--bg-modal);
+  border-color: var(--seg-border);
+  box-shadow: 0 1px 3px rgba(41, 37, 54, 0.10);
+}
+
+/* 滑块是分段栏里的二级表面：必须比一级轨道更实，不能跟 .filter-tab 共用二级局部变量后又
+   被全局透明 token 叠出紫调；这里直接指定二级玻璃 token 与边缘高光。 */
+body[data-preset-bg] .lg-thumb,
+body.bg-image-on .lg-thumb {
+  background: var(--glass-l2-tint);
+  --seg-border: var(--border-strong);
+  border-color: var(--seg-border);
+  box-shadow: 0 1px 3px rgba(41, 37, 54, 0.10);
+}
+
+/* 滑块模式下选中态只能由 .lg-thumb 画一次：标签自身若再吃壁纸态
+   --bg-elevated / inset 高光，就是半透明白叠实白再叠轨道，表现为偏紫。 */
+body:not(.lg-mode-off) .filter-tabs.lg-bar .filter-tab {
+  box-shadow: none;
+}
+body:not(.lg-mode-off) .filter-tabs.lg-bar .filter-tab.active {
+  background: transparent;
+  box-shadow: none;
+}
+
+/* 自绘弹窗跟随壁纸态：本体一级玻璃、头尾二级玻璃；非壁纸态保持近实色。 */
+
+body[data-preset-bg] .usage-modal,
+body[data-preset-bg] .ctx-detail-modal,
+body.bg-image-on .usage-modal,
+body.bg-image-on .ctx-detail-modal,
+body[data-preset-bg] .ctx-detail-modal :is(.usage-header, .usage-footer),
+body.bg-image-on .ctx-detail-modal :is(.usage-header, .usage-footer) {
+  --bg-card: var(--surface-dialog-bg);
+  --bg-card-hover: var(--surface-dialog-bg);
+  --bg-elevated: var(--surface-dialog-header);
+  --bg-input: var(--surface-dialog-bg);
+  --bg-hover: var(--surface-dialog-bg);
+  background-color: var(--surface-dialog-bg);
+}
+body[data-preset-bg] .usage-modal :is(.usage-header, .usage-footer),
+body.bg-image-on .usage-modal :is(.usage-header, .usage-footer) {
+  --bg-card: var(--surface-dialog-header);
+  --bg-card-hover: var(--surface-dialog-header);
+  --bg-elevated: var(--surface-dialog-header);
+  --bg-input: var(--surface-dialog-header);
+  --bg-hover: var(--surface-dialog-header);
+  background-color: var(--surface-dialog-header);
+}
+body[data-preset-bg] .usage-modal :is(.card, .settings-entry-card, .process-entry-card, .row-card, .model-picker-item, .field-input),
+body.bg-image-on .usage-modal :is(.card, .settings-entry-card, .process-entry-card, .row-card, .model-picker-item, .field-input) {
+  --bg-card: var(--surface-dialog-header);
+  --bg-card-hover: var(--surface-dialog-header);
+  --bg-elevated: var(--surface-dialog-header);
+  --bg-input: var(--surface-dialog-header);
+  --bg-hover: var(--surface-dialog-header);
+}
+
+/* Rust 原生弹窗：壁纸态也跟随同一套 L1/L2 语义表面，不再强制实色孤岛。 */
+body.mw-window {
+  background: var(--bg-app);
+}
+body[data-preset-bg] :is(.pw-group, .pw-topbar, .mw-card, .mw-group, .mw-footer),
+body.bg-image-on :is(.pw-group, .pw-topbar, .mw-card, .mw-group, .mw-footer) {
+  --bg-card: var(--surface-l1-bg);
+  --bg-card-hover: var(--surface-l2-bg);
+  --bg-elevated: var(--surface-l2-bg);
+  --bg-hover: var(--surface-l2-bg);
+  box-shadow: inset 0 1px 0 var(--glass-edge);
+}
+body[data-preset-bg] .field-input,
+body.bg-image-on .field-input,
+body[data-preset-bg] select,
+body.bg-image-on select,
+body[data-preset-bg] .input-style,
+body.bg-image-on .input-style,
+body[data-preset-bg] .pw-group .field-input,
+body[data-preset-bg] .mw-card .field-input,
+body[data-preset-bg] .pw-topbar .field-input,
+body.bg-image-on .pw-group .field-input,
+body.bg-image-on .mw-card .field-input,
+body.bg-image-on .pw-topbar .field-input {
+  --bg-input: var(--surface-l2-bg);
+  border-color: var(--surface-l1-line);
+}
+
+/* info 信息是短时反馈：近实色高对比，不做玻璃。 */
+body[data-preset-bg] .toast,
+body.bg-image-on .toast {
+  --bg-elevated: var(--toast-surface-solid);
+  --bg-card: var(--toast-surface-solid);
+  background: var(--toast-surface-solid);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
 }
 /* 语义实底按钮（primary/accent）透明化，不参与染色 */
 body[data-preset-bg] .btn-primary,
@@ -4776,9 +4978,9 @@ body.bg-image-on .main-content {
 }
 .input-style {
   /* 审查 v2-L6：--bg-elev / --border-soft 全仓无定义（前者疑为 --bg-elevated 写漏后缀），
-     一直恒吃 fallback 字面值。改指真源：输入框与 .field-input 同口径（--bg-input + --border-default）。
-     观感变化点：底色由 rgba(255,255,255,.85) 改为随主题的 --bg-input（浅色下更透、深色下不再是白块）。 */
-  background: var(--bg-input);
+     一直恒吃 fallback 字面值。改指真源：输入框与容器白面同口径（--bg-modal + --border-default），
+     避免浅紫 --bg-input 在大段白容器里形成孤岛色块。 */
+  background: var(--bg-modal);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-btn);
   padding: 6px 10px;
@@ -4879,8 +5081,7 @@ body.bg-image-on .main-content {
   cursor: pointer;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-small);
-  /* 表面实色化（方案 v1.6 §5.3）：树图格子是绝对定位在图上的独立命中区，实底 --bg-elevated。 */
-  background: var(--bg-elevated);
+  background: var(--surface-l2-bg);
   color: var(--fg-primary);
   font-size: calc(12px * var(--font-size-scale, 1));
   line-height: 1.25;
@@ -5623,7 +5824,7 @@ body.bg-image-on .layout {
 .upd-notes code {
   padding: 1px 5px;
   border-radius: var(--radius-badge);
-  background: var(--bg-card-hover);
+  background: var(--surface-l2-bg);
   color: var(--fg-primary);
   font-family: var(--font-mono);
   font-size: calc(12.5px * var(--font-size-scale, 1));
@@ -5633,7 +5834,7 @@ body.bg-image-on .layout {
   padding: 10px 12px;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-small);
-  background: var(--bg-card);
+  background: var(--surface-l2-bg);
   overflow-x: auto;
 }
 .upd-notes pre code { padding: 0; background: none; }
@@ -5644,7 +5845,7 @@ body.bg-image-on .layout {
 .upd-notes table { width: 100%; margin: 10px 0; border-collapse: collapse; font-size: var(--fs-secondary); }
 .upd-notes th,
 .upd-notes td { padding: 5px 8px; border: 1px solid var(--border-default); text-align: left; }
-.upd-notes th { background: var(--bg-card-hover); color: var(--fg-primary); font-weight: calc(600 * var(--font-weight-scale, 1)); }
+.upd-notes th { background: var(--surface-l2-bg); color: var(--fg-primary); font-weight: calc(600 * var(--font-weight-scale, 1)); }
 /* v3.2.0（列表项卡片样式统一）：检查项列表容器样式已随首页「体检结论」区块退役（2026-10-12） */
 
 /* 优化项详情弹窗：预期效果说明（P2-7）——v3.2.0 迁移为 .opt-detail-effect（见优化中心段） */
@@ -5921,7 +6122,7 @@ body.bg-image-on .titlebar {
 .rs-detail-verdict {
   padding: 8px 10px;
   border-radius: var(--radius-small);
-  background: var(--bg-elevated);
+  background: var(--surface-l2-bg);
   border: 1px solid var(--border-default);
   color: var(--fg-primary);
   font-size: var(--fs-secondary);

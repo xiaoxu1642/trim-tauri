@@ -215,7 +215,17 @@
     const t = el('startupDefendToggle');
     if (t) t.checked = isDefendEnabled();
     const st = el('startupDefendState');
-    if (st) { st.textContent = isDefendEnabled() ? '已开启' : '已关闭'; st.classList.toggle('off', !isDefendEnabled()); }
+    if (st) {
+      const enabled = isDefendEnabled();
+      st.textContent = enabled ? '已开启 · 删除前逐条确认' : '已关闭 · 仅提示不自动删';
+      st.classList.toggle('off', !enabled);
+      const detail = enabled
+        ? '已开启：被你禁用的启动项连续 3 次被外部恢复，或已拉黑项再次出现时，会先逐条征求确认，再删除其启动登记。'
+        : '已关闭：启动项被外部反复恢复或重新创建时只提示，不再自动删除。程序仍可能随系统启动，需手动处理。';
+      st.setAttribute('data-tip', detail);
+      st.setAttribute('aria-label', `防恢复自动删除${st.textContent}。${detail}`);
+      if (t) t.setAttribute('aria-label', `防恢复自动删除总开关，当前${enabled ? '开启' : '关闭'}。${detail}`);
+    }
   }
 
   // SU-2（S7）：不可逆删除前逐条红色二次确认（modal 对 message 统一转义，可安全内插项名）。
@@ -230,10 +240,10 @@
     try {
       return await window.app.confirmDanger(
         '删除被拦截的启动项',
-        `「${itemName}」${reason}\n\n删除后该项将不再随本次扫描保留；若程序再次自行创建，下次扫描将再次提示。是否删除？`,
+        `「${itemName}」${reason}\n\n删除会移除这条启动登记（删除前会备份），程序本身不会被卸载；若程序再次自行创建，下次扫描会再次提示。是否删除？`,
         '仍然执行',
         '取消',
-        '此操作将删除该启动项（不可恢复，删除前请确认无需再随系统启动）'
+        '将删除这条启动登记；程序文件不会被卸载。删除前会写入启动备份目录，但界面不提供一键恢复；取消可保留原状。'
       );
     } catch (e) { return false; }
   }
@@ -457,7 +467,9 @@
           window.app?.toast('warning', `扫描完成，但部分来源不可读（${scanWarnings.length} 处），列表可能不完整`);
           window.app?.log?.('warn', '启动项扫描告警: ' + scanWarnings.join('；'));
         }
-        else window.app?.toast('success', `扫描完成，共发现 ${items.length} 项启动项`);
+        else {
+          window.app?.toast('success', `扫描完成，共发现 ${items.length} 项启动项`, 3000, { replaceKey: 'startup:scan-complete' });
+        }
       }
     } catch (e) {
       if (silent) { window.app?.log?.('warn', `启动项后台重扫异常: ${e.message}`); return; }
@@ -779,6 +791,22 @@
     bulk('btnStartupDisableBulk', hasDisable);
     bulk('btnStartupEnableBulk', hasEnable);
     bulk('btnStartupDeleteBulk', sel.length > 0);
+    const selectAll = el('startupSelectAll');
+    if (selectAll) {
+      const selected = selectAll.checked && sel.length > 0;
+      selectAll.setAttribute('aria-label', `全选当前筛选下的启动项，已选 ${sel.length} 项${selected ? '，当前已全选' : ''}`);
+      selectAll.setAttribute('data-tip', `只勾选当前筛选下的可操作项，系统组件不可勾选；当前已选 ${sel.length} 项`);
+    }
+    const deleteBtn = el('btnStartupDelete');
+    if (deleteBtn) {
+      deleteBtn.setAttribute('aria-label', `删除所选启动项（${sel.length} 项，删除前需确认）`);
+      deleteBtn.setAttribute('data-tip', `删除所选 ${sel.length} 项启动登记；删除前会先备份，需二次确认，程序文件不会被卸载`);
+    }
+    const deleteBulk = el('btnStartupDeleteBulk');
+    if (deleteBulk) {
+      deleteBulk.setAttribute('aria-label', `删除所选启动项（${sel.length} 项，删除前需确认）`);
+      deleteBulk.setAttribute('data-tip', `删除所选 ${sel.length} 项启动登记；删除前会先备份，需二次确认，程序文件不会被卸载`);
+    }
   }
 
   // 回执三态判序（F4a2-M02 / v7.2 C07）：**命令层整体拒绝** ≠ 部分失败 ≠ 全成。
@@ -921,10 +949,10 @@ ${enable ? '（启用后该项将随系统启动运行）' : '（禁用后可随
       }
       ok = await window.app.confirmDanger(
         '删除启动项',
-        `将删除以下 ${selItems.length} 个启动项（删除前会自动备份）。`,
+        `将删除以下 ${selItems.length} 个启动项的启动登记（删除前会自动备份）。程序本身不会被卸载，删除后需重新配置才能恢复自启动。`,
         '仍然执行',
         '取消',
-        '此操作不可逆，删除后需重新配置才能恢复。',
+        `此操作会移除选中的 ${selItems.length} 条启动登记，不会卸载程序；删除前会写入启动备份目录，但界面不提供一键恢复，取消可保留原状。`,
         selItems.map(i => ({ name: i.name, text: i.command || i.location || '' }))
       );
     } catch (e) {
@@ -1070,6 +1098,9 @@ ${enable ? '（启用后该项将随系统启动运行）' : '（禁用后可随
   }
 
   function init() {
+    el('startupFilter')?.setAttribute('aria-label', '启动项筛选');
+    document.querySelector('.startup-filter-ops')?.setAttribute('role', 'group');
+    document.querySelector('.startup-filter-ops')?.setAttribute('aria-label', '启动项批量操作');
     // SU-2（S7）：防恢复总开关——关闭后只计数提示、不自动删除
     const defendToggle = el('startupDefendToggle');
     if (defendToggle) {

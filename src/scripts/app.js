@@ -455,6 +455,7 @@
       }
     };
     applyActivePage(pageName);
+    if (prevPage !== pageName) clearToastsFromPage(prevPage);
 
     // 页面进入逻辑
     // v3.7.0 议题五第 0 步：此处原本是裸变量（logger.load() / startup.load()），
@@ -639,6 +640,8 @@
 
     const el = document.createElement('div');
     el.className = `toast ${type}${options.guide ? ' toast-guide' : ''}`;
+    const sourcePage = document.querySelector('.page.active')?.id || '';
+    if (sourcePage) el.dataset.sourcePage = sourcePage;
     const messageHtml = escapeHtml(message).replace(/\n/g, '<br>');
     el.innerHTML = `
       <div class="toast-icon">${icons[type] || icons.info}</div>
@@ -652,7 +655,7 @@
 
     let removeTimer;
     // F3-L15：pinned 条目（进度 Toast）常驻，普通提示的 FIFO 挤出不得动它。
-    const entry = { el, pinned: options.pinned === true };
+    const entry = { el, pinned: options.pinned === true, replaceKey: options.replaceKey || '' };
     entry.remove = () => {
       clearTimeout(removeTimer);
       const i = activeToasts.indexOf(entry);
@@ -663,7 +666,6 @@
       // 尾巴被硬切；延到 260ms 留出余量（reduced-motion 下动画只剩 0.01ms，不影响）。
       setTimeout(() => el.remove(), 260);
     };
-    activeToasts.push(entry);
     el.querySelector('.toast-close')?.addEventListener('click', entry.remove);
     removeTimer = setTimeout(entry.remove, duration);
     // v3.7.0：悬停暂停计时、移出后续 1.5s —— 用户正在读的提示不该被计时器抽走
@@ -672,11 +674,19 @@
       clearTimeout(removeTimer);
       removeTimer = setTimeout(entry.remove, 1500);
     });
-    trimToasts();
-    return entry;
+    return registerToast(entry);
   }
 
   // v3.7.0 议题一：FIFO 挤出最旧的 Toast，保证同屏不超过 MAX_VISIBLE_TOASTS。
+  function clearToastsFromPage(pageName) {
+    if (!pageName) return;
+    const pageId = `page-${pageName}`;
+    [...activeToasts].forEach((entry) => {
+      if (entry.pinned || entry.el?.dataset.sourcePage !== pageId) return;
+      entry.remove();
+    });
+  }
+
   function trimToasts() {
     let guard = activeToasts.length + 1;
     while (activeToasts.length > MAX_VISIBLE_TOASTS && guard-- > 0) {
@@ -692,6 +702,11 @@
   // 让「点击空白关最顶层」够得到它，也让条数护栏能统一计数。
   function registerToast(entry) {
     if (!entry || !entry.el) return entry;
+    if (entry.replaceKey && !entry.pinned) {
+      [...activeToasts].forEach((existing) => {
+        if (!existing.pinned && existing.replaceKey === entry.replaceKey) existing.remove();
+      });
+    }
     activeToasts.push(entry);
     trimToasts();
     return entry;

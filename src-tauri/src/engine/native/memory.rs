@@ -66,11 +66,19 @@ pub struct NativeProcess {
     pub path: String,
 }
 
+/// 进程采集的可观察统计（不折叠进成功列表）
+pub struct NativeProcessSnapshot {
+    pub processes: Vec<NativeProcess>,
+    pub errors: Vec<String>,
+    pub partial: bool,
+}
+
 /// 原生枚举进程列表，按 WorkingSetSize 降序，取前 300
-pub fn memory_processes() -> Result<Vec<NativeProcess>, String> {
+pub fn memory_processes() -> Result<NativeProcessSnapshot, String> {
     unsafe {
         use windows::core::PWSTR;
         use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::Foundation::ERROR_NO_MORE_FILES;
         use windows::Win32::System::Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
             TH32CS_SNAPPROCESS,
@@ -85,10 +93,15 @@ pub fn memory_processes() -> Result<Vec<NativeProcess>, String> {
             .map_err(|_| "CreateToolhelp32Snapshot 失败".to_string())?;
 
         let mut entries: Vec<NativeProcess> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        let mut first_succeeded = false;
         let mut pe: PROCESSENTRY32W = std::mem::zeroed();
         pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
 
-        if Process32FirstW(snap, &mut pe).is_ok() {
+        if let Err(e) = Process32FirstW(snap, &mut pe) {
+            errors.push(format!("Process32FirstW 失败: {e}"));
+        } else {
+            first_succeeded = true;
             loop {
                 let pid = pe.th32ProcessID;
                 let name = wide_str(pe.szExeFile.as_ptr());
@@ -98,29 +111,49 @@ pub fn memory_processes() -> Result<Vec<NativeProcess>, String> {
 
                 // R5b-M10：32 位进程在 LIMITED 权限下可能拿不到内存计数；
                 // 先用 QUERY_INFORMATION|VM_READ，失败再退回 LIMITED（权限不足的进程仍可读路径）。
-                let proc = OpenProcess(
+                let proc = match OpenProcess(
                     PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
                     false,
                     pid,
                 )
-                .or_else(|_| OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid));
-                if let Ok(proc) = proc {
+                .or_else(|_| OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)) {
+                    Ok(handle) => handle,
+                    Err(e) => {
+                        errors.push(format!("PID {pid} OpenProcess 失败: {e}"));
+                        pe = std::mem::zeroed();
+                        pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+                        if let Err(e) = Process32NextW(snap, &mut pe) {
+                            if e.code() != ERROR_NO_MORE_FILES.into() {
+                                errors.push(format!("PID {pid} 后进程枚举中断: {e}"));
+                            }
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                {
                     let mut pmc: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
                     pmc.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-                    if GetProcessMemoryInfo(proc, &mut pmc, pmc.cb).is_ok() {
-                        working_set = pmc.WorkingSetSize as u64;
+                    match GetProcessMemoryInfo(proc, &mut pmc, pmc.cb) {
+                        Ok(()) => {
+                            working_set = pmc.WorkingSetSize as u64;
+                        }
+                        Err(e) => errors.push(format!("PID {pid} GetProcessMemoryInfo 失败: {e}")),
                     }
                     let mut buf = [0u16; 1024];
                     let mut len = buf.len() as u32;
-                    if QueryFullProcessImageNameW(
+                    match QueryFullProcessImageNameW(
                         proc,
                         PROCESS_NAME_FORMAT(0),
                         PWSTR(buf.as_mut_ptr()),
                         &mut len,
                     )
-                    .is_ok()
                     {
-                        path = String::from_utf16_lossy(&buf[..len as usize]);
+                        Ok(()) => {
+                            path = String::from_utf16_lossy(&buf[..len as usize]);
+                        }
+                        Err(e) => errors
+                            .push(format!("PID {pid} QueryFullProcessImageNameW 失败: {e}")),
                     }
                     let _ = CloseHandle(proc);
                 }
@@ -134,7 +167,10 @@ pub fn memory_processes() -> Result<Vec<NativeProcess>, String> {
 
                 pe = std::mem::zeroed();
                 pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-                if Process32NextW(snap, &mut pe).is_err() {
+                if let Err(e) = Process32NextW(snap, &mut pe) {
+                    if e.code() != ERROR_NO_MORE_FILES.into() {
+                        errors.push(format!("PID {pid} 后进程枚举中断: {e}"));
+                    }
                     break;
                 }
             }
@@ -142,8 +178,17 @@ pub fn memory_processes() -> Result<Vec<NativeProcess>, String> {
         let _ = CloseHandle(snap);
 
         entries.sort_by(|a, b| b.working_set.cmp(&a.working_set));
+        let truncated = entries.len() > 300 || errors.len() > 100;
         entries.truncate(300);
-        Ok(entries)
+        if truncated {
+            errors.push("采集结果达到上限，已截断".to_string());
+        }
+        let partial = !first_succeeded || !errors.is_empty();
+        Ok(NativeProcessSnapshot {
+            processes: entries,
+            errors,
+            partial,
+        })
     }
 }
 

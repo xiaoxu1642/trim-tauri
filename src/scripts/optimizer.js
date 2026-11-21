@@ -843,10 +843,12 @@
       return `
         <section class="opt-col opt-col--nara is-degraded" data-nara-entry-degraded aria-label="永劫无间专项暂不可用">
           <div class="opt-col-head">
-            <span class="opt-nara-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+            <span class="opt-col-title">
+              <span class="opt-nara-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+              </span>
+              永劫无间专项
             </span>
-            <span class="opt-col-title">永劫无间专项</span>
             <span class="opt-col-count">不可用</span>
           </div>
           <div class="opt-nara-desc">专项数据暂不可用。原因：${escapeHtml(NARA_PANEL_DEGRADED)}。原专项隐藏成员已回到主列表，可照常单独执行。</div>
@@ -859,10 +861,12 @@
       <section class="opt-col opt-col--nara" data-nara-entry role="button" tabindex="0"
                aria-label="打开永劫无间优化专项面板" data-tip="打开永劫无间优化专项面板">
         <div class="opt-col-head">
-          <span class="opt-nara-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+          <span class="opt-col-title">
+            <span class="opt-nara-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+            </span>
+            永劫无间专项
           </span>
-          <span class="opt-col-title">永劫无间专项</span>
           <span class="opt-col-count opt-nara-count">${optCount} 项</span>
         </div>
         <div class="opt-nara-desc">${sections.length} 个分区 · ${optCount} 优化项${taskCount ? ' · ' + taskCount + ' 维护任务' : ''}</div>
@@ -1295,10 +1299,12 @@
       return `
         <section class="opt-col opt-col--nara opt-col--privacy is-degraded" data-privacy-entry-degraded aria-label="隐私自护面板暂不可用">
           <div class="opt-col-head">
-            <span class="opt-nara-icon opt-privacy-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">${PRIVACY_SHIELD_SVG}</svg>
+            <span class="opt-col-title">
+              <span class="opt-nara-icon opt-privacy-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">${PRIVACY_SHIELD_SVG}</svg>
+              </span>
+              隐私自护
             </span>
-            <span class="opt-col-title">隐私自护</span>
             <span class="opt-col-count">不可用</span>
           </div>
           <div class="opt-nara-desc">专项数据暂不可用。原因：${escapeHtml(PRIVACY_PANEL_DEGRADED)}。原专项隐藏成员已回到主列表，可照常单独执行。</div>
@@ -1310,10 +1316,12 @@
       <section class="opt-col opt-col--nara opt-col--privacy" data-privacy-entry role="button" tabindex="0"
                aria-label="打开隐私自护面板" data-tip="打开隐私自护面板">
         <div class="opt-col-head">
-          <span class="opt-nara-icon opt-privacy-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">${PRIVACY_SHIELD_SVG}</svg>
+          <span class="opt-col-title">
+            <span class="opt-nara-icon opt-privacy-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">${PRIVACY_SHIELD_SVG}</svg>
+            </span>
+            隐私自护
           </span>
-          <span class="opt-col-title">隐私自护</span>
           <span class="opt-col-count opt-privacy-count">${count} 项</span>
         </div>
         <div class="opt-nara-desc">${sections.length} 个分区 · ${count} 个隐私与遥测开关集中管理</div>

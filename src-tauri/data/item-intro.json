@@ -955,13 +955,13 @@
     "memoryclean": {
       "label": "内存清理",
       "match": "按内存清理区域 id 精确匹配，未命中时回落到通用说明",
-      "default": "该操作会向系统内核发送内存列表清理请求（NtSetSystemInformation），释放对应内存区域。需要管理员权限，清理后内存占用下降，下次打开应用时会重新缓存，属正常现象。",
+      "default": "该操作会向系统内核发送内存列表清理请求（NtSetSystemInformation），清理对应内存区域。需要管理员权限；可用内存变化取决于读数口径，未测到时如实显示未测到，下次打开应用时重新缓存属正常现象。",
       "byId": {
         "workingSet": "清空所有进程的工作集（MemoryEmptyWorkingSets）：把各进程已驻留的物理内存页交还给系统，是最安全、见效最快的常规清理，适合在运行大型应用后快速回收内存。",
         "standbyPriority0": "清理低优先级备用列表（MemoryPurgeLowPriorityStandbyList）：只回收被标记为低优先级的备用内存页，不影响常用应用的热缓存，安全系数高，可放心使用。",
         "combine": "合并物理内存页（SystemCombinePhysicalMemoryInformation）：把系统中内容相同的物理页合并以降低页表开销，通常能额外释放少量内存，低配机器上可能造成短暂卡顿。",
         "modified": "修改列表（MemoryFlushModifiedList）：强制把尚未写盘的脏页刷入磁盘后清空，属于高危操作，瞬时磁盘 I/O 较高，可能造成卡顿，建议在空闲时段使用。",
-        "standby": "备用列表（全部）（MemoryPurgeStandbyList）：清空全部备用内存页，释放量最大，但代价是下次打开应用时要重新从磁盘加载，短期内可能出现明显卡顿，需二次确认后执行。",
+        "standby": "备用列表（全部）（MemoryPurgeStandbyList）：备用内存页本就计入可用内存，清完可用量几乎不变，代价是之后冷读变慢；下次打开应用时要重新从磁盘加载，短期内可能出现明显卡顿，需二次确认后执行。",
         "stubbornKill": "一次性结束 MuMu 模拟器、网易 UU 远程、抖音、剪映、WPS/金山办公和微软电脑管家相关的前台及后台进程，未保存的数据可能丢失，执行前请先正常退出这些软件并保存工作。"
       }
     },

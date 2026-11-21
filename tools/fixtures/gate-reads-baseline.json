@@ -34,13 +34,13 @@
     "check-native-hygiene": "d43526d9d759e21c",
     "check-handle-lifecycle": "02b1b39a04ac7489",
     "check-comment-coords": "6fff15c052161c3a",
-    "check-css-tokens": "b29df6fbda7372fc",
+    "check-css-tokens": "1abd72f4449217bf",
     "check-css-hygiene": "30c86d5d7f2a8c1e",
     "check-assets-used": "2aee5e7cad5b131d",
     "check-asset-size": "a3904ba3bcd55a1c",
     "check-artifact-size": "ddcdb671a4dc8c97",
     "check-first-paint": "a8fb9478040707c9",
-    "check-contrast": "017ae7afa3bd4ab2",
+    "check-contrast": "c49e2e40c543ea0d",
     "check-subwindow-css": "4629e05fd3d05b6e",
     "check-idle-scripts": "c9ea50dec0f9d6ea",
     "check-escape-delegation": "fd9829e973cd4c58",
@@ -50,7 +50,7 @@
     "check-silent-catch": "6450412966f4fbb8",
     "check-material-parity": "9f486edd434c6795",
     "check-treemap-layout": "37630f30b2b71f3b",
-    "check-item-intro": "dbcf84a50a79270d",
+    "check-item-intro": "fe381f0e5ba2fe90",
     "check-desktop-entry": "8eec3b36ed2d2215",
     "check-data-parity": "e2997063c1f90497",
     "check-rule-schema-sync": "56857836ba91312d",
@@ -549,5 +549,5 @@
       "M-12"
     ]
   },
-  "bodyHash": "91e474741350189d"
+  "bodyHash": "ae8680da49823825"
 }

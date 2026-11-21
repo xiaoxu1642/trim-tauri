@@ -634,8 +634,9 @@
       <!-- 运行库修复页面（v3.3.0 第一期）：只读检测 + 白名单化一键安装 -->
       <div class="page" id="page-runtimes">
         <div class="page-header">
-          <div>
+          <div class="page-title-row">
             <h1 class="page-title">运行库修复</h1>
+            <p class="page-title-note">部分游戏或软件在运行时需要特定运行库支持，当缺失该类文件时，会无法正常启动。</p>
           </div>
           <div class="page-actions">
             <button class="btn btn-primary" id="btnRuntimesScan">
@@ -643,9 +644,6 @@
               开始扫描
             </button>
           </div>
-        </div>
-        <div class="rt-intro-card" data-tip="覆盖范围：Microsoft Visual C++ 2015-2022 · .NET Framework 4.x / 3.5 · DirectX 9-12">
-          <p>部分游戏或软件在运行时需要特定运行库支持，当缺失该类文件时，会无法正常启动。</p>
         </div>
         <div class="rt-radar-wrap">
           <div id="rtRadar"><!-- 雷达图：由 runtimes.js 渲染内联 SVG --></div>

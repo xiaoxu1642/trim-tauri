@@ -237,14 +237,29 @@ pub async fn memory_clean<R: tauri::Runtime>(window: WebviewWindow<R>, items: Op
                     message
                 };
                 log::write_log("warn", &format!("原生内存清理失败: {message}"));
-                json!({ "success": false, "message": message })
+                json!({
+                    "success": false,
+                    "message": message,
+                    "acceptedItems": accepted,
+                    "droppedItems": dropped_items,
+                })
             }
         },
         Ok(Err(message)) => {
             log::write_log("warn", &format!("原生内存清理不可用: {message}"));
-            json!({ "success": false, "message": "解析清理结果失败" })
+            json!({
+                "success": false,
+                "message": "解析清理结果失败",
+                "acceptedItems": accepted,
+                "droppedItems": dropped_items,
+            })
         }
-        Err(e) => json!({ "success": false, "message": format!("内存清理任务异常: {e}") }),
+        Err(e) => json!({
+            "success": false,
+            "message": format!("内存清理任务异常: {e}"),
+            "acceptedItems": accepted,
+            "droppedItems": dropped_items,
+        }),
     })
 }
 
@@ -270,11 +285,16 @@ fn save_snapshot(label: &str, processes: &[Value]) {
         if id <= 0 {
             continue;
         }
+        let process_name = js_string(p.get("ProcessName"));
+        let path = js_string(p.get("Path"));
+        if process_name.trim().is_empty() || path.trim().is_empty() {
+            continue;
+        }
         slot.insert(
             id,
             ProcInfo {
-                process_name: js_string(p.get("ProcessName")),
-                path: js_string(p.get("Path")),
+                process_name,
+                path,
             },
         );
     }
@@ -295,6 +315,12 @@ fn lookup_snapshot(label: &str, pid: i64) -> Option<ProcInfo> {
         .cloned()
 }
 
+fn clear_snapshot(label: &str) {
+    let key = proc_slot_key(label);
+    let mut snapshots = PROCESS_SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
+    snapshots.retain(|(l, _)| l != &key);
+}
+
 /// memory:processes — 进程列表（只读），同时刷新本窗口的快照槽
 ///
 /// S3：纯 Rust 原生，无 PS 回退。
@@ -302,8 +328,9 @@ fn lookup_snapshot(label: &str, pid: i64) -> Option<ProcInfo> {
 pub async fn memory_processes<R: tauri::Runtime>(window: WebviewWindow<R>) -> Result<Value, String> {
     let label = guard::guard_readonly(&window)?;
     match tauri::async_runtime::spawn_blocking(native::memory_processes).await {
-        Ok(Ok(entries)) => {
-            let processes: Vec<Value> = entries
+        Ok(Ok(snapshot)) => {
+            let processes: Vec<Value> = snapshot
+                .processes
                 .into_iter()
                 .map(|p| {
                     json!({
@@ -314,11 +341,33 @@ pub async fn memory_processes<R: tauri::Runtime>(window: WebviewWindow<R>) -> Re
                     })
                 })
                 .collect();
+            if processes.is_empty() {
+                clear_snapshot(&label);
+                return Ok(json!({
+                    "success": false,
+                    "message": "未采集到可展示的进程，已清除旧快照",
+                    "errors": snapshot.errors,
+                    "partial": snapshot.partial,
+                    "engine": "rust"
+                }));
+            }
             save_snapshot(&label, &processes);
-            Ok(json!({ "success": true, "processes": processes, "engine": "rust" }))
+            Ok(json!({
+                "success": true,
+                "processes": processes,
+                "errors": snapshot.errors,
+                "partial": snapshot.partial,
+                "engine": "rust"
+            }))
         }
-        Ok(Err(e)) => Ok(json!({ "success": false, "message": format!("原生采集失败: {e}") })),
-        Err(e) => Ok(json!({ "success": false, "message": format!("采集任务异常: {e}") })),
+        Ok(Err(e)) => {
+            clear_snapshot(&label);
+            Ok(json!({ "success": false, "message": format!("原生采集失败: {e}") }))
+        }
+        Err(e) => {
+            clear_snapshot(&label);
+            Ok(json!({ "success": false, "message": format!("采集任务异常: {e}") }))
+        }
     }
 }
 
@@ -342,6 +391,16 @@ pub async fn memory_kill<R: tauri::Runtime>(window: WebviewWindow<R>, pid: Optio
             "message": "进程不是最近一次扫描结果，已拒绝结束"
         }));
     };
+    if known.path.trim().is_empty() {
+        log::write_log(
+            "warn",
+            &format!("结束进程被拒：快照内 PID {n} 的路径为空，无法复核目标身份"),
+        );
+        return Ok(json!({
+            "success": false,
+            "message": "快照缺少进程路径，无法复核目标身份，已拒绝结束"
+        }));
+    }
     // 复核 N2：渲染/GPU helper 等子进程 PID 与主进程不同，靠**同 exe 路径**一并拦住
     // 性能优化 P1：本进程 exe 路径在进程生命周期内恒定，用 OnceLock 只查一次。
     // 方案原建议 spawn_blocking —— `current_exe` 是模块路径查询不是磁盘 I/O，

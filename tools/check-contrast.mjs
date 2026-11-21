@@ -922,7 +922,7 @@ const SOLID_TOKEN = '--surface-solid';
 // 底色合规 = 声明引用实色表面 token（四级表面 + hover/input 档）或实色语义染底
 // （-soft/-light 已 color-mix 化为实色宿主，见 B2 token 终表）。半透明/transparent 一律不合规。
 const SURFACE_SOLID_RE =
-  /var\(--(?:bg-card|bg-card-hover|bg-elevated|bg-input|bg-hover|bg-base|bg-app|surface-solid|accent-soft|accent-light|success-soft|warning-soft|danger-soft|info-soft)\)/;
+  /var\(--(?:bg-card|bg-card-hover|bg-elevated|bg-input|bg-hover|bg-base|bg-app|surface-solid|surface-l2-bg|surface-dialog-bg|surface-dialog-header|modal-surface-solid|accent-soft|accent-light|success-soft|warning-soft|danger-soft|info-soft)\)/;
 const FLOOR_OK = (decl) => SURFACE_SOLID_RE.test(decl);
 
 // kind:
@@ -1194,6 +1194,18 @@ check(
       expectBad: 0,
     },
     {
+      name: '语义二级实底 token 放行',
+      css: `.btn { background: var(--surface-l2-bg); }`,
+      entries: [{ sel: '.btn', kind: 'stack' }],
+      expectBad: 0,
+    },
+    {
+      name: '未知语义别名仍判红',
+      css: `.btn { background: var(--surface-l2-bg-unknown); }`,
+      entries: [{ sel: '.btn', kind: 'stack' }],
+      expectBad: 1,
+    },
+    {
       name: '后级覆写判红',
       css: `.btn { background: ${G}; }\nbody.theme-light .btn { background: transparent; }`,
       entries: [{ sel: '.btn', kind: 'stack' }],
@@ -1239,7 +1251,7 @@ check(
   ].filter(Boolean);
   check(
     ctrlBad.length === 0 && refractCtlBad.length === 0,
-    'F5. 正向对照自检：裸透明/半透明字面/后级覆写/修饰类另写底/台账过期/background-image 半透明绕开/弹性名单含未登记类 必判红；实底 token、background-image 实底 必放行',
+    'F5. 正向对照自检：裸透明/半透明字面/后级覆写/修饰类另写底/台账过期/background-image 半透明绕开/弹性名单含未登记类 必判红；实底 token、语义二级实底 token、background-image 实底 必放行',
     [...ctrlBad, ...refractCtlBad].join('；'),
   );
 }

@@ -1678,20 +1678,11 @@ fn batch_preflight_response_shape_matches_renderer_contract() {
 
 // ==================== R1-3 E4 区域耗时 ====================
 
-/// E4 的形状契约：三个域的 `results[]` 每项都带 `elapsedMs`，且它是**非负整数**。
-///
-/// 为什么这条断「非负」：`elapsedMs` 来自 `Instant::elapsed().as_millis()`，恒 ≥ 0。
-/// 一旦出现负数或小数，说明计时口径被改坏（或经过了 lossy 转换）——
-/// 而耗时会进日志给人看，负数会被读成「系统时钟回拨」这类无法解释的现象。
-///
-/// 快速组只跑 `memory_clean` 的**形状面**（用不存在的区域 id 触发参数校验早退）。
-/// contextmenu / startup 两域要真删文件才有 results，一律 `#[ignore]`。
-///
-/// 零副作用的两态口径（X1-M03 补）：提权态下 is_admin 已过、会进原生引擎，但
-/// 白名单 fail-closed 在任何 `NtSetSystemInformation` 之前（perf.rs:818-822），
-/// 非法 id 整批拒、一个区域都不会被碰；非提权态在 is_admin 处早退。
+/// `memory_clean` 非法区域负例：用不存在的区域 id 触发早退，真实内存不会被动过。
+/// 提权态下原生白名单在任何 `NtSetSystemInformation` 之前拒掉整批；非提权态在
+/// `is_admin` 处早退。原用例只走到这里，就被名字误读成 results 成功形状覆盖。
 #[test]
-fn memory_clean_results_shape_carries_elapsed() {
+fn memory_clean_invalid_region_rejected() {
     // 反向前提：确认耗时字段的产出侧确实存在（否则下面这条形状断言会恒空）
     let perf = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1716,6 +1707,115 @@ fn memory_clean_results_shape_carries_elapsed() {
             || common::message_of(&res).contains("需要管理员权限"),
         "拒因必须可点名（提权态=原生白名单 fail-closed；非提权态=needAdmin）: {res}"
     );
+}
+
+/// `memory_clean` 入参归一负例（零副作用）：非字符串项必须按条数记账，不能静默丢弃，
+/// 也不能把归一失败误报成「未选择」。数字 0 是 JSON 值类型探针，不是区域 id。
+#[test]
+fn memory_clean_counts_non_string_items_without_dropping_them_silently() {
+    let w = main_window();
+    for (items, expected_dropped, expected_message) in [
+        (json!([]), 0, "未选择要清理的内存区域"),
+        (json!([0]), 1, "清理项全部无效"),
+        (json!([0, 0]), 2, "清理项全部无效"),
+    ] {
+        let res = invoke(&w, "memory_clean", json!({ "items": items }));
+        assert_eq!(res["success"], json!(false), "归一失败必须拒: {res}");
+        assert_eq!(
+            res["droppedItems"],
+            json!(expected_dropped),
+            "被丢弃条数必须可见（入参 {items}）: {res}"
+        );
+        assert!(
+            common::message_of(&res).contains(expected_message),
+            "归一后的失败原因必须点名（入参 {items}）: {res}"
+        );
+    }
+
+    // 合法字符串不是「丢弃项」：提权态走原生白名单拒非法 id，非提权态在 needAdmin 早退，
+    // 两条出口都不碰真实内存；这里只钉 droppedItems=2，拒因按当前权限态点名。
+    let items = json!([0, "__不存在的区域__", 0]);
+    let res = invoke(&w, "memory_clean", json!({ "items": items }));
+    assert_eq!(res["droppedItems"], json!(2), "只应丢掉两个非字符串项: {res}");
+    let expected_message = if trim_tauri_lib::engine::sysinfo::is_admin() {
+        "非法区域 id"
+    } else {
+        "需要管理员权限"
+    };
+    assert!(
+        common::message_of(&res).contains(expected_message),
+        "合法字符串必须被当受理项并走到安全拒因: {res}"
+    );
+}
+
+/// `memory_clean` 的主窗/子窗档位（只读负例）：主窗必须能走到入参归一，子窗必须被来源校验拒。
+/// 子窗只传空数组，不会触到任何真实清理；两个方向都可判红，防档位被偷偷放宽或收紧。
+#[test]
+fn memory_clean_main_only_tier_reaches_normalization_and_rejects_subwindows() {
+    let w = main_window();
+    let text = invoke_text(&w, "memory_clean", json!({ "items": [] }));
+    common::assert_guard_passed(
+        &text,
+        "主窗调 memory_clean 的空数组归一负例",
+        &["未选择要清理的内存区域"],
+    );
+    for label in sub_windows() {
+        let sub = window_with_label(label);
+        let text = invoke_text(&sub, "memory_clean", json!({ "items": [] }));
+        assert_guard_rejected(&text, &format!("{label} 窗调 memory_clean 必须被主窗档拒杀"));
+    }
+}
+
+/// `memory_kill` 失败路径负例：无效 PID 和自 PID 都在任何快照查表/进程终止之前早退，
+/// 因此快速组可以零副作用钉住「形状 + 文案」。防的是回退成裸 bool 或换错错误出口。
+#[test]
+fn memory_kill_invalid_and_self_pid_are_rejected_before_dangerous_work() {
+    let w = main_window();
+    for (pid, reason) in [
+        (json!(0), "无效的进程 ID"),
+        (json!("13.5"), "无效的进程 ID"),
+        (json!(std::process::id()), "不能结束 Trim 自身进程"),
+    ] {
+        let res = invoke(&w, "memory_kill", json!({ "pid": pid }));
+        assert_eq!(res["success"], json!(false), "PID {pid} 必须被拒: {res}");
+        assert_eq!(
+            common::message_of(&res),
+            reason,
+            "PID {pid} 的拒绝出口要保持可判红: {res}"
+        );
+    }
+}
+
+/// `memory_info` / `memory_processes` 成功形状静态断言（零副作用，不调真实采集命令）。
+/// 渲染层按 `data.*` 与 `processes[].{Id,ProcessName,mem,Path}` 直接消费，
+/// 少字段或丢掉 `engine:"rust"` 会在页面上静默变成空值/未标注的降级路径。
+#[test]
+fn memory_read_commands_shape_contract_static() {
+    let memory_rs = include_str!("../src/commands/memory.rs");
+    let body = |name: &str| -> &str {
+        let start = memory_rs
+            .find(&format!("pub async fn {name}"))
+            .unwrap_or_else(|| panic!("找不到命令 {name}"));
+        let rest = &memory_rs[start..];
+        &rest[..rest.find("\n}\n").unwrap_or(rest.len())]
+    };
+    for needle in [r#""success": true"#, r#""data": data"#, r#""engine": "rust""#] {
+        assert!(body("memory_info").contains(needle), "memory:info 丢失契约 {needle}");
+    }
+    for needle in [
+        r#""success": true"#,
+        r#""processes": processes"#,
+        r#""engine": "rust""#,
+        r#""Id": p.pid as i64"#,
+        r#""ProcessName": p.name"#,
+        r#""mem": p.working_set as i64"#,
+        r#""Path": p.path"#,
+    ] {
+        assert!(
+            body("memory_processes").contains(needle),
+            "memory:processes 丢失契约 {needle}"
+        );
+    }
 }
 
 /// `elapsedMs` 的**类型**契约对着渲染层消费口径断。

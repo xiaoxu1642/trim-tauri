@@ -2139,6 +2139,7 @@
     const managed = !!state.managed;
     const entries = Array.isArray(state.entries) ? state.entries : [];
     const modeText = managed ? '系统托管（自动管理分页文件大小）' : '手动配置';
+    const pagefileHint = '修改前自动备份，需重启生效；0 MB 表示未指定固定大小，系统可按需要调整（手动模式下需设置非零最大值）。';
     const rows = entries.length
       ? entries.map((e) => {
           const initMb = Number(e.initialMb) || 0;
@@ -2152,13 +2153,14 @@
     // 提示只留卡片头没覆盖的那一条事实：「改前自动备份 · 需重启生效」卡片头已写；
     // 而原实现把 markdown 的 ** 直接写进了 HTML（页面上显示成两颗星号），整段三行也太长。
     el.innerHTML = `
-      <p class="syspanel-pf-mode">${window.ds.esc(modeText)}</p>
+      <p class="syspanel-pf-mode" data-tip="${window.ds.escAttr(pagefileHint)}">${window.ds.esc(modeText)}</p>
+      <p class="syspanel-pf-hint">${window.ds.esc(pagefileHint)}</p>
       <table class="syspanel-pf-table">
         <thead><tr><th>路径</th><th>初始大小</th><th>最大值</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
       <div class="syspanel-pf-actions">
-        <button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPfEdit">编辑配置</button>
+        <button type="button" class="btn btn-secondary btn-small" id="btnSyspanelPfEdit" data-tip="${window.ds.escAttr(pagefileHint)}" aria-label="编辑虚拟内存配置；${window.ds.escAttr(pagefileHint)}">编辑配置</button>
       </div>
       <div id="syspanelPfEditor" style="display:none"></div>
     `;
@@ -2293,6 +2295,7 @@
       '修改虚拟内存配置',
       `即将把虚拟内存改为「${managed ? '系统托管' : '手动配置（' + entries.length + ' 个卷）'}」。\n`
         + '\n必须知道：\n'
+        + '· 修改前自动备份；\n'
         + '· 需要重启才生效；\n'
         + '· 全部关完会让物理内存耗尽时直接蓝屏，Trim 参数校验层会拒这种配置；\n'
         + '· 改前当前配置已备份，可通过导入备份 JSON 手动回退。',
@@ -2384,6 +2387,7 @@
       desc: '高危：安全补丁不再自动送达',
       btn: '禁用',
       icon: '<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8 0-1.85.63-3.55 1.69-4.9L16.9 18.31C15.55 19.37 13.85 20 12 20zm6.31-3.1L7.1 5.69C8.45 4.63 10.15 4 12 4c4.41 0 8 3.59 8 8 0 1.85-.63 3.55-1.69 4.9z"/>',
+      highRisk: true,
       tip: '写 NoAutoUpdate=1，彻底停止自动检查与安装更新，安全更新将不再自动送达。仅建议在明确知晓风险时使用；只想推迟一段时间请用「暂停」。',
     },
     {
@@ -2413,18 +2417,18 @@
     sec.innerHTML = `
       <div class="syspanel-card-head">
         <h4>Windows 更新</h4>
-        <span class="syspanel-tag">改前自动备份</span>
+        <p class="syspanel-pwr-modal-hint">修改前自动备份；禁用更新需重启后生效，恢复更新立即生效。</p>
       </div>
       <div class="qc-grid">
         ${WU_CARDS.map(w => `
-        <div class="qc-card" data-tip="${window.ds.escAttr(w.tip)}">
+        <div class="qc-card" data-tip="${window.ds.escAttr(w.tip)}" aria-label="${window.ds.escAttr(`${w.name}：${w.desc}`)}">
           <div class="qc-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">${w.icon}</svg></div>
           <div class="qc-body">
             <div class="qc-name">${window.ds.esc(w.name)}</div>
             <div class="qc-desc">${window.ds.esc(w.desc)}</div>
           </div>
           <div class="qc-actions">
-            <button type="button" class="btn btn-secondary btn-small" data-wu-run="${window.ds.escAttr(w.id)}">${window.ds.esc(w.btn)}</button>
+            <button type="button" class="btn ${w.highRisk ? 'btn-danger' : 'btn-secondary'} btn-small" data-tip="${window.ds.escAttr(w.tip)}" aria-label="${window.ds.escAttr(`${w.btn}：${w.name}`)}" data-wu-run="${window.ds.escAttr(w.id)}">${window.ds.esc(w.btn)}</button>
           </div>
         </div>`).join('')}
       </div>`;

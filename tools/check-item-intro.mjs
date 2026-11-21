@@ -289,6 +289,27 @@ function classKeyProblems(vocab, keys, fallback) {
     `⑧b memoryclean.byId ⇄ REGIONS（${byIdMc.size} / ${regions.size}）`,
     `REGIONS 缺简介 ${setDiff(regions, byIdMc).join('、') || '无'}；简介多出 ${setDiff(byIdMc, regions).join('、') || '无'}`,
   );
+  const memoryclean = intro?.scopes?.memoryclean;
+  const standbyIntro = memoryclean?.byId?.standby;
+  const standbyRegion = mcJs.match(/\{ id: 'standby',[\s\S]*?desc: '([^']+)' \},/)?.[1] || '';
+  const hasText = (text, needle) => typeof text === 'string' && text.includes(needle);
+  const memorySemantics = (text) => typeof text === 'string' && text.length > 0
+    && !hasText(text, '释放量最大') && !hasText(text, '释放量大')
+    && hasText(text, '本就计入可用内存') && hasText(text, '可用量几乎不变') && hasText(text, '冷读变慢');
+  check(
+    !memorySemantics(standbyIntro + '释放量最大'),
+    '⑧b1 正向对照：伪造 standby 文案出现「释放量最大」必须被判红',
+  );
+  check(
+    hasText(standbyRegion, '本来就算作可用内存') && hasText(standbyRegion, '可用量几乎不变') && hasText(standbyRegion, '冷读变慢'),
+    `⑧b2 REGIONS.standby 仍声明正确口径（${standbyRegion.length} 字）`,
+    '',
+  );
+  check(
+    memorySemantics(standbyIntro),
+    `⑧b3 standby 简介与 REGIONS 同口径（${typeof standbyIntro === 'string' ? standbyIntro.length : 0} 字）`,
+    '',
+  );
 
   const ctxJs = fs.readFileSync(path.join(ROOT, 'src', 'scripts', 'contextmenu.js'), 'utf8');
   const co = ctxJs.match(/const CATEGORY_ORDER = \[([\s\S]*?)\];/);

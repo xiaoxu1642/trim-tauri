@@ -171,6 +171,51 @@ fn finder_delete_manifest_shape() {
     assert!(res["data"]["items"].is_array(), "data.items 必须是数组: {res}");
 }
 
+/// `memory:processes` 的档位与形状契约（快速组，不枚举真实进程）：
+/// 源码必须走 `guard_readonly` 且回执带 `engine:"rust"`，形状契约里必须包含
+/// 前端直接消费的 `Id / ProcessName / mem / Path` 四字段。静态 grep 能判红
+/// 「档位改错」「engine 丢失」「字段改名」三类漂移，不把真实采集塞进默认组。
+#[test]
+fn memory_processes_tier_and_shape_contract() {
+    let memory_rs = include_str!("../src/commands/memory.rs");
+    let start = memory_rs
+        .find("pub async fn memory_processes")
+        .expect("找不到 memory_processes 命令");
+    let body = &memory_rs[start..];
+    let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+    assert!(
+        body.contains("guard::guard_readonly(&window)?"),
+        "memory:processes 必须保持 readonly 档（子窗进程面板要读）: {body}"
+    );
+    for needle in [
+        r#""processes": processes"#,
+        r#""engine": "rust""#,
+        r#""Id": p.pid as i64"#,
+        r#""ProcessName": p.name"#,
+        r#""mem": p.working_set as i64"#,
+        r#""Path": p.path"#,
+    ] {
+        assert!(body.contains(needle), "memory:processes 丢失契约 {needle}: {body}");
+    }
+}
+
+/// `memory_kill` 档位静态断言（快速组）：命令必须保持 `guard_readonly`，
+/// 即进程管理子窗可调、窗口 label 校验仍生效；危险面靠本窗快照与关键进程名单收口，
+/// 不是靠把整个子窗档位收紧。源码漂移会在这里判红，不触发真实结束进程。
+#[test]
+fn memory_kill_tier_contract_stays_readonly() {
+    let memory_rs = include_str!("../src/commands/memory.rs");
+    let start = memory_rs
+        .find("pub async fn memory_kill")
+        .expect("找不到 memory_kill 命令");
+    let body = &memory_rs[start..];
+    let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+    assert!(
+        body.contains("guard::guard_readonly(&window)?"),
+        "memory_kill 必须保持 readonly 档（进程管理子窗要调，安全靠本窗快照）: {body}"
+    );
+}
+
 // ==================== 重 / 外呼组（默认 ignore，发布前门禁跑） ====================
 //
 // `pwsh_status_shape` 随 v2-R1 一起删掉：PS7 通道整条摘除后 `pwsh_status` 命令不复存在，

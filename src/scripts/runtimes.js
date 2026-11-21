@@ -25,6 +25,7 @@
   };
 
   const NODE_LABELS = { vc: 'VC++ 2015-2022', dx: 'DirectX 9-12', net: '.NET Framework' };
+  const RING_DESCRIPTION = '同心圆由内到外表示低、中、高检测范围；节点位置不代表严重程度。';
   // 组内最差状态决定雷达节点颜色（fail > warn > ok > 未扫描）
   const RANK = { fail: 0, warn: 1, ok: 2, info: 3, unknown: 4, scanning: 5, idle: 6 };
 
@@ -43,6 +44,7 @@
         <circle cx="340" cy="215" r="46" fill="none" stroke="var(--border-default)" stroke-width="1"/>
         <circle cx="340" cy="215" r="82" fill="none" stroke="var(--border-default)" stroke-width="1"/>
         <circle cx="340" cy="215" r="118" fill="none" stroke="var(--border-default)" stroke-width="1"/>
+        <text class="rt-node-state" x="340" y="408" text-anchor="middle">节点状态文字为判定结果；颜色：正常=绿，警告=黄，异常=红。</text>
         <circle cx="340" cy="215" r="4" fill="var(--accent)" opacity="0.35"/>
         <g class="rt-sweep" style="transform-origin:340px 215px">
           <line x1="340" y1="215" x2="340" y2="97" stroke="var(--accent)" stroke-width="1" opacity="0.5"/>
@@ -69,6 +71,13 @@
           <text class="rt-node-state" x="484" y="336">未扫描</text>
         </g>
       </svg>`;
+    let note = document.querySelector('.rt-radar-note');
+    if (!note) {
+      note = document.createElement('p');
+      note.className = 'rt-radar-note';
+      mount.parentElement?.insertBefore(note, mount.nextSibling);
+    }
+    note.textContent = RING_DESCRIPTION;
   }
 
   // 用检测结果驱动雷达节点状态（组内取最差状态）
@@ -150,13 +159,15 @@
         : '尚未扫描 · 点击「开始扫描」检测本机运行库';
       return;
     }
-    if (summary.fail === 0 && summary.warn === 0) {
-      el.textContent = `共 ${summary.total} 项，全部正常`;
-      el.classList.add('all-ok');
-    } else {
-      el.textContent = `共 ${summary.total} 项：${summary.ok} 项正常 · ${summary.warn} 项警告 · ${summary.fail} 项异常`;
-      el.classList.remove('all-ok');
-    }
+    const info = Math.max(0, summary.total - summary.ok - summary.warn - summary.fail);
+    const counts = [`共 ${summary.total} 项：${summary.ok} 项正常 · ${summary.warn} 项警告 · ${summary.fail} 项异常`];
+    if (info > 0) counts.push(`${info} 项信息级（仅展示，不参与正常/异常判定）`);
+    counts.push(`雷达展示其中 ${summary.total - info} 项，按 VC++ / DirectX / .NET 分为 3 个节点。`);
+    el.textContent = counts.join('；');
+    el.setAttribute('data-tip', info > 0
+      ? '信息级条目只展示已装版本，不判定运行库是否缺失；雷达节点只汇总参与判定的条目。'
+      : '雷达节点只汇总参与判定的条目。');
+    el.classList.toggle('all-ok', summary.fail === 0 && summary.warn === 0);
   }
 
   // ==================== 扫描 ====================

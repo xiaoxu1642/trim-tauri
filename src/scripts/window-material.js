@@ -37,6 +37,11 @@
       document.body.classList.toggle('theme-dark', dark);
       document.body.classList.toggle('theme-light', !dark);
     }
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) {
+      const bgApp = getComputedStyle(document.documentElement).getPropertyValue('--bg-app').trim();
+      if (bgApp) meta.setAttribute('content', bgApp);
+    }
   }
 
   // 首帧时序例外（theme-boot.js 头注同款）：head 求值期外观族未加载，直读镜像键；子窗只读。
@@ -46,12 +51,45 @@
     } catch (_) { return ''; }
   }
 
+  function applyBackgroundMirror() {
+    var ap = {};
+    try {
+      ap = JSON.parse(localStorage.getItem('trim-appearance') || '{}') || {};
+    } catch (_) {}
+    var preset = typeof ap.presetBg === 'string' ? ap.presetBg : '';
+    if (preset) document.body.dataset.presetBg = preset;
+    else delete document.body.dataset.presetBg;
+    var root = document.documentElement;
+    if (ap.bgPath) {
+      root.style.setProperty('--app-bg-image', 'url("' + String(ap.bgPath) + '")');
+      root.style.setProperty('--app-bg-opacity', String((100 - (ap.bgOpacity == null ? 85 : ap.bgOpacity)) / 100));
+      root.style.setProperty('--app-bg-position', (ap.bgPosX == null ? 50 : ap.bgPosX) + '% ' + (ap.bgPosY == null ? 50 : ap.bgPosY) + '%');
+    } else {
+      root.style.removeProperty('--app-bg-image');
+      root.style.removeProperty('--app-bg-opacity');
+      root.style.removeProperty('--app-bg-position');
+    }
+    document.body.classList.toggle('bg-image-on', !!ap.bgPath);
+
+    var wallpaper = document.querySelector('.app-wallpaper');
+    if (!wallpaper) {
+      wallpaper = document.createElement('div');
+      wallpaper.className = 'app-wallpaper';
+      wallpaper.setAttribute('aria-hidden', 'true');
+      document.body.prepend(wallpaper);
+    }
+  }
+
   function init() {
     applyTheme();
+    applyBackgroundMirror();
     // 主窗「界面主题」切换 → 镜像更新 → 跨窗 storage 事件 → 子窗实时跟随。
     // e.key 为空（clear）也重读一次：镜像整清意味着回到缺省浅色。
     window.addEventListener('storage', function (e) {
-      if (!e.key || e.key === 'trim-appearance') applyTheme();
+      if (!e.key || e.key === 'trim-appearance') {
+        applyTheme();
+        applyBackgroundMirror();
+      }
     });
     if (!HAS_BRIDGE) {
       return;

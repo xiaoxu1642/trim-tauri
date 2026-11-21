@@ -1,6 +1,6 @@
 // processes.js - 共享进程读取 / 进程树渲染 / 结束进程逻辑
 // 同时供「内存清理」页（点击「去管理」后跳转）与独立「应用进程管理」窗口使用。
-// 数据来源：主进程 memory:processes（PowerShell 读取，形状 {Id, ProcessName, mem, Path}）。
+// 数据来源：主进程 memory:processes（纯 Rust ToolHelp，形状 {Id, ProcessName, mem, Path}）。
 // 渲染采用「按路径分组 → 实例缩进」的进程树（默认全折叠，点分组行展开/收起，状态按路径记忆），与微软电脑管家
 // 「应用进程管理」保持一致：图标 + 名称 + 内存占用 + 单一「结束进程」按钮。
 (function () {
@@ -21,7 +21,7 @@
   const PM_ROW_H = 44;
 
   // 审查 PM-1/PM-2（2026-09-15）：系统关键进程名黑名单（去掉 .exe 后小写比较）。
-  // 渲染层只负责「只读态」展示；真正的拦截在主进程 memory:kill（渲染层过滤可被绕过）。
+  // 这里只做 UI 只读态过滤，最终防线在后端 memory:kill；需与后端 CRITICAL_PROCESS_NAMES 对拍（本文件不做门禁真源）。
   const PM_CRITICAL_NAMES = new Set([
     'system', 'idle', 'registry', 'memory compression', 'secure system',
     'smss', 'csrss', 'wininit', 'winlogon', 'services', 'lsass', 'lsaiso',

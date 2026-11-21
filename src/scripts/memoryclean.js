@@ -8,7 +8,7 @@
 
   const $ = id => document.getElementById(id);
 
-  // 内存清理区域定义（与 memory-scripts.js 的 cleanScript 顺序保持一致）
+  // 内存清理区域定义（区域 id 与后端 memory:clean 受理项一致）
   // 注：系统文件缓存(82)、注册表缓存(84) 后端不提供（NtSetSystemInformation 在该
   // 系统版本上被内核拒绝），曾以灰显「不可用」行展示，2026-10-06 用户裁定直接隐藏：
   // 入口不再渲染（区别于「清理失败」，不给用户点了没反应的路径）。
@@ -369,10 +369,15 @@
         // v5 M-3：toast 档位必须跟 resp.success 走。此前只看 data.results 存不存在，
         // 于是 5 个区域全被系统拒绝也弹 **success**「内存清理完成：释放 0 B，5 项失败」。
         const tier = resp.success ? (failCount ? 'warning' : 'success') : 'error';
-        const parts = [`内存清理${resp.success ? '完成' : '未成功'}：释放 ${freedTxt}`, `成功 ${okCount} 项`];
+        const accepted = Number.isFinite(Number(resp.acceptedItems)) ? Number(resp.acceptedItems) : list.length;
+        const parts = [`内存清理${resp.success ? '完成' : '未成功'}：释放 ${freedTxt}`, `受理 ${accepted} 项`, `成功 ${okCount} 项`];
         if (failCount) parts.push(`${failCount} 项失败${note ? '：' + note : ''}`);
         window.app?.toast(tier, parts.join('，'));
         window.app?.log(tier === 'error' ? 'warn' : 'info', parts.join('，'));
+        const dropped = Number(resp.droppedItems);
+        if (Number.isFinite(dropped) && dropped > 0) {
+          window.app?.toast('warning', `${dropped} 项形状不合未参与清理`);
+        }
         await loadInfo();
         return;
       }
@@ -474,21 +479,43 @@
   function init() {
     if (inited) return;
     inited = true;
-    $('btnMemRefresh')?.addEventListener('click', () => { loadInfo(); });
-    $('btnMemProcesses')?.addEventListener('click', () => { openProcessManager(); });
+    $('btnMemRefresh')?.addEventListener('click', async () => {
+      try {
+        await loadInfo();
+      } catch (e) {
+        window.app?.toast('error', '刷新内存信息失败：' + e.message);
+      }
+    });
+    $('btnMemProcesses')?.addEventListener('click', async () => {
+      try {
+        await openProcessManager();
+      } catch (e) {
+        window.app?.toast('error', '打开进程管理窗口失败：' + e.message);
+      }
+    });
     $('btnMemClean')?.addEventListener('click', () => { withMemBusy(() => runClean()); });
     $('btnMemSelectAll')?.addEventListener('click', () => selectAll(true));
     $('btnMemSelectNone')?.addEventListener('click', () => selectAll(false));
-    $('btnOpenProcessManager')?.addEventListener('click', () => { openProcessManager(); });
-    // 进程管理窗口结束进程后，实时更新卡片中间的回显区
-    window.api?.processManager?.onUpdate?.((data) => {
-      updateProcessEntry(data);
+    $('btnOpenProcessManager')?.addEventListener('click', async () => {
+      try {
+        await openProcessManager();
+      } catch (e) {
+        window.app?.toast('error', '打开进程管理窗口失败：' + e.message);
+      }
     });
-    $('btnMemAiIntro')?.addEventListener('click', () => {
-      if (window.modelpicker && typeof window.modelpicker.open === 'function') {
-        window.modelpicker.open('memoryclean');
-      } else {
-        window.app?.toast('warning', '模型选择暂不可用，请稍后重试');
+    // 进程管理窗口结束进程后，实时更新卡片中间的回显区
+    window.app?.trackSubscription?.(window.api?.processManager?.onUpdate?.((data) => {
+      updateProcessEntry(data);
+    }));
+    $('btnMemAiIntro')?.addEventListener('click', async () => {
+      try {
+        if (window.modelpicker && typeof window.modelpicker.open === 'function') {
+          await window.modelpicker.open('memoryclean');
+        } else {
+          window.app?.toast('warning', '模型选择暂不可用，请稍后重试');
+        }
+      } catch (e) {
+        window.app?.toast('error', '打开模型选择失败：' + e.message);
       }
     });
     applyLayout();
