@@ -4659,28 +4659,26 @@ body.theme-light .appearance-card,
 body.theme-light .empty-state { background: var(--bg-card); color: var(--fg-primary); }
 body.theme-light .summary-card:hover { background: var(--bg-card-hover); }
 
-/* ==================== 壁纸态：两级原生毛玻璃（2026-11-21 小旭裁定） ====================
-   第一步「减法」已把底块 token 全部归零（见下）。本段在其上做**原生两级毛玻璃**：
-   一级 = 外层大容器（红框：设置区/概览卡/面板），模糊深、染色淡；
-   二级 = 嵌套小容器（蓝/紫框：入口卡/按钮/输入/tab/侧栏项），模糊浅、染色略浓。
-   壁纸背景层（.app-wallpaper）完全不改动。
-   实现只用 CSS 原生 backdrop-filter + 实色 token 染色，无 JS 注入滤镜、无多层 rgba
-   叠加。四个数值集中在下面四个变量里，实测后由小旭直接调。 */
+/* ==================== 壁纸态：液态玻璃（透明 + 边缘高光，壁纸清晰不被遮挡） ====================
+   小旭裁定：毛玻璃的 blur 把壁纸虚化了，不要。参考液态玻璃观感——容器**透明**，
+   靠边缘高光 + 细描边表达边界，壁纸人物清晰可见。
+   实现纯 CSS 原生：不写 backdrop-filter（壁纸零模糊）、染色极淡、inset 顶部高光 + 描边。
+   四个数值集中在下面变量，实测后由小旭直接调；改完需 cargo build + 起窗（Tauri 内嵌资产）。 */
 body[data-preset-bg],
 body.bg-image-on {
-  /* —— 可调参数（小旭改这里）：一级模糊深、二级模糊浅 —— */
-  --glass-l1-blur: 18px;   /* 一级（大容器）模糊半径 */
-  --glass-l2-blur: 6px;    /* 二级（嵌套容器）模糊半径 */
-  --glass-l1-tint: rgba(255, 255, 255, 0.42); /* 一级染色（越浓越像白块、越淡越透） */
-  --glass-l2-tint: rgba(255, 255, 255, 0.58); /* 二级染色 */
-  /* 暗色档用深色染色，避免白雾 */
+  /* —— 可调参数 —— */
+  --glass-l1-tint: rgba(255, 255, 255, 0.10); /* 一级（大容器）染色：越淡越透 */
+  --glass-l2-tint: rgba(255, 255, 255, 0.18); /* 二级（嵌套容器）染色 */
+  --glass-edge: rgba(255, 255, 255, 0.55);    /* 边缘高光强度（液态玻璃的"厚度"） */
+  --glass-edge-dark: rgba(255, 255, 255, 0.10); /* 暗色档边缘高光 */
 }
 body.theme-dark[data-preset-bg],
 body.theme-dark.bg-image-on {
-  --glass-l1-tint: rgba(15, 17, 21, 0.50);
-  --glass-l2-tint: rgba(15, 17, 21, 0.62);
+  --glass-l1-tint: rgba(15, 17, 21, 0.18);
+  --glass-l2-tint: rgba(15, 17, 21, 0.28);
+  --glass-edge: var(--glass-edge-dark);
 }
-/* 一级：大容器。把表面 token 指向一级染色，并给原生毛玻璃。 */
+/* 一级：大容器。透明染色 + 边缘高光（无 blur，壁纸清晰）。 */
 body[data-preset-bg] :is(.settings-section, .summary-card, .overview-card, .card,
   .table-card, .appearance-card, .progress-section, .category-group, .mem-panel,
   .realtime-chart-panel, .rt-sr-panel, .external-test-panel, .opt-col, .ctx-col,
@@ -4695,10 +4693,9 @@ body.bg-image-on :is(.settings-section, .summary-card, .overview-card, .card,
   --bg-card-hover: var(--glass-l1-tint);
   --bg-elevated: var(--glass-l1-tint);
   --bg-sidebar: var(--glass-l1-tint);
-  backdrop-filter: blur(var(--glass-l1-blur));
-  -webkit-backdrop-filter: blur(var(--glass-l1-blur));
+  box-shadow: inset 0 1px 0 var(--glass-edge);
 }
-/* 二级：嵌套小容器。token 指向二级染色，原生毛玻璃（浅）。 */
+/* 二级：嵌套小容器。略浓染色 + 边缘高光（无 blur）。 */
 body[data-preset-bg] :is(.settings-entry-card, .process-entry-card, .row-card,
   .maint-card, .startup-item, .device-info-row, .restore-item, .un-app-card,
   .finder-group-header, .btn, .field-input, .filter-tab, .maint-tab, .nav-item,
@@ -4714,10 +4711,9 @@ body.bg-image-on :is(.settings-entry-card, .process-entry-card, .row-card,
   --bg-elevated: var(--glass-l2-tint);
   --bg-input: var(--glass-l2-tint);
   --bg-hover: var(--glass-l2-tint);
-  backdrop-filter: blur(var(--glass-l2-blur));
-  -webkit-backdrop-filter: blur(var(--glass-l2-blur));
+  box-shadow: inset 0 1px 0 var(--glass-edge);
 }
-/* 语义实底按钮（primary/accent）与字面实色补齐：透明化，不参与毛玻璃染色 */
+/* 语义实底按钮（primary/accent）透明化，不参与染色 */
 body[data-preset-bg] .btn-primary,
 body[data-preset-bg] .btn-accent,
 body.bg-image-on .btn-primary,
