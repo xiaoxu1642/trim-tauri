@@ -2,9 +2,9 @@
   "_说明": "删除原语调用点棘轮基线：由 `node tools/check-delete-callsites.mjs --write` 现算回填，禁止手抄。顶层 api→file→count 保留棘轮口径，details 记录文件/函数/API/行锚点，meta 记录生成器版本与输入哈希。",
   "meta": {
     "generatorVersion": "p1-04e-v1",
-    "inputHash": "e4c88303de169600",
-    "callCount": 414,
-    "cleanupCallCount": 91
+    "inputHash": "83fecdf6374b98fe",
+    "callCount": 416,
+    "cleanupCallCount": 93
   },
   "details": [
     {
@@ -2123,6 +2123,18 @@
       "api": "remove_file",
       "file": "src-tauri/src/engine/native/cleanup.rs",
       "fn": "cleanup_execute_with_backup_root",
+      "anchor": "let _ = std::fs::remove_file(&mpath);"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "cleanup_execute_with_backup_root",
+      "anchor": "let _ = std::fs::remove_file(files_backup_root.join(rel));"
+    },
+    {
+      "api": "remove_file",
+      "file": "src-tauri/src/engine/native/cleanup.rs",
+      "fn": "cleanup_execute_with_backup_root",
       "anchor": "match std::fs::remove_file(path) {"
     },
     {
@@ -2521,7 +2533,7 @@
     "src-tauri/src/commands/updater.rs": 3,
     "src-tauri/src/engine/backup_write.rs": 2,
     "src-tauri/src/engine/log.rs": 1,
-    "src-tauri/src/engine/native/cleanup.rs": 10,
+    "src-tauri/src/engine/native/cleanup.rs": 12,
     "src-tauri/src/engine/native/startup.rs": 3,
     "src-tauri/src/engine/native/syspanel.rs": 4,
     "src-tauri/src/engine/paths.rs": 1,

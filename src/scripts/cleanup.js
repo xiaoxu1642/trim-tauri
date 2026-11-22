@@ -3151,7 +3151,7 @@
       } else if (failed.length) {
         window.app?.toast?.('warning', `已清除 ${data.removed || 0} 项，${failed.length} 项未清除（详见日志）`);
         // F4a1-K02：只记条数与原因——f.name 就是用户文件名，不进日志
-        window.app?.log?.('warn', `备份清除未成功 ${failed.length} 项：${failed.slice(0, 5).map((f) => f.reason || '未给出原因').join('；')}`);
+        window.app?.log?.('warn', `备份清除未成功 ${failed.length} 项：${failed.slice(0, 5).map((f) => maskReasonPaths(f.reason) || '未给出原因').join('；')}`);
       } else {
         window.app?.toast?.('success', `已清除 ${data.removed || 0} 项备份`);
       }

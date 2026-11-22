@@ -876,7 +876,7 @@ function surfaceBackgrounds(ruleBody) {
           }
           continue;
         }
-        if (!SURFACE_FAMILY.test(v) && !/^var\(--/.test(v) && !/^color-mix\(/i.test(v)) {
+        if (!SURFACE_FAMILY.test(v)) {
           solidBad.push(`S2 异层异色：${rel} « ${rule.prelude} » { ${d.prop}: ${v} }（须为 --bg-base/--bg-app 家族）`);
         }
       }
@@ -1130,6 +1130,16 @@ solidBad.push(...wallpaperFloorViolations(MATERIAL_CSS));
     const ok = cssRules('body[data-preset-bg] .titlebar { background: transparent; }').every((r) =>
       surfaceBackgrounds(r.body).every((d) => /^\s*transparent\s*$/i.test(d.value) && SURFACE_SEE_THROUGH.test(r.prelude)));
     expect('S2 壁纸贯通放行', ok, true);
+    // S2 换家族写法：var(--accent) / color-mix(异色家族) 必判红，--bg-base 放行（T1d-01）。
+    expect('S2 var(--accent) 异色判红',
+      cssRules('.titlebar { background: var(--accent); }').some((r) => surfaceHits(r.prelude, TITLEBAR_RULE) &&
+        surfaceBackgrounds(r.body).some((d) => !SURFACE_FAMILY.test(d.value))), true);
+    expect('S2 var(--bg-base) 同族放行',
+      cssRules('.titlebar { background: var(--bg-base); }').every((r) =>
+        surfaceBackgrounds(r.body).every((d) => SURFACE_FAMILY.test(d.value))), true);
+    expect('S2 color-mix 异色判红',
+      cssRules('.titlebar { background: color-mix(in srgb, var(--danger) 50%, var(--bg-card)); }').some((r) => surfaceHits(r.prelude, TITLEBAR_RULE) &&
+        surfaceBackgrounds(r.body).some((d) => !SURFACE_FAMILY.test(d.value))), true);
   }
   // S3：回流样本判红；装饰层（spot/sweep/top-hi）与弹簧变量放行
   expect('S3 floor 回流判红',

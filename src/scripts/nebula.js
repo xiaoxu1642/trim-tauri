@@ -96,22 +96,41 @@
     }
   }
 
+  // F4c-01（2026-11-22 CDP 实测）：start 时判一次 reduced() 不够——运行中开
+  // 「减少动态效果」后 tick 只看 hidden，星云仍持续重绘。改为 matchMedia change
+  // 双向切换：进 RM 落静态单帧并停拍，退出 RM 重启动态拍（与 aurora 同口径）。
+  var mqReduce = null;
+  function reduceMQ() {
+    if (!mqReduce) mqReduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+    return mqReduce;
+  }
+  function applyMotionMode() {
+    if (!ctx) return;
+    if (reduced()) {
+      if (timer) { clearInterval(timer); timer = 0; }
+      draw(3.2, true);
+    } else if (!timer) {
+      timer = setInterval(function () {
+        if (document.hidden || !ctx) return;
+        draw(performance.now() / 1000, false);
+      }, TICK_MS);
+    }
+  }
+  function onReduceChange() { applyMotionMode(); }
   function start() {
-    if (reduced()) { mount(); draw(3.2, true); window.addEventListener('resize', onResizeStatic); return; }
     mount();
     if (!ctx) return;
     // 节拍重绘而非 rAF：理由见文件头（aurora 实测教训）。hidden 时暂停。
-    timer = setInterval(function () {
-      if (document.hidden || !ctx) return;
-      draw(performance.now() / 1000, false);
-    }, TICK_MS);
+    applyMotionMode();
+    var mq = reduceMQ();
+    if (mq.addEventListener) mq.addEventListener('change', onReduceChange);
+    else if (mq.addListener) mq.addListener(onReduceChange);
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('resize', onResize);
     document.addEventListener('pointermove', onPointer, { passive: true });
   }
   function onVisibility() { /* 节拍内自判 hidden，无需额外处理 */ }
-  function onResize() { sizeCanvas(); }
-  function onResizeStatic() { sizeCanvas(); draw(3.2, true); }
+  function onResize() { sizeCanvas(); if (reduced()) draw(3.2, true); }
   function onPointer(e) {
     pointer.tx = e.clientX / Math.max(1, window.innerWidth);
     pointer.ty = e.clientY / Math.max(1, window.innerHeight);

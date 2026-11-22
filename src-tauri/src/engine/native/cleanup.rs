@@ -350,7 +350,10 @@ pub struct CleanupExecuteResult {
 
 /// PF-P0-03：清单写入额度以序列化后的真实字节数计，上限取自契约表的读取侧口径。
 /// 每份清单还必须落在还原批次数上限内，额度不够就不写副本，避免产生孤儿。
-const MANIFEST_OVERHEAD_PER_ENTRY: usize = 8;
+/// R5a-K01：per-entry 开销按 pretty 落盘实测（含条目间 `\n      ` 分隔）取 24，
+/// 预算条目本体用 `to_string_pretty` 计价（与落盘 :2318 同源）；compact 的 8 字节
+/// 旧值会让预算放行的批次落盘超读侧上限，整份清单被拒读。
+const MANIFEST_OVERHEAD_PER_ENTRY: usize = 24;
 /// 整批还原的单次条目上限；写入侧清单额度与读取侧批量还原共用，防止写出还原不了的清单。
 pub(crate) const FILE_RESTORE_BATCH_MAX: usize = 50_000;
 
@@ -390,7 +393,8 @@ impl ManifestBudget {
         Self {
             limit,
             max_entries: FILE_RESTORE_BATCH_MAX,
-            fixed_bytes: serde_json::to_string(&json!({"ts": 0i64, "entries": []}))
+            // R5a-K01：预算口径必须与落盘序列化同源（落盘用 to_string_pretty，:2318）。
+            fixed_bytes: serde_json::to_string_pretty(&json!({"ts": 0i64, "entries": []}))
                 .map(|text| text.len())
                 .unwrap_or(0),
             entries: 0,
@@ -409,7 +413,8 @@ impl ManifestBudget {
     }
 
     fn reserve(&mut self, entry: &Value) -> bool {
-        let Ok(bytes) = serde_json::to_string(entry).map(|text| text.len() as u64) else {
+        // R5a-K01：与落盘 to_string_pretty 同源计价；compact 计价放行的批次落盘会超读侧上限。
+        let Ok(bytes) = serde_json::to_string_pretty(entry).map(|text| text.len() as u64) else {
             self.truncated_entries += 1;
             return false;
         };
@@ -2311,9 +2316,10 @@ let mut freed = 0i64;
 
     // C-4：批次备份清单落盘（有副本才写；还原通道按清单逐条拷回）
     if !backup_entries.is_empty() {
+        let entry_count = backup_entries.len();
         let manifest = json!({ "ts": backup_batch_ts, "entries": backup_entries });
         let mpath = files_backup_root.join(format!("manifest-{backup_batch_id}.json"));
-        // R5a-M11：清单同样住在备份根下，写前必须过根判定。
+        // R5a-K01：清单同样住在备份根下，写前必须过根判定。
         if backup_root_ready(&files_backup_root) {
             match serde_json::to_string_pretty(&manifest) {
                 Ok(text) => {
@@ -2327,20 +2333,47 @@ let mut freed = 0i64;
                         crate::engine::log::write_log(
                             "warn",
                             &format!(
-                                "files 备份清单写入失败: {e}；本批 {} 个文件副本无还原依据，\
+                                "files 备份清单写入失败: {e}；本批 {entry_count} 个文件副本无还原依据，\
                                  24h 后由孤儿回收清理",
-                                backup_entries.len()
                             ),
                         );
+                    } else {
+                        // R5a-K01：写后按实际落盘字节数二次校验（与读侧同一口径）。超限清单
+                        // 读侧整份拒读 ⇒ 本批副本失去唯一还原凭据，整批 fail-closed：删清单、
+                        // 删已落副本，不留下读不了的孤儿；计数进回执告警。
+                        let disk_len = std::fs::metadata(&mpath).map(|m| m.len()).unwrap_or(0);
+                        if disk_len > manifest_limit {
+                            let _ = std::fs::remove_file(&mpath);
+                            let over_count = manifest["entries"].as_array().map(|a| a.len()).unwrap_or(0);
+                            if let Some(entries) = manifest["entries"].as_array() {
+                                for e in entries {
+                                    if let Some(rel) = e.get("file").and_then(|v| v.as_str()) {
+                                        let rel_path = std::path::Path::new(rel);
+                                        if !rel.contains("..") && !rel_path.is_absolute() && rel_path.components().count() > 1 {
+                                            let _ = std::fs::remove_file(files_backup_root.join(rel));
+                                        }
+                                    }
+                                }
+                            }
+                            // R5a-K01：超限整批撤销的副本数由 warn 日志如实告警（含 disk_len/
+                            // limit/over_count）；清单是整批一次写，details 早于此处组装，
+                            // 回执逐规则字段无法承载整批事件，故不在这里写恒 0 的假字段。
+                            crate::engine::log::write_log(
+                                "warn",
+                                &format!(
+                                    "files 备份清单落盘 {disk_len} 字节超过读取侧上限 {manifest_limit}；\
+                                     本批 {over_count} 个副本已整体撤销，未留下不可还原清单",
+                                ),
+                            );
+                        }
                     }
                 }
                 Err(_) => {
                     crate::engine::log::write_log(
                         "warn",
                         &format!(
-                            "files 备份清单序列化失败；本批 {} 个文件副本无还原依据，\
+                            "files 备份清单序列化失败；本批 {entry_count} 个文件副本无还原依据，\
                              24h 后由孤儿回收清理",
-                            backup_entries.len()
                         ),
                     );
                 }
@@ -5165,6 +5198,18 @@ mod review_shape_tests {
             src.contains("\"backupManifestTruncatedBytes\": manifest_budget.truncated_bytes"),
             "截断字节数必须进回执"
         );
+        assert!(
+            src.contains("serde_json::to_string_pretty(&json!({\"ts\": 0i64, \"entries\": []}))"),
+            "R5a-K01：fixed_bytes 必须与落盘 pretty 同源，compact 计价必须判红"
+        );
+        assert!(
+            src.contains("serde_json::to_string_pretty(entry)"),
+            "R5a-K01：reserve 计价必须与落盘 pretty 同源，compact 计价必须判红"
+        );
+        assert!(
+            src.contains("std::fs::metadata(&mpath).map(|m| m.len())"),
+            "R5a-K01：写后必须按实际落盘字节数二次校验"
+        );
 
         let mut budget = ManifestBudget::new(180);
         let small = json!({"file": "r\\1_a", "path": "C:\\a", "size": 1, "rule": "r"});
@@ -5178,6 +5223,38 @@ mod review_shape_tests {
         assert!(
             budget.truncated_bytes > 0,
             "截断申报字节数必须进入回执计数"
+        );
+    }
+
+    /// R5a-K01：预算按 pretty 计价时放行的条目，落盘（pretty）必须不超同一上限；
+    /// 若把计价改回 compact（与落盘口径分叉），放行条数变多、落盘超限 ⇒ 本用例红。
+    #[test]
+    fn 预算放行条目按落盘序列化不超读侧上限() {
+        let limit = 4096u64;
+        let mut budget = ManifestBudget::new(limit);
+        let mut entries: Vec<Value> = Vec::new();
+        for i in 0..10_000usize {
+            let entry = json!({
+                "file": format!("优化清理规则\\1770000000000001_{i:05}_desktop.ini"),
+                "path": format!(
+                    "C:\\Users\\Administrator\\AppData\\Local\\Microsoft\\Windows\\INetCache\\IE\\优化清理规则\\deep\\desktop.ini"
+                ),
+                "size": 1,
+                "rule": "优化清理规则-浏览器缓存深度清理",
+            });
+            if budget.reserve(&entry) {
+                entries.push(entry);
+            }
+        }
+        assert!(!entries.is_empty(), "预算内必须能放行条目");
+        let manifest = json!({ "ts": 0i64, "entries": entries });
+        let pretty_len = serde_json::to_string_pretty(&manifest)
+            .map(|t| t.len() as u64)
+            .unwrap_or(u64::MAX);
+        assert!(
+            pretty_len <= limit,
+            "R5a-K01：预算放行 {n} 条，落盘 {pretty_len} 字节必须 ≤ 上限 {limit}",
+            n = manifest["entries"].as_array().map(|a| a.len()).unwrap_or(0)
         );
     }
 

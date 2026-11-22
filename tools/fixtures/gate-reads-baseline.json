@@ -15,7 +15,7 @@
     "M-12"
   ],
   "srcHash": {
-    "check-channel-map": "a406449561e3f6aa",
+    "check-channel-map": "e79d6e69a851c3b0",
     "check-guard-tiers": "1611cd1f623a5c67",
     "check-layering": "2eafd617abcf47b6",
     "check-delete-exits": "c7c3b79a79f4928d",
@@ -34,7 +34,7 @@
     "check-native-hygiene": "d43526d9d759e21c",
     "check-handle-lifecycle": "02b1b39a04ac7489",
     "check-comment-coords": "6fff15c052161c3a",
-    "check-css-tokens": "1abd72f4449217bf",
+    "check-css-tokens": "55377493f2a530b0",
     "check-css-hygiene": "30c86d5d7f2a8c1e",
     "check-assets-used": "2aee5e7cad5b131d",
     "check-asset-size": "a3904ba3bcd55a1c",
@@ -78,9 +78,9 @@
     "check-review-units": "b1346bf1600df8d4",
     "check-tests-helper-parity": "fb2af723d16b11f0",
     "check-data-signatures": "4d4dd6d89c196d58",
-    "check-fixture-freshness": "264dcec8a506125d",
+    "check-fixture-freshness": "d3c38af257fccfbd",
     "check-gate-roster": "ecb1ff6a4698d821",
-    "check-delete-root-guard": "2fa28c81abc5c6ce",
+    "check-delete-root-guard": "19758d7851376a0e",
     "check-ignored-isolation": "844fd88546a4f779",
     "check-async-exits": "d0ef6d3ef5513994",
     "check-degraded-consumption": "f0763b1cecbabe31",
@@ -264,9 +264,7 @@
       "M-01",
       "M-02"
     ],
-    "check-artifact-size": [
-      "M-11"
-    ],
+    "check-artifact-size": [],
     "check-first-paint": [
       "M-01",
       "M-02"
@@ -407,9 +405,7 @@
     "check-updater-pubkey": [
       "M-12"
     ],
-    "check-release-artifacts": [
-      "M-12"
-    ],
+    "check-release-artifacts": [],
     "check-readme-claims": [
       "M-02",
       "M-04",
@@ -549,5 +545,5 @@
       "M-12"
     ]
   },
-  "bodyHash": "ae8680da49823825"
+  "bodyHash": "002e1ae17134fd69"
 }

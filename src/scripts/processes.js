@@ -257,7 +257,13 @@
         try {
           const resp = await window.api.memory.kill(Number(pid));
           if (resp && resp.success) {
-            toast('success', (resp.message || `进程 ${pid} 已结束`));
+            // 后端 TerminateProcess 已受理即 success:true，stillAliveProbe 才是 300ms 后的存活实测；
+            // 只判 success 会把"请求已受理但进程仍活"误报成"已结束"（R5e-01）。
+            if (resp.stillAliveProbe === true) {
+              toast('warning', '已发送结束请求，但进程仍存活，请确认权限或退出状态');
+            } else {
+              toast('success', (resp.message || `进程 ${pid} 已结束`));
+            }
           } else {
             toast('warning', (resp && resp.message) || `结束进程 ${pid} 失败`);
           }

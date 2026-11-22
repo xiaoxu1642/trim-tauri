@@ -7,7 +7,7 @@
 // 口径真源，它烂了两边的断言一起烂，且无任何信号。
 //
 // 判据：生成器导出的构造函数（唯一实现）在内存里重算，与盘上产物**逐字节**比。
-// 覆盖四件：residue-contract（gen-residue-fixture）/ winerror-codes（gen-winerror-codes，
+// 覆盖 TARGETS 列出的全部产物：residue-contract（gen-residue-fixture）/ winerror-codes（gen-winerror-codes，
 // 产出在 src-tauri/data/）/ finder-delete-modes（gen-finder-delete-modes）/
 // rules-canonical（tools/fixtures/rules-canonical/gen.mjs，签名规范化跨语言共享夹具）。
 // protect-parity 夹具不在本门禁：它的内存重算由 check-data-parity P4 负责
@@ -62,7 +62,7 @@ function isFresh(have, want) {
   g.ok('正向对照：比对器正反样本各命中（相同放行 / 不一致判红）');
 }
 
-// ---------- 真仓：三件产物 ⇄ 生成器导出逐字节比 ----------
+// ---------- 真仓：逐件产物 ⇄ 生成器导出逐字节比 ----------
 const stale = [];
 for (const { out, build } of TARGETS) {
   const want = build();

@@ -1690,6 +1690,13 @@ fn cm_registry_container_ok(native_path: &str) -> bool {
     if !hive_ok {
         return false;
     }
+    // R5a-K02：cm_scan 的新建菜单臂只从 HKCU 的 PostSetup\ShellNew 列表键读
+    // Classes，写侧必须认出同一个键，否则禁用 100% 被 containment 拒。
+    // 精确相等，不放宽成任意 PostSetup 子键；HKLM 不在该扫描面内。
+    let shellnew_list = r"software\microsoft\windows\currentversion\explorer\discardable\postsetup\shellnew";
+    if key.starts_with("hkey_current_user\\") && rest == shellnew_list {
+        return true;
+    }
     // 32 位视图折回：Wow6432Node 段剥掉后与 64 位形态同判（两种前缀按序试剥）
     let classes = rest
         .strip_prefix("software\\classes\\wow6432node\\")
@@ -2649,7 +2656,13 @@ mod c02_write_gate_tests {
         // ---- registry：⑤ 场景形状合法 ⑥ 越界容器拒 ----
         assert!(cm_registry_container_ok(r"HKEY_CURRENT_USER\Software\Classes\*\shell\Foo\command"));
         assert!(cm_registry_container_ok(r"HKEY_LOCAL_MACHINE\SOFTWARE\Classes\Wow6432Node\Directory\shellex\ContextMenuHandlers\X"));
-        assert!(cm_registry_container_ok(r"HKEY_CURRENT_USER\Software\Classes\.txt\ShellNew"), "shellnew 形状必须放行");
+        // R5a-K02：测试样本改为扫描侧真实产出——PostSetup\ShellNew 列表键，
+        // 不是 Classes 下的单扩展名 ShellNew 子键；后者是另一合法形状，一并保留回归。
+        assert!(cm_registry_container_ok(r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Discardable\PostSetup\ShellNew"), "shellnew 真实列表键必须放行");
+        assert!(cm_registry_container_ok(r"HKEY_CURRENT_USER\Software\Classes\.txt\ShellNew"), "Classes 单扩展名 shellnew 形状仍须放行");
+        // 越界形状：HKLM 的 PostSetup 列表键与任意 PostSetup 子键都不得借本条放宽。
+        assert!(!cm_registry_container_ok(r"HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Explorer\Discardable\PostSetup\ShellNew"), "HKLM 的 PostSetup 列表键必须拒");
+        assert!(!cm_registry_container_ok(r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Discardable\PostSetup"), "PostSetup 容器本身必须拒");
         assert!(cm_registry_container_ok(r"HKEY_LOCAL_MACHINE\SOFTWARE\Classes\Applications\notepad.exe"), "openwith 形状必须放行");
         assert!(cm_registry_container_ok(r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked"), "屏蔽表固定键必须放行");
         assert!(!cm_registry_container_ok(r"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run"), "Run 容器不在本域扫描面，必须拒");

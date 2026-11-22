@@ -356,8 +356,11 @@
   // 返回同步可用的退订函数。
   function onEvent(event, handler) {
     var active = true;
+    // F2-M01：callbackId 必须留在 onEvent 函数作用域，executor 与退订闭包才能共享同一绑定；
+    // 原先困在 Promise executor 内，正常退订闭包引用越界抛 ReferenceError 并泄漏注册回调。
+    var callbackId;
     var offPromise = new Promise(function (resolve) {
-      var callbackId = internals.transformCallback(function (rawEvent) {
+      callbackId = internals.transformCallback(function (rawEvent) {
         try { handler(rawEvent && rawEvent.payload !== undefined ? rawEvent.payload : rawEvent); }
         catch (e) { console.error('[tauri-api] 事件处理器异常 ' + event, e); }
       });

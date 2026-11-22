@@ -53,22 +53,45 @@ const GUARD = 'inspect_root(';
 // ② 绑定后读结果 `let verdict = inspect_root(…); … verdict.is_trusted()`（现盘主流写法）。
 // `let _ = inspect_root(…)` 是丢弃结果，不算读；E1/E3 两条假绿形态见 CONTROLS C15/C16。
 const GUARD_CHAIN = /inspect_root\s*\([^;{}]*\)\s*(?:\?\.)?\.is_trusted\s*\(/;
+// T1e-K03（2026-11-22）：三腿共用「结果进控制表达式」判据。旧实现只有 native-scanner
+// 两腿要求 `if` 在前，inspect_root 腿只验接收者绑定 ⇒ `let _ = inspect_root(…).is_trusted()`
+// 与 `let _ = verdict.is_trusted()` 两种「读了就丢」仍判绿。统一后结果落在 `let _ =`、
+// 裸语句等非控制位一律不算；只认 if 条件（含 `let x = if …` 条件赋值）与三元条件。
+// 文本级、函数体粒度，与既有 T1e-L05 同精度，不做控制流/语句序分析。
+function resultEntersControl(body, exprRe) {
+  const re = exprRe.global ? exprRe : new RegExp(exprRe.source, exprRe.flags + 'g');
+  for (const m of body.matchAll(re)) {
+    const at = m.index;
+    const end = at + m[0].length;
+    const stmtStart = Math.max(body.lastIndexOf(';', at), body.lastIndexOf('{', at), body.lastIndexOf('}', at)) + 1;
+    const semi = body.indexOf(';', end);
+    const before = body.slice(stmtStart, at);
+    const after = body.slice(end, semi === -1 ? body.length : semi);
+    // `let _ = …` 与裸语句调用都是把判定结果丢弃，不是「进控制表达式」
+    if (/\blet\s+_\s*=/.test(before) || !/\S/.test(before)) continue;
+    // if 条件，含条件赋值 `let x = if <判定> { … } else { … }`
+    if (/\bif\b/.test(before)) return true;
+    // 三元条件 `<判定> ? a : b`（要求出现 `:`，避开 Rust 的 `?` 传播运算符）
+    if (/^\s*\?[^.?]/.test(after) && after.includes(':')) return true;
+  }
+  return false;
+}
 function hasRootGuard(body) {
-  if (GUARD_CHAIN.test(body)) return true;
+  if (resultEntersControl(body, GUARD_CHAIN)) return true;
   for (const m of body.matchAll(/\blet\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*[^;]*inspect_root\s*\(/g)) {
     const name = m[1];
     if (name === '_') continue; // 丢弃结果
-    if (new RegExp(`\\b${name}\\s*(?:\\?\\.)?\\.is_trusted\\s*\\(`).test(body)) return true;
+    const readRe = new RegExp(`\\b${name}\\s*(?:\\?\\.)?\\.is_trusted\\s*\\(`);
+    if (resultEntersControl(body, readRe)) return true;
   }
   return false;
 }
 const READ = 'read_dir(';
-// T1e-M01：native-scanner 的两条根闸腿（`is_protected_path` 与 N1c-Y01 的
-// 「直接子目录 + Trim-DiskBench 名字」双判据）也要与 L05 同口径：结果必须进
-// 控制表达式（`if` 条件，含 `let … = if …`），否则 `let _ = …` 这种「调用一下
-// 不读结果」会被洗白。文本级判据与 L05 同粒度，不做控制流/语句序分析。
-const GUARD_PROTECTED = /\bif\b[^;]*\bis_protected_path\s*\(/;
-const GUARD_BENCH = /\bif\b[^;]*\bdirect_child\s*&&\s*bench_name_ok\b/;
+// T1e-M01：native-scanner 的两条根闸腿（is_protected_path、N1c-Y01 的双判据）与
+// inspect_root 腿统一走 resultEntersControl —— 只认结果进 if/三元/条件赋值；
+// `let _ = …` 这种「调用一下不读结果」由 C13/C14 对照组钉住必须判红。
+const GUARD_PROTECTED = /\bis_protected_path\s*\(/;
+const GUARD_BENCH = /\bdirect_child\s*&&\s*bench_name_ok\b/;
 // T1e-L04：增 `remove_dir(` / `recycle_one(` 两类删除原语；`delete_file_with_panic(` 在仓内零命中（已退役），
 // 删掉以免掩耳盗铃。任何「read_dir + 2 跳内出现下列原语」的站点未判根即红。
 const DESTRUCTIVE = ['remove_file(', 'remove_dir_all(', 'remove_dir(', 'send_to_trash_os(', 'recycle_one('];
@@ -192,10 +215,11 @@ function build(code) {
       // 这一层由 C8/C13 形态钉住）。
       // T1e-M04：native-scanner 没有 inspect_root，根/目标闸是
       // `is_protected_path` 与 N1c-Y01 的「直接子目录 + Trim-DiskBench 名字」双判据。
-      // T1e-M01：这两条腿同样只认「结果进控制表达式」，不认纯出现。
+      // T1e-K03：三腿统一经 resultEntersControl —— 都要求真值进 if/三元/条件赋值，
+      // inspect_root 腿的 `let _ = …is_trusted()` 与 native 两腿的 `let _ = …` 同样判红。
       guards: hasRootGuard(body)
-        || GUARD_PROTECTED.test(body)
-        || GUARD_BENCH.test(body),
+        || resultEntersControl(body, GUARD_PROTECTED)
+        || resultEntersControl(body, GUARD_BENCH),
       calls: null,
       argCalls: null,
     };
@@ -370,6 +394,18 @@ const CONTROLS = [
     label: 'C17 跨行实参的 inspect_root(…).is_trusted() 进 if 条件 ⇒ 不判红（接收者绑定正例）',
     code: 'fn top(p: &Path) {\n  let _ = std::fs::read_dir(p);\n  if crate::engine::protect::inspect_root(\n    p,\n    Some(root),\n  ).is_trusted() {\n    let _ = std::fs::remove_file(p);\n  }\n}',
     expectViolation: false,
+  },
+  {
+    // T1e-K03：链式结果直接落 `let _ =` —— 读了 is_trusted 却丢弃，不算进控制表达式。
+    label: 'C18 let _ = inspect_root(…).is_trusted() ⇒ 必须判红（读后丢弃）',
+    code: 'fn top(p: &Path) { let _ = std::fs::read_dir(p); let _ = crate::engine::protect::inspect_root(p, None).is_trusted(); let _ = std::fs::remove_file(p); }',
+    expectViolation: true,
+  },
+  {
+    // T1e-K03：先绑定 verdict 再 `let _ = verdict.is_trusted()` —— 同样读了就丢。
+    label: 'C19 let _ = verdict.is_trusted() ⇒ 必须判红（绑定后读却丢弃）',
+    code: 'fn top(p: &Path) { let _ = std::fs::read_dir(p); let verdict = crate::engine::protect::inspect_root(p, None); let _ = verdict.is_trusted(); let _ = std::fs::remove_file(p); }',
+    expectViolation: true,
   },
 ];
 let ctrlBad = 0;

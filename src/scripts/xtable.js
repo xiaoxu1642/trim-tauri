@@ -52,11 +52,13 @@
       // 用 `data-col="${col.key}"` 字面量锚定「表头 data-col ⇄ 行单元 data-cell 同源」
       // 契约，且 key 的允许来源本就是调用方静态常量（现算唯一调用方 cleanup.js 的
       // COL_* 全为字面量）——要放宽 key 的转义必须先改那条门禁，不许库侧静默换形态。
+      // F5-M01：列宽只有下限 56px、无真实硬上限，拖拽可超过任意固定值；ARIA 允许无界值，
+      // 故 resizer 只播报 valuenow，不声明 valuemin/max（伪值域会让读屏误判越界）。
       return `<div class="xtable-th${sortable ? ' sortable' : ''}${state && state.key === col.key ? ' sorted' : ''}${sortable ? '' : ' no-sort'}"
         data-col="${col.key}" style="${style}" data-align="${align}"${a11y}${sortable ? ' data-tip="点击排序"' : ''}>
         <span class="xtable-th-label">${window.ds.esc(col.label)}</span>
         ${sortable && state ? sortIndicatorHtml(state, col.key) : ''}
-        ${col.resizable === false ? '' : `<span class="xtable-resizer" data-resize="${col.key}" data-tip="拖动或方向键调整列宽" tabindex="0" role="separator" aria-orientation="vertical" aria-label="调整列宽" aria-valuemin="${RESIZE_MIN_WIDTH}" aria-valuemax="${RESIZE_MIN_WIDTH}"></span>`}
+        ${col.resizable === false ? '' : `<span class="xtable-resizer" data-resize="${col.key}" data-tip="拖动或方向键调整列宽" tabindex="0" role="separator" aria-orientation="vertical" aria-label="调整列宽"></span>`}
       </div>`;
     }).join('');
     return `<div class="xtable-head${opts.compact ? ' xtable-head-compact' : ''}" role="row">${cells}</div>`;

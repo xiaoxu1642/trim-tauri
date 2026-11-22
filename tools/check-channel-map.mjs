@@ -676,29 +676,92 @@ const d5MissingWhy = [...D5_READONLY_WITHOUT_SUB_CONSUMER].filter((c) => d5Why(c
     return out;
   };
   const tiers = tierOf();
-  // 命令名 → 通道名（反查 CHANNEL_MAP）
-  const chanOf = new Map([...channelMap].map(([ch, cmd]) => [cmd, ch]));
-  const readonlyNoSubConsumer = [];
-  const readonlyGrantsNoOne = [];
-  for (const cmd of [...tiers.READONLY].sort()) {
-    const ch = chanOf.get(cmd);
-    if (!ch) continue; // 无渲染层通道（如纯事件源）不在本组范围
-    if (!usedIn(ch, subSources)) {
-      // 主窗也在用 = 放宽白给（须登记）；主窗也不用 = 纯孤儿，归 D4 组管
-      if (usedIn(ch, sources)) readonlyGrantsNoOne.push(cmd);
-      readonlyNoSubConsumer.push(cmd);
+  // 命令名 → 通道名反查：必须基于 allChannels（invoke ∪ send）。旧版只反查 channelMap，
+  // readonly 的 send 命令（process_manager_report）因反查不到被下面 continue 跳过，白给放宽漏检（T1i-K02）。
+  const chanOfFrom = (channels) => new Map([...channels].map(([ch, cmd]) => [cmd, ch]));
+  const chanOf = chanOfFrom(allChannels);
+
+  /** D5 判定核心：现盘与 send-only 合成对照共用同一实现，反查漏 sendMap 时对照能判红 */
+  function d5Diff(chanOf, readonlySet, mainSet, usedInFn, baseline) {
+    const noSub = [];
+    const grantsNoOne = [];
+    for (const cmd of [...readonlySet].sort()) {
+      const ch = chanOf.get(cmd);
+      if (!ch) continue; // 无渲染层通道（如纯事件源）不在本组范围
+      if (!usedInFn(ch, subSources)) {
+        // 主窗也在用 = 放宽白给（须登记）；主窗也不用 = 纯孤儿，归 D4 组管
+        if (usedInFn(ch, sources)) grantsNoOne.push(cmd);
+        noSub.push(cmd);
+      }
     }
+    const mainWithSub = [...mainSet].filter((cmd) => {
+      const ch = chanOf.get(cmd);
+      return ch && usedInFn(ch, subSources);
+    });
+    return {
+      noSub,
+      grantsNoOne,
+      mainWithSub,
+      // 棘轮①：新增一条「只读却无子窗消费方」即红（表只许变短）
+      newGrants: grantsNoOne.filter((n) => !baseline.has(n)),
+      // 棘轮②：表里的条目后来有了子窗调用点 → 豁免失效，同样红（白名单烂掉比没有更危险）
+      staleGrants: [...baseline].filter((n) => !grantsNoOne.includes(n)),
+    };
   }
-  const mainWithSubConsumer = [...tiers.MAIN].filter((cmd) => {
-    const ch = chanOf.get(cmd);
-    return ch && usedIn(ch, subSources);
-  });
-  // 棘轮①：新增一条「只读却无子窗消费方」即红（表只许变短）
-  const newGrants = readonlyGrantsNoOne.filter((n) => !D5_READONLY_WITHOUT_SUB_CONSUMER.has(n));
-  // 棘轮②：表里的条目后来有了子窗调用点 → 豁免失效，同样红（白名单烂掉比没有更危险）
-  const staleGrants = [...D5_READONLY_WITHOUT_SUB_CONSUMER].filter(
-    (n) => !readonlyGrantsNoOne.includes(n),
+
+  const d5 = d5Diff(chanOf, tiers.READONLY, tiers.MAIN, usedIn, D5_READONLY_WITHOUT_SUB_CONSUMER);
+  const {
+    noSub: readonlyNoSubConsumer,
+    grantsNoOne: readonlyGrantsNoOne,
+    mainWithSub: mainWithSubConsumer,
+    newGrants,
+    staleGrants,
+  } = d5;
+
+  // 消费面解析锁定（T1i-K02）：send 包装（sendChannel）必须被 parseApiPaths 认出，
+  // 否则「反查纳入 send」仍会因找不到 window.api 路径而在 usedIn 里假绿。
+  const sendNoPath = [...sendMap.keys()].filter((ch) => !apiPaths.has(ch));
+  check(
+    sendNoPath.length === 0,
+    `对照：send 通道都有 window.api 包装路径（sendMap ${sendMap.size}）`,
+    sendNoPath.length ? `parseApiPaths 未解析这些 send 包装，D5 会假绿：${JSON.stringify(sendNoPath)}` : '',
   );
+  // 反查必须真的落在生产的 chanOf 上：若它退回只认 channelMap，真实 send 命令会反查不到
+  // 而被 continue 跳过（T1i-K02）。这条钉住 line 680 的改动，合成对照另行覆盖 D5 判红。
+  const sendNoReverse = [...sendMap].filter(([ch, cmd]) => chanOf.get(cmd) !== ch);
+  check(
+    sendNoReverse.length === 0,
+    `对照：send 命令都能从生产 chanOf 反查到通道（sendMap ${sendMap.size}）`,
+    sendNoReverse.length ? `chanOf 漏掉 send 命令，D5 会跳过白给放宽：${JSON.stringify(sendNoReverse)}` : '',
+  );
+
+  // send-only 合成对照（T1i-K02）：send 通道的 readonly 命令无子窗消费方必须判红。
+  // 走与现盘同一条 chanOfFrom(allChannels) → d5Diff —— 若反查退回只认 channelMap，
+  // fakeChanOf 取不到合成 send 命令，本对照即红（防「纳入反查」钩子被默默摘掉）。
+  {
+    const fakeCmd = 'synthetic_send_only_cmd';
+    const fakeCh = 'synthetic:send-only';
+    const fakeChanOf = chanOfFrom(new Map([...allChannels, [fakeCh, fakeCmd]]));
+    // 该 send 通道有 api 包装、主窗在调，但子窗没有 → 典型「放宽白给」
+    const fakeUsedIn = (ch, pool) => ch === fakeCh && pool === sources;
+    const synth = d5Diff(fakeChanOf, new Set([fakeCmd]), new Set(), fakeUsedIn, new Set());
+    check(
+      fakeChanOf.get(fakeCmd) === fakeCh &&
+      synth.grantsNoOne.includes(fakeCmd) &&
+      synth.newGrants.includes(fakeCmd) &&
+      synth.mainWithSub.length === 0,
+      '对照：D5 send-only 只读命令无子窗消费方必须判红（反查覆盖 sendMap）',
+      fakeChanOf.get(fakeCmd) !== fakeCh
+        ? 'chanOf 反查漏掉合成 send 命令（allChannels 未纳入？）'
+        : !synth.grantsNoOne.includes(fakeCmd)
+          ? '合成 send-only 未被识别为「无子窗消费方」'
+          : !synth.newGrants.includes(fakeCmd)
+            ? '合成 send-only 未判为新增强（判红失败）'
+            : synth.mainWithSub.length !== 0
+              ? '合成样本误判出 MAIN 档子窗消费方'
+              : '',
+    );
+  }
   check(
     newGrants.length === 0 && staleGrants.length === 0 && mainWithSubConsumer.length === 0,
     `D5. 只读档的放宽有子窗消费方支撑（只读 ${tiers.READONLY.size} / 已登记豁免 ${D5_READONLY_WITHOUT_SUB_CONSUMER.size} / 主窗 ${tiers.MAIN.size}）`,
