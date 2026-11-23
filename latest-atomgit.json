@@ -1,15 +1,15 @@
 {
-  "version": "0.9.12",
-  "notes": "## 版本 0.9.12（2026-11-22 内存清理模块审查修复）\n\n> 本版只修内存清理模块的文案、回执、进程采集与快照安全；不调整版本承诺，不新增用户设置。\n\n① **内存区域文案改为真实口径**：`standby` 不再声称“释放量最大”，明确备用页本就计入可用内存、清完可用量几乎不变但冷读变慢；`default` 不再无条件承诺内存占用下降，未测到就显示未测到。\n\n② **进程采集失败不再静默**：原生进程枚举把首轮失败、枚举中断、打开句柄、内存计数与路径读取失败写入 `errors/partial`，失败或空列表时清除旧快照，避免用过期 PID 放行结束进程。\n\n③ **结束进程校验修正**：进程名复核同时接受 `Notepad.exe` 与 `notepad` 两种口径；`TerminateProcess` 成功后按成功回执返回，不再因进程对象短暂残留误报可能需要管理员权限。\n\n④ **清理回执可见**：前端显示受理项与丢弃项数量，形状不合的清理项单独提示；三个异步入口改为 `await + catch + toast`，进程更新订阅进入统一退订台账。\n\n⑤ **测试与门禁补齐**：新增归一计数、档位、形状与失败路径测试；简介门禁增加 standby 反向语义判红；已重算门禁读取面。\n\n本版验证：`cargo check --all-targets`、`cargo test`、Node 相关门禁、全量 `--run --changed` 均通过；真机 Release 采样 `memory:processes` p50 13ms / p95 14ms，无 >50ms 长任务；`workingSet` 真机清理成功，自建 Notepad 进程结束成功；系统显示缩放按用户裁定不测。",
-  "pub_date": "2026-11-21T20:57:37Z",
-  "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.9.12/attach_files/Trim_0.9.12_x64-setup.exe/download",
-  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaENMbW5Mcmp5MndTZEJ6MFlLRTdRTCtUend1MG1hbU5hTDc4c0RyZUdnYldhaExCdFhZTkxRNit4N2ZOMHlFdlBIOVpQZUZweno3ZURXNXdBVHJaSEE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1MjkzNDM4CWZpbGU6VHJpbV8wLjkuMTJfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuOS4xMgp3Vm14NnlBYVkzcWVVUzNyUGRHRUxOd1d1a3h0bTAxTFIrckNGV2ZPR3p4dzhrSlFyWVJ4bWlQa09XNUJxNzhCUGFLdmFINnF3N0hueGJ0MTVoeGJBZz09Cg==",
-  "sha256": "6311bffc6bc6cffe8c3c8398ce1548447fe73571d485825050e9dea8104af4f8",
+  "version": "0.9.13",
+  "notes": "## 版本 0.9.13（2026-11-24 optimizerDuck 借鉴与设置界面收口）\n\n> 本版落地 optimizerDuck 借鉴方案：优化回执三态化、账本不可确认保留灰态、用户体验细节按真机反馈收口；不做远端资产变更以外的产品口径调整。\n\n① **优化回执增加稳定机器原因码与净变更语义**：`optimizer_run` 早退、执行、还原各分支统一带 `reasonCode`，前端按原因码与 `netChanged` 选 toast，避免把“已满足 / 部分写入 / 无法验证”混成普通失败或绿色成功。\n\n② **服务复合写失败可补偿**：停服与改启动类型只有在前后读证据成立时才记作已落地，失败回执带 LIFO 补偿清单，摘要落入现有 `optimization-state.json`，不新建第二套补偿账本。\n\n③ **状态账本损坏不再伪装成没执行过**：读失败或骨架缺失时回执带 `stateUncertain` / `appliedIdsUnknown`，界面保留灰态并提示不可确认，避免用户重复执行已改过的项。\n\n④ **账外核对整条退役**：删除按钮、前端弹窗、后端命令、清单登记、门禁特例与文档引用；保留用户可见面清爽，不留下无人调用的通道。\n\n⑤ **设置与优化页按真机反馈调整**：三态文案区分、并排设置块、导入背景图片文案与按钮、系统信息折叠箭头、优化页按钮布局与标题徽章位置、标题栏三按钮尺寸与悬停底色均按目检收口；自绘弹窗不再复用壁纸。\n\n本版验证：全量 Node 门禁 74/74 通过；`cargo check --all-targets` 与 `cargo test` 全绿；CDP 对按钮布局、设置并排、弹窗背景、优化计数与默认动效逐项读取计算样式确认。远端发布资产、tag 与双线清单以发版收口实际结果为准。",
+  "pub_date": "2026-11-23T21:43:59Z",
+  "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.9.13/attach_files/Trim_0.9.13_x64-setup.exe/download",
+  "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaEpLSWdjaUlMRTB1YlJFbFhDRHBoSWFrY1BNSXNjSjVRcVhTYkdzK05McG5RMHZqOTJ2V2d0ZDNSTGlJTDJVUUVvSjhHL2Z3Q3hVT1VoOU5ER0x2N1EwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NDcwMDY0CWZpbGU6VHJpbV8wLjkuMTNfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuOS4xMwoyNGNqSW9lL1RUb1RVMnhzYkdHSkYxemRHcEcrTGlnY2Z4eDBwL2V5dEh4cnlYV2J3NHc2VWdPNHcxSjl2RXZ2ZlZ3Z3lqeXZOT0NkUEV2SmI2K0VDQT09Cg==",
+  "sha256": "c8a1def4c03df01a90f65d99ba2d3c030ae340a791a66a6d87f042a8da1dd000",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.9.12/attach_files/Trim_0.9.12_x64-setup.exe/download",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaENMbW5Mcmp5MndTZEJ6MFlLRTdRTCtUend1MG1hbU5hTDc4c0RyZUdnYldhaExCdFhZTkxRNit4N2ZOMHlFdlBIOVpQZUZweno3ZURXNXdBVHJaSEE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1MjkzNDM4CWZpbGU6VHJpbV8wLjkuMTJfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuOS4xMgp3Vm14NnlBYVkzcWVVUzNyUGRHRUxOd1d1a3h0bTAxTFIrckNGV2ZPR3p4dzhrSlFyWVJ4bWlQa09XNUJxNzhCUGFLdmFINnF3N0hueGJ0MTVoeGJBZz09Cg==",
-      "sha256": "6311bffc6bc6cffe8c3c8398ce1548447fe73571d485825050e9dea8104af4f8"
+      "url": "https://api.atomgit.com/api/v5/repos/xiaoxiaoxu1642/trim-tauri/releases/v0.9.13/attach_files/Trim_0.9.13_x64-setup.exe/download",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUbGYwT1dQeXlOaEpLSWdjaUlMRTB1YlJFbFhDRHBoSWFrY1BNSXNjSjVRcVhTYkdzK05McG5RMHZqOTJ2V2d0ZDNSTGlJTDJVUUVvSjhHL2Z3Q3hVT1VoOU5ER0x2N1EwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NDcwMDY0CWZpbGU6VHJpbV8wLjkuMTNfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuOS4xMwoyNGNqSW9lL1RUb1RVMnhzYkdHSkYxemRHcEcrTGlnY2Z4eDBwL2V5dEh4cnlYV2J3NHc2VWdPNHcxSjl2RXZ2ZlZ3Z3lqeXZOT0NkUEV2SmI2K0VDQT09Cg==",
+      "sha256": "c8a1def4c03df01a90f65d99ba2d3c030ae340a791a66a6d87f042a8da1dd000"
     }
   }
 }
