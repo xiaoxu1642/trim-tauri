@@ -61,6 +61,7 @@
      的方向），深字对提亮后的底仍 6.09:1；若沿用向黑混，深字会掉到 3.51:1，故混色方向走 token。 */
   --danger-text: #171832;
   --danger-hover-tint: #ffffff;
+  --danger-fg: #F0524D;
   --info: #4D9DE0;
   --success-soft: color-mix(in srgb, var(--success) 14%, var(--bg-card));
   --warning-soft: color-mix(in srgb, var(--warning) 14%, var(--bg-card));
@@ -274,10 +275,9 @@
      （报告原建议值叠软底仅 ≈4.3，故再深一档）；深色主题对应组本就达标，不动。 */
   --success: #156B42;
   --warning: #875708;
-  --danger: #AC2A27;
-  /* 审查 E3-1：浅色 --danger 深红，白字 6.71:1 达标；hover 沿用向黑混（对齐 --accent-hover
-     浅色变暗的方向），8.82:1。与暗色档共用同一对 token 名。 */
-  --danger-text: #ffffff;
+  /* 实底按用户指定走粉色；浅染底上的文字/图标走同源深红，避免 2.x:1 对比度。 */
+  --danger: #D67A97;
+  --danger-fg: #9B2B56;
   --danger-hover-tint: #000000;
   --info: #1D6493;
   --success-soft: color-mix(in srgb, var(--success) 12%, var(--bg-card));
@@ -286,7 +286,7 @@
   --info-soft: color-mix(in srgb, var(--info) 12%, var(--bg-card));
   --warning-rgb: 135, 87, 8;
   --success-rgb: 21, 107, 66;
-  --danger-rgb: 172, 42, 39;
+  --danger-rgb: 214, 122, 151;
   --info-rgb: 29, 100, 147;
   /* 审查 3-1：浅色不透明表面 */
   --surface-solid: #FFFFFF;
@@ -424,8 +424,8 @@ body {
   -webkit-app-region: drag;
   position: relative;
   z-index: 100;
-  /* 右侧预留原生 overlay 按钮区域（Win11 三按钮约 138px） */
-  padding-right: 140px;
+  /* 自绘 caption 自带固定定位，只留 8px 视觉边距，不再按原生 overlay 预留 140px。 */
+  padding-right: 8px;
 }
 
 .app-icon {
@@ -950,8 +950,8 @@ body {
   border-color: var(--danger);
 }
 .btn-danger:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--danger) 82%, var(--danger-hover-tint));
-  border-color: color-mix(in srgb, var(--danger) 82%, var(--danger-hover-tint));
+  background: color-mix(in srgb, var(--danger) 88%, var(--danger-hover-tint));
+  border-color: color-mix(in srgb, var(--danger) 88%, var(--danger-hover-tint));
 }
 
 /* D10：中风险确认按钮（黄色），前景一律吃 --accent-text——两主题把它各自定义成
@@ -998,7 +998,7 @@ body {
   border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
   border-radius: var(--radius-btn);
   background: var(--danger-soft);
-  color: var(--danger);
+  color: var(--danger-fg);
   font-size: var(--fs-secondary);
   font-weight: calc(600 * var(--font-weight-scale, 1));
   line-height: 1.6;
@@ -1171,10 +1171,13 @@ body {
   align-items: center;
   justify-content: center;
   color: var(--accent);
-  transition: transform var(--duration-fast) var(--ease-standard);
+  transition: transform var(--duration-slow) var(--ease-standard);
 }
 .category-group.collapsed .category-group-icon {
-  transform: rotate(-90deg);
+  transform: rotate(0deg);
+}
+.category-group:not(.collapsed) .category-group-icon {
+  transform: rotate(90deg);
 }
 
 .category-group-content {
@@ -1367,6 +1370,24 @@ body {
   border: 1px solid var(--border-default);
   width: fit-content;
 }
+.ctx-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.ctx-toolbar .filter-tabs { margin-bottom: 0; }
+.optimizer-toolbar .filter-tabs {
+  margin-top: 0;
+  margin-bottom: 0;
+  align-self: center;
+}
+.ctx-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
 
 .filter-tab {
   padding: 6px 14px;
@@ -1542,7 +1563,7 @@ body.lg-reduce-motion .lg-thumb {
   flex: 0 0 auto;
 }
 .badge.system { background: rgba(var(--success-rgb), 0.15); color: var(--success); }
-.badge.protected { background: rgba(var(--danger-rgb), 0.15); color: var(--danger); }
+.badge.protected { background: rgba(var(--danger-rgb), 0.15); color: var(--danger-fg); }
 /* badge.off 的染底与前景唯一真源在 ds.css（审查 K1 的 AA 约束随该档一并迁过去）。 */
 
 /* 右键菜单分类分组 */
@@ -1951,13 +1972,12 @@ select.field-input { cursor: pointer; appearance: auto; }
 }
 .empty-state-cta { margin-top: 16px; }
 /* A1-L07：读取失败态与「确实为空」共用结构件，但用危险色区分，避免各域自建。
-   --danger-text 是「危险实底上的前景」，不能拿来当普通底上的图标/文字色
-   （暗色它是深墨，与同色 8% 浅染底对比度只有 1.09:1）。 */
+   浅染底上的图标/文字走 --danger-fg，保证两主题对比度。 */
 .empty-state--error .empty-state-icon {
   background: var(--danger-soft);
-  color: var(--danger);
+  color: var(--danger-fg);
 }
-.empty-state--error .empty-state-title { color: var(--danger); }
+.empty-state--error .empty-state-title { color: var(--danger-fg); }
 
 /* 优化电脑（Optimizer）页面 */
 .optimizer-banner {
@@ -2094,7 +2114,7 @@ select.field-input { cursor: pointer; appearance: auto; }
   height: 20px;
 }
 .toast.success .toast-icon { color: var(--success); }
-.toast.error .toast-icon { color: var(--danger); }
+.toast.error .toast-icon { color: var(--danger-fg); }
 .toast.warning .toast-icon { color: var(--warning); }
 .toast.info .toast-icon { color: var(--info); }
 
@@ -2435,7 +2455,7 @@ input[type="radio"]:focus-visible {
 }
 .bench-history-delete:hover {
   background: rgba(var(--danger-rgb), 0.12);
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
 .ctx-detail-modal {
@@ -2919,7 +2939,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 }
 .restore-vol.off {
   background: rgba(var(--danger-rgb), 0.12);
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
 /* 使用说明弹窗（显示 readme.md） */
@@ -3193,7 +3213,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 }
 /* on/off 两档的染底与前景唯一真源在 ds.css（同 .category-risk 那条口径，审查 F1b-L02）；
    ghost 档只有本文件一份，不属重复实现。 */
-.startup-badge.ghost { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+.startup-badge.ghost { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger-fg); }
 
 /* v3.7.0 议题二 P0：缓存年龄横幅（数据来自 N 分钟前的扫描 · 立即重新扫描） */
 .startup-cache-banner {
@@ -3232,7 +3252,7 @@ body.mw-window #pmBody .pm-virtual .xtable-body {
 }
 .btn-opt-del {
   background: var(--danger-soft);
-  color: var(--danger);
+  color: var(--danger-fg);
   border-color: transparent;
 }
 .btn-opt-del:hover:not(:disabled) {
@@ -3421,7 +3441,7 @@ input[type="range"].fm-slider:disabled,
 .intro-ai-content { min-height: 42px; font-size: var(--fs-meta); line-height: 1.75; color: var(--fg-secondary); }
 .intro-ai-idle { color: var(--fg-tertiary); }
 .intro-ai-meta { margin-top: 6px; font-size: calc(11px * var(--font-size-scale, 1)); color: var(--fg-tertiary); }
-.intro-ai-fail { color: var(--danger); line-height: 1.6; }
+.intro-ai-fail { color: var(--danger-fg); line-height: 1.6; }
 .intro-ai-retry {
   margin-top: 8px;
   padding: 4px 10px;
@@ -3531,7 +3551,7 @@ input[type="range"].fm-slider:disabled,
 .pw-item { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border-default); }
 .pw-item:last-child { border-bottom: 0; }
 .pw-hint { font-size: calc(11px * var(--font-size-scale, 1)); color: var(--fg-tertiary); margin-top: 3px; min-height: 14px; }
-.pw-hint.warn { color: var(--danger); }
+.pw-hint.warn { color: var(--danger-fg); }
 .pw-hint.ok { color: var(--success); }
 .pw-empty { text-align: center; color: var(--fg-tertiary); padding: 32px 0; font-size: var(--fs-secondary); }
 .startup-intro-modal { max-width: 760px; }
@@ -3994,9 +4014,7 @@ img.ctx-col-icon {
 .nara-checkrow.is-optimized { cursor: default; opacity: 0.62; }
 .nara-checkrow.is-optimized:hover { background: transparent; }
 .nara-checkrow .checkbox.disabled { opacity: 0.55; }
-/* 永劫专项入口卡无「更多」按钮，项数徽章靠右 */
-.opt-col--nara .opt-nara-count { margin-left: auto; }
-.opt-col--privacy .opt-privacy-count { margin-left: auto; }
+/* 项数徽章统一紧贴标题，入口卡的「更多调优项」按钮独占右侧。 */
 @media (prefers-reduced-motion: reduce) {
   .opt-col--privacy, .nara-card, .nara-checkrow { transition: none; }
 }
@@ -4182,7 +4200,7 @@ img.ctx-col-icon {
 }
 .rt-badge.ok { color: var(--success); background: color-mix(in srgb, var(--success) 10%, transparent); border-color: color-mix(in srgb, var(--success) 35%, transparent); }
 .rt-badge.warn { color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, transparent); border-color: color-mix(in srgb, var(--warning) 40%, transparent); }
-.rt-badge.fail { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
+.rt-badge.fail { color: var(--danger-fg); background: color-mix(in srgb, var(--danger) 10%, transparent); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
 .rt-badge.info { color: var(--fg-secondary); }
 /* v2-U1：染底浓度 6% 而非 8% —— 8% 时「--accent 前景 / accent 染底」仅 4.47:1 未达 AA，
    降到 6% 后 4.59:1。同族还有 .maint-tab.active .maint-tab-count / .maint-status-running，
@@ -4270,7 +4288,7 @@ img.ctx-col-icon {
   padding: 2px 5px;
   border-radius: var(--radius-badge);
 }
-.bg-list-del:hover { color: var(--danger); background: var(--bg-hover); }
+.bg-list-del:hover { color: var(--danger-fg); background: var(--bg-hover); }
 
 /* 设置页：系统信息折叠容器（移至最下，默认折叠） */
 .settings-collapse-head {
@@ -4701,31 +4719,12 @@ body.bg-image-on {
   --surface-l2-bg: var(--glass-l2-tint);
   --surface-l1-line: var(--border-default);
   --surface-l2-line: var(--border-strong);
-  --surface-dialog-bg: var(--glass-l1-tint);
-  --surface-dialog-header: var(--glass-l2-tint);
+  --surface-dialog-bg: var(--bg-card);
+  --surface-dialog-header: var(--bg-card-hover);
   --glass-edge: rgba(255, 255, 255, 0.65);    /* 边缘高光强度（液态玻璃的"厚度"） */
   --glass-edge-dark: rgba(255, 255, 255, 0.10); /* 暗色档边缘高光 */
 }
 
-/* 壁纸态弹窗遮罩必须让壁纸层透出来：只留极淡压暗，不再用 --bg-app 把整窗糊成纯色。 */
-body[data-preset-bg] .usage-backdrop,
-body.bg-image-on .usage-backdrop {
-  background: transparent;
-}
-
-/* 弹窗本体复用当前壁纸层图案，按 L1/L2 叠加，既显示壁纸又保持内容可读。 */
-body[data-preset-bg] .usage-modal,
-body.bg-image-on .usage-modal {
-  background-image: var(--dialog-wallpaper-image, var(--app-bg-image, none));
-  background-size: cover;
-  background-position: center;
-  background-repeat: no-repeat;
-}
-
-body[data-preset-bg="wp-winter"] { --dialog-wallpaper-image: linear-gradient(180deg, rgba(247,248,251,.12), rgba(247,248,251,.28)), url('../assets/bg/wp-winter.jpg'); }
-body[data-preset-bg="wp-gaming"] { --dialog-wallpaper-image: linear-gradient(180deg, rgba(247,248,251,.12), rgba(247,248,251,.30)), url('../assets/bg/wp-gaming.jpg'); }
-body[data-preset-bg="wp-anime"] { --dialog-wallpaper-image: linear-gradient(180deg, rgba(247,248,251,.12), rgba(247,248,251,.28)), url('../assets/bg/wp-anime.jpg'); }
-body[data-preset-bg="wp-doll"] { --dialog-wallpaper-image: linear-gradient(180deg, rgba(247,248,251,.12), rgba(247,248,251,.30)), url('../assets/bg/wp-doll.jpg'); }
 body.theme-dark[data-preset-bg],
 body.theme-dark.bg-image-on {
   --glass-l1-tint: rgba(15, 17, 21, 0.48);
@@ -4734,8 +4733,8 @@ body.theme-dark.bg-image-on {
   --surface-l2-bg: var(--glass-l2-tint);
   --surface-l1-line: var(--border-default);
   --surface-l2-line: var(--border-strong);
-  --surface-dialog-bg: var(--glass-l1-tint);
-  --surface-dialog-header: var(--glass-l2-tint);
+  --surface-dialog-bg: var(--bg-card);
+  --surface-dialog-header: var(--bg-card-hover);
   --glass-edge: var(--glass-edge-dark);
 }
 /* 一级：大容器。透明染色 + 边缘高光（无 blur，壁纸清晰）。 */
@@ -4743,17 +4742,15 @@ body[data-preset-bg] :is(.settings-section, .summary-card, .overview-card, .card
   .table-card, .appearance-card, .progress-section, .category-group,
   .realtime-chart-panel, .rt-sr-panel, .rt-intro-card, .rt-radar-wrap, .rt-item,
   .external-test-panel, .opt-col, .ctx-col,
-  .syspanel-card, .maint-batchbar, .startup-defend-bar, .backup-purge-bar,
+  .syspanel-card, .maint-batchbar, .startup-defend-inline, .backup-purge-bar,
   .nara-card, .peri-card, .pw-group, .mw-card,
-  .usage-modal, .ctx-detail-modal,
   .benchmark-panel, .benchmark-result-group, .maint-output, .sidebar, .filter-tabs),
 body.bg-image-on :is(.settings-section, .summary-card, .overview-card, .card,
   .table-card, .appearance-card, .progress-section, .category-group,
   .realtime-chart-panel, .rt-sr-panel, .rt-intro-card, .rt-radar-wrap, .rt-item,
   .external-test-panel, .opt-col, .ctx-col,
-  .syspanel-card, .maint-batchbar, .startup-defend-bar, .backup-purge-bar,
+  .syspanel-card, .maint-batchbar, .startup-defend-inline, .backup-purge-bar,
   .nara-card, .peri-card, .pw-group, .mw-card,
-  .usage-modal, .ctx-detail-modal,
   .benchmark-panel, .benchmark-result-group, .maint-output, .sidebar, .filter-tabs) {
   --bg-card: var(--surface-l1-bg);
   --bg-card-hover: var(--surface-l1-bg);
@@ -4844,39 +4841,6 @@ body:not(.lg-mode-off) .filter-tabs.lg-bar .filter-tab {
 body:not(.lg-mode-off) .filter-tabs.lg-bar .filter-tab.active {
   background: transparent;
   box-shadow: none;
-}
-
-/* 自绘弹窗跟随壁纸态：本体一级玻璃、头尾二级玻璃；非壁纸态保持近实色。 */
-
-body[data-preset-bg] .usage-modal,
-body[data-preset-bg] .ctx-detail-modal,
-body.bg-image-on .usage-modal,
-body.bg-image-on .ctx-detail-modal,
-body[data-preset-bg] .ctx-detail-modal :is(.usage-header, .usage-footer),
-body.bg-image-on .ctx-detail-modal :is(.usage-header, .usage-footer) {
-  --bg-card: var(--surface-dialog-bg);
-  --bg-card-hover: var(--surface-dialog-bg);
-  --bg-elevated: var(--surface-dialog-header);
-  --bg-input: var(--surface-dialog-bg);
-  --bg-hover: var(--surface-dialog-bg);
-  background-color: var(--surface-dialog-bg);
-}
-body[data-preset-bg] .usage-modal :is(.usage-header, .usage-footer),
-body.bg-image-on .usage-modal :is(.usage-header, .usage-footer) {
-  --bg-card: var(--surface-dialog-header);
-  --bg-card-hover: var(--surface-dialog-header);
-  --bg-elevated: var(--surface-dialog-header);
-  --bg-input: var(--surface-dialog-header);
-  --bg-hover: var(--surface-dialog-header);
-  background-color: var(--surface-dialog-header);
-}
-body[data-preset-bg] .usage-modal :is(.card, .settings-entry-card, .process-entry-card, .row-card, .model-picker-item, .field-input),
-body.bg-image-on .usage-modal :is(.card, .settings-entry-card, .process-entry-card, .row-card, .model-picker-item, .field-input) {
-  --bg-card: var(--surface-dialog-header);
-  --bg-card-hover: var(--surface-dialog-header);
-  --bg-elevated: var(--surface-dialog-header);
-  --bg-input: var(--surface-dialog-header);
-  --bg-hover: var(--surface-dialog-header);
 }
 
 /* Rust 原生弹窗：壁纸态也跟随同一套 L1/L2 语义表面，不再强制实色孤岛。 */
@@ -5727,11 +5691,11 @@ body.aurora-ready .page.active .device-info-row:nth-child(n+8) { animation-delay
 .netcheck-badge.scanning { color: var(--info); background: rgba(var(--info-rgb), 0.12); }
 .netcheck-badge.ok { color: var(--success); background: var(--success-soft); }
 .netcheck-badge.warn { color: var(--warning); background: var(--warning-soft); }
-.netcheck-badge.fail { color: var(--danger); background: var(--danger-soft); }
+.netcheck-badge.fail { color: var(--danger-fg); background: var(--danger-soft); }
 @keyframes netcheckSpin { to { transform: rotate(360deg); } }
 
 .netcheck-detail { margin-top: 8px; font-size: var(--fs-secondary); color: var(--warning); }
-.netcheck-item:has(.netcheck-badge.fail) .netcheck-detail { color: var(--danger); }
+.netcheck-item:has(.netcheck-badge.fail) .netcheck-detail { color: var(--danger-fg); }
 
 /* 全局白容器统一参数（v3.0，本机资料区·系统维护任务卡参数，不入库）：
    本块只统一圆角（--radius-medium），底色/描边由各类既有定义承担（表面实色化后

@@ -729,20 +729,20 @@ const MIN_CASES = 24;
     addCase('F4b-L07', ok);
   }
 
-  // F4b-M03：两处「执行所选」入口必须套 guardAsync
+  // F4b-M03：执行所选入口必须套 guardAsync；批量按钮已退役，不再留第二入口。
   {
     const block = funcBlock(blankNonCode(optSrc, 'js', { keepStrings: true }), 'bindEvents') || '';
     const judge = (text) => text.includes('const guardBatch = (label, fn) => guardAsync(')
-      && text.includes("guardBatch('批量执行', runBatch)")
-      && text.includes("guardBatch('执行所选', runSelected)");
-    const good = "const guardBatch = (label, fn) => guardAsync(label, () => fn());\nbatchBtn.addEventListener('click', guardBatch('批量执行', runBatch));\nselectedBtn.addEventListener('click', guardBatch('执行所选', runSelected));";
-    const bad = "batchBtn.addEventListener('click', () => runBatch());\nselectedBtn.addEventListener('click', () => runSelected());";
+      && text.includes("guardBatch('执行所选', runSelected)")
+      && !/getElementById\(['"]btnOptimizerBatch['"]\)/.test(text);
+    const good = "const guardBatch = (label, fn) => guardAsync(label, () => fn());\nselectedBtn.addEventListener('click', guardBatch('执行所选', runSelected));";
+    const bad = "const guardBatch = (label, fn) => guardAsync(label, () => fn());\nselectedBtn.addEventListener('click', () => runSelected());";
     if (!judge(good) || judge(bad)) {
       g.fail('F4b-M03 正向对照失败：批量入口 guardAsync 判定器失真');
     }
     const ok = judge(block);
-    if (!ok) g.fail('F4b-M03：runSelected / runBatch 入口未套 guardAsync ⇒ 确认链 reject 仍是浮动 Promise');
-    else g.ok('F4b-M03：两处「执行所选」入口都经 guardAsync 收口');
+      if (!ok) g.fail('F4b-M03：执行所选入口未套 guardAsync 或批量按钮未退役 ⇒ 确认链 reject 仍是浮动 Promise');
+    else g.ok('F4b-M03：执行所选入口经 guardAsync 收口，批量按钮已退役');
     addCase('F4b-M03', ok);
   }
 

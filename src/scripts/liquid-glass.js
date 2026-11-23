@@ -31,7 +31,7 @@
   const ELASTIC_ZONE = 160;
   const ELASTICITY = 0.12;
 
-  let mode = 'standard';
+  let mode = 'full';
   let reduceMotion = false;
   // v2.8.0：环境自适应状态（会话级降级，不改用户存储的偏好）
   let envBattery = false;        // 电池供电：full/standard → frost
@@ -49,15 +49,15 @@
   let modePrefDirty = false;
 
   function normalizeUserPref(v) {
-    if (v === 'frost') return 'standard';
+    if (v === 'frost') return 'full';
     if (v && LEGACY_MODE_MAP[v]) return LEGACY_MODE_MAP[v];
-    return USER_MODES.indexOf(v) > -1 ? v : 'standard';
+    return USER_MODES.indexOf(v) > -1 ? v : 'full';
   }
 
   function readLsMode() {
     try {
       return normalizeUserPref(localStorage.getItem(MODE_KEY));
-    } catch (e) { return 'standard'; }
+    } catch (e) { return 'full'; }
   }
 
   function readStoredMode() { return modePref; }
@@ -111,7 +111,7 @@
 
   function normalizeMode(v) {
     if (v && LEGACY_MODE_MAP[v]) return LEGACY_MODE_MAP[v];
-    return MODES.indexOf(v) > -1 ? v : 'standard';
+    return MODES.indexOf(v) > -1 ? v : 'full';
   }
 
   // 弹性形变层：按档位把 .lg-elastic 收敛到名单成员上（幂等，可反复调用）。

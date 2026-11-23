@@ -2,8 +2,8 @@
   "_说明": "删除原语调用点棘轮基线：由 `node tools/check-delete-callsites.mjs --write` 现算回填，禁止手抄。顶层 api→file→count 保留棘轮口径，details 记录文件/函数/API/行锚点，meta 记录生成器版本与输入哈希。",
   "meta": {
     "generatorVersion": "p1-04e-v1",
-    "inputHash": "83fecdf6374b98fe",
-    "callCount": 416,
+    "inputHash": "2eac991e66d480e9",
+    "callCount": 417,
     "cleanupCallCount": 93
   },
   "details": [
@@ -186,6 +186,12 @@
       "file": "src-tauri/src/commands/optimizer/contract_tests.rs",
       "fn": "m3_还原回读验证三种判据",
       "anchor": "let _ = crate::engine::native::reg_restore_delete(HKEY_CURRENT_USER, sub, );"
+    },
+    {
+      "api": "reg_restore_delete",
+      "file": "src-tauri/src/commands/optimizer/overview.rs",
+      "fn": "drop",
+      "anchor": "let _ = reg_restore_delete(HKEY_CURRENT_USER, SUB, NAME);"
     },
     {
       "api": "reg_restore_delete",
@@ -2595,6 +2601,7 @@
   "reg_restore_delete": {
     "src-tauri/src/commands/optimizer/backup_restore.rs": 1,
     "src-tauri/src/commands/optimizer/contract_tests.rs": 13,
+    "src-tauri/src/commands/optimizer/overview.rs": 1,
     "src-tauri/src/commands/uninstall/residue.rs": 1,
     "src-tauri/src/engine/native/cleanup.rs": 2,
     "src-tauri/src/engine/native/registry.rs": 3,

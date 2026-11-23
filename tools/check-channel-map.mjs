@@ -193,7 +193,6 @@ const TAURI_ADDED = {
   'syspanel:power-ultimate-enable': 'G-04（2026-10-16 裁定）：开启卓越性能（已存在则激活、不存在则先克隆内置模板再激活 + 回读；主窗档，电源卡工具区）',
   'syspanel:power-hide-high-performance': 'G-04（2026-10-16 裁定）：隐藏高性能（导出 .powrplan 备份 → 专用删除 → 回读；主窗档 + 高危确认）',
   'syspanel:power-restore-high-performance': 'G-04（2026-10-16 裁定）：还原高性能（按 power-ops.json 记录的备份导入，GUID 由系统重新分配；主窗档）',
-  'optimizer:external-scan': '账外核对（2026-10-15 拍板）：只读扫描社区常见但不在优化目录里的手动 tweak 键（主窗档）',
   'syspanel:pagefile-state': 'P2 §3.6（2026-10-03）：虚拟内存只读展示（写侧同批落地）',
   'syspanel:pagefile-apply': 'P2 §3.6（2026-10-03）：虚拟内存写侧（AutomaticManagedPagefile + PagingFiles；主窗档 + 高危确认 + 需重启）',
   'optimizer:batch-preflight': 'M1（2026-10-03）：批量执行前整批准入预检（纯只读，上游 Electron 无此面）',

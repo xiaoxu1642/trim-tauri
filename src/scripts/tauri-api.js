@@ -261,7 +261,6 @@
     'optimizer:restore-frequency': 'optimizer_restore_frequency',
     'optimizer:genadvice': 'optimizer_genadvice',
     'optimizer:bcd-enum': 'optimizer_bcd_enum',
-    'optimizer:external-scan': 'optimizer_external_scan',
     'optimizer:nara-panel': 'optimizer_nara_panel',
     'optimizer:privacy-panel': 'optimizer_privacy_panel',
     'peripheral:query': 'peripheral_query',
@@ -316,7 +315,22 @@
       bridgeLog('warn', 'tauri-api：未登记窗口插件命令 ' + pluginCmd);
       return Promise.reject(new Error('tauri-api：未登记窗口插件命令 ' + pluginCmd));
     }
+    // 硬护栏：caption 控制只接受这三类动作；任何其他调用路径不得经本函数关窗。
+    if (pluginCmd !== 'minimize' && pluginCmd !== 'toggle_maximize' && pluginCmd !== 'close') {
+      bridgeLog('warn', 'tauri-api：拒绝非 caption 窗口控制命令 ' + pluginCmd);
+      return Promise.reject(new Error('tauri-api：拒绝非 caption 窗口控制命令 ' + pluginCmd));
+    }
     var args = { label: currentLabel() };
+    // CDP 诊断护栏：把每次 caption 控制调用留痕，确认「点最小化却关窗」是点击映射错还是后端错。
+    try {
+      var trace = window.__captionInvokeCalls || (window.__captionInvokeCalls = []);
+      trace.push({ cmd: pluginCmd, label: args.label, at: Date.now() });
+      if (trace.length > 20) trace.shift();
+    } catch (e) {}
+    if (!args.label) {
+      bridgeLog('warn', 'tauri-api：窗口控制缺少 label，拒绝调用 ' + pluginCmd);
+      return Promise.reject(new Error('tauri-api：窗口控制缺少 label，拒绝调用 ' + pluginCmd));
+    }
     return invokeCore('plugin:window|' + pluginCmd, args);
   }
 
@@ -780,7 +794,6 @@
       bcdEnum: function () { return invokeChannel('optimizer:bcd-enum'); },
       naraPanel: function () { return invokeChannel('optimizer:nara-panel'); },
       privacyPanel: function () { return invokeChannel('optimizer:privacy-panel'); },
-      externalScan: function () { return invokeChannel('optimizer:external-scan'); },
       onProgress: function (callback) { return onEvent('optimizer:progress', callback); }
     },
 
@@ -955,16 +968,16 @@
     style.textContent = [
       // 高度必须与 main.css .titlebar（36px）一致：46px 时代字形中心比品牌行低 5px（真机目检实锤）。
       // F2-L05：caption 必须高于 NE 缩放热区（100001），关闭按钮右上角才优先命中。
-      '.tauri-caption{position:fixed;top:0;right:0;height:36px;display:flex;z-index:100002;',
+      '.tauri-caption{position:fixed;top:0;right:0;height:36px;display:flex;gap:2px;align-items:center;padding-right:8px;z-index:100002;',
       '  -webkit-user-select:none;user-select:none;}',
-      '.tauri-caption-btn{width:46px;height:100%;border:0;background:transparent;cursor:default;',
-      '  display:flex;align-items:center;justify-content:center;padding:0;color:currentColor;',
-      '  font-size:10px;line-height:1;opacity:.72;transition:background .12s ease,opacity .12s ease;}',
-      '.tauri-caption-btn svg{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:1.4;}',
-      // 审查 v2-L5：原先的 `rgba(0,0,0,.07)` 与 `#c42b1c`/`#fff` 三个字面色值既不随主题走（暗色下 7% 黑 hover 几乎看不见）、
-      // 白字又违反「实底语义色前景必须走 token」；改用既有 token（暗/亮两主题对比度均已验）。
+      '.tauri-caption-btn{width:46px;height:36px;border:0;background:transparent;cursor:default;',
+      '  display:flex;align-items:center;justify-content:center;padding:0;color:var(--fg-primary);',
+      '  opacity:.88;transition:opacity .12s ease,transform .12s ease;}',
+      '.tauri-caption-btn svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:1.4;}',
       '.tauri-caption-btn:hover{background:var(--bg-card-hover);opacity:1;}',
+      '.tauri-caption-btn:active{background:var(--bg-card-hover);transform:scale(.96);}',
       '.tauri-caption-btn[data-act=close]:hover{background:var(--danger);color:var(--danger-text);opacity:1;}',
+      '.tauri-caption-btn[data-act=close]:active{background:var(--danger);color:var(--danger-text);}',
       '.tauri-caption-btn[data-act=maximize] .tauri-cap-restore{display:none;}',
       'body.tauri-maximized .tauri-caption-btn[data-act=maximize] .tauri-cap-max{display:none;}',
       'body.tauri-maximized .tauri-caption-btn[data-act=maximize] .tauri-cap-restore{display:block;}',

@@ -493,6 +493,9 @@ pub fn service_start_pub(name: &str) -> Result<(), String> {
 /// 设置服务启动类型（`sc.exe config X start= N 2>$null` 的等价物）
 ///
 /// 同 [`service_stop_pub`] 的终态口径：服务没装（1060）= 它不会自己起来 = 目标已达成。
+/// 写侧不复制「先读再比再跳」：停服/启动的已达成由各写入入口的终态码收口，
+/// 启动类型的检测由 [`service_start_type_state`] 单点拥有；optimizer 执行链只消费
+/// 这些原语，不得再补一份本地跳过判据。
 pub fn service_set_start_pub(name: &str, start: u32) -> Result<(), String> {
     unsafe {
         match service_set_start_type(name, start) {

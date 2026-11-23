@@ -17,6 +17,99 @@
   // （取数命令：rg -n 'guardAsync\(' src/scripts/optimizer.js）。
   const guardAsync = ds.guardAsync;
 
+  // A1/A3：新回执字段缺席时 readRunOutcome 返回 null，调用方一律走旧判据。
+  // 这里只做「机器原因码 → toast 类型」映射，不新增应用状态机；中文文案仍在各调用点。
+  const REASON_TOAST = {
+    success: 'success', ok: 'success', applied: 'success', restored: 'success',
+    restore: 'success',
+    already_satisfied: 'info', alreadySatisfied: 'info', no_change: 'info', unchanged: 'info', skipped: 'info',
+    noChange: 'info', skipped_existing: 'info', skippedExisting: 'info', no_restore_path: 'warning', noRestorePath: 'warning',
+    partial: 'warning', partial_write: 'warning', partialWrite: 'warning',
+    verify_partial: 'warning', verifyPartial: 'warning', verify_unknown: 'warning', verifyUnknown: 'warning',
+    admin_required: 'warning', adminRequired: 'warning', need_admin: 'warning', needAdmin: 'warning', needConfirm: 'warning',
+    unsupported_step: 'error', unsupportedStep: 'error', failed: 'error', failure: 'error', partial_write_failed: 'error',
+    partialWriteFailed: 'error'
+  };
+
+  function readRunOutcome(resp) {
+    if (!resp || typeof resp !== 'object') return null;
+    if (!Object.prototype.hasOwnProperty.call(resp, 'reasonCode') &&
+        !Object.prototype.hasOwnProperty.call(resp, 'changedCount') &&
+        !Object.prototype.hasOwnProperty.call(resp, 'netChanged')) return null;
+    const reasonCode = typeof resp.reasonCode === 'string' && resp.reasonCode ? resp.reasonCode : '';
+    const hasReasonCode = Object.prototype.hasOwnProperty.call(resp, 'reasonCode');
+    const changedRaw = resp.changedCount;
+    const netRaw = resp.netChanged;
+    const hasChanged = changedRaw !== undefined && changedRaw !== null;
+    const hasNet = netRaw !== undefined && netRaw !== null;
+    const changedIsZero = !hasChanged || Number(changedRaw) === 0;
+    const netIsZero = !hasNet || Number(netRaw) === 0;
+    if (!reasonCode && changedIsZero && netIsZero) return null;
+    const changedNum = hasChanged ? Number(changedRaw) : null;
+    const netNum = hasNet ? Number(netRaw) : null;
+    const changedCount = changedNum !== null && Number.isFinite(changedNum) && changedNum >= 0 ? changedNum : null;
+    const netChanged = netNum !== null && Number.isFinite(netNum) ? netNum : null;
+    let toastType = hasReasonCode && Object.prototype.hasOwnProperty.call(REASON_TOAST, reasonCode) ? REASON_TOAST[reasonCode] : '';
+    if (!toastType) {
+      if (netChanged !== null && netChanged < 0) toastType = 'success';
+      else if (changedCount !== null && netChanged !== null && changedCount > 0 && netChanged < changedCount) toastType = 'warning';
+    }
+    if (!toastType) toastType = 'success';
+    return { reasonCode, changedCount, netChanged, toastType };
+  }
+
+  function chooseToastType(outcome, fallback) {
+    return outcome && outcome.toastType ? outcome.toastType : fallback;
+  }
+
+  function summarizeRunOutcomes(outcomes, fallbackType, total, okCount, failCount, failedNames, prefix) {
+    const hasNew = outcomes && outcomes.length > 0;
+    let message = `${prefix}：成功 ${okCount} 项，失败 ${failCount} 项` +
+      (failCount ? `（${failedNames.slice(0, 5).join('、')}${failedNames.length > 5 ? ' 等' : ''}）` : '');
+    if (!hasNew) return { type: fallbackType, message, reasonCode: '' };
+    let changed = 0;
+    let net = 0;
+    const codes = [];
+    for (const outcome of outcomes) {
+      if (!outcome) continue;
+      if (typeof outcome.changedCount === 'number') changed += outcome.changedCount;
+      if (typeof outcome.netChanged === 'number') net += outcome.netChanged;
+      if (outcome.reasonCode && !codes.includes(outcome.reasonCode)) codes.push(outcome.reasonCode);
+    }
+    const types = codes.map(code => REASON_TOAST[code]).filter(Boolean);
+    let toastType = fallbackType;
+    if (types.includes('error')) toastType = 'error';
+    else if (types.includes('warning')) toastType = 'warning';
+    else if (types.includes('info') && okCount !== total) toastType = 'info';
+    else if (changed > 0 && net === 0) toastType = 'warning';
+    else toastType = net !== 0 || okCount === total ? 'success' : fallbackType;
+    message += `；净变更 ${net} 项`;
+    if (changed > 0) message += `，共变更 ${changed} 项`;
+    return { type: toastType, message, reasonCode: codes.join(',') };
+  }
+
+  // P1-11：中文文案保持原样，机器通道只追加 eventKey / reasonCode，不带路径或账号。
+  function logOptimizerEvent(level, eventKey, message, reasonCode) {
+    const suffix = reasonCode ? `eventKey=${eventKey} reasonCode=${reasonCode}` : `eventKey=${eventKey}`;
+    window.app?.log?.(level, `${message} [${suffix}]`);
+  }
+
+  // P2-15：纯函数，只按当前进度状态与事件推导新状态；无变化返回原对象，调用方据此免写 DOM。
+  // 完成态或 optionId 不匹配时返回原对象，迟到 progress 不点亮已结束的 Toast。
+  function map_progress(state, event) {
+    if (!state || state.done === true || !event) return state;
+    const eventId = event.optionId;
+    if (eventId !== undefined && eventId !== null && eventId !== state.optionId) return state;
+    const raw = event.percent;
+    if (raw === undefined || raw === null || raw === '') return state;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return state;
+    const percent = Math.max(0, Math.min(100, value));
+    if (state.percent === percent) return state;
+    return { optionId: state.optionId, percent, done: false };
+  }
+  let progressState = { optionId: null, percent: -1, done: false };
+
   // ==================== E7：分类两层结构（default / custom）====================
   //
   // 借 Winaero `NavigationPane` 的 `pageNavPaneDefaultItems` 与
@@ -362,6 +455,7 @@
   // 由下一条 createProgressToast 认领槽位时统一清理上一条。
   let progressToast = null;
   const PROGRESS_TOAST_DWELL_MS = 2000; // 单条完成后停留 2s（2026-09-23 用户裁定口径）
+  let lastRunOutcome = null;
   // 批量执行时的序号后缀（「3/12」）。此前循环里先建一条带序号的 Toast，runOptionActive
   // 内又建一条并立刻销毁前者——每项白建白毁一个节点；现在只建一条，序号走这个后缀传入。
   let progressToastSuffix = '';
@@ -403,11 +497,15 @@
   }
 
   function setProgressToastProgress(pct) {
-    if (!progressToast) return;
+    if (!progressToast || progressState.done) return;
+    const raw = typeof pct === 'number' ? pct : pct && pct.percent;
+    const next = map_progress(progressState, { optionId: progressState.optionId, percent: raw });
+    if (next === progressState) return;
+    progressState = next;
     const fill = progressToast.el.querySelector('.toast-progress-fill');
     const tune = progressToast.el.querySelector('.toast-tune');
-    if (fill) fill.style.width = pct + '%';
-    if (tune) tune.textContent = `执行中 ${pct}%（${progressToast.label}）`;
+    if (fill) fill.style.width = progressState.percent + '%';
+    if (tune) tune.textContent = `执行中 ${progressState.percent}%（${progressToast.label}）`;
   }
 
   function finishProgressToast(ok, message) {
@@ -415,6 +513,7 @@
     const t = progressToast;
     // 不再提前摘引用：保留 finished 标记，由下一条 createProgressToast 或计时器回收
     t.finished = true;
+    progressState = { optionId: progressState.optionId, percent: progressState.percent, done: true };
     // F3-L15：完成即 unpin，退出常驻；随后按停留时长自行回收。
     t.pinned = false;
     const icon = t.el.querySelector('.toast-icon');
@@ -844,12 +943,8 @@
         <section class="opt-col opt-col--nara is-degraded" data-nara-entry-degraded aria-label="永劫无间专项暂不可用">
           <div class="opt-col-head">
             <span class="opt-col-title">
-              <span class="opt-nara-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-              </span>
-              永劫无间专项
+                            永劫无间专项<span class="opt-col-count">不可用</span>
             </span>
-            <span class="opt-col-count">不可用</span>
           </div>
           <div class="opt-nara-desc">专项数据暂不可用。原因：${escapeHtml(NARA_PANEL_DEGRADED)}。原专项隐藏成员已回到主列表，可照常单独执行。</div>
         </section>`;
@@ -862,12 +957,8 @@
                aria-label="打开永劫无间优化专项面板" data-tip="打开永劫无间优化专项面板">
         <div class="opt-col-head">
           <span class="opt-col-title">
-            <span class="opt-nara-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-            </span>
-            永劫无间专项
+                          永劫无间专项<span class="opt-col-count opt-nara-count">${optCount} 项</span>
           </span>
-          <span class="opt-col-count opt-nara-count">${optCount} 项</span>
         </div>
         <div class="opt-nara-desc">${sections.length} 个分区 · ${optCount} 优化项${taskCount ? ' · ' + taskCount + ' 维护任务' : ''}</div>
         <div class="opt-col-body">
@@ -1300,12 +1391,8 @@
         <section class="opt-col opt-col--nara opt-col--privacy is-degraded" data-privacy-entry-degraded aria-label="隐私自护面板暂不可用">
           <div class="opt-col-head">
             <span class="opt-col-title">
-              <span class="opt-nara-icon opt-privacy-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">${PRIVACY_SHIELD_SVG}</svg>
-              </span>
-              隐私自护
+                            隐私自护<span class="opt-col-count">不可用</span>
             </span>
-            <span class="opt-col-count">不可用</span>
           </div>
           <div class="opt-nara-desc">专项数据暂不可用。原因：${escapeHtml(PRIVACY_PANEL_DEGRADED)}。原专项隐藏成员已回到主列表，可照常单独执行。</div>
         </section>`;
@@ -1317,12 +1404,8 @@
                aria-label="打开隐私自护面板" data-tip="打开隐私自护面板">
         <div class="opt-col-head">
           <span class="opt-col-title">
-            <span class="opt-nara-icon opt-privacy-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">${PRIVACY_SHIELD_SVG}</svg>
-            </span>
-            隐私自护
+                        隐私自护<span class="opt-col-count opt-privacy-count">${count} 项</span>
           </span>
-          <span class="opt-col-count opt-privacy-count">${count} 项</span>
         </div>
         <div class="opt-nara-desc">${sections.length} 个分区 · ${count} 个隐私与遥测开关集中管理</div>
         <div class="opt-col-body">
@@ -1550,9 +1633,8 @@
       return `
       <section class="opt-col">
         <div class="opt-col-head">
-          <span class="opt-col-title">${escapeHtml(group)}</span>
+          <span class="opt-col-title">${escapeHtml(group)}<span class="opt-col-count">${items.length} 项</span></span>
           ${moreBtn}
-          <span class="opt-col-count">${items.length}</span>
         </div>
         <div class="opt-col-body">
           ${items.map((o, i) => renderOptRow(o, i + 1)).join('')}
@@ -1637,6 +1719,7 @@
   const appliedLocal = new Set();     // 来源①：本机执行落盘
   const appliedDetected = new Set();  // 来源②：主进程持久化记账
   const appliedChecked = new Set();   // 来源③：实时检测
+  const UNCONFIRMED_APPLIED = new Set(); // 账本损坏时只标记「不可确认」，不清前三源
 
   const OPT_APPLIED_KEY = 'trim-opt-applied-ids';
 
@@ -1706,6 +1789,7 @@
     appliedLocal.delete(id);
     appliedDetected.delete(id);
     appliedChecked.delete(id);
+    UNCONFIRMED_APPLIED.delete(id);
     saveAppliedLocal();
     syncOptimized();
   }
@@ -1715,10 +1799,17 @@
       const id = row.dataset.id;
       if (!id) return;
       const isOpt = optimizedIds.has(id);
+      const unconfirmed = UNCONFIRMED_APPLIED.has(id);
       row.classList.toggle('optimized', isOpt);
       const check = row.querySelector('.checkbox');
-      if (check) check.classList.toggle('disabled', isOpt);
-      // 2026-10-11：主列表不再打「已优化」文字标签（只留灰态），此处只同步灰态类。
+      if (check) {
+        check.classList.toggle('disabled', isOpt);
+        if (isOpt && unconfirmed) {
+          check.setAttribute('data-tip', '不可确认');
+        } else {
+          check.setAttribute('data-tip', isOpt ? '已优化的项不可勾选，点击行查看详情' : '勾选/取消选择该优化项');
+        }
+      }
     });
   }
 
@@ -1817,6 +1908,7 @@
     }
     if (r && r.success) {
       clearAllApplied(opt.id);
+      UNCONFIRMED_APPLIED.delete(opt.id);
       renderGroups(OPTIONS);
       if (r.ledgerCleanupFailed) {
         window.app?.toast('warning', '已恢复：' + (opt.title || opt.id) + '；但备份记录清理失败，记录已保留');
@@ -1860,6 +1952,20 @@
       const resp = await window.api.optimizer.stateOverview();
       if (!resp || !resp.success) throw new Error((resp && resp.message) || '无回执');
       overviewOk = true;
+      const stateUncertain = resp.stateUncertain === true;
+      const appliedIdsUnknown = resp.appliedIdsUnknown === true;
+      if (stateUncertain || appliedIdsUnknown || resp.degraded) {
+        UNCONFIRMED_APPLIED.clear();
+        for (const id of appliedLocal) UNCONFIRMED_APPLIED.add(id);
+        for (const id of appliedDetected) UNCONFIRMED_APPLIED.add(id);
+        for (const id of appliedChecked) UNCONFIRMED_APPLIED.add(id);
+        if (stateUncertain || appliedIdsUnknown) {
+          window.app?.toast?.('warning', '优化状态不可确认，已保留当前灰态', 6000);
+          logOptimizerEvent('warn', 'optimizer.state-ledger.uncertain', '优化状态账本不可确认', stateUncertain ? 'state_uncertain' : 'applied_ids_unknown');
+        }
+      } else {
+        UNCONFIRMED_APPLIED.clear();
+      }
       // A1-M07：状态文件损坏/读取失败时保留已有横幅，并明确提示“状态不完整”。
       if (resp.degraded) {
         window.app?.toast?.('warning', resp.degradedReason || '优化状态读取不完整，已显示可用部分');
@@ -1876,7 +1982,7 @@
         if (!opt || opt.dynamic) continue;
         if (d && d.optimized === true && !appliedDetected.has(id)) { appliedDetected.add(id); prefill++; }
       }
-      if (prefill || appliedLocal.size) syncOptimized();
+      if (prefill || appliedLocal.size || UNCONFIRMED_APPLIED.size) syncOptimized();
       // v2-M14：`migration.restored / failed` 是空桩产物（启动从不自动还原，那两个数组
       // 永远是空的），据此弹的「已自动还原 N 项」是从未发生过的承诺，已删。
       // 现在字段给的是「本机仍留有注册表备份的退役项」，还原由用户点，走同一条已确认通道。
@@ -2134,64 +2240,6 @@
       btn.disabled = false;
       btn.textContent = '按原值还原';
     });
-  }
-
-  // ==================== 账外核对（2026-10-15 拍板：只读清单） ====================
-  // 「系统上被手工改过、但不在 Trim 优化目录里」的对照面。数据源是后端 external_scan.rs
-  // 的**现值命中制**表（只报命中已知社区形态的项；键/值不存在一律不报——机器差异是常态）。
-  // 只读出口：不提供任何一键还原。
-  async function openExternalAudit() {
-    if (!window.api?.optimizer?.externalScan) {
-      window.app?.toast?.('warning', '当前环境不支持账外核对');
-      return;
-    }
-    const create = window.modal?.create;
-    if (!create) { window.app?.toast?.('error', '弹窗组件未就绪，请刷新页面重试'); return; }
-    const ctrl = create({
-      id: 'externalAuditModal',
-      title: '账外核对',
-      width: 640,
-      bodyHtml: '<div class="opt-ext-body"><p class="nara-muted">正在扫描…</p></div>',
-      footerHtml: '<button type="button" class="btn btn-secondary" data-ext-close>关闭</button>',
-    });
-    ctrl.footer.querySelector('[data-ext-close]').addEventListener('click', () => ctrl.close());
-    const body = ctrl.body.querySelector('.opt-ext-body');
-    let resp = null;
-    try { resp = await window.api.optimizer.externalScan(); } catch (e) { resp = null; }
-    if (!body.isConnected) return; // 等待期间用户已关窗
-    // P1-6B：后端现在把「N 个键读不出来」如实回成 success:false + partial + data。
-    // 旧分支只认 success，一有读不出的键就把已经命中的清单整块换成一句「扫描失败」——
-    // 那是把「部分失败」再伪装成「彻底失败」，方向相反但同样是假信息。
-    let data = (resp && resp.data) || {};
-    let partialNote = '';
-    if (!resp || !resp.success) {
-      const part = resp && resp.partial ? resp.data : null;
-      if (!part || !Array.isArray(part.findings) || !part.findings.length) {
-        body.innerHTML = `<p class="empty-state"><span>${escapeHtml((resp && resp.message) || '扫描失败')}</span></p>`;
-        return;
-      }
-      data = part;
-      const ids = Array.isArray(part.unreadableIds) && part.unreadableIds.length
-        ? `（${part.unreadableIds.join('、')}）` : '';
-      partialNote = `<p class="opt-ext-foot">${escapeHtml(`${resp.message || '部分键未能核对'}${ids}`)}</p>`;
-    }
-    const findings = Array.isArray(data.findings) ? data.findings : [];
-    if (!findings.length) {
-      body.innerHTML = `<p class="empty-state"><span>没有发现已知的手动调整（已核对 ${Number(data.scanned) || 0} 个键）</span></p>`;
-      return;
-    }
-    const items = findings.map((f) => `
-      <div class="opt-ext-item">
-        <div class="opt-ext-title">${escapeHtml(f.title || f.id)}</div>
-        <div class="opt-ext-meta"><code>${escapeHtml(String(f.value || ''))} = ${escapeHtml(String(f.current === null || f.current === undefined ? '?' : f.current))}</code><span class="opt-ext-shape">${escapeHtml(f.shape || '')}</span></div>
-        <div class="opt-ext-path">${escapeHtml(`${f.hive || ''}\\${f.subkey || ''}`)}</div>
-        <p class="opt-ext-note">${escapeHtml(f.note || '')}</p>
-      </div>`).join('');
-    body.innerHTML = `
-      <p class="opt-ext-lead">发现 ${findings.length} 项系统上被手动改过的设置（共核对 ${Number(data.scanned) || 0} 个键）。</p>
-      ${items}
-      ${partialNote}
-      <p class="opt-ext-foot">本清单只读：只检测、不修改。需要恢复默认值请自行调整注册表或相关设置。</p>`;
   }
 
   // ==================== 详情弹窗（v3.2.0 弹窗统一批次：迁移到 modal.js 工厂） ====================
@@ -2677,6 +2725,7 @@
         return false;
       }
     }
+    progressState = { optionId: opt.id, percent: -1, done: false };
     createProgressToast(opt.title || '…');
     try {
       const t = progressToast;
@@ -2691,14 +2740,17 @@
       const runParams = Object.assign({}, params || {});
       if (!runParams.restore && needsHazardConfirm(opt)) runParams.confirmedHighRisk = true;
       const resp = await window.api.optimizer.run(opt.id, runParams);
+      const outcome = readRunOutcome(resp);
+      lastRunOutcome = outcome;
       if (resp && resp.success) {
-        finishProgressToast(true, resp.message);
-        window.app?.log('info', `优化电脑完成: ${optName}`);
+        const toastType = chooseToastType(outcome, 'success');
+        finishProgressToast(toastType === 'success', resp.message);
+        logOptimizerEvent(toastType === 'success' ? 'info' : 'warn', 'optimizer.run.completed', `优化电脑完成: ${optName}`, outcome && outcome.reasonCode);
         // v2.6.0（P0-2）：执行后回读校验不符（主进程已逐键比对）——明确告知而非静默成功。
         // 2026-09-30：日志只留后端那一条（optimizer.rs 的执行后/还原后各一），这里不再重复记，
         // 同一次失败在日志页出现两行会把真实的一条挤下去；toast 是用户侧唯一回执，保留。
-        if (resp.verify === 'partial') {
-          window.app?.toast('warning', `「${optName}」已执行但读回校验不符，可能被组策略或安全软件覆盖`, 6000);
+        if (resp.verify === 'partial' || (outcome && outcome.toastType === 'warning')) {
+          window.app?.toast('warning', `「${optName}」${resp.verify === 'partial' ? '已执行但读回校验不符，可能被组策略或安全软件覆盖' : '已执行，请确认变更结果'}`, 6000);
         }
         // 安全托底：执行成功后立即标记为已优化（灰态）+ 落本地数据
         if (params && params.restore) {
@@ -2720,6 +2772,7 @@
       // 此前只报「优化失败」死路；现在弹提权确认，管理员重启后重试即可
       if (resp && resp.needAdmin) {
         finishProgressToast(false, '需要管理员权限');
+        logOptimizerEvent('warn', 'optimizer.run.rejected', `优化电脑被拒: ${optName}: 需要管理员权限`, (outcome && outcome.reasonCode) || 'admin_required');
         // 审查 2026-09-27 M8：同意提权 → 应用即将重启，先把批量剩余写进 localStorage，
         // 重启进页时恢复预勾选（见 restorePendingBatch）；单项执行 batchRemainingIds
         // 为 null，不写键、行为不变
@@ -2736,7 +2789,7 @@
       // 若仍收到 needConfirm（契约被破坏的信号），如实呈现而不是并进泛化的「优化失败」
       if (resp && resp.needConfirm) {
         finishProgressToast(false, resp.message || '缺少高危确认回执');
-        window.app?.log('warn', `优化电脑被拒: ${optName}: 缺少高危确认回执`);
+        logOptimizerEvent('warn', 'optimizer.run.rejected', `优化电脑被拒: ${optName}: 缺少高危确认回执`, (outcome && outcome.reasonCode) || 'need_confirm');
         return false;
       }
       // P0-5：还原方向的 partial/unknown 是「部分恢复 / 待复核」，不是绿色成功，也不清账。
@@ -2746,7 +2799,7 @@
           : '还原已执行，但无法验证是否生效，记录已保留');
         finishProgressToast(false, msg);
         window.app?.toast('warning', msg, 6000);
-        window.app?.log('warn', `优化电脑还原未完成（${resp.verify}）: ${optName}: ${msg}`);
+        logOptimizerEvent('warn', 'optimizer.restore.incomplete', `优化电脑还原未完成（${resp.verify}）: ${optName}: ${msg}`, (outcome && outcome.reasonCode) || resp.verify);
         return false;
       }
       // 审查 2026-09-27 M4：后端随回执下发逐步失败原因（failedSteps），toast 展示前
@@ -2756,7 +2809,7 @@
         ? `${resp.message || '部分步骤失败'}（${failedSteps.slice(0, 3).join('；')}${failedSteps.length > 3 ? ' 等' : ''}）`
         : (resp && resp.message);
       finishProgressToast(false, detail);
-      window.app?.log('warn', `优化电脑失败: ${optName}: ${detail || ''}${failedSteps.length ? ' | 全部: ' + failedSteps.join('；') : ''}`);
+      logOptimizerEvent('warn', 'optimizer.run.failed', `优化电脑失败: ${optName}: ${detail || ''}${failedSteps.length ? ' | 全部: ' + failedSteps.join('；') : ''}`, (outcome && outcome.reasonCode) || 'failed_steps');
       return false;
     } catch (e) {
       finishProgressToast(false, e.message);
@@ -2905,9 +2958,7 @@
     if (!btn) return;
     const count = selectedIds.size;
     btn.disabled = count === 0;
-    btn.innerHTML = count > 0
-      ? '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>执行所选优化（' + count + '）'
-      : '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>执行所选优化';
+    btn.textContent = count > 0 ? '执行所选优化（' + count + '）' : '执行所选优化';
   }
 
   // 执行已勾选的优化项（支持跨分类；跳过当前页面分类之外的项需重新渲染时保持一致）
@@ -3003,6 +3054,7 @@
 
     let okCount = 0, failCount = 0;
     const failedNames = [];
+    const batchOutcomes = [];
     // BoosterX §B2：整批只给**一次**生效建议，取成功项里最粗的档位。
     // 逐项提示会把用户推向「每改一项重启一次」；档位由后端侧表算好透在每行的 applyScope 上
     // （data/optimizer-scope.json，判定规则与档位序两侧同表，由 check-optimizer-dynamic 对拍）。
@@ -3019,6 +3071,7 @@
           const p = batchParams(opt, paramsByRun);
           if (p === null) { failCount++; failedNames.push(opt.title + '（未选定参数）'); continue; }
           const succeeded = await runOptionActive(p, opt);
+          batchOutcomes.push(succeeded ? readRunOutcome(lastRunOutcome) : null);
           if (succeeded) {
             okCount++;
             const rank = SCOPE_RANK[String(opt.applyScope || 'none')] || 0;
@@ -3032,11 +3085,12 @@
       }
       if (!entriesOverride) clearSelection();  // 面板批次用独立勾选集，不清主页面选择
       renderGroups(OPTIONS); // 刷新已优化灰态
-      window.app?.toast(
-        okCount === allowed.length ? 'success' : 'warning',
-        `执行完成：成功 ${okCount} 项，失败 ${failCount} 项` +
-        (failCount ? `（${failedNames.slice(0, 5).join('、')}${failedNames.length > 5 ? ' 等' : ''}）` : '')
-      );
+      const batchSummary = summarizeRunOutcomes(batchOutcomes,
+        okCount === allowed.length ? 'success' : 'warning', allowed.length,
+        okCount, failCount, failedNames, '执行完成');
+      window.app?.toast(batchSummary.type, batchSummary.message);
+      logOptimizerEvent(batchSummary.type === 'error' ? 'error' : batchSummary.type === 'success' ? 'info' : 'warn',
+        'optimizer.batch.summary', batchSummary.message, batchSummary.reasonCode);
       // 整批只提示一次生效粒度，且排在「执行完成」之后 —— 用户先要知道做没做成，再要知道要不要重启
       if (batchScope > 0 && batchScopeCount > 0) {
         window.app?.toast(batchScope >= SCOPE_RANK.reboot ? 'info' : 'success', scopeAdviceText(batchScope, batchScopeCount), 9000);
@@ -3124,7 +3178,7 @@
     if (batchRunning) return;
     // A2-L01：同 runSelected —— 判据后立刻上锁并禁用按钮，二连点不会进第二遍。
     batchRunning = true;
-    const btn = document.getElementById('btnOptimizerBatch');
+    const btn = batchEntry;
     if (btn) { btn.disabled = true; btn.dataset.orig = btn.innerHTML; btn.innerHTML = '批量执行中…'; }
     try {
       await runBatchLocked();
@@ -3206,6 +3260,7 @@
 
     let okCount = 0, failCount = 0;
     const failedNames = [];
+    const batchOutcomes = [];
     let batchScope = 0, batchScopeCount = 0;
     // F4b-M12：同 runSelected —— 循环之后的 setCardsSelected / clearSelection / renderGroups /
     // toast 都可能抛，锁必须在 finally 里放。
@@ -3223,6 +3278,7 @@
             : batchParams(opt, paramsByRun);
           if (p === null) { failCount++; failedNames.push(opt.title + '（未选定参数）'); continue; }
           const succeeded = await runOptionActive(p, opt);
+          batchOutcomes.push(succeeded ? readRunOutcome(lastRunOutcome) : null);
           if (succeeded) {
             okCount++;
             const rank = SCOPE_RANK[String(opt.applyScope || 'none')] || 0;
@@ -3237,11 +3293,12 @@
       setCardsSelected(false);
       clearSelection();
       renderGroups(OPTIONS); // 刷新已优化灰态
-      window.app?.toast(
-        okCount === allowed.length ? 'success' : 'warning',
-        `批量执行完成：成功 ${okCount} 项，失败 ${failCount} 项` +
-        (failCount ? `（${failedNames.slice(0, 5).join('、')}${failedNames.length > 5 ? ' 等' : ''}）` : '')
-      );
+      const batchSummary = summarizeRunOutcomes(batchOutcomes,
+        okCount === allowed.length ? 'success' : 'warning', allowed.length,
+        okCount, failCount, failedNames, '批量执行完成');
+      window.app?.toast(batchSummary.type, batchSummary.message);
+      logOptimizerEvent(batchSummary.type === 'error' ? 'error' : batchSummary.type === 'success' ? 'info' : 'warn',
+        'optimizer.batch.summary', batchSummary.message, batchSummary.reasonCode);
       // 与 runSelected 同一口径：两条批量入口都只提示一次，漏一条会让「一键全选」比手勾更没有提示
       if (batchScope > 0 && batchScopeCount > 0) {
         window.app?.toast(batchScope >= SCOPE_RANK.reboot ? 'info' : 'success', scopeAdviceText(batchScope, batchScopeCount), 9000);
@@ -3348,8 +3405,11 @@
         window.app?.log?.('error', '优化中心初始化异常: ' + ((e && e.message) || e));
         renderFallback('页面初始化异常');
       });
-      window.app?.trackSubscription?.(window.api.optimizer.onProgress(({ percent }) => {
-        if (typeof percent === 'number') setProgressToastProgress(percent);
+      window.app?.trackSubscription?.(window.api.optimizer.onProgress((event) => {
+        const next = map_progress(progressState, event);
+        if (next === progressState) return;
+        progressState = next;
+        setProgressToastProgress(next.percent);
       }));
     } else {
       renderFallback();
@@ -3483,15 +3543,11 @@
       return fn();
     });
 
-    const batchBtn = document.getElementById('btnOptimizerBatch');
-    if (batchBtn) batchBtn.addEventListener('click', guardBatch('批量执行', runBatch));
     const selectedBtn = document.getElementById('btnOptimizerSelected');
     if (selectedBtn) {
       selectedBtn.disabled = true;
       selectedBtn.addEventListener('click', guardBatch('执行所选', runSelected));
     }
-    const externalBtn = document.getElementById('btnOptExternal');
-    if (externalBtn) externalBtn.addEventListener('click', openExternalAudit);
     // 分类切换时保留勾选状态（跨分类勾选允许执行所选）
     updateSelectedButtonState();
   }

@@ -1515,6 +1515,8 @@ pub fn startup_toggle(items: &[Value], enable: bool) -> Result<Value, String> {
 /// 本来就是「已禁用」）。`startup_toggle` 必须把它记成 `status:"skip"` 且不计 `success`：
 /// 前端只把 `status=="ok"` 的禁用项写进防恢复台账（`startup.js` 的 F4a2-M02 口径），
 /// 把「没改」算成成功会让汇总提示多算一项，还给该项留一条假的防恢复指纹。
+/// 本枚举是「已符合期望」的唯一出口；各写入分支只返回 `Unchanged`，不得自行写 skip
+/// 或自增成功计数。
 #[derive(Debug)]
 enum ToggleOutcome {
     Changed(String),
@@ -3170,6 +3172,47 @@ mod r5d_ledger_and_task_tests {
         assert!(
             !prod.contains(r#"let enabled = !xml_first(&text, "Enabled")"#),
             "旧的全文首匹配读法还在（触发器 Enabled 会盖住任务级 Enabled）"
+        );
+    }
+
+    /// R5d-L01：`Unchanged` 到 `status:"skip"` 的映射只能有一个所有者，且不得计成功。
+    /// 判红自证：删掉 skip 映射、在 skip 臂自增 success、或另加一处 skip 回执都会红。
+    #[test]
+    fn r5d_l01_unchanged只映射为skip() {
+        let prod = include_str!("startup.rs")
+            .split("#[cfg(test)]\nmod r5d_ledger_and_task_tests")
+            .next()
+            .unwrap_or_default();
+        assert_eq!(
+            prod.matches(r#""status": "skip""#).count(),
+            1,
+            "skip 回执只能由 startup_toggle 的 Unchanged 臂产出"
+        );
+        let toggle = prod
+            .split("pub fn startup_toggle")
+            .nth(1)
+            .and_then(|s| s.split("/// 单项启用/禁用的结局").next())
+            .unwrap_or_default();
+        let unchanged_arm = toggle
+            .split("Ok(ToggleOutcome::Unchanged(msg))")
+            .nth(1)
+            .and_then(|s| s.split("Err(e) =>").next())
+            .unwrap_or_default();
+        assert!(
+            unchanged_arm.contains(r#""status": "skip""#),
+            "Unchanged 必须落到 skip: {unchanged_arm}"
+        );
+        assert!(
+            !unchanged_arm.contains("success += 1"),
+            "Unchanged 不得计成功: {unchanged_arm}"
+        );
+        assert!(
+            prod.contains("read_startup_approved(hive, approved_subkey, value_name) == Some(true)"),
+            "注册表禁用臂没先读批准位再跳过"
+        );
+        assert!(
+            prod.contains("item.get(\"enabled\").and_then(|v| v.as_bool()) == Some(enable)"),
+            "任务启停臂没先用扫描态判已符合期望"
         );
     }
 

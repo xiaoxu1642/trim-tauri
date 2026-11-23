@@ -10,6 +10,8 @@
 
 use serde_json::{json, Map, Value};
 
+use std::path::Path;
+
 use crate::engine::{log, paths};
 use crate::security;
 
@@ -78,17 +80,21 @@ pub fn touch_recent(id: &str) -> bool {
     })
 }
 
-fn load_state() -> (Value, bool) {
-    let f = state_file();
+fn load_state() -> (Value, bool, bool) {
+    load_state_from(&state_file())
+}
+
+fn load_state_from(f: &Path) -> (Value, bool, bool) {
     // v5-K01 批次 4（R7-M05）：三态读器——读失败（Corrupt，含 IO 失败）已在
     // read_json_state 内 warn 留痕，不再与「没有配置」同归静默空；这里降级空骨架
     // 只影响读侧预读，写侧 update_state 拒 Corrupt，不会把空骨架写出去。
     // A1-M12：把 Corrupt 位带回给回执，读失败与「确实没有状态」分开。
-    let (v, degraded) = match security::read_json_state(&f) {
+    let (v, degraded) = match security::read_json_state(f) {
         security::JsonState::Ok(v) => (v, false),
         security::JsonState::Absent => (empty_state(), false),
         security::JsonState::Corrupt => (empty_state(), true),
     };
+    let mut applied_ids_unknown = degraded;
     let v = match v {
         Value::Object(m) if m.get("items").map(|x| x.is_object()).unwrap_or(false) => {
             let mut o = m;
@@ -104,9 +110,13 @@ fn load_state() -> (Value, bool) {
             }
             Value::Object(o)
         }
-        _ => empty_state(),
+        _ => {
+            // 合法 JSON 但没有可用 items 段时，不能把空骨架误读成“没有执行过”。
+            applied_ids_unknown = true;
+            empty_state()
+        }
     };
-    (v, degraded)
+    (v, degraded, applied_ids_unknown)
 }
 
 fn load() -> Value {
@@ -150,9 +160,19 @@ fn empty_map() -> &'static Map<String, Value> {
 /// 覆盖别人的改动」这种形态，`Snapshot` 也就没暴露 `&mut`。
 pub struct Snapshot {
     st: Value,
+    state_uncertain: bool,
+    applied_ids_unknown: bool,
 }
 
 impl Snapshot {
+    fn from_state(st: Value, state_uncertain: bool, applied_ids_unknown: bool) -> Snapshot {
+        Snapshot {
+            st,
+            state_uncertain,
+            applied_ids_unknown,
+        }
+    }
+
     /// 记账段（`items`）；缺段按空表（与 [`all`] 的降级口径一致）
     pub fn items(&self) -> &Map<String, Value> {
         items_of(&self.st).unwrap_or(empty_map())
@@ -167,6 +187,16 @@ impl Snapshot {
     pub fn dismissed(&self) -> &Map<String, Value> {
         dismissed_of(&self.st).unwrap_or(empty_map())
     }
+
+    /// 状态文件读失败或骨架丢失时，空 items 不能被解释成“确实为空”。
+    pub fn state_uncertain(&self) -> bool {
+        self.state_uncertain
+    }
+
+    /// 是否无法确认 applied 账目；false 只表示证据可读，不代表“没有执行过”。
+    pub fn applied_ids_unknown(&self) -> bool {
+        self.applied_ids_unknown
+    }
 }
 
 /// 读一次状态文件并派生快照（走的是同一个 `load()`：三态读器 + 骨架补齐 + 损坏降级
@@ -177,8 +207,14 @@ pub fn snapshot() -> Snapshot {
 
 /// A1-M12：与 [`snapshot`] 同一份读盘，额外返回「本次读是否降级（Corrupt）」。
 pub fn snapshot_with_health() -> (Snapshot, bool) {
-    let (st, degraded) = load_state();
-    (Snapshot { st }, degraded)
+    let (st, degraded, applied_ids_unknown) = load_state_from(&state_file());
+    (Snapshot::from_state(st, degraded, applied_ids_unknown), degraded)
+}
+
+#[cfg(test)]
+pub(crate) fn snapshot_with_health_from(path: &Path) -> (Snapshot, bool) {
+    let (st, degraded, applied_ids_unknown) = load_state_from(path);
+    (Snapshot::from_state(st, degraded, applied_ids_unknown), degraded)
 }
 
 /// 写侧骨架校验（v4 P2-D 尾）：结构与 `load()` 的接受面**同判据**，但方向是拒写。
@@ -825,5 +861,41 @@ mod tests {
         assert!(st::get(pending).is_none(), "pending 条目应被清理");
         assert!(st::get(applied).is_some(), "已转正条目不得被误删");
         let _ = st::remove(applied);
+    }
+
+    /// A2-2：损坏/结构缺失读数不得把 applied 证据折成“没动过”。
+    #[test]
+    fn p0_4_损坏与骨架缺失不折成正常空状态() {
+        use crate::engine::optimization_state as st;
+        let _sandbox = crate::testutil::Sandbox::new("p0-4-state-health");
+        let corrupt_path = _sandbox.join("corrupt.json");
+        let missing_path = _sandbox.join("missing.json");
+        let absent = _sandbox.join("absent.json");
+        std::fs::write(&corrupt_path, "{").expect("写损坏夹具失败");
+        std::fs::write(&missing_path, r#"{"version":1}"#).expect("写缺骨架夹具失败");
+        let (corrupt_health, corrupt_degraded) = st::snapshot_with_health_from(&corrupt_path);
+        let (missing_health, missing_degraded) = st::snapshot_with_health_from(&missing_path);
+        let (absent_health, absent_degraded) = st::snapshot_with_health_from(&absent);
+        assert!(corrupt_degraded);
+        assert!(!missing_degraded);
+        assert!(!absent_degraded);
+        assert!(corrupt_health.state_uncertain());
+        assert!(corrupt_health.applied_ids_unknown());
+        assert!(!missing_health.state_uncertain());
+        assert!(missing_health.applied_ids_unknown());
+        assert!(!absent_health.state_uncertain());
+        assert!(!absent_health.applied_ids_unknown());
+    }
+
+    /// 接口健康位必须来自同一份读盘；破坏字段映射即红。
+    #[test]
+    fn p0_4_健康位映射_读失败与骨架缺失区分() {
+        use crate::engine::optimization_state as st;
+        let _sandbox = crate::testutil::Sandbox::new("p0-4-health-map");
+        let absent_path = _sandbox.join("absent.json");
+        let (absent, degraded) = st::snapshot_with_health_from(&absent_path);
+        assert!(!degraded);
+        assert!(!absent.state_uncertain());
+        assert!(!absent.applied_ids_unknown());
     }
 }

@@ -704,11 +704,7 @@
           </div>
         </div>`;
     }).join('') + `
-      <div class="startup-list-ops">
-        <button class="btn btn-secondary btn-small" id="btnStartupDisableBulk">禁用所选</button>
-        <button class="btn btn-secondary btn-small" id="btnStartupEnableBulk">启用所选</button>
-        <button class="btn btn-danger btn-small" id="btnStartupDeleteBulk">删除所选</button>
-      </div>`;
+      `;
 
     // B2：有路径的项提取真实程序图标，失败或无路径时统一兜底为 Trim.ico
     applyStartupIcons(listEl);
@@ -787,10 +783,6 @@
     el('btnStartupDisable').disabled = !hasDisable;
     el('btnStartupEnable').disabled = !hasEnable;
     el('btnStartupDelete').disabled = !sel.length;
-    const bulk = (id, on) => { const b = el(id); if (b) b.disabled = !on; };
-    bulk('btnStartupDisableBulk', hasDisable);
-    bulk('btnStartupEnableBulk', hasEnable);
-    bulk('btnStartupDeleteBulk', sel.length > 0);
     const selectAll = el('startupSelectAll');
     if (selectAll) {
       const selected = selectAll.checked && sel.length > 0;
@@ -801,11 +793,6 @@
     if (deleteBtn) {
       deleteBtn.setAttribute('aria-label', `删除所选启动项（${sel.length} 项，删除前需确认）`);
       deleteBtn.setAttribute('data-tip', `删除所选 ${sel.length} 项启动登记；删除前会先备份，需二次确认，程序文件不会被卸载`);
-    }
-    const deleteBulk = el('btnStartupDeleteBulk');
-    if (deleteBulk) {
-      deleteBulk.setAttribute('aria-label', `删除所选启动项（${sel.length} 项，删除前需确认）`);
-      deleteBulk.setAttribute('data-tip', `删除所选 ${sel.length} 项启动登记；删除前会先备份，需二次确认，程序文件不会被卸载`);
     }
   }
 
@@ -1139,14 +1126,6 @@ ${enable ? '（启用后该项将随系统启动运行）' : '（禁用后可随
       const locBtn = e.target.closest('.btn-opt-loc');
       if (locBtn) {
         openSource(locBtn.dataset);
-        return;
-      }
-      const bulkBtn = e.target.closest('#btnStartupDisableBulk, #btnStartupEnableBulk, #btnStartupDeleteBulk');
-      if (bulkBtn) {
-        const sel = getSelected();
-        if (bulkBtn.id === 'btnStartupDisableBulk') safeAction(() => doToggle(sel, false), '禁用启动项')();
-        else if (bulkBtn.id === 'btnStartupEnableBulk') safeAction(() => doToggle(sel, true), '启用启动项')();
-        else if (bulkBtn.id === 'btnStartupDeleteBulk') safeAction(() => doDelete(sel), '删除启动项')();
         return;
       }
       // 点击条目主体（非按钮/复选框区域）→ 弹出详细简介（含本地简介 + 联网 AI 简介）

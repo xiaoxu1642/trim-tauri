@@ -41,24 +41,15 @@ const ZONES = [
 ];
 
 /**
- * 清单校验：任何结构问题都以可读文案抛出（fail-fast，调用方决定打印或判红）。
- * 未知字段也算非法 —— 字段拼错名（如 tiers）会静默漏同步，宁红勿漏。
+ * 清单结构校验：任何结构问题都以可读文案抛出（fail-fast，调用方决定打印或判红）。
+ * 顶层和命令级未知字段也算非法 —— 字段拼错名（如 tiers）会静默漏同步，宁红勿漏。
  */
-export function loadManifest() {
-  let raw;
-  try {
-    raw = readFileSync(MANIFEST_PATH, 'utf8');
-  } catch (e) {
-    throw new Error('读不到清单 ' + MANIFEST_REL + '（' + e.message + '）—— 命令面真源缺席，按失败处理');
-  }
-  let doc;
-  try {
-    doc = JSON.parse(raw);
-  } catch (e) {
-    throw new Error(MANIFEST_REL + ' 不是合法 JSON：' + e.message);
-  }
+function validateManifestDoc(doc) {
   const bad = (msg) => { throw new Error('清单校验失败：' + msg); };
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) bad('顶层必须是对象');
+  for (const k of Object.keys(doc)) {
+    if (!['_doc', 'commands'].includes(k)) bad('顶层有未知字段 ' + k);
+  }
   if (doc._doc !== undefined && typeof doc._doc !== 'string') bad('_doc 必须是字符串');
   if (!Array.isArray(doc.commands) || doc.commands.length === 0) bad('commands 必须是非空数组');
   const seenName = new Set();
@@ -89,6 +80,23 @@ export function loadManifest() {
   return doc.commands;
 }
 
+/** 读入并解析清单真源，随后做结构校验；返回已校验的命令数组。 */
+export function loadManifest() {
+  let raw;
+  try {
+    raw = readFileSync(MANIFEST_PATH, 'utf8');
+  } catch (e) {
+    throw new Error('读不到清单 ' + MANIFEST_REL + '（' + e.message + '）—— 命令面真源缺席，按失败处理');
+  }
+  let doc;
+  try {
+    doc = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(MANIFEST_REL + ' 不是合法 JSON：' + e.message);
+  }
+  return validateManifestDoc(doc);
+}
+
 /** 生成一个 zone 的内容行（不含锚注释行；rust 按 manifest 序、tier 表按名字典序） */
 function zoneLines(zone, commands) {
   const lines = [];
@@ -116,6 +124,18 @@ function zoneLines(zone, commands) {
     for (const n of names) lines.push('  \'' + n + '\',');
   }
   return lines;
+}
+
+/** 生成一个 zone 的完整锚区内容（含尾随换行；空内容时为空串）。 */
+function zoneContent(zone, commands, eol) {
+  const lines = zoneLines(zone, commands);
+  return lines.length ? lines.join(eol) + eol : '';
+}
+
+/** 比较 zone 实况与内存生成内容；一致返回 null，不一致返回可读差异串。 */
+function zoneProblem(zone, actual, commands, eol) {
+  const expected = zoneContent(zone, commands, eol);
+  return actual === expected ? null : diffSummary(zone, actual, expected, eol);
 }
 
 /** 定位 zone 内容区间：begin 行末之后到 end 行行首（end 行自身原样保留，rust 的 end 锚骑在「])」行上） */
@@ -167,7 +187,8 @@ function diffSummary(zone, actual, expected, eol) {
 
 /**
  * 「清单 ⇄ 生成物」对拍（门禁与 --check 共用）：
- * 逐 zone 重新生成内容并与盘上锚区逐字比对；清单非法或锚区缺失都计为问题（fail-closed）。
+ * 逐 zone 重新生成内容并与盘上锚区逐字比对，再跑只读合成反例；清单非法、
+ * 锚区缺失或反例漏判都计为问题（fail-closed）。
  */
 export function checkZones() {
   const problems = [];
@@ -178,6 +199,7 @@ export function checkZones() {
     return { ok: false, problems: [e.message] };
   }
   const fileCache = new Map();
+  const zoneActual = new Map();
   for (const zone of ZONES) {
     let text;
     try {
@@ -194,13 +216,57 @@ export function checkZones() {
       problems.push(zone.rel + '：' + e.message);
       continue;
     }
-    const lines = zoneLines(zone, commands);
     const eol = eolOf(text);
-    const expected = lines.length ? lines.join(eol) + eol : '';
     const actual = text.slice(span.contentStart, span.contentEnd);
-    if (actual !== expected) problems.push(diffSummary(zone, actual, expected, eol));
+    zoneActual.set(zone.id, { actual, eol });
+    const problem = zoneProblem(zone, actual, commands, eol);
+    if (problem) problems.push(problem);
   }
+  problems.push(...syntheticProblems(commands, zoneActual));
   return { ok: problems.length === 0, problems };
+}
+
+/**
+ * 内存合成反例：确认对照逻辑会因删条目、坏 tier、重复通道和未知字段判红。
+ * 只用当前清单和已读 zone 内容构造，不落盘、不新建 fixture。
+ */
+function syntheticProblems(commands, zoneActual) {
+  const problems = [];
+  const requireProblem = (problem, label) => {
+    if (!problem) problems.push('合成对照未判红：' + label);
+  };
+  const requireInvalid = (doc, label) => {
+    try {
+      validateManifestDoc(doc);
+      problems.push('合成对照未判红：' + label);
+    } catch {
+      // 预期失败；反例只关心能判红。
+    }
+  };
+  const zone = ZONES[0];
+  const zoneSnapshot = zoneActual.get(zone.id);
+  if (!zoneSnapshot) problems.push('合成对照缺 zone 实况：' + zone.id);
+  else requireProblem(zoneProblem(zone, zoneSnapshot.actual, commands.slice(1), zoneSnapshot.eol), '删生成区条目');
+
+  const base = commands[0];
+  requireProblem(
+    zoneProblem(
+      zone,
+      zoneSnapshot?.actual ?? '',
+      [...commands, { ...base, name: base.name + '_synthetic', channel: null, tier: 'invalid-tier' }],
+      zoneSnapshot?.eol ?? '\n',
+    ),
+    '生成区 tier 改坏',
+  );
+
+  const channelBase = commands.find((c) => c.channel !== null);
+  const duplicate = channelBase
+    ? { ...channelBase, name: channelBase.name + '_synthetic' }
+    : { ...base, name: base.name + '_synthetic', channel: 'synthetic:probe' };
+  requireInvalid({ _doc: '合成对照', commands: [...commands, duplicate] }, '重复通道');
+  requireInvalid({ _doc: '合成对照', commands: [{ ...base, syntheticUnknown: true }] }, '命令级未知字段');
+  requireInvalid({ _doc: '合成对照', commands, syntheticUnknown: true }, '顶层未知字段');
+  return problems;
 }
 
 /** --write：把生成区写回源码文件（幂等）；返回发生改写的 zone 描述 */
@@ -210,10 +276,10 @@ export function writeZones() {
   for (const zone of ZONES) {
     const text = readFileSync(zone.file, 'utf8');
     const span = zoneSpan(text, zone.id);
-    const lines = zoneLines(zone, commands);
     const eol = eolOf(text);
-    const expected = lines.length ? lines.join(eol) + eol : '';
-    if (text.slice(span.contentStart, span.contentEnd) === expected) continue;
+    const actual = text.slice(span.contentStart, span.contentEnd);
+    const expected = zoneContent(zone, commands, eol);
+    if (actual === expected) continue;
     const next = text.slice(0, span.contentStart) + expected + text.slice(span.contentEnd);
     writeFileSync(zone.file, next, 'utf8');
     changed.push(zone.rel + ' zone ' + zone.id);

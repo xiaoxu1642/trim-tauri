@@ -920,6 +920,22 @@ pub fn read_reg_value_faithful(hive: HKEY, subkey: &str, name: &str) -> Option<(
     }
 }
 
+/// 仅供 P1-8 单测：注册表等值断言 `Absent` 视为达标，`Unknown` 不冒充不达标。
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn read_reg_value_state_as_expected(
+    hive: HKEY,
+    subkey: &str,
+    name: &str,
+    expected: &str,
+    flatten: bool,
+) -> Option<bool> {
+    match read_reg_value_state(hive, subkey, name, flatten) {
+        RegReadState::Absent => Some(true),
+        RegReadState::Unknown(_) => None,
+        RegReadState::Value(_, data) => Some(data == expected),
+    }
+}
+
 /// UTF-16 **严格**解码：非法序列（孤立代理项）不做有损替换。
 ///
 /// 为什么不能有损：`from_utf16_lossy` 会把孤立代理项换成 U+FFFD，而这条链的输出会
@@ -1361,7 +1377,8 @@ pub(super) unsafe fn reg_count_values(hk: HKEY) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        open_key_missing_is_idempotent, win_reg_err_label, read_reg_value_state, reg_key_remove,
+        open_key_missing_is_idempotent, win_reg_err_label, read_reg_value_state,
+        read_reg_value_state_as_expected, reg_key_remove,
         reg_restore_write, reg_enum_value_names_pub, to_wide, RegReadState, remove_cause_label,
         decode_reg_value_bytes, reg_enum_subkeys_pub_scan, hive_hklm,
     };
@@ -1746,6 +1763,23 @@ mod tests {
         assert_eq!(win_reg_err_label(5), "ERROR_ACCESS_DENIED");
         assert_eq!(win_reg_err_label(234), "ERROR_MORE_DATA");
         assert_eq!(win_reg_err_label(1008), "WIN32_ERROR(1008)");
+    }
+
+    /// P1-8：注册表等值断言收到 `Unknown` 必须保持三态，不得冒充「确认不存在」。
+    #[test]
+    fn 等值三态_不存在的长值名仍返回_absent() {
+        use windows::Win32::System::Registry::HKEY_CURRENT_USER;
+
+        assert_eq!(
+            read_reg_value_state_as_expected(
+                HKEY_CURRENT_USER,
+                r"Software\Trim\p1-8-probe",
+                &"A".repeat(20_000),
+                "expected",
+                true,
+            ),
+            Some(true)
+        );
     }
 
     /// P0-3 真机 `#[ignore]` 探针（**本轮未执行**，归发布前门禁）：HKCU 专用 scratch 键上

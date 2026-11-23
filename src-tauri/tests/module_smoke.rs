@@ -1983,20 +1983,6 @@ fn syspanel_power_edit_command_is_main_only() {
     debug_assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
 }
 
-/// 账外核对（2026-10-15 拍板）：只读但只被主窗优化页消费 ⇒ 按 D5 判据取 MAIN，子窗被拒杀。
-/// 只点子窗拒绝侧；命中判定由 `external_scan.rs` 的单测与真机探针覆盖。
-#[test]
-fn optimizer_external_scan_is_main_only() {
-    let mut rejected: Vec<&str> = Vec::new();
-    for label in sub_windows() {
-        let w = window_with_label(label);
-        let text = invoke_text(&w, "optimizer_external_scan", json!({}));
-        assert_guard_rejected(&text, &format!("{label} 窗调 optimizer_external_scan 必须被来源校验拒杀"));
-        rejected.push(label);
-    }
-    debug_assert_eq!(rejected, sub_windows(), "循环体内已逐条断言，此处仅作同源可读汇总（X1-M03）");
-}
-
 /// 2026-10-04 磁盘清理审计 §5.6：item-detail 的 path 形参必须与扫描快照同源。
 /// MockRuntime 没有真实扫描（快照为空）⇒ 任意非空 path 必须被拒——这正好是
 /// 「任意目录读暴露面」的拒收面；空 path 走规则自身枚举，不得触发该拒绝。

@@ -660,7 +660,6 @@
           </div>
           <div class="page-actions">
             <button class="btn btn-secondary" id="btnMemAiIntro" data-tip="选择「内存清理」生成 AI 简介所用的模型（与其他模块相互独立）">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm3.5 6.5c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zm-11 0c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zM12 19c-3.87 0-7-3.13-7-7h2c0 2.76 2.24 5 5 5s5-2.24 5-5h2c0 3.87-3.13 7-7 7z"/></svg>
               联网 AI 简介
             </button>
             <button class="btn btn-secondary" id="btnMemProcesses" data-tip="刷新当前运行的进程列表">
@@ -747,43 +746,23 @@
       </div>
 
       <!-- 优化电脑页面 -->
-      <div class="page" id="page-optimizer">
-        <div class="page-header">
-          <div>
+            <div class="page" id="page-optimizer">
+        <div class="optimizer-title-row">
+          <div class="page-title-row">
             <h1 class="page-title">优化电脑 <span class="page-summary" id="optimizerSummary"></span></h1>
-          </div>
-          <div class="page-actions">
-            <button class="btn btn-secondary" id="btnOptimizerSelected" data-tip="执行当前页面中已勾选的优化项">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
-              执行所选优化
-            </button>
-            <button class="btn btn-secondary" id="btnOptimizerBatch" data-tip="一键全选当前页面所有优化项，二次确认后依次执行">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
-              全选执行
-            </button>
-            <button class="btn btn-secondary" id="btnOptimizerAiIntro" data-tip="选择「电脑优化中心」生成 AI 简介所用的模型（与其他模块相互独立）">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm3.5 6.5c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zm-11 0c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zM12 19c-3.87 0-7-3.13-7-7h2c0 2.76 2.24 5 5 5s5-2.24 5-5h2c0 3.87-3.13 7-7 7z"/></svg>
-              联网 AI 简介
-            </button>
-            <button class="btn btn-secondary" id="btnSysRestore" data-tip="查看系统保护状态、创建与管理系统还原点">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></svg>
-              系统还原点
-            </button>
-            <button class="btn btn-secondary" id="btnOptExternal" data-tip="只读核对：列出系统上被手工改过、但不在 Trim 优化目录里的设置">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M4 5h16v2H4zm0 6h16v2H4zm0 6h10v2H4z"/></svg>
-              账外核对
-            </button>
-            <button class="btn btn-secondary" id="btnOptimizerElevate" style="display:none" data-tip="部分选项需要管理员权限">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z"/></svg>
-              提升权限
-            </button>
+            <button class="btn btn-secondary btn-small" id="btnSysRestore" data-tip="查看系统保护状态、创建与管理系统还原点">系统还原点</button>
           </div>
         </div>
 
-        <!-- 优化分类分段栏（原侧边栏分类子菜单收拢于此，由 optimizer.js 按 OPT_CATEGORIES 渲染） -->
-        <div class="filter-tabs optimizer-cats filter-tabs--scroll" id="optimizerCatNav" role="tablist" aria-label="优化分类"></div>
-
-        <!-- 管理员提醒（可选，交由 JS 控制） -->
+        <div class="optimizer-toolbar">
+          <div class="filter-tabs optimizer-cats filter-tabs--scroll" id="optimizerCatNav" role="tablist" aria-label="优化分类"></div>
+          <div class="page-actions optimizer-toolbar-actions">
+            <button class="btn btn-secondary btn-small" id="btnOptimizerSelected" data-tip="执行当前页面中已勾选的优化项">执行所选优化</button>
+            <button class="btn btn-secondary btn-small" id="btnOptimizerAiIntro" data-tip="选择「电脑优化中心」生成 AI 简介所用的模型（与其他模块相互独立）">联网 AI 简介</button>
+            <button class="btn btn-secondary btn-small" id="btnOptimizerElevate" style="display:none" data-tip="部分选项需要管理员权限">提升权限</button>
+          </div>
+        </div>
+<!-- 管理员提醒（可选，交由 JS 控制） -->
         <div class="optimizer-banner" id="optimizerBanner" style="display:none"></div>
 
         <!-- v2.6.0（P0-1）：未完成还原提醒——启动扫描发现「有记账但未生效/执行中断」的项时显示。
@@ -827,16 +806,7 @@
           <div>
             <h1 class="page-title">右键菜单管理 <span class="page-summary" id="contextSummary"></span></h1>
           </div>
-          <div class="page-actions">
-            <button class="btn btn-primary" id="btnScanContext">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
-              扫描右键菜单
-            </button>
-            <button class="btn btn-secondary" id="btnContextAiIntro" data-tip="选择「右键管理」生成 AI 简介所用的模型（与其他模块相互独立）">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm3.5 6.5c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zm-11 0c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zM12 19c-3.87 0-7-3.13-7-7h2c0 2.76 2.24 5 5 5s5-2.24 5-5h2c0 3.87-3.13 7-7 7z"/></svg>
-              联网 AI 简介
-            </button>
-          </div>
+
         </div>
 
         <!-- 批次 B：延迟批量生效条。右键菜单由资源管理器在加载期解析，改完必须重启才可见；
@@ -852,12 +822,18 @@
              （一个软件下有哪些位置的菜单项），位置降级成行上的小标签，
              所以不再需要"先选一个位置再看项"这一层导航。剩下的只有状态筛选。 -->
         <!-- 筛选标签 -->
+        <div class="ctx-toolbar">
         <div class="filter-tabs" id="contextFilter">
           <button class="filter-tab active" data-filter="all">全部</button>
           <button class="filter-tab" data-filter="high">第三方项</button>
           <button class="filter-tab" data-filter="low">系统原生</button>
           <button class="filter-tab" data-filter="disabled">已禁用</button>
           <span id="contextDisabledSummary" style="margin-left:auto;font-size:12px;color:var(--fg-tertiary);align-self:center">已禁用 <strong id="contextSelectedCount">0</strong> 项</span>
+        </div>
+          <div class="ctx-toolbar-actions">
+            <button class="btn btn-primary" id="btnScanContext">扫描右键菜单</button>
+            <button class="btn btn-secondary" id="btnContextAiIntro" data-tip="选择「右键管理」生成 AI 简介所用的模型（与其他模块相互独立）">联网 AI 简介</button>
+          </div>
         </div>
 
         <div class="contextmenu-list" id="contextMenuList">
@@ -1003,15 +979,12 @@
           </div>
           <div class="page-actions">
             <button class="btn btn-secondary" id="btnAddStartup" data-tip="选择程序并添加为当前用户的开机启动项">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
               添加启动项
             </button>
             <button class="btn btn-primary" id="btnScanStartup">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
               扫描启动项
             </button>
             <button class="btn btn-secondary" id="btnStartupAiIntro" data-tip="选择「启动项管理」生成 AI 简介所用的模型（与其他模块相互独立）">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm3.5 6.5c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zm-11 0c0-1.1.9-2 2-2s2 .9 2 2-.9 2-2 2-2-.9-2-2zM12 19c-3.87 0-7-3.13-7-7h2c0 2.76 2.24 5 5 5s5-2.24 5-5h2c0 3.87-3.13 7-7 7z"/></svg>
               联网 AI 简介
             </button>
           </div>
@@ -1028,21 +1001,21 @@
         <!-- 状态卡 -->
         <div class="summary-cards">
           <div class="summary-card">
-            <div class="summary-icon" style="--icon-bg: var(--info-soft); color: var(--info)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v8"/><path d="M6.3 6.5a8 8 0 1 0 11.4 0"/></svg></div>
+            <div class="summary-icon" style="--icon-bg: var(--info-soft); color: var(--info)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5h16M6.5 5.5v13h11v-13"/><path d="M10 14.5l2-2 2 2M12 12.5V9" stroke="var(--accent)"/></svg></div>
             <div class="summary-info">
               <div class="summary-value" id="startupTotal" role="status" aria-live="polite">-</div>
               <div class="summary-label">启动项总数</div>
             </div>
           </div>
           <div class="summary-card">
-            <div class="summary-icon" style="--icon-bg: var(--success-soft); color: var(--success)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M8.3 12.3l2.5 2.5 4.9-5.4"/></svg></div>
+            <div class="summary-icon" style="--icon-bg: var(--success-soft); color: var(--success)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v8"/><path d="M6.3 6.5a8 8 0 1 0 11.4 0"/><path d="M9.2 13.6l2.1 2.1 3.7-4" stroke="var(--accent)"/></svg></div>
             <div class="summary-info">
               <div class="summary-value" id="startupEnabled" role="status" aria-live="polite">-</div>
               <div class="summary-label">当前启用</div>
             </div>
           </div>
           <div class="summary-card">
-            <div class="summary-icon" style="--icon-bg: var(--warning-soft); color: var(--warning)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M6.2 6.2l11.6 11.6"/></svg></div>
+            <div class="summary-icon" style="--icon-bg: var(--warning-soft); color: var(--warning)"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v8"/><path d="M6.3 6.5a8 8 0 1 0 11.4 0"/><path d="M6.5 17.5l11-11" stroke="var(--accent)"/></svg></div>
             <div class="summary-info">
               <div class="summary-value" id="startupDisabled" role="status" aria-live="polite">-</div>
               <div class="summary-label">已禁用</div>
@@ -1065,18 +1038,15 @@
             <button class="btn btn-secondary btn-small" id="btnStartupEnable" disabled>启用所选</button>
             <button class="btn btn-danger btn-small" id="btnStartupDelete" disabled>删除所选</button>
           </span>
-        </div>
-
-        <!-- SU-2（S7）：防恢复机制总开关 + UI 告知 -->
-        <div class="startup-defend-bar">
-          <label class="toggle-switch" for="startupDefendToggle" data-tip="关闭后，被拦截的启动项再次被程序创建时只做提示、不再自动删除；开启状态下每次自动删除前仍会逐条红色确认">
-            <input type="checkbox" id="startupDefendToggle" />
-            <span class="toggle-track"><span class="toggle-thumb"></span></span>
-          </label>
-          <div class="startup-defend-text">
-            <div class="startup-defend-title">防恢复自动删除</div>
-          </div>
-          <span class="startup-defend-state" id="startupDefendState">已开启</span>
+          <!-- SU-2：防恢复总开关并入筛选行，缩短后靠右顶格 -->
+          <span class="startup-defend-inline">
+            <label class="toggle-switch" for="startupDefendToggle" data-tip="关闭后，被拦截的启动项再次被程序创建时只做提示、不再自动删除；开启状态下每次自动删除前仍会逐条红色确认">
+              <input type="checkbox" id="startupDefendToggle" />
+              <span class="toggle-track"><span class="toggle-thumb"></span></span>
+            </label>
+            <span class="startup-defend-title">防恢复自动删除</span>
+            <span class="startup-defend-state" id="startupDefendState">已开启</span>
+          </span>
         </div>
 
         <!-- 启动项列表 -->
@@ -1231,35 +1201,37 @@
             </div>
                 <div class="appearance-merge-grid">
                   <div class="appearance-merge-col">
-                    <div class="appearance-sub">
-                      <div class="appearance-sub-head">界面主题</div>
-                      <div class="skin-row">
-                        <span class="skin-row-label">主题</span>
-                        <select id="themeSelect" aria-label="界面主题" data-tip="浅色 / 深色（碳墨）界面，切换即时生效">
-                          <option value="light">浅色</option>
-                          <option value="dark">深色</option>
-                        </select>
+                    <div class="appearance-pair-grid">
+                      <div class="appearance-sub">
+                        <div class="appearance-sub-head">界面主题</div>
+                        <div class="skin-row">
+                          <span class="skin-row-label">主题</span>
+                          <select id="themeSelect" aria-label="界面主题" data-tip="浅色 / 深色（碳墨）界面，切换即时生效">
+                            <option value="light">浅色</option>
+                            <option value="dark">深色</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div class="appearance-sub">
+                        <div class="appearance-sub-head">预设背景</div>
+                        <div class="skin-row">
+                          <span class="skin-row-label">预设壁纸</span>
+                          <select id="presetBgSelect" data-tip="选择内置渐变墙纸或实拍壁纸">
+                            <option value="">无</option>
+                            <option value="graphite">石墨 Graphite</option>
+                            <option value="wp-winter">冬日 · 二次元</option>
+                            <option value="wp-gaming">电竞 · 玩趣</option>
+                            <option value="wp-anime">动漫 · 场景</option>
+                            <option value="wp-doll">Doll · 手办</option>
+                          </select>
+                        </div>
                       </div>
                     </div>
                     <div class="appearance-sub">
-                      <div class="appearance-sub-head">预设背景</div>
-                      <div class="skin-row">
-                        <span class="skin-row-label">预设壁纸</span>
-                        <select id="presetBgSelect" data-tip="选择内置渐变墙纸或实拍壁纸">
-                          <option value="">无</option>
-                          <option value="graphite">石墨 Graphite</option>
-                          <option value="wp-winter">冬日 · 二次元</option>
-                          <option value="wp-gaming">电竞 · 玩趣</option>
-                          <option value="wp-anime">动漫 · 场景</option>
-                          <option value="wp-doll">Doll · 手办</option>
-                        </select>
-                      </div>
-                    </div>
-                    <div class="appearance-sub">
-                      <div class="appearance-sub-head">导入图片</div>
+                      <div class="appearance-sub-head">导入背景图片</div>
                       <div class="bg-ops-row">
-                        <button class="btn btn-secondary btn-small" id="btnBgClear">✕ 清除</button>
-                        <button class="btn btn-secondary btn-small" id="btnBgImport">⬆ 导入图片</button>
+                        <button class="btn btn-secondary btn-small" id="btnBgClear">清除</button>
+                        <button class="btn btn-secondary btn-small" id="btnBgImport">导入</button>
                       </div>
                       <div class="bg-current" id="bgCurrentRow" style="display:none">
                         <img id="bgThumb" alt="背景预览" />
@@ -1336,59 +1308,63 @@
                    表面全部实色，材质档与磨砂强度都成了「无效果」的设置项，一并摘除 -->
               <!-- 背景图片卡已并入上方「背景与主题」合并卡（v3.0） -->
               <!-- 动效设置（设置页整合4）：合并原「鼠标拖尾」与「切换动效」两张卡 -->
-              <div class="appearance-sub">
-                <div class="appearance-sub-head">鼠标拖尾</div>
-                <div class="mouse-trail-row">
-                  <span class="mouse-trail-label">启用鼠标拖尾</span>
-                  <label class="toggle-switch" for="mouseTrailToggle" data-tip="开启后指针移动会留下淡紫色光点轨迹">
-                    <input type="checkbox" id="mouseTrailToggle" />
-                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                  </label>
+              <div class="appearance-merge-grid">
+                <div class="appearance-sub">
+                  <div class="appearance-sub-head">鼠标拖尾</div>
+                  <div class="mouse-trail-row">
+                    <span class="mouse-trail-label">启用鼠标拖尾</span>
+                    <label class="toggle-switch" for="mouseTrailToggle" data-tip="开启后指针移动会留下淡紫色光点轨迹">
+                      <input type="checkbox" id="mouseTrailToggle" />
+                      <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                    </label>
+                  </div>
                 </div>
-              </div>
-              <div class="appearance-sub">
-                <div class="appearance-sub-head">动效选择</div>
-                <div class="skin-row">
-                  <span class="skin-row-label">效果</span>
-                  <select id="liquidMotionSelect" data-tip="切换全局液态玻璃效果强度">
-                    <option value="full">完整液态玻璃</option>
-                    <option value="standard">标准液态玻璃</option>
-                    <option value="off">关闭</option>
-                  </select>
+                <div class="appearance-sub">
+                  <div class="appearance-sub-head">动效选择</div>
+                  <div class="skin-row">
+                    <span class="skin-row-label">效果</span>
+                    <select id="liquidMotionSelect" data-tip="切换全局液态玻璃效果强度">
+                      <option value="full">完整 · 全效果</option>
+                      <option value="standard">标准 · 推荐</option>
+                      <option value="off">关闭 · 无效果</option>
+                    </select>
+                  </div>
                 </div>
               </div>
           </div>
           <div class="settings-section settings-about-section">
-            <h3>关于我们</h3>
+          <h3>关于本软件</h3>
             <div class="about-row">
               <div class="about-row-copy">
                 <strong>关于</strong>
                 <p>由小旭个人开发制作，仅供个人测试交流使用，请严格参照使用说明使用。</p>
               </div>
             </div>
-            <div class="about-row">
-              <div class="about-row-copy">
-                <strong>使用说明</strong>
+            <div class="about-inline-grid">
+              <div class="about-row">
+                <div class="about-row-copy">
+                  <strong>使用说明</strong>
+                </div>
+                <button class="btn btn-secondary btn-small" id="btnUsageGuide">查看说明</button>
               </div>
-              <button class="btn btn-secondary btn-small" id="btnUsageGuide">查看说明</button>
-            </div>
-            <div class="about-row">
-              <div class="about-row-copy">
-                <strong>检查更新</strong>
-                <p id="updaterCheckHint"></p>
+              <div class="about-row">
+                <div class="about-row-copy">
+                  <strong>检查更新</strong>
+                  <p id="updaterCheckHint"></p>
+                </div>
+                <div class="about-row-actions">
+                  <button class="btn btn-secondary btn-small" id="btnCheckUpdate" type="button">检查更新</button>
+                </div>
               </div>
-              <div class="about-row-actions">
-                <button class="btn btn-secondary btn-small" id="btnCheckUpdate" type="button">检查更新</button>
-              </div>
-            </div>
-            <!-- 更新线路选择已退役（2026-10-06）：源顺序固化 AtomGit→GitHub（updater.rs FEEDS）。 -->
-            <div class="about-row">
-              <div class="about-row-copy">
-                <strong>联系我</strong>
-              </div>
-              <div class="about-row-actions">
-                <button class="btn btn-secondary btn-small" id="btnGitHub" type="button" data-tip="打开 GitHub 反馈区">GitHub</button>
-                <button class="btn btn-secondary btn-small" id="btnAtomGit" type="button" data-tip="打开 AtomGit 反馈区">AtomGit</button>
+              <!-- 更新线路选择已退役（2026-10-06）：源顺序固化 AtomGit→GitHub（updater.rs FEEDS）。 -->
+              <div class="about-row">
+                <div class="about-row-copy">
+                  <strong>联系我</strong>
+                </div>
+                <div class="about-row-actions">
+                  <button class="btn btn-secondary btn-small" id="btnGitHub" type="button" data-tip="打开 GitHub 反馈区">GitHub</button>
+                  <button class="btn btn-secondary btn-small" id="btnAtomGit" type="button" data-tip="打开 AtomGit 反馈区">AtomGit</button>
+                </div>
               </div>
             </div>
           </div>

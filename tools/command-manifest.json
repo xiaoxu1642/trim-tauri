@@ -1101,13 +1101,6 @@
       "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
     },
     {
-      "name": "optimizer_external_scan",
-      "module": "optimizer",
-      "channel": "optimizer:external-scan",
-      "tier": "main",
-      "group": "D 批（删除与高危：文件清理 / 维护 / 右键 / 启动项 / 优化 / 外设）"
-    },
-    {
       "name": "optimizer_nara_panel",
       "module": "optimizer",
       "channel": "optimizer:nara-panel",

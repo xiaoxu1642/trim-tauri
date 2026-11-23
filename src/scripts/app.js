@@ -1207,7 +1207,7 @@
     // （电池/系统关透明）只改实际生效的玻璃，不该把下拉带成"磨砂"。
     const liquidSelect = document.getElementById('liquidMotionSelect');
     if (liquidSelect) {
-      liquidSelect.value = window.liquidBar?.getUserMode?.() || 'standard';
+      liquidSelect.value = window.liquidBar?.getUserMode?.() || 'full';
       liquidSelect.addEventListener('change', () => {
         window.liquidBar?.setMode?.(liquidSelect.value);
       });

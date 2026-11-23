@@ -267,7 +267,6 @@ export const UNITS = [
       'src-tauri/src/commands/optimizer/catalog.rs',
       'src-tauri/src/commands/optimizer/advice.rs',
       'src-tauri/src/commands/optimizer/bcd.rs',
-      'src-tauri/src/commands/optimizer/external_scan.rs',
       'src-tauri/src/commands/optimizer/contract_tests.rs',
       'src-tauri/src/commands/optimizer/mod.rs',
     ],
@@ -371,7 +370,7 @@ export const UNITS = [
   },
   {
     id: 'F4b', owner: 'sub', name: '优化与查询链脚本',
-    files: [`${S}/optimizer.js`, `${S}/finder.js`, `${S}/overview.js`, `${S}/models-window.js`,
+    files: [`${S}/optimizer.js`, `${S}/finder.js`, `${S}/overview.js`,
       `${S}/diskbench.js`, `${S}/netspeed.js`, `${S}/netspeed-detector.js`,
       `${S}/netcheck.js`, `${S}/realtime.js`, `${S}/processes.js`],
     contract: '优化项执行 / 磁盘查找 / 测速 / 实时视图',
@@ -379,12 +378,12 @@ export const UNITS = [
     gates: ['check-channel-map', 'check-treemap-layout'],
   },
   {
-    // P2：F4b 被新增代码顶破 U2 上限，按「按页面/执行链」把两个**独立窗口脚本**
-    // 单列 —— 模型选择器与进程管理面板各自成窗，与优化/查询执行链无耦合。
+    // P2：F4b 被新增代码顶破 U2 上限，按「按页面/执行链」把**独立窗口脚本**
+    // 单列 —— 模型选择器、模型详情窗与进程管理面板各自成窗，与优化/查询执行链无耦合。
     id: 'F4d', owner: 'sub', name: '模型选择器与进程面板窗口脚本',
-    files: [`${S}/modelpicker.js`, `${S}/process-manager-window.js`],
+    files: [`${S}/modelpicker.js`, `${S}/models-window.js`, `${S}/process-manager-window.js`],
     contract: '模型选择器弹窗 / 进程管理面板窗口的渲染与事件',
-    boundary: '只审这两个独立窗口脚本；主优化页与查询链归 F4b',
+    boundary: '只审这些独立窗口脚本；主优化页与查询链归 F4b',
     gates: ['check-channel-map', 'check-subwindow-init'],
   },
   {

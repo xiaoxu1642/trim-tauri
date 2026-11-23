@@ -15,8 +15,8 @@
     "M-12"
   ],
   "srcHash": {
-    "check-channel-map": "e79d6e69a851c3b0",
-    "check-guard-tiers": "1611cd1f623a5c67",
+    "check-channel-map": "26c388b6c582f1c9",
+    "check-guard-tiers": "b1d29c57c2e242f1",
     "check-layering": "2eafd617abcf47b6",
     "check-delete-exits": "c7c3b79a79f4928d",
     "check-delete-callsites": "fd8c5fb7da03595d",
@@ -54,14 +54,14 @@
     "check-desktop-entry": "8eec3b36ed2d2215",
     "check-data-parity": "e2997063c1f90497",
     "check-rule-schema-sync": "56857836ba91312d",
-    "check-optimizer-dynamic": "12c1496e1befd159",
+    "check-optimizer-dynamic": "2940a9b914669384",
     "check-optimizer-security": "d790a44e21ecaf4d",
     "check-optimizer-subitem-contract": "577f68cac9f20e15",
     "check-optimizer-groups-sidecar": "2e4396bd59c601d9",
     "check-optimizer-schema-sync": "4878f3eced74efb2",
     "check-bcd-row-ids": "2d3d8d209426fdd1",
     "check-optimizer-write-contract": "349c045a325ade33",
-    "check-power-write-surface": "05d67579eba7bda6",
+    "check-power-write-surface": "84eb2248005ac16e",
     "check-cleanup-postactions": "b21c6c0bde8730b4",
     "check-cleanup-aggregates": "e3aab132471bba68",
     "check-desc-vs-writes": "f8e29ec92efa21c5",
@@ -87,7 +87,7 @@
     "check-test-sandbox": "7111cb54a357bb89",
     "check-finder-scan-notes": "d353cb678acc30e3",
     "check-registry-delete-guard": "54ea1923bdedbbd4",
-    "check-receipt-tri-state": "3370203b1ebd33bf",
+    "check-receipt-tri-state": "2b39e916e7aeaf6c",
     "check-user-copy-policy": "2d46ab57018cc892"
   },
   "reads": {
@@ -264,7 +264,9 @@
       "M-01",
       "M-02"
     ],
-    "check-artifact-size": [],
+    "check-artifact-size": [
+      "M-11"
+    ],
     "check-first-paint": [
       "M-01",
       "M-02"
@@ -405,7 +407,9 @@
     "check-updater-pubkey": [
       "M-12"
     ],
-    "check-release-artifacts": [],
+    "check-release-artifacts": [
+      "M-12"
+    ],
     "check-readme-claims": [
       "M-02",
       "M-04",
@@ -545,5 +549,5 @@
       "M-12"
     ]
   },
-  "bodyHash": "002e1ae17134fd69"
+  "bodyHash": "d5110be5e9b4a58f"
 }

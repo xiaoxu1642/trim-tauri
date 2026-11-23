@@ -50,6 +50,20 @@
   flex-wrap: wrap;
   min-width: 0;
 }
+.optimizer-title-row { margin-bottom: 12px; }
+.optimizer-title-row .page-title-row { gap: 10px; }
+.optimizer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.optimizer-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
 
 .page-title-note {
   margin: 0;
@@ -227,7 +241,7 @@
 /* v5 P1/P2 电源计划编辑器（独立弹窗承载；2026-10-15 用户裁定）
    伪类/元素级选择器统一加 #syspanelPowerBody 前缀：把特异度抬进 1-* 档避开
    check-subwindow-css S3（main.css 的 :hover/::after/[type] 全在 0-* 档）；纯类规则不加。 */
-.syspanel-pwr-act-danger { color: var(--danger); }
+.syspanel-pwr-act-danger { color: var(--danger-fg); }
 .syspanel-pwr-editor { display: flex; flex-direction: column; gap: 10px; }
 .syspanel-pwr-editor-head {
   display: flex;
@@ -445,6 +459,25 @@
 .syspanel-pwr-search, .syspanel-pwr-modal-select, #syspanelPwrNameInput, #syspanelPwrNewName { width: 100%; }
 /* 一行多个操作按钮（如检查更新行） */
 .about-row-actions { display: flex; gap: 8px; flex: none; }
+.about-inline-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+.about-inline-grid .about-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-small);
+  background: var(--bg-card);
+}
+.about-inline-grid .about-row-actions { justify-content: flex-start; }
+@media (max-width: 1000px) {
+  .about-inline-grid { grid-template-columns: 1fr; }
+}
 /* v3.2.0：device-info-table 旧外壳声明与 device-info-row 旧版 grid 行声明已删除
    （现样式见 main.css 的「.device-info-row」卡片化版本：行自持边框圆角、容器只管栅格间距）。
    .device-info-label/-value 的规则本体在下方「硬件信息」段各一份（审查 F1c-M03：不写重复 prelude）。 */
@@ -544,7 +577,7 @@
 }
 .opt-detail-col.cons {
   border-left: 3px solid var(--danger);
-  background: color-mix(in srgb, var(--danger) 4%, var(--bg-app));
+  background: color-mix(in srgb, var(--danger-fg) 4%, var(--bg-app));
 }
 .opt-detail-col-label {
   font-size: var(--fs-meta);
@@ -552,7 +585,7 @@
   margin-bottom: 6px;
 }
 .opt-detail-col.pros .opt-detail-col-label { color: var(--success); }
-.opt-detail-col.cons .opt-detail-col-label { color: var(--danger); }
+.opt-detail-col.cons .opt-detail-col-label { color: var(--danger-fg); }
 .opt-detail-col-text {
   margin: 0;
   font-size: calc(12.5px * var(--font-size-scale, 1));
@@ -569,14 +602,6 @@
   padding: 4px 10px;
 }
 /* P2-05（D-01）「改了谁」摘要行（消费后端注入的 regTargets） */
-/* 账外核对弹窗（2026-10-15 拍板：只读清单；纯列表、无卡片底，省首屏字节） */
-.opt-ext-lead, .opt-ext-foot { margin: 0 0 10px; color: var(--fg-tertiary); font-size: calc(12px * var(--font-size-scale, 1)); }
-.opt-ext-item { margin-bottom: 10px; }
-.opt-ext-title { color: var(--fg-primary); font-weight: calc(600 * var(--font-weight-scale, 1)); }
-.opt-ext-meta { margin-top: 2px; color: var(--fg-secondary); font-size: var(--fs-meta); overflow-wrap: anywhere; }
-.opt-ext-shape { margin-left: 8px; color: var(--accent); }
-.opt-ext-path { margin-top: 2px; color: var(--fg-tertiary); font-size: calc(11px * var(--font-size-scale, 1)); overflow-wrap: anywhere; }
-.opt-ext-note { margin: 4px 0 0; color: var(--fg-secondary); font-size: calc(12px * var(--font-size-scale, 1)); line-height: 1.6; }
 .opt-reg-targets {
   margin: 8px 0 2px;
   padding: 6px 8px;
@@ -837,7 +862,7 @@
 
 /* 系统还原点管理 */
 .text-success { color: var(--success); }
-.text-danger { color: var(--danger); }
+.text-danger { color: var(--danger-fg); }
 
 .restore-list {
   display: flex;
@@ -939,7 +964,7 @@
 .health-status { color: var(--success); font-size: var(--fs-section); font-weight: calc(650*var(--font-weight-scale,1)); }
 /* F3（2026-09-15）：健康度按等级着色，如实反馈状态（不再恒绿） */
 .health-card.health-warn .health-status { color: var(--warning); }
-.health-card.health-bad .health-status { color: var(--danger); }
+.health-card.health-bad .health-status { color: var(--danger-fg); }
 .health-meta { min-width: 0; flex: 1; }
 
 /* 概览分节 */
@@ -997,19 +1022,15 @@
   user-select: none;
 }
 
-/* SU-2（S7）：防恢复自动删除总开关条（启动项页）——只做 UI 告知与总开关，不新增布局系统 */
-.startup-defend-bar {
-  display: flex;
+/* SU-2：防恢复开关并入筛选行，右端顶格，不单独占一行。 */
+.startup-defend-inline {
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
-  padding: 10px 14px;
-  background: var(--surface-l1-bg);
-  border: 1px solid var(--surface-l1-line);
-  border-radius: var(--radius-small);
+  gap: 6px;
+  margin-left: auto;
+  flex: 0 0 auto;
 }
-.startup-defend-text { flex: 1; min-width: 0; }
-.startup-defend-title { font-size: var(--fs-secondary); font-weight: calc(600*var(--font-weight-scale,1)); color: var(--fg-primary); }
+.startup-defend-title { font-size: var(--fs-meta); color: var(--fg-secondary); white-space: nowrap; }
 .startup-item-check {
   flex-shrink: 0;
 }
@@ -1036,12 +1057,6 @@
   display: flex;
   gap: 6px;
 }
-.startup-list-ops {
-  display: flex;
-  gap: 8px;
-  padding: 4px 2px 0;
-}
-
 /* 设置页：功能入口三卡片（安装路径绑定 / 大模型管理 / 字体选择）
    横向 3 个小白色容器：仅图标 + 标题 + 操作按钮，简介移入各弹窗内 */
 .settings-entry-cards {
@@ -1158,7 +1173,7 @@
   border-radius: var(--radius-medium);
   background: var(--danger-soft);
   border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
-  color: var(--danger);
+  color: var(--danger-fg);
   font-size: var(--fs-secondary);
   line-height: 1.6;
 }
@@ -1209,7 +1224,7 @@
 #btnRealtimeRecord.recording {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   border-color: var(--danger);
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
 @media (max-width: 640px) {
@@ -1344,7 +1359,6 @@
 /* 入口卡跟分类卡并列进瀑布流，头部沿用 opt-col-head。头部只放短标题（keep-all 不收缩，
    长标题会与右侧按钮/徽章重叠——2026-10-11 真机实测），分区明细放 body。
    不臆造 ds-* 类：ds.css 只有 badge/ring/menu/tooltip/skeleton，没有 card/row/alert/stack。 */
-.opt-nara-icon { display: inline-flex; align-items: center; color: var(--accent); flex: 0 0 auto; }
 .opt-nara-desc {
   margin: 8px 6px 2px;
   padding: 0 2px;
@@ -1406,8 +1420,7 @@
 
 /* 隐私自护面板入口卡（2026-10-11 WinUtil 借鉴 V3） */
 /* 弹窗内布局直接复用 .nara-panel/.nara-card/.nara-checkrow（同一种「侧表聚合面板」形态，
-   不另起一套类名造视觉分叉）；这里只补入口卡图标色与 footer 布局。 */
-.opt-privacy-icon { color: var(--accent); }
+   不另起一套类名造视觉分叉）；这里只补 footer 布局。 */
 .privacy-panel-footer [data-privacy-toggle-all] { margin-right: auto; }
 
 /* 外设优化弹窗（更多调优项） */
@@ -1598,10 +1611,17 @@
   gap: 6px 28px;
   align-items: start;
 }
+.appearance-pair-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 16px;
+  align-items: start;
+}
 
 @media (max-width: 1000px) {
 
   .appearance-merge-grid { grid-template-columns: 1fr; }
+  .appearance-pair-grid { grid-template-columns: 1fr; }
 }
 
 .appearance-hint {
@@ -1808,7 +1828,7 @@
   border-color: color-mix(in srgb, var(--warning) 40%, transparent);
 }
 .maint-status-error {
-  color: var(--danger);
+  color: var(--danger-fg);
   background: color-mix(in srgb, var(--danger) 10%, transparent);
   border-color: color-mix(in srgb, var(--danger) 40%, transparent);
 }
@@ -2275,7 +2295,7 @@ body:not(.mouse-trail-on) .mouse-trail-layer { display: none; }
   border: 1px solid color-mix(in srgb, var(--danger) 32%, transparent);
   border-radius: var(--radius-small);
   background: color-mix(in srgb, var(--danger) 10%, transparent);
-  color: var(--danger);
+  color: var(--danger-fg);
   font-size: var(--fs-secondary);
   line-height: 1.7;
   overflow-wrap: anywhere;

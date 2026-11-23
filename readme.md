@@ -3,7 +3,7 @@
 > **Windows 11 清理与优化工具。中文界面，Fluent Design 风格，Tauri v2 + Rust 原生实现，零前端框架。**
 > 由小旭个人开发制作，仅供个人测试交流使用。
 
-> 版本 **0.9.12**　本版改动见 [update.md](update.md)。
+> 版本 **0.9.13**　本版改动见 [update.md](update.md)。
 
 ![Platform](https://img.shields.io/badge/platform-Windows%2011-lightgrey)
 ![Stack](https://img.shields.io/badge/stack-Tauri%20v2%20%7C%20Rust%20%7C%20原生%20Win32%20%2F%20WinHTTP-blueviolet)
@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | 磁盘与内存清理 | 5 大类 182 项磁盘清理、6 区域内存清理 | 不清理 Cookies、会话与本地站点存储 |
 | 优化与启动项 | 124 项优化、启动项启停与删除备份 | 服务/驱动/注册表/启动参数改动前先建还原点 |
-| 应用卸载与占用 | 原厂卸载、残留扫描、占用查询 | 卸载后仅展示该应用的四类残留 |
+| 应用卸载与占用 | 原厂卸载、残留扫描、占用查询 | 卸载后仅展示该应用的残留 |
 | 维护、设置与网络 | 系统维护、Windows 设置、测速与诊断 | 设置改动前备份、可还原 |
 | 还原备份与外设调优 | 还原点、备份还原、深度调优 | 值级回读校验后才算还原成功 |
 
@@ -121,6 +121,42 @@
 - **本工具仅供个人测试交流使用，使用风险自负。**
 
 问题或建议欢迎提交 [Issues](../../issues)。
+
+---
+
+## Gotchas
+
+本节给改代码的人看：下面几处是「看起来对、其实不是对的改法」，每条给现象、后果、源码坐标与不许动的边界。
+
+- **别给命令清单对拍再建第二套门禁**
+  - 现象：想给「清单 ⇄ 生成区」再加一道独立的 parity 门禁。
+  - 后果：同一批生成区已经被两条现有门禁逐字对拍，第二套只会造出第二真源——生成区一改要动两处，两条门禁口径一旦分叉就互相打脸。
+  - 坐标：真源 `tools/command-manifest.json`；生成区定义 `tools/gen-command-manifest.mjs:36-41`；对拍函数 `tools/gen-command-manifest.mjs:172`；现有两处调用 `tools/check-channel-map.mjs:1251-1259`、`tools/check-guard-tiers.mjs:977-985`；生成区本体在 `src-tauri/src/lib.rs`、`src/scripts/tauri-api.js` 与 `tools/check-guard-tiers.mjs` 的两张 MUST 表。
+  - 不许动：不新建第二个 parity 门禁文件；补覆盖只在现有门禁里加反例；生成区仍由 `node tools/gen-command-manifest.mjs --write` 改写，不手改。
+
+- **损坏既不是成功，也不是没动过**
+  - 现象：把「读不出来 / 损坏」一律折成「已处理成功」，或反过来折成「什么都没发生过」。
+  - 后果：备份损坏时报成功，等于给出假的可还原入口；状态账本损坏时清成没动过，用户会对同一项重复执行。
+  - 坐标：`src-tauri/src/commands/optimizer/backup_restore.rs:850-873`（台账摘要为 `unreadable`/`corrupt` 一律拒绝还原）；配置损坏走隔离 `src-tauri/src/security/mod.rs:345`（改名 `<file>.corrupt-<ts>`，保留原文）；优化状态账本读侧三态在 `src-tauri/src/engine/optimization_state.rs`（损坏降级为空骨架，回执带 `degraded` 位，见 `src-tauri/src/commands/optimizer/overview.rs:1347`）；回执自身的 `verify` 语义 `src-tauri/src/commands/optimizer/apply.rs:1721-1747`（`verify` 为 `unknown` 时不摘灰）。
+  - 不许动：optimizer 备份 `unreadable`/`corrupt` 必须继续拒绝还原；配置损坏继续隔离并保留字节；损坏不得折成成功，也不得折成「没执行过」——读不出就标成不可确认。
+
+- **读失败继续 fail-closed，安全面不许降级**
+  - 现象：把「检测读不出来」按「没检测到 / 未达标」处理，或把三态里的 `Unknown` 折成「不存在」。
+  - 后果：读失败被当成「没问题」，等于给删除、提权、保护路径判定开了口子；注册表侧一旦把访问拒绝当成值不存在，还原链会生成永久删除指令。
+  - 坐标：`src-tauri/src/engine/protect.rs:585-588`（路径无法规范化即判受保护）；注册表三态 `src-tauri/src/engine/native/registry.rs:776-815`（`Absent` / `Value` / `Unknown`）；服务三态 `src-tauri/src/engine/native/services.rs:14-44`（`NotFound` / `Unknown`）；判红样例 `src-tauri/src/commands/optimizer/contract_tests.rs:414-425`（查询失败不得冒充达标，服务不存在才算达标）。
+  - 不许动：删除、保护、提权、验签这类安全面读失败一律拒绝；只有辅助检测可以降级成「无法确认」，且降级结果不得用来放行安全动作。
+
+- **进度条的完成态要显式写，迟到的报告不许改终态**
+  - 现象：以为进度条会自己收尾，于是不写终态；或者让后到的进度事件照常写进进度条。
+  - 后果：真实进度按设计折算到 90% 为止（`src/scripts/cleanup.js:950`），没有显式终态时进度条停在封顶处，看着像卡住；完成之后迟到的报告会把「已完成」改回「进行中」或再次点亮进度条。
+  - 坐标：`src/scripts/cleanup.js:1952-1958`（计时器进度）、`src/scripts/cleanup.js:1962-1972`（真实进度折算）、`src/scripts/cleanup.js:2098`（完成时显式写终值）、`src/scripts/cleanup.js:2124`、`src/scripts/cleanup.js:2173`（收尾隐藏进度区）、`src/scripts/cleanup.js:966`（扫描期的迟到报告守卫）；`src/scripts/finder.js:184-191`（真实进度只在大于当前值时抬升）、`src/scripts/finder.js:197`（扫描结束后的报告不再落地）。
+  - 不许动：终态必须由显式终值收尾，不靠计时器或后到事件顺带结束；迟到的进度报告只许被丢弃，不许覆盖已写下的终态；真实进度按 0-90% 折算是设计口径，别为了「更准」动它。
+
+- **两处相对时间语义不同，别为「看着重复」抽公共件**
+  - 现象：看到两处都写着「刚刚 / N 分钟 / N 小时 / N 天」，就想抽一个公共格式化函数。
+  - 后果：两处算的不是一回事——一处是「某个时间点距今多久」，另一处是「一段时长 / 年龄」；共用一套单位与措辞后必有一处变形（折掉「月」或去掉「前」后缀），那是改坏不是复用。
+  - 坐标：`src/scripts/sysrestore.js:16-37`（`fmtTime` 绝对时间 + `fmtRelative`：未来时间回落绝对时间，单位带「前」）；`src/scripts/startup.js:374-383`（`formatAge`：天数不足一个月的折成「月」，负值返回「未知时间」，措辞不带「前」）。
+  - 不许动：不因看着重复就抽公共件；要统一得先确认两处语义确实该统一（属产品裁定），且只许改词面、不许改语义边界。
 
 ---
 

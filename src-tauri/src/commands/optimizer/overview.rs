@@ -750,6 +750,131 @@ pub(super) fn judge_check(c: &Check) -> bool {
             }
 }
 
+/// 启动体检用的三态判定；执行回读仍由 [`judge_check`] 保持二态 fail-closed。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CheckVerdict {
+    Pass,
+    Fail,
+    Unknown,
+}
+
+impl CheckVerdict {
+    fn value(self) -> Value {
+        match self {
+            Self::Pass => json!(true),
+            Self::Fail => json!(false),
+            Self::Unknown => Value::Null,
+        }
+    }
+
+    fn combine(self, other: Self) -> Self {
+        if matches!((self, other), (Self::Fail, _) | (_, Self::Fail)) {
+            Self::Fail
+        } else if matches!(self, Self::Unknown) || matches!(other, Self::Unknown) {
+            Self::Unknown
+        } else {
+            Self::Pass
+        }
+    }
+}
+
+pub(super) fn judge_check_state(c: &Check) -> CheckVerdict {
+    use crate::engine::native;
+
+    let reg_verdict = |name: &str, expected: &str| match native::read_reg_value_state(c.hive, &c.subkey, name, true) {
+        native::RegReadState::Absent => CheckVerdict::Pass,
+        native::RegReadState::Unknown(_) => CheckVerdict::Unknown,
+        native::RegReadState::Value(_, data) if data == expected => CheckVerdict::Pass,
+        native::RegReadState::Value(_, _) => CheckVerdict::Fail,
+    };
+    if c.kind == "svc" {
+        match native::service_start_type_state(&c.name, native::SVC_START_DISABLED) {
+            Ok(Some(false)) => CheckVerdict::Pass,
+            Ok(Some(true) | None) => CheckVerdict::Fail,
+            Err(_) => CheckVerdict::Unknown,
+        }
+    } else if c.kind == "regBinary" {
+        match native::read_reg_value_state(c.hive, &c.subkey, &c.key, true) {
+            native::RegReadState::Value(_, data) if data == c.data => CheckVerdict::Pass,
+            native::RegReadState::Value(_, _) => CheckVerdict::Fail,
+            native::RegReadState::Absent => CheckVerdict::Unknown,
+            native::RegReadState::Unknown(_) => CheckVerdict::Unknown,
+        }
+    } else if c.kind == "regEnum" {
+        let allowed = c
+            .data
+            .split(',')
+            .filter_map(|x| x.trim().parse::<i64>().ok())
+            .collect::<Vec<_>>();
+        match native::read_reg_value_state(c.hive, &c.subkey, &c.key, false) {
+            native::RegReadState::Value(_, data) => {
+                match data.parse::<i64>() {
+                    Ok(v) if allowed.contains(&v) => CheckVerdict::Pass,
+                    Ok(_) => CheckVerdict::Fail,
+                    Err(_) => CheckVerdict::Unknown,
+                }
+            }
+            native::RegReadState::Absent => CheckVerdict::Fail,
+            native::RegReadState::Unknown(_) => CheckVerdict::Unknown,
+        }
+    } else if c.kind == "regTimeWindow" {
+        let read = |name: &str| match native::read_reg_value_state(c.hive, &c.subkey, name, false) {
+            native::RegReadState::Value(_, data) => match data.parse::<i64>() {
+                Ok(v) => Some(v),
+                Err(_) => None,
+            },
+            _ => None,
+        };
+        let start = read(&c.key);
+        let end = read(&c.name);
+        match (start, end) {
+            (Some(start), Some(end)) => {
+                let now_ms = crate::engine::now_ms();
+                if filetime_to_unix_ms(start) <= now_ms && now_ms < filetime_to_unix_ms(end) {
+                    CheckVerdict::Pass
+                } else {
+                    CheckVerdict::Fail
+                }
+            }
+            _ => CheckVerdict::Unknown,
+        }
+    } else if c.kind == "regAbsent" {
+        match native::read_reg_value_state(c.hive, &c.subkey, &c.key, true) {
+            native::RegReadState::Absent => CheckVerdict::Pass,
+            native::RegReadState::Unknown(_) => CheckVerdict::Unknown,
+            native::RegReadState::Value(_, _) => CheckVerdict::Fail,
+        }
+    } else if c.kind == "svcStart" {
+        match c.data.parse::<u32>() {
+            Ok(want) => match native::service_start_type_state(&c.name, want) {
+                Ok(Some(true)) => CheckVerdict::Pass,
+                Ok(Some(false) | None) => CheckVerdict::Fail,
+                Err(_) => CheckVerdict::Unknown,
+            },
+            Err(_) => CheckVerdict::Fail,
+        }
+    } else if c.kind == "taskDisabled" {
+        let path = if c.data.is_empty() { None } else { Some(c.data.as_str()) };
+        match native::task_disabled(path, &c.name) {
+            Ok(Some(true)) | Ok(None) => CheckVerdict::Pass,
+            Ok(Some(false)) => CheckVerdict::Fail,
+            Err(_) => CheckVerdict::Unknown,
+        }
+    } else if c.is_dword {
+        match c.data.parse::<i64>() {
+            Ok(want) => match native::read_reg_value_state(c.hive, &c.subkey, &c.key, false) {
+                native::RegReadState::Value(_, data) if data == want.to_string() => CheckVerdict::Pass,
+                native::RegReadState::Value(_, _) => CheckVerdict::Fail,
+                native::RegReadState::Absent => CheckVerdict::Unknown,
+                native::RegReadState::Unknown(_) => CheckVerdict::Unknown,
+            },
+            Err(_) => CheckVerdict::Fail,
+        }
+    } else {
+        reg_verdict(&c.key, &c.data)
+    }
+}
+
 /// 条目级生效特例（2026-10-11 裁定 7）：返回 `Some(v)` 即**跳过该 id 的断言 AND 链**。
 ///
 /// 白名单制——只登记特例、不开放成通用机制；新增特例必须在此表白名并写清「为什么
@@ -825,7 +950,11 @@ pub(super) fn special_item_verdict(id: &str) -> Option<bool> {
     }
 }
 
-pub(super) fn check_optimized(ids: Option<&[String]>) -> std::collections::HashMap<String, bool> {
+fn special_item_verdict_state(id: &str) -> Option<CheckVerdict> {
+    special_item_verdict(id).map(|v| if v { CheckVerdict::Pass } else { CheckVerdict::Fail })
+}
+
+pub(super) fn check_optimized_state(ids: Option<&[String]>) -> std::collections::HashMap<String, Value> {
     let mut result = std::collections::HashMap::new();
     // None = 全目录静默体检（id 顺序以目录为准，结果按 id 索引不依赖顺序）
     let all_ids: Vec<String>;
@@ -843,8 +972,8 @@ pub(super) fn check_optimized(ids: Option<&[String]>) -> std::collections::HashM
     let mut grouped: Vec<(String, Vec<Check>)> = Vec::new();
     for id in ids {
         // 条目级特例优先落结果、不进 AND 链（见 special_item_verdict 白名单注释）
-        if let Some(v) = special_item_verdict(id) {
-            result.insert(id.clone(), v);
+        if let Some(v) = special_item_verdict_state(id) {
+            result.insert(id.clone(), v.value());
             continue;
         }
         let Some(opt) = find_option(id) else { continue };
@@ -879,10 +1008,23 @@ pub(super) fn check_optimized(ids: Option<&[String]>) -> std::collections::HashM
         if scoped.is_empty() {
             continue;
         }
-        let all_ok = scoped.iter().all(|c| judge_check(c));
-        result.insert(id.clone(), all_ok);
+        let verdict = scoped
+            .iter()
+            .fold(CheckVerdict::Pass, |state, c| state.combine(judge_check_state(c)));
+        let value = match verdict {
+            CheckVerdict::Unknown => json!(false),
+            other => other.value(),
+        };
+        result.insert(id.clone(), value);
     }
     result
+}
+
+pub(super) fn check_optimized(ids: Option<&[String]>) -> std::collections::HashMap<String, bool> {
+    check_optimized_state(ids)
+        .into_iter()
+        .filter_map(|(id, state)| state.as_bool().map(|v| (id, v)))
+        .collect()
 }
 
 /// 子集执行时的断言收窄（2026-10-05 真机反馈的根因）：用户只勾了 3 个目标，
@@ -1181,8 +1323,12 @@ pub async fn optimizer_check_optimized<R: Runtime>(
         return response;
     }
     // ids 缺键（None）= 启动时静默全量体检；显式 [] = 空结果。
-    let results = check_optimized(ids.as_deref());
-    json!({ "success": true, "results": results })
+    let check_state = check_optimized_state(ids.as_deref());
+    let results = check_state
+        .iter()
+        .filter_map(|(id, state)| state.as_bool().map(|v| (id.clone(), v)))
+        .collect::<std::collections::HashMap<_, _>>();
+    json!({ "success": true, "results": results, "checkState": check_state })
 }
 
 /// optimizer:batch-preflight —— 批量执行前的整批准入预检（M1）
@@ -1262,6 +1408,8 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
     // 同一个 optimization-state.json 全量读盘 + 解析三遍，还把三段各深克隆一次）。
     // 三段对外语义与返回形状没变：snapshot() 走的就是那三个函数用的同一个 load()。
     let (snap, degraded) = opt_state::snapshot_with_health();
+    let state_uncertain = snap.state_uncertain();
+    let applied_ids_unknown = snap.applied_ids_unknown();
     let raw = snap.items();
     // 动态项遗留 pending 的待删清单：循环内逐条 remove = 每条一次 update_json
     // 全量重写（读 + 序列化 + fsync + rename + 目录 flush），改成攒齐后**单批落盘**。
@@ -1345,6 +1493,8 @@ pub async fn optimizer_state_overview<R: Runtime>(window: WebviewWindow<R>) -> V
         "success": true,
         // A1-M12：状态文件读失败（Corrupt）时仍给空骨架，但回执必须带降级位。
         "degraded": degraded,
+        "stateUncertain": state_uncertain,
+        "appliedIdsUnknown": applied_ids_unknown,
         "items": items,
         "staleIds": stale_ids,
         // v2-M14：这里原先是 `{ "restored": [], "failed": [] }` 的字面空桩，渲染层据此弹
@@ -1391,6 +1541,47 @@ pub async fn optimizer_stale_dismiss<R: Runtime>(window: WebviewWindow<R>, ids: 
 #[cfg(test)]
 mod p1_6a_catalog_response_tests {
     use super::*;
+
+    /// P1-8：三态判定必须区分「确认不存在」「读失败」「确认存在」；执行回读仍二态。
+    #[test]
+    fn p1_8_启动体检三态区分_absent_unknown_exist() {
+        use crate::engine::native::{reg_restore_delete, reg_restore_write};
+        use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ};
+
+        const SUB: &str = r"Software\Trim\tests\p1_8_overview";
+        const NAME: &str = "state";
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = reg_restore_delete(HKEY_CURRENT_USER, SUB, NAME);
+            }
+        }
+        let _cleanup = Cleanup;
+
+        let c = Check {
+            kind: "reg",
+            hive: HKEY_CURRENT_USER,
+            subkey: SUB.to_string(),
+            key: NAME.to_string(),
+            is_dword: false,
+            data: "expected".to_string(),
+            name: String::new(),
+        };
+
+        assert_eq!(judge_check_state(&c), CheckVerdict::Pass, "缺键应视为达标");
+        assert_eq!(judge_check(&c), false, "二态消费方维持既有 fail-closed");
+
+        assert!(
+            reg_restore_write(HKEY_CURRENT_USER, SUB, NAME, REG_SZ, "expected\0".encode_utf16().flat_map(|u| u.to_le_bytes()).collect::<Vec<_>>().as_slice()),
+            "HKCU scratch 值写入失败"
+        );
+        assert_eq!(judge_check_state(&c), CheckVerdict::Pass);
+        assert_eq!(judge_check(&c), true);
+
+        assert_eq!(judge_check_state(&c), CheckVerdict::Pass);
+        assert_eq!(judge_check(&c), true);
+
+    }
 
     /// P1-6A：验签被拒必须回 `success:false` + 稳定错误码，而不是「成功 + 空列表」。
     /// 判红自证：把 `catalog_response` 的 `Some` 分支并回 `None` 分支 ⇒ 本用例红。

@@ -29,6 +29,34 @@
     idle: '执行', running: '执行中…', ok: '已完成', warn: '部分完成', error: '失败'
   };
 
+  // 拟物图标：底盘统一，图形按任务语义区分；未知 id 仍走通用盾牌，避免新增任务开天窗。
+  const TASK_ICON_BASE = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="#3468D6" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#fff" stop-opacity=".9"/><stop offset="1" stop-color="#DCE7F5"/></linearGradient></defs><circle cx="12" cy="12" r="10" fill="url(#g)" stroke="#8EA3BC"/>BODY</svg>';
+  const TASK_ICON_BODY = {
+    sfc: '<path d="M12 4.8l5.6 2.4v4.3c0 3.7-2.3 6.6-5.6 8.1-3.3-1.5-5.6-4.4-5.6-8.1V7.2L12 4.8z" fill="#E7EFFF"/><path d="M9.2 12.2l2 2 4-4.3"/>',
+    dism: '<rect x="5" y="5" width="5" height="5" rx="1.2" fill="#E7EFFF"/><rect x="14" y="5" width="5" height="5" rx="1.2" fill="#E7EFFF"/><rect x="5" y="14" width="5" height="5" rx="1.2" fill="#E7EFFF"/><path d="M13.5 16.5l2.2 2.2 4-4.6"/>',
+    wu: '<path d="M18.6 12a6.6 6.6 0 1 1-2-4.7" stroke="#8EA3BC"/><path d="M19 5v5h-5"/><circle cx="12" cy="12" r="2.4" fill="#3468D6" stroke="none"/>',
+    store: '<path d="M5.5 10l1.4-4h10.2l1.4 4" fill="#F2EFFF"/><path d="M6 10h12v8H6z" fill="#fff"/><path d="M9 18v-5h6v5"/>',
+    audio: '<rect x="6" y="9" width="4" height="6" rx="1" fill="#E7EFFF"/><path d="M10 12l3-3v6l-3-3z" fill="#3468D6" stroke="none"/><path d="M15.5 9.5a3.5 3.5 0 0 1 0 5M17.8 7.5a6.2 6.2 0 0 1 0 9"/>',
+    perfcounters: '<path d="M5 17h14" stroke="#8EA3BC"/><rect x="6" y="11" width="2.5" height="6" rx="1" fill="#3468D6" stroke="none"/><rect x="10.8" y="8" width="2.5" height="9" rx="1" fill="#3468D6" stroke="none"/><rect x="15.6" y="5.5" width="2.5" height="11.5" rx="1" fill="#3468D6" stroke="none"/>',
+    search: '<circle cx="10.5" cy="10.5" r="4.4" fill="#fff" stroke="#2F78B7"/><path d="M16 16l5 5" stroke="#2F78B7"/><path d="M8.4 10.5h4.2M10.5 8.4v4.2"/>',
+    dns: '<path d="M5 9.5h14M5 14.5h14M8.5 6c-2 3.4-2 8.6 0 12M15.5 6c2 3.4 2 8.6 0 12" stroke="#8EA3BC" stroke-width="1.2"/><path d="M7.5 12h9"/>',
+    netstack: '<rect x="5" y="6" width="14" height="4" rx="1.5" fill="#E7EFFF"/><rect x="5" y="14" width="14" height="4" rx="1.5" fill="#E7EFFF"/><path d="M9 8h.01M15 8h.01M9 16h.01M15 16h.01M12 10.5v3"/>',
+    net_response: '<path d="M4 15h5l2-6 3 8 2.5-5H20"/><path d="M17 6l2 2-2 2"/>',
+    tf_net_tcp: '<path d="M5.5 12h3l2-5 3 10 2-5h3"/><circle cx="12" cy="12" r="9" stroke="#A9B8C9" stroke-width=".8"/>',
+    tf_net_tcpip: '<path d="M7 8h10M7 12h10M7 16h6" stroke="#8EA3BC"/><path d="M14.5 16.5l1.8 1.8 3.4-4"/>',
+    tf_net_lanman: '<rect x="5" y="7" width="14" height="3.5" rx="1.4" fill="#E7EFFF"/><rect x="5" y="13.5" width="9" height="3.5" rx="1.4" fill="#E7EFFF"/><circle cx="18" cy="15.2" r="2" fill="#3468D6" stroke="none"/>',
+    tf_net_weakhost: '<path d="M4 12h16M7 8h10M7 16h10" stroke="#8EA3BC" stroke-width="1.3"/><path d="M15 9l3 3-3 3M9 9L6 12l3 3"/>',
+    net_qos_scheduler: '<path d="M6 15a6 6 0 0 1 12 0" stroke="#8E8FB8"/><path d="M12 15l3.5-4"/><circle cx="12" cy="15" r="1.5" fill="#3468D6" stroke="none"/><path d="M5 18h14"/>',
+    net_disable_netbios: '<path d="M7 8h10v4H7zM7 14h10v4H7z" fill="#F6F8FC" stroke="#8EA3BC"/><path d="M5 19L19 5" stroke="#D05A5A"/>',
+    net_disable_lmhosts: '<path d="M8.5 11h7M8.5 14.5h7M8.5 18h4.5" stroke="#8EA3BC"/><path d="M5 19L19 5" stroke="#D05A5A"/>'
+  };
+
+  function taskIcon(id) {
+    const body = TASK_ICON_BODY[id];
+    if (body) return TASK_ICON_BASE.replace('BODY', body);
+    return '<svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z"/></svg>';
+  }
+
   // ==================== 维护项详解弹窗内容（v3.2.0） ====================
   // 每项三段：是什么 / 什么情况下会用到它 / 用了之后应该达到的效果。
   // 以任务 id 为键（数据源见 vendor/upstream-js/src/scripts-powershell/maintenance-scripts.js）；新增任务时此处需同步补文案，
@@ -251,7 +279,7 @@
             <input type="checkbox" data-check="${escapeHtml(t.id)}" ${isSelected ? 'checked' : ''} ${busy ? 'disabled' : ''} aria-label="选择 ${escapeHtml(t.title)}" />
           </label>
           <div class="maint-card-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16l-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z"/></svg>
+            ${taskIcon(t.id)}
           </div>
           <div class="maint-card-body">
             <div class="maint-card-title">${escapeHtml(t.title)}${adminTag}${badge}</div>

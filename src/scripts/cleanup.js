@@ -334,9 +334,9 @@
     '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></svg>'
   ]);
   function groupIconHtml(icon) {
-    const svg = GROUP_ICON_WHITELIST.has(icon) ? icon : GROUP_ICON_WHITELIST.values().next().value;
-    const decorated = svg.replace(/^<svg\s/, '<svg aria-hidden="true" focusable="false" ');
-    return `<span class="category-group-icon">${decorated}</span>`;
+    return '<span class="category-group-icon" aria-hidden="true">'
+      + '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>'
+      + '</span>';
   }
 
   // 跨条目重复计账扣减（唯一口径，所有汇总走它）。后端把「两条 item 覆盖到同一批文件」

@@ -28,7 +28,7 @@
 }
 .ds-badge.ok      { background: var(--success-soft); color: var(--success); }
 .ds-badge.warn    { background: var(--warning-soft); color: var(--warning); }
-.ds-badge.bad     { background: var(--danger-soft);  color: var(--danger); }
+.ds-badge.bad     { background: var(--danger-soft);  color: var(--danger-fg); }
 .ds-badge.neutral { background: var(--bg-input);     color: var(--fg-tertiary); }
 .ds-badge.accent  { background: var(--accent-soft);  color: var(--accent); }
 
@@ -41,7 +41,7 @@
    不是装饰件：染底与 --fg-tertiary 必须达 AA 4.5:1，取值以 check-contrast 的逐组合现算为准。 */
 .category-risk.low        { background: var(--success-soft); color: var(--success); }
 .category-risk.medium     { background: var(--warning-soft); color: var(--warning); }
-.category-risk.high       { background: var(--danger-soft);  color: var(--danger); }
+.category-risk.high       { background: var(--danger-soft);  color: var(--danger-fg); }
 .badge.off                { background: var(--bg-input);     color: var(--fg-tertiary); }
 .startup-badge.on         { background: var(--success-soft); color: var(--success); }
 .startup-badge.off        { background: var(--warning-soft); color: var(--warning); }
@@ -187,7 +187,7 @@ input[type="range"].ds-slider:focus-visible {
 }
 .ds-menu-item:hover { background: var(--accent-soft); color: var(--accent); }
 .ds-menu-item:focus-visible { background: var(--accent-soft); color: var(--accent); outline: 2px solid var(--accent); outline-offset: -2px; }
-.ds-menu-item.danger { color: var(--danger); }
+.ds-menu-item.danger { color: var(--danger-fg); }
 .ds-menu-item.danger:hover,
 .ds-menu-item.danger:focus-visible { background: var(--danger-soft); }
 .ds-menu-item[aria-disabled="true"] { opacity: 0.4; cursor: default; }

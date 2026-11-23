@@ -154,12 +154,6 @@ const ALLOW = [
 
   // ---- T1b-M03（v7.2 C09）漫游面新增的四条登记（walkFiles 派生后首次现算命中）：
   {
-    file: 'src-tauri/src/commands/optimizer/external_scan.rs',
-    match: (h) => h.rule === 'power-ns' && /SESSION_POWER: &str = "SYSTEM/.test(h.anchor || ''),
-    expect: 1,
-    why: '外部优化器足迹检测的只读判据常量（Session Manager\\Power 等）——本文件只读注册表做检出，不写',
-  },
-  {
     file: 'src-tauri/data/cleanup-rules.json',
     match: (h) => h.rule === 'power-ns' && /%WINDIR%/.test(h.anchor || '') && /SleepStudy/.test(h.anchor || ''),
     expect: 2,

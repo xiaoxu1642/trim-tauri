@@ -1800,6 +1800,455 @@ foreach ($n in $picked) { Get-PnpDevice -ErrorAction SilentlyContinue | Where-Ob
         assert!(options().iter().any(|o| o.get("id").and_then(|v| v.as_str()) == Some("perf_wu_pause")));
     }
 
+    /// P1-7：`optimizer_run` 回执表驱动矩阵。
+    ///
+    /// 表里只使用 Trim 回执字段（success/verify/failedSteps/skipped/alreadySatisfied/
+    /// needAdmin/needConfirm/compensation），新增或改错字段、丢掉 reasonCode、增加未登记
+    /// 原因码都会红。
+    #[test]
+    fn p1_7_optimizer_run回执矩阵() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        struct Case {
+            direction: &'static str,
+            code: &'static str,
+            fields: Value,
+        }
+
+        let cases = vec![
+            Case { direction: "early", code: "guard_rejected", fields: json!({"success": false, "message": "x"}) },
+            Case { direction: "early", code: "run_in_flight", fields: json!({"success": false, "message": "x"}) },
+            Case { direction: "early", code: "write_in_flight", fields: json!({"success": false, "message": "x"}) },
+            Case { direction: "early", code: "catalog_unavailable", fields: json!({"success": false, "degraded": true, "loadError": "x", "code": "optimizer-catalog-unverified", "message": "x"}) },
+            Case { direction: "early", code: "unknown_option", fields: json!({"success": false, "message": "x"}) },
+            Case { direction: "early", code: "direction_conflict", fields: json!({"success": false, "message": "x"}) },
+            Case { direction: "early", code: "admin_required", fields: json!({"success": false, "needAdmin": true, "message": "x"}) },
+            Case { direction: "early", code: "confirm_required", fields: json!({"success": false, "needConfirm": true, "message": "x"}) },
+            Case { direction: "early", code: "unsupported_step", fields: json!({"success": false, "message": "x"}) },
+            Case { direction: "early", code: "already_satisfied", fields: json!({"success": false, "alreadySatisfied": true, "message": "x"}) },
+            Case { direction: "early", code: "restore_unavailable", fields: json!({"success": false, "message": "x"}) },
+            Case { direction: "early", code: "assemble_rejected", fields: json!({"success": false, "message": "x"}) },
+            Case { direction: "early", code: "no_executable_steps", fields: json!({"success": false, "message": "x"}) },
+            Case { direction: "early", code: "backup_required", fields: json!({"success": false, "message": "x"}) },
+            Case { direction: "early", code: "state_write_failed", fields: json!({"success": false, "message": "x"}) },
+            Case { direction: "apply", code: "execution_failed", fields: json!({"success": false, "message": "x"}) },
+            Case { direction: "restore", code: "restore_failed", fields: json!({"success": false, "message": "x", "failedSteps": ["step"]}) },
+            Case { direction: "restore", code: "restore_staged", fields: json!({"success": true, "message": "x", "verify": "pass"}) },
+            Case { direction: "restore", code: "restore_verify_partial", fields: json!({"success": false, "restored": false, "message": "x", "verify": "partial"}) },
+            Case { direction: "restore", code: "restore_verify_unknown", fields: json!({"success": false, "restored": false, "message": "x", "verify": "unknown"}) },
+            Case { direction: "restore", code: "restored", fields: json!({"success": true, "restored": true, "message": "x", "verify": "pass"}) },
+            Case { direction: "apply", code: "applied_verify_partial", fields: json!({"success": true, "message": "x", "verify": "partial", "skipped": []}) },
+            Case { direction: "apply", code: "applied_unverified", fields: json!({"success": true, "message": "x", "verify": "unknown", "skipped": []}) },
+            Case { direction: "apply", code: "applied_with_skips", fields: json!({"success": true, "message": "x", "verify": "pass", "skipped": ["服务 X"]}) },
+            Case { direction: "apply", code: "applied", fields: json!({"success": true, "message": "x", "verify": "pass", "skipped": []}) },
+            Case { direction: "apply", code: "partial_write", fields: json!({"success": false, "message": "x", "failedSteps": ["step"], "compensation": []}) },
+        ];
+
+        assert!(cases.iter().any(|c| c.direction == "apply"), "矩阵缺少正向执行");
+        assert!(cases.iter().any(|c| c.direction == "restore"), "矩阵缺少还原执行");
+        assert!(cases.iter().any(|c| c.direction == "early"), "矩阵缺少早退");
+
+        for case in &cases {
+            let receipt = run_receipt(case.code, case.fields.clone());
+            assert_eq!(receipt["reasonCode"], json!(case.code), "{} 的 reasonCode 不符: {receipt}", case.code);
+            assert_eq!(receipt["success"], case.fields["success"], "{} 改写了 success: {receipt}", case.code);
+
+            let expected: BTreeSet<String> = case.fields
+                .as_object()
+                .expect("矩阵 case 必须是对象")
+                .keys()
+                .cloned()
+                .collect();
+            let actual: BTreeSet<String> = receipt
+                .as_object()
+                .expect("回执必须是对象")
+                .keys()
+                .cloned()
+                .collect();
+            let mut expected_with_code = expected;
+            expected_with_code.insert("reasonCode".into());
+            assert_eq!(actual, expected_with_code, "{} 回执字段集漂移", case.code);
+
+            match case.code {
+                "already_satisfied" => {
+                    assert_eq!(receipt["success"], json!(false), "已满足不是失败也不是成功写入");
+                    assert_eq!(receipt["alreadySatisfied"], json!(true));
+                }
+                "admin_required" => assert_eq!(receipt["needAdmin"], json!(true)),
+                "confirm_required" => assert_eq!(receipt["needConfirm"], json!(true)),
+                "restore_verify_unknown" => {
+                    assert_ne!(receipt["verify"], json!("pass"), "verify=unknown 不得折成 pass");
+                    assert_eq!(receipt["restored"], json!(false));
+                }
+                "restore_verify_partial" => {
+                    assert_eq!(receipt["verify"], json!("partial"));
+                    assert_eq!(receipt["restored"], json!(false));
+                }
+                "partial_write" | "restore_failed" => {
+                    assert_eq!(receipt["success"], json!(false), "带失败步骤的回执不得报成功");
+                    assert!(receipt["failedSteps"].as_array().is_some_and(|a| !a.is_empty()));
+                }
+                "applied_with_skips" => {
+                    assert_eq!(receipt["success"], json!(true));
+                    assert!(receipt["skipped"].as_array().is_some_and(|a| !a.is_empty()));
+                }
+                "applied" => {
+                    assert_eq!(receipt["success"], json!(true));
+                    assert_eq!(receipt["skipped"], json!([]));
+                }
+                _ => {}
+            }
+        }
+
+        let apply_src = include_str!("apply.rs");
+        let run_body = apply_src
+            .split("pub async fn optimizer_run")
+            .nth(1)
+            .and_then(|s| s.split("/// 正向执行后回读").next())
+            .expect("optimizer_run 函数体定位失败");
+        assert!(
+            !run_body.contains("return json!("),
+            "optimizer_run 又出现绕过 run_receipt 的直接回执"
+        );
+
+        fn scan_receipt_object(obj: &str) -> (BTreeSet<String>, BTreeMap<String, bool>) {
+            let bytes = obj.as_bytes();
+            let (mut i, mut depth, mut expect_key) = (0usize, 0i32, false);
+            let mut keys = BTreeSet::new();
+            let mut bools = BTreeMap::new();
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'"' => {
+                        let start = i + 1;
+                        let mut j = start;
+                        let mut escaped = false;
+                        while j < bytes.len() {
+                            if escaped {
+                                escaped = false;
+                            } else if bytes[j] == b'\\' {
+                                escaped = true;
+                            } else if bytes[j] == b'"' {
+                                break;
+                            }
+                            j += 1;
+                        }
+                        let key = &obj[start..j];
+                        if depth == 1 && expect_key {
+                            keys.insert(key.to_string());
+                            let mut k = j + 1;
+                            while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+                                k += 1;
+                            }
+                            if k < bytes.len() && bytes[k] == b':' {
+                                let mut v = k + 1;
+                                while v < bytes.len() && bytes[v].is_ascii_whitespace() {
+                                    v += 1;
+                                }
+                                if obj[v..].starts_with("true") {
+                                    bools.insert(key.to_string(), true);
+                                } else if obj[v..].starts_with("false") {
+                                    bools.insert(key.to_string(), false);
+                                }
+                            }
+                            expect_key = false;
+                        }
+                        i = j + 1;
+                    }
+                    b'{' => {
+                        depth += 1;
+                        if depth == 1 {
+                            expect_key = true;
+                        }
+                        i += 1;
+                    }
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                        i += 1;
+                    }
+                    b',' if depth == 1 => {
+                        expect_key = true;
+                        i += 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+            (keys, bools)
+        }
+
+        let marker = "run_receipt(";
+        let mut calls: Vec<(&str, Option<(BTreeSet<String>, BTreeMap<String, bool>)>)> = Vec::new();
+        let mut at = 0usize;
+        while let Some(rel) = run_body[at..].find(marker) {
+            let after_marker = at + rel + marker.len();
+            let mut code_start = after_marker;
+            while code_start < run_body.len()
+                && run_body.as_bytes()[code_start].is_ascii_whitespace()
+            {
+                code_start += 1;
+            }
+            if code_start >= run_body.len() {
+                at = after_marker;
+                continue;
+            }
+            let (code, arg_end) = if run_body.as_bytes()[code_start] == b'"' {
+                code_start += 1;
+                let code_end =
+                    code_start + run_body[code_start..].find('"').expect("reasonCode 字面量未闭合");
+                (&run_body[code_start..code_end], code_end + 1)
+            } else {
+                let arg_end = code_start
+                    + run_body[code_start..]
+                        .find(',')
+                        .expect("run_receipt 原因参数未闭合");
+                (run_body[code_start..arg_end].trim(), arg_end)
+            };
+            let tail = run_body[arg_end..].trim_start();
+            let tail = tail.strip_prefix(',').unwrap_or("").trim_start();
+            let parsed = tail.strip_prefix("json!").map(|json_tail| {
+                let brace = json_tail.find('{').expect("run_receipt 的 json 对象缺失");
+                scan_receipt_object(&json_tail[brace..])
+            });
+            calls.push((code, parsed));
+            at = arg_end;
+        }
+
+        let reason_block = run_body
+            .split("let reason_code =")
+            .nth(1)
+            .and_then(|s| s.split("};").next())
+            .expect("正向成功原因码分支定位失败");
+        let dynamic_codes: BTreeSet<&str> = reason_block
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .filter(|s| s.starts_with("applied_") || *s == "applied")
+            .collect();
+        let want_dynamic: BTreeSet<&str> = [
+            "applied_verify_partial",
+            "applied_unverified",
+            "applied",
+            "applied_with_skips",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(dynamic_codes, want_dynamic, "正向成功原因码分支与矩阵不一致");
+        let compact_reason_block: String = reason_block.split_whitespace().collect();
+        assert!(compact_reason_block.contains("verify==\"partial\"{\"applied_verify_partial\"}"));
+        assert!(compact_reason_block.contains("verify==\"unknown\"{\"applied_unverified\"}"));
+        assert!(compact_reason_block.contains("skipped.is_empty(){\"applied\"}"));
+        assert!(
+            compact_reason_block.contains("else{\"applied_with_skips\""),
+            "实得: {compact_reason_block}"
+        );
+
+        let mut source_codes: BTreeSet<&str> = calls
+            .iter()
+            .filter_map(|(code, _)| (*code != "reason_code").then_some(*code))
+            .collect();
+        source_codes.extend(dynamic_codes);
+        let table_codes: BTreeSet<&str> = cases.iter().map(|c| c.code).collect();
+        assert_eq!(source_codes, table_codes, "原因码集合与 P1-7 矩阵不一致");
+
+        for (code, parsed) in calls {
+            if code == "catalog_unavailable" {
+                assert!(parsed.is_none(), "目录降级回执仍应复用 catalog_load_failure");
+                continue;
+            }
+            let (keys, bools) = parsed.expect("optimizer_run 回执必须内联 json 对象");
+            let case = if code == "reason_code" {
+                cases
+                    .iter()
+                    .find(|c| c.code == "applied")
+                    .expect("矩阵缺少正向成功基准")
+            } else {
+                cases.iter().find(|c| c.code == code).expect("原因码未进矩阵")
+            };
+            let expected_keys: BTreeSet<String> = case.fields
+                .as_object()
+                .expect("矩阵 case 必须是对象")
+                .keys()
+                .cloned()
+                .collect();
+            assert_eq!(keys, expected_keys, "{code} 的实际回执字段与矩阵不一致");
+            for (key, value) in case.fields.as_object().expect("矩阵 case 必须是对象") {
+                if let Some(want) = value.as_bool() {
+                    assert_eq!(
+                        bools.get(key),
+                        Some(&want),
+                        "{code} 的布尔字段 {key} 与矩阵不一致"
+                    );
+                }
+            }
+        }
+    }
+
+    /// P0-3：复合写「先落地一半、后一半失败」的落地判定表。
+    ///
+    /// 判红点：把任何一条「有证据才算落地」改成「调用返回 Ok 就算落地」，
+    /// 1051（依赖占用）/ 回读仍未命中 / 服务不存在三条会立刻红。
+    #[test]
+    fn p0_3_复合写落地判定表() {
+        let stop_cases: &[(Option<bool>, bool, Option<bool>, bool)] = &[
+            (Some(true), true, Some(false), true),
+            (Some(true), true, Some(true), false),
+            (Some(true), true, None, false),
+            (Some(false), true, Some(false), false),
+            (None, true, Some(false), false),
+            (Some(true), false, Some(false), false),
+        ];
+        for &(before, stop_ok, after, want) in stop_cases {
+            let got = landed_service_stop("TrimProbeSvc", before, stop_ok, after).is_some();
+            assert_eq!(
+                got, want,
+                "停服落地判定不符: before={before:?} stop_ok={stop_ok} after={after:?}"
+            );
+        }
+
+        type StartRead = Result<Option<bool>, u32>;
+        let start_cases: &[(StartRead, bool, StartRead, bool, &str)] = &[
+            (Ok(Some(false)), true, Ok(Some(true)), true, "改前不是目标、改后命中"),
+            (Ok(Some(true)), true, Ok(Some(true)), false, "本来就命中，不算落地"),
+            (Ok(Some(false)), true, Ok(Some(false)), false, "调用成功但回读仍未命中"),
+            (Ok(Some(false)), true, Err(5), true, "改前已知不同，改后读失败仍按落地"),
+            (Err(5), true, Ok(Some(true)), true, "改前读失败、改后命中，按落地"),
+            (Err(5), true, Ok(Some(false)), false, "改前读失败、改后仍未命中"),
+            (Ok(None), true, Ok(None), false, "服务不存在，不算落地"),
+            (Ok(Some(false)), false, Ok(Some(true)), false, "写入失败不记落地"),
+        ];
+        for &(before, set_ok, after, want, why) in start_cases {
+            let got = landed_service_start("TrimProbeSvc", before, set_ok, after).is_some();
+            assert_eq!(
+                got, want,
+                "启动类型落地判定不符（{why}）: before={before:?} set_ok={set_ok} after={after:?}"
+            );
+        }
+    }
+
+    /// P0-3：补偿清单必须是 LIFO，且只投影到现有 `staged_restore_steps` 与备份账本。
+    ///
+    /// 判红点：把 `.rev()` 去掉 ⇒ 顺序断言红；把 `backup_ledger.Start` 或
+    /// `backup_ledger.wasRunning` 换成自造路径 ⇒ 对应断言红。
+    #[test]
+    fn p0_3_补偿清单按后进先出且复用现有还原面() {
+        let opt = json!({
+            "restore": [
+                { "label": "还原：W32Time 改回 Automatic", "service": "W32Time", "startType": "automatic" },
+                { "label": "还原：FDResPub 改回 Automatic", "service": "FDResPub", "startType": "automatic" },
+                { "label": "还原：删除注册表键", "reg": "Windows Registry Editor Version 5.00\r\n" }
+            ]
+        });
+        let landed = vec![
+            LandedServiceWrite { kind: "service_running", service: "MessagingService".into() },
+            LandedServiceWrite { kind: "service_start", service: "MessagingService".into() },
+            LandedServiceWrite { kind: "service_start", service: "W32Time".into() },
+        ];
+        let plan = landed_compensation_plan(&opt, &landed);
+        assert_eq!(plan.len(), 3, "每个已落地子写都要有补偿条目: {plan:?}");
+        assert_eq!(
+            plan[0]["service"],
+            json!("W32Time"),
+            "最后落地的先补偿（LIFO）: {plan:?}"
+        );
+        assert_eq!(plan[1]["kind"], json!("service_start"));
+        assert_eq!(plan[2]["kind"], json!("service_running"));
+        assert_eq!(plan[1]["restore"], json!("backup_ledger.Start"));
+        assert_eq!(plan[2]["restore"], json!("backup_ledger.wasRunning"));
+        assert_eq!(
+            plan[0]["presetLabel"],
+            json!("还原：W32Time 改回 Automatic"),
+            "有预设还原步时必须带出 label，不能自造一步: {plan:?}"
+        );
+        assert!(
+            plan[2]["presetLabel"].is_null(),
+            "没有预设服务还原步时必须如实为空，不能编一条: {plan:?}"
+        );
+        let note = compensation_note(&plan).expect("非空补偿必须落进现有状态账本");
+        assert!(note.contains("按相反顺序"), "摘要必须把还原顺序讲清楚: {note}");
+        assert!(
+            note.find("W32Time") < note.find("MessagingService"),
+            "摘要顺序必须与补偿清单一致: {note}"
+        );
+        assert!(compensation_note(&[]).is_none(), "无补偿不得写噪音行");
+    }
+
+    /// P0-3：结构判据 —— 补偿登记必须同时挂在失败回执与现有持久化账本上。
+    ///
+    /// 判红点：删掉 `landed_compensation_plan` 调用、删掉 `compensation_note` 落账、
+    /// 删掉服务分支的落地登记、或把 LIFO 反向去掉，本用例都会红。
+    #[test]
+    fn p0_3_部分写补偿登记必须挂在回执与持久化上() {
+        let src = include_str!("apply.rs");
+        let run_body = src
+            .split("pub async fn optimizer_run")
+            .nth(1)
+            .and_then(|s| s.split("/// 正向执行后回读").next())
+            .expect("optimizer_run 函数体定位失败");
+        assert!(
+            run_body.contains("landed_compensation_plan(&opt, &landed_writes)"),
+            "失败分支没有登记补偿清单"
+        );
+        assert!(
+            run_body.contains("\"compensation\": compensation"),
+            "补偿清单没有进失败回执"
+        );
+        assert!(
+            run_body.contains("compensation_note(&compensation)"),
+            "补偿摘要没有进现有状态账本"
+        );
+        let persist = run_body
+            .split("let mut ledger_reasons")
+            .nth(1)
+            .expect("失败持久化段定位失败");
+        assert!(
+            persist.contains("compensation_note(&compensation)")
+                && persist.contains("ledger_reasons.extend(failed_reasons.iter().cloned())")
+                && persist.contains("mark_partial_with_reasons(&option_id, &ledger_reasons)"),
+            "补偿摘要与失败列表都必须在 mark_partial_with_reasons 之前进 ledger_reasons"
+        );
+        let note_pos = persist
+            .find("compensation_note(&compensation)")
+            .expect("补偿摘要落账调用缺失");
+        let failed_pos = persist
+            .find("ledger_reasons.extend(failed_reasons.iter().cloned())")
+            .expect("失败列表落账调用缺失");
+        assert!(
+            note_pos < failed_pos,
+            "补偿摘要必须先于失败列表进账，避免被 mark_partial_with_reasons 的 8 条上限截掉"
+        );
+
+        let native_body = src
+            .split("pub(super) fn native_execute_steps")
+            .nth(1)
+            .and_then(|s| s.split("// ==================== 动态步骤").next())
+            .expect("native_execute_steps 函数体定位失败");
+        let service_branch = native_body
+            .split("} else if let Some(service) = s.get(\"service\")")
+            .nth(1)
+            .and_then(|s| s.split("} else if let Some(pwsh) = s.get(\"pwsh\")").next())
+            .expect("service 执行分支定位失败");
+        assert!(service_branch.contains("landed_service_stop("), "停服落地没有登记");
+        assert!(service_branch.contains("landed_service_start("), "启动类型落地没有登记");
+        assert!(service_branch.contains("landed_writes.push("), "落地子写没有进返回列表");
+
+        let plan_fn = src
+            .split("pub(super) fn landed_compensation_plan")
+            .nth(1)
+            .and_then(|s| s.split("\n}\n").next())
+            .expect("补偿清单函数定位失败");
+        assert!(
+            plan_fn.contains("staged_restore_steps(&restore, None)"),
+            "补偿清单没有复用 staged_restore_steps"
+        );
+        assert!(plan_fn.contains(".rev()"), "补偿清单必须按 LIFO 反向");
+        assert!(
+            plan_fn.contains("backup_ledger.Start") && plan_fn.contains("backup_ledger.wasRunning"),
+            "补偿清单没有指向现有备份账本"
+        );
+    }
+
     /// M2 · B 类：6 项「写服务启动类型但检测不出」的项必须真能产出断言。
     ///
     /// v0.5.0 的形态：这 6 项的 `steps` 全是 `pwsh` 文本，`collect_checks` 不解析 pwsh

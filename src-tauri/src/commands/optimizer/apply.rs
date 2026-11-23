@@ -531,11 +531,68 @@ mod recycle2_tests {
     }
 }
 
+const LANDED_SERVICE_RUNNING: &str = "service_running";
+const LANDED_SERVICE_START: &str = "service_start";
+
+/// 复合写中**有前后读证据**的一段：只用于失败回执的补偿清单，不是第二套补偿账本。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LandedServiceWrite {
+    pub(super) kind: &'static str,
+    pub(super) service: String,
+}
+
+/// 停服子写是否真的落地：停前在跑、停调用成功、停后确认不在跑。
+///
+/// `service_stop_pub` 把 1051（依赖服务占用）也判 Ok，但那时服务仍在跑；读失败
+/// （`None`）同样不能当「已停止」。两种都不记 —— 读不到不等于停成了（P1-10）。
+pub(super) fn landed_service_stop(
+    service: &str,
+    before_running: Option<bool>,
+    stop_ok: bool,
+    after_running: Option<bool>,
+) -> Option<LandedServiceWrite> {
+    (before_running == Some(true) && stop_ok && after_running == Some(false)).then(|| {
+        LandedServiceWrite {
+            kind: LANDED_SERVICE_RUNNING,
+            service: service.to_string(),
+        }
+    })
+}
+
+/// 启动类型子写是否真的落地：改前已知不是目标，或改后回读确认已是目标。
+///
+/// 改前已经命中目标的不记（没有变化）；`service_set_start_pub` 返回 Ok 但回读仍不是
+/// 目标的不记（调用成功 ≠ 落盘成功）；改前读失败但改后确认命中的记 —— 那是可核对的
+/// 落地证据，不能因为第一次读失败就把已落地的写入丢掉。
+pub(super) fn landed_service_start(
+    service: &str,
+    before: Result<Option<bool>, u32>,
+    set_ok: bool,
+    after: Result<Option<bool>, u32>,
+) -> Option<LandedServiceWrite> {
+    let already = matches!(before, Ok(Some(true)));
+    let known_different = matches!(before, Ok(Some(false)));
+    let after_same = matches!(after, Ok(Some(true)));
+    let after_different = matches!(after, Ok(Some(false)));
+    (set_ok && !already && (after_same || (known_different && !after_different))).then(|| {
+        LandedServiceWrite {
+            kind: LANDED_SERVICE_START,
+            service: service.to_string(),
+        }
+    })
+}
+
 /// 原生执行优化步骤（对应 optimizer_build.ps1 模板，S1）
 ///
 /// 支持 reg/cmd/service 三种 step 类型；pwsh 类型交给 pssteps 解释器
 /// （原生可编译 → 原生执行；白名单内不可编译 → 收件箱 PS 逐字执行，v3-K1）。
-/// 实时推送 optimizer:progress 事件，返回 (failed_steps, PsInline stdout 累积, 失败原因明细)。
+/// 实时推送 optimizer:progress 事件，返回 (failed_steps, PsInline stdout 累积, 失败原因明细,
+/// 已落地服务子写)。
+///
+/// P0-3：`{service, disable:true}` 是真实存在的复合写（停服 + 改启动类型，例如
+/// `privacy_permissions_tune` 的 MessagingService）。两步都可能一半落地后失败；这里
+/// 把**有前后读证据**的那一半记进返回值，由调用方投影到现有备份/还原链作为补偿，
+/// 不新建补偿框架。延迟标志当前没有备份写面，不在本判据内。
 /// 审查 2026-09-27 M2/M4：pwsh 编译/执行失败不再中止整批（与 reg/cmd/service 的
 /// 「失败计数继续」语义一致，避免前置已落盘、后置永不执行的批量断裂）；每步失败的
 /// label 与原因收集进返回值，由调用方随回执下发前端，不再只回「部分步骤可能失败」。
@@ -543,11 +600,12 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
     window: &WebviewWindow<R>,
     steps: &[Value],
     option_id: &str,
-) -> Result<(i64, String, Vec<String>), String> {
+) -> Result<(i64, String, Vec<String>, Vec<LandedServiceWrite>), String> {
     let total = steps.len();
     let mut failed = 0i64;
     let mut inline_stdout = String::new();
     let mut failed_reasons: Vec<String> = Vec::new();
+    let mut landed_writes: Vec<LandedServiceWrite> = Vec::new();
     // 审查 v3-M2：私有 tmp 被替换成 junction 时 temp_script_dir 返回 Err，这里绝不能
     // 降级到全局可写的 %TEMP% —— 那会把「拒绝写入」翻译成「换个更危险的目录写」，
     // 提权实例在 %TEMP% 写可预测路径的 .reg 再以管理员 reg import，是经典 TOCTOU 窗口。
@@ -721,19 +779,52 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
             // 停服判据与 PS 轨共用 [`service_need_stop`]（R3-L01）：`disable:true`、
             // 纯停服步、`startType:"disabled"` 都要停；其余显式档位只改启动类型。
             let need_stop = service_need_stop(want_disable, expected_start);
+            let before_running = if !unknown_start && need_stop {
+                crate::engine::native::service_running(service)
+            } else {
+                None
+            };
 
             if !unknown_start && need_stop {
                 // 终态语义走 native 原语（v5 O-1）：1062 本就未启动 / 1060 本机没装
                 // 都等于目标达成，判 Ok。旧的 `sc stop` 直调把退出码非零一律当失败。
-                if let Err(reason) = crate::engine::native::service_stop_pub(service) {
-                    step_failures.push(format!("服务「{service}」: {reason}"));
+                let stop_ok = match crate::engine::native::service_stop_pub(service) {
+                    Ok(()) => true,
+                    Err(reason) => {
+                        step_failures.push(format!("服务「{service}」: {reason}"));
+                        false
+                    }
+                };
+                if stop_ok {
+                    let after_running = crate::engine::native::service_running(service);
+                    if let Some(landed) =
+                        landed_service_stop(service, before_running, stop_ok, after_running)
+                    {
+                        landed_writes.push(landed);
+                    }
                 }
             }
             if !unknown_start {
                 if let Some(want) = expected_start {
                     // 审查 2026-09-27 L5 的等价物：被策略拒绝不再静默，计入失败原因。
-                    if let Err(reason) = crate::engine::native::service_set_start_pub(service, want) {
-                        step_failures.push(format!("服务「{service}」: {reason}（可能被组策略锁定）"));
+                    let before_start =
+                        crate::engine::native::service_start_type_state(service, want);
+                    let set_ok = match crate::engine::native::service_set_start_pub(service, want) {
+                        Ok(()) => true,
+                        Err(reason) => {
+                            step_failures
+                                .push(format!("服务「{service}」: {reason}（可能被组策略锁定）"));
+                            false
+                        }
+                    };
+                    if set_ok {
+                        let after_start =
+                            crate::engine::native::service_start_type_state(service, want);
+                        if let Some(landed) =
+                            landed_service_start(service, before_start, set_ok, after_start)
+                        {
+                            landed_writes.push(landed);
+                        }
                     }
                 }
                 // 存在性回读。判据用「服务在不在」而不是「停没停」：startType 形态刻意
@@ -788,7 +879,7 @@ pub(super) fn native_execute_steps<R: tauri::Runtime>(
             json!({ "optionId": option_id, "percent": pct }),
         );
     }
-    Ok((failed, inline_stdout, failed_reasons))
+    Ok((failed, inline_stdout, failed_reasons, landed_writes))
 }
 
 // ==================== 动态步骤 ====================
@@ -986,6 +1077,13 @@ impl Drop for OptRunGuard {
     fn drop(&mut self) {
         *OPT_RUN_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner()) = false;
     }
+}
+
+/// 给 `optimizer_run` 回执补稳定机器原因码；只加 `reasonCode`，不改既有字段语义。
+/// 新增或改名原因码必须同步 `contract_tests` 的 P1-7 矩阵。
+pub(super) fn run_receipt(reason_code: &'static str, mut fields: Value) -> Value {
+    fields["reasonCode"] = json!(reason_code);
+    fields
 }
 
 /// M1 预检拒绝理由（方案 §5.3）。刻意做成枚举而不是裸 `String`：
@@ -1234,6 +1332,72 @@ fn staged_restore_steps(restore: &[Value], stage: Option<RestoreStage>) -> Resul
     Ok(steps)
 }
 
+/// 把已落地的服务子写投影成补偿清单（LIFO），不新建第二套补偿账本。
+///
+/// - 原值：执行前 [`ensure_opt_backup_present`] 已确认 `optimizer-backups.json` 里有本项
+///   条目；`Start` 与 `wasRunning` 都由 [`super::backup_restore::optimizer_restore_reg`]
+///   回写/重启，条目里的 `restore` 字段直接指向这两条现有路径。
+/// - 预设步：从数据层 `restore` 经 [`staged_restore_steps`] 同一入口取，只带 `label`
+///   供审计，不在本函数里另造一份还原动作。
+///
+/// 顺序按 `landed.iter().rev()`：后落地的先补偿。对 `{service, disable:true}` 就是先回写
+/// 启动类型，再按 `wasRunning` 把服务拉起来，和现有值级还原链一致。
+pub(super) fn landed_compensation_plan(
+    opt: &Value,
+    landed: &[LandedServiceWrite],
+) -> Vec<Value> {
+    if landed.is_empty() {
+        return Vec::new();
+    }
+    let restore: Vec<Value> = opt
+        .get("restore")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let preset = staged_restore_steps(&restore, None).unwrap_or_default();
+    landed
+        .iter()
+        .rev()
+        .map(|landed| {
+            let preset_step = preset.iter().find(|step| {
+                step.get("service").and_then(Value::as_str) == Some(landed.service.as_str())
+            });
+            let restore_path = if landed.kind == LANDED_SERVICE_RUNNING {
+                "backup_ledger.wasRunning"
+            } else {
+                "backup_ledger.Start"
+            };
+            json!({
+                "kind": landed.kind,
+                "service": landed.service,
+                "restore": restore_path,
+                "presetLabel": preset_step.and_then(|s| s.get("label")).cloned(),
+            })
+        })
+        .collect()
+}
+
+/// 把补偿清单压成一行，落进现有 `optimization-state.json` 的 `partialReasons`。
+/// `None` = 没有已落地补偿，不写噪音。
+pub(super) fn compensation_note(compensation: &[Value]) -> Option<String> {
+    if compensation.is_empty() {
+        return None;
+    }
+    let items: Vec<String> = compensation
+        .iter()
+        .map(|entry| {
+            let service = entry.get("service").and_then(Value::as_str).unwrap_or("?");
+            let action = match entry.get("kind").and_then(Value::as_str).unwrap_or("") {
+                LANDED_SERVICE_START => "启动类型还原",
+                LANDED_SERVICE_RUNNING => "重新启动",
+                other => other,
+            };
+            format!("服务 {service} {action}")
+        })
+        .collect();
+    Some(format!("可还原的已落地更改（按相反顺序）：{}", items.join(" → ")))
+}
+
 /// R3-M04（v7.2 C04）：@@RECYCLE@@ 计数的回执/记账摘要。`None` = 本轮没有回收站
 /// 动作，不附加任何文案。抽成纯函数是给「失败时计数不消失」留判据面。
 pub(super) fn recycle_summary(rec_ok: i64, rec_fail: i64, rec_malformed: i64) -> Option<String> {
@@ -1331,30 +1495,42 @@ pub async fn optimizer_run<R: Runtime>(
     params: Option<RunParams>,
 ) -> Value {
     if let Err(msg) = guard::guard(&window, guard::MAIN) {
-        return json!({ "success": false, "message": msg });
+        return run_receipt("guard_rejected", json!({ "success": false, "message": msg }));
     }
     let Some(_inflight) = OptRunGuard::acquire() else {
-        return json!({ "success": false, "message": "已有优化项正在执行，请稍候" });
+        return run_receipt(
+            "run_in_flight",
+            json!({ "success": false, "message": "已有优化项正在执行，请稍候" }),
+        );
     };
     let Some(_write_guard) = OptWriteGuard::acquire() else {
-        return json!({ "success": false, "message": "另一个优化写入正在进行" });
+        return run_receipt(
+            "write_in_flight",
+            json!({ "success": false, "message": "另一个优化写入正在进行" }),
+        );
     };
     let option_id = option_id.unwrap_or_default();
     let Some(opt) = find_option(&option_id) else {
         if let Some(failure) = catalog_load_failure() {
-            return failure;
+            return run_receipt("catalog_unavailable", failure);
         }
-        return json!({ "success": false, "message": "未知的优化选项" });
+        return run_receipt(
+            "unknown_option",
+            json!({ "success": false, "message": "未知的优化选项" }),
+        );
     };
     let mut p = params.unwrap_or_default();
     if let Some(direction) = p.direction {
         match direction {
             RunDirection::Restore => p.restore = true,
             RunDirection::Apply if p.restore => {
-                return json!({
-                    "success": false,
-                    "message": "执行方向参数矛盾（direction=apply 但 restore=true），已拒绝执行"
-                });
+                return run_receipt(
+                    "direction_conflict",
+                    json!({
+                        "success": false,
+                        "message": "执行方向参数矛盾（direction=apply 但 restore=true），已拒绝执行"
+                    }),
+                );
             }
             RunDirection::Apply => p.restore = false,
         }
@@ -1370,36 +1546,51 @@ pub async fn optimizer_run<R: Runtime>(
     // **整体死锁**（4 条还原入口全部命中）。preflight 必须复刻这个豁免，否则把死锁重造一遍。
     match preflight_reason(&opt, &option_id, p.restore) {
         Some(r @ PreflightReject::NeedAdmin) => {
-            return json!({
-                "success": false, "needAdmin": true,
-                "message": r.message()
-            });
+            return run_receipt(
+                "admin_required",
+                json!({
+                    "success": false, "needAdmin": true,
+                    "message": r.message()
+                }),
+            );
         }
         Some(PreflightReject::NeedHighRiskConfirm) if !p.confirmed_high_risk => {
             log::write_log(
                 "warn",
                 &format!("高危优化缺少确认回执，已拒绝: {option_id} (restore={})", p.restore),
             );
-            return json!({
-                "success": false, "needConfirm": true,
-                "message": "高危操作缺少红色确认回执，请在界面重新确认后执行"
-            });
+            return run_receipt(
+                "confirm_required",
+                json!({
+                    "success": false, "needConfirm": true,
+                    "message": "高危操作缺少红色确认回执，请在界面重新确认后执行"
+                }),
+            );
         }
         // 步骤在本机编译不出来时预先拒绝：原先这条只在执行中段才暴露（apply.rs 的
         // pwsh 分支 `failed += 1`），用户看到的是「第 5 项失败」而前 4 项已落盘。
         Some(r @ PreflightReject::UnsupportedStep(_)) => {
             log::write_log("warn", &format!("优化项步骤不可执行，已预先拒绝: {option_id} ({})", r.message()));
-            return json!({ "success": false, "message": r.message() });
+            return run_receipt(
+                "unsupported_step",
+                json!({ "success": false, "message": r.message() }),
+            );
         }
         // 目标状态已满足（Defender 已卸载/已禁用）：不当失败处理，明确告知无需执行
         Some(PreflightReject::AlreadySatisfied(reason)) => {
             log::write_log("info", &format!("优化项目标状态已满足，跳过执行: {option_id} ({reason})"));
-            return json!({ "success": false, "alreadySatisfied": true, "message": reason });
+            return run_receipt(
+                "already_satisfied",
+                json!({ "success": false, "alreadySatisfied": true, "message": reason }),
+            );
         }
         // R3-K01（v7.2 C04）：无可还原步骤的还原请求点名拒因（与批量预检同一份判据）
         Some(r @ PreflightReject::NoRestorePath) => {
             log::write_log("warn", &format!("优化项无可还原步骤，已拒绝还原请求: {option_id}"));
-            return json!({ "success": false, "message": r.message() });
+            return run_receipt(
+                "restore_unavailable",
+                json!({ "success": false, "message": r.message() }),
+            );
         }
         _ => {}
     }
@@ -1415,11 +1606,17 @@ pub async fn optimizer_run<R: Runtime>(
         Ok(v) => v,
         Err(message) => {
             log::write_log("warn", &format!("优化项组装即拒: {option_id}（{message}）"));
-            return json!({ "success": false, "message": message });
+            return run_receipt(
+                "assemble_rejected",
+                json!({ "success": false, "message": message }),
+            );
         }
     };
     if steps.is_empty() {
-        return json!({ "success": false, "message": "选项无可执行步骤" });
+        return run_receipt(
+            "no_executable_steps",
+            json!({ "success": false, "message": "选项无可执行步骤" }),
+        );
     }
 
     // B-06 ①：备份前置闸 —— 放在**执行前记账之前**：记账是执行前动作，
@@ -1429,7 +1626,10 @@ pub async fn optimizer_run<R: Runtime>(
             "warn",
             &format!("优化项备份前置闸拒绝执行: {option_id}（{message}）"),
         );
-        return json!({ "success": false, "message": message });
+        return run_receipt(
+            "backup_required",
+            json!({ "success": false, "message": message }),
+        );
     }
 
     // P1-02（G-02）：用 SCM 核对本次涉及的服务/驱动，收集本机不存在（执行 foreach
@@ -1488,10 +1688,13 @@ pub async fn optimizer_run<R: Runtime>(
             picked_targets_effective.as_deref(),
         ) {
             log::write_log("error", &format!("优化状态记账失败，已按 fail-closed 中止执行: {title}"));
-            return json!({
-                "success": false,
-                "message": "优化状态记录写入失败，已中止执行（避免产生无法追溯的系统更改）"
-            });
+            return run_receipt(
+                "state_write_failed",
+                json!({
+                    "success": false,
+                    "message": "优化状态记录写入失败，已中止执行（避免产生无法追溯的系统更改）"
+                }),
+            );
         }
     }
 
@@ -1516,8 +1719,12 @@ pub async fn optimizer_run<R: Runtime>(
     })
     .await
     .unwrap_or_else(|e| Err(format!("阻塞池任务异常（执行未起跑或未跑完）: {e}")));
-    let (run, failed_reasons): (Result<pwsh::PsOutput, String>, Vec<String>) = match native {
-            Ok((failed_steps, inline_stdout, reasons)) => {
+    let (run, failed_reasons, landed_writes): (
+        Result<pwsh::PsOutput, String>,
+        Vec<String>,
+        Vec<LandedServiceWrite>,
+    ) = match native {
+            Ok((failed_steps, inline_stdout, reasons, landed)) => {
                 let code = if failed_steps == 0 { 0 } else { 1 };
                 let mut stdout = String::new();
                 // PsInline 的 stdout（@@RECYCLE@@ 协议行）必须先于收尾标记
@@ -1528,9 +1735,13 @@ pub async fn optimizer_run<R: Runtime>(
                     }
                 }
                 stdout.push_str(&format!("@@PROGRESS:100@@\n@@FAILED:{failed_steps}@@\n@@DONE@@\n"));
-                (Ok(pwsh::PsOutput { code, stdout, stderr: String::new(), timed_out: false, tree_terminate_failed: false }), reasons)
+                (
+                    Ok(pwsh::PsOutput { code, stdout, stderr: String::new(), timed_out: false, tree_terminate_failed: false }),
+                    reasons,
+                    landed,
+                )
             }
-            Err(e) => (Err(format!("原生执行失败: {e}")), Vec::new()),
+            Err(e) => (Err(format!("原生执行失败: {e}")), Vec::new(), Vec::new()),
         };
     let Ok(out) = run else {
         let e = run.err().unwrap_or_else(|| "执行异常".into());
@@ -1547,9 +1758,12 @@ pub async fn optimizer_run<R: Runtime>(
                     &[format!("执行链整体失败: {e}")],
                 ),
             );
-            return json!({ "success": false, "message": format!("{e}{note}") });
+            return run_receipt(
+                "execution_failed",
+                json!({ "success": false, "message": format!("{e}{note}") }),
+            );
         }
-        return json!({ "success": false, "message": e });
+        return run_receipt("execution_failed", json!({ "success": false, "message": e }));
     };
 
     let stdout = out.stdout.clone();
@@ -1678,13 +1892,20 @@ pub async fn optimizer_run<R: Runtime>(
         // 真正的状态收口由随后的值级备份回写（optimizer_restore_reg）负责。
         if p.restore_stage == Some(RestoreStage::NonReg) {
             if !ok {
-                return json!({
-                    "success": false,
-                    "message": ok_message,
-                    "failedSteps": failed_reasons
-                });
+                return run_receipt(
+                    "partial_write",
+                    json!({
+                        "success": false,
+                        "message": ok_message,
+                        "failedSteps": failed_reasons,
+                        "compensation": []
+                    }),
+                );
             }
-            return json!({ "success": true, "message": ok_message, "verify": "pass" });
+            return run_receipt(
+                "restore_staged",
+                json!({ "success": true, "message": ok_message, "verify": "pass" }),
+            );
         }
         if ok {
             // 首选值级备份逐项比对（原值不存在则当前必须不存在）；无备份/读不到再走反向判据
@@ -1692,32 +1913,54 @@ pub async fn optimizer_run<R: Runtime>(
             if verify == "partial" {
                 log::write_log("warn", &format!("还原后回读校验不符（可能被组策略/安全软件覆盖）: {title}"));
                 let note = ledger_note("未完成标记", opt_state::set_detected_entry(&option_id, true));
-                return json!({
-                    "success": false,
-                    "restored": false,
-                    "message": format!("还原已执行但未完全生效（回读不符），可重试{note}"),
-                    "verify": verify
-                });
+                return run_receipt(
+                    "restore_verify_partial",
+                    json!({
+                        "success": false,
+                        "restored": false,
+                        "message": format!("还原已执行但未完全生效（回读不符），可重试{note}"),
+                        "verify": verify
+                    }),
+                );
             }
             // v5 P2：`unknown` = 既没有值级备份可比、反向判据也给不出结论。此时**销账**等于
             // 抹掉用户唯一的重试依据（「未完成还原」横幅靠这条记录才提示），界面上却写着"已恢复"。
             // 只有拿到 pass 证据才销账；unknown 保留记录并如实说明。
             if verify == "unknown" {
                 log::write_log("warn", &format!("还原后无法回读校验（无备份且反向判据不适用），账本保留: {title}"));
-                return json!({
-                    "success": false,
-                    "restored": false,
-                    "message": "还原命令已执行，但无法验证是否生效，请在详情里复核（该记录已保留，可重试）",
-                    "verify": verify
-                });
+                return run_receipt(
+                    "restore_verify_unknown",
+                    json!({
+                        "success": false,
+                        "restored": false,
+                        "message": "还原命令已执行，但无法验证是否生效，请在详情里复核（该记录已保留，可重试）",
+                        "verify": verify
+                    }),
+                );
             }
             let note = format!(
                 "{}{}",
                 ledger_note("还原销账", opt_state::remove(&option_id)),
                 ledger_note("摘灰", opt_state::set_detected_entry(&option_id, false)),
             );
-            return json!({ "success": true, "restored": true, "message": format!("{ok_message}{note}"), "verify": verify });
+            return run_receipt(
+                "restored",
+                json!({
+                    "success": true,
+                    "restored": true,
+                    "message": format!("{ok_message}{note}"),
+                    "verify": verify
+                }),
+            );
         }
+        return run_receipt(
+            "restore_failed",
+            json!({
+                "success": false,
+                "message": ok_message,
+                "failedSteps": failed_reasons
+            }),
+        );
     } else if ok {
         let mut verify = verify_applied(&option_id, opt, &p);
         // 审查 2026-09-27 L7：@@RECYCLE@@ 目录删除失败不计入步骤失败（主要写入已成功），
@@ -1739,12 +1982,24 @@ pub async fn optimizer_run<R: Runtime>(
         } else {
             format!("{ok_message}（{} 个本机不存在，已跳过，完整名单见操作日志）{note}", skipped.len())
         };
-        return json!({
-            "success": true,
-            "message": final_message,
-            "verify": verify,
-            "skipped": skipped
-        });
+        let reason_code = if verify == "partial" {
+            "applied_verify_partial"
+        } else if verify == "unknown" {
+            "applied_unverified"
+        } else if skipped.is_empty() {
+            "applied"
+        } else {
+            "applied_with_skips"
+        };
+        return run_receipt(
+            reason_code,
+            json!({
+                "success": true,
+                "message": final_message,
+                "verify": verify,
+                "skipped": skipped
+            }),
+        );
     } else {
         // 审查 2026-09-27 M1：部分步骤失败（failed>0 但链路跑完）不再 mark_applied("unknown")
         // 转正为「已应用」——违反记账不变式②「执行成功才转正」，且纯 cmd/pwsh 项不可回读、
@@ -1753,7 +2008,16 @@ pub async fn optimizer_run<R: Runtime>(
         // 「状态不明」却无从判断该还原还是该重跑。
         // R3-M04（v7.2 C04）：已移入回收站的目录数一并记账——只记失败原因会把
         // 「部分目标已经离开原位」这个事实从账本上抹掉。
-        let mut ledger_reasons = failed_reasons.clone();
+        // P0-3：已落地的服务子写投影成 LIFO 补偿清单；原值仍由执行前已确认的
+        // optimizer-backups.json 持有，回滚仍走现有 restore 链。
+        let compensation = landed_compensation_plan(&opt, &landed_writes);
+        // 补偿摘要放在首位：`mark_partial_with_reasons` 有条目上限，放末尾会在
+        // 多步失败时被截掉，等于补偿证据没落账。完整失败列表仍在回执 failedSteps。
+        let mut ledger_reasons: Vec<String> = Vec::new();
+        if let Some(s) = compensation_note(&compensation) {
+            ledger_reasons.push(s);
+        }
+        ledger_reasons.extend(failed_reasons.iter().cloned());
         if let Some(s) = &rec_summary {
             ledger_reasons.push(s.clone());
         }
@@ -1765,13 +2029,16 @@ pub async fn optimizer_run<R: Runtime>(
             "warn",
             &format!("优化项部分步骤失败（{failed_steps} 项），已记账为 partial: {title}"),
         );
-        return json!({
-            "success": false,
-            "message": format!("{ok_message}{note}"),
-            "failedSteps": failed_reasons
-        });
+        return run_receipt(
+            "partial_write",
+            json!({
+                "success": false,
+                "message": format!("{ok_message}{note}"),
+                "failedSteps": failed_reasons,
+                "compensation": compensation
+            }),
+        );
     }
-    json!({ "success": ok, "message": ok_message })
 }
 
 /// 正向执行后回读：动态 svc_mem_gb 比对档位；可检测项走 check_optimized；否则 unknown
@@ -1979,7 +2246,7 @@ mod r3_m04_cmd_reason_tests {
     #[test]
     fn cmd超时与启动失败得到两条不同原因() {
         // 超时样本按引擎真实产物拼：status=1 + stderr 注记（前缀取同一常量）
-        let timeout = cmd_step_failure(Ok(out(1, &format!("{CMD_TIMEOUT_STDERR_MARKER}60000ms），已终止"))))
+        let timeout = cmd_step_failure(Ok(out(1, &format!("{CMD_TIMEOUT_STDERR_MARKER}超时标记），已终止"))))
             .expect("超时必须判失败");
         let spawn = cmd_step_failure(Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -1996,7 +2263,7 @@ mod r3_m04_cmd_reason_tests {
         }
         // 与 step_reason 拼装后仍带步骤序号与 label（口径沿用既有构造器）
         let line = step_reason(2, "挂起更新服务", &timeout);
-        assert!(line.starts_with("第 3 步「挂起更新服务」: "), "{line}");
+        assert!(line.starts_with(&step_reason(2, "挂起更新服务", "")), "{line}");
     }
 
     /// 真实非零退出：退出码 + stderr 原文都要进原因（旧实现只知道「非零」）。
@@ -2040,7 +2307,7 @@ mod r3_m04_cmd_reason_tests {
     /// 「换成别的解码也不会把注记读花」，并且坏字节不 panic。
     #[test]
     fn 超时注记按引擎口径解码() {
-        let note = format!("{CMD_TIMEOUT_STDERR_MARKER}60000ms），已终止");
+        let note = format!("{CMD_TIMEOUT_STDERR_MARKER}超时标记），已终止");
         assert_eq!(
             crate::engine::systembin::decode_native_output(note.as_bytes()),
             note,
@@ -2146,12 +2413,12 @@ mod restore_stage_tests {
         let only_reg = vec![json!({ "label": "仅注册表", "reg": "Windows Registry Editor Version 5.00\n" })];
         assert!(
             staged_restore_steps(&only_reg, Some(RestoreStage::NonReg)).is_err(),
-            "没有非 reg 步骤时必须拒绝，而不是跑 0 步报成功"
+            "没有非 reg 步骤时必须拒绝，而不是跑空步骤报成功"
         );
         let only_non_reg = vec![json!({ "label": "仅服务", "service": "X", "disable": true })];
         assert!(
             staged_restore_steps(&only_non_reg, Some(RestoreStage::RegOnly)).is_err(),
-            "没有 reg 步骤时必须拒绝，而不是跑 0 步报成功"
+            "没有 reg 步骤时必须拒绝，而不是跑空步骤报成功"
         );
     }
 

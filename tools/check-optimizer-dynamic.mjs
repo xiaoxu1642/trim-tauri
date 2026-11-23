@@ -71,24 +71,11 @@ const rustCatalog = R('src-tauri/src/commands/optimizer/catalog.rs');
 // D0 三侧覆盖需要另外两侧的源码：检测侧在 overview.rs，备份侧在 backup_restore.rs。
 const rustOverview = R('src-tauri/src/commands/optimizer/overview.rs');
 const rustBackup = R('src-tauri/src/commands/optimizer/backup_restore.rs');
-const rustExternal = R('src-tauri/src/commands/optimizer/external_scan.rs');
 
 let fail = 0;
 function check(ok, name, detail) {
   console.log(`${ok ? '✓' : '✗'} ${name}${detail ? ' —— ' + detail : ''}`);
   if (!ok) fail++;
-}
-
-// A11（R3b-L04）：账外核对的 8 次注册表读必须离开 async runtime worker。
-// 判据同时钉住「声明是 async」与「函数体内真把读放进 spawn_blocking」；
-// 只改签名而不挪读，或只挪读却改回同步命令，都判红。
-{
-  const fnBody = rustFnBody(rustExternal, 'optimizer_external_scan');
-  const asyncCmd = /pub async fn optimizer_external_scan\b/.test(rustExternal);
-  const blockingRead = /spawn_blocking\(move \|\|[\s\S]*?read_ext_dword\(/.test(fnBody);
-  check(asyncCmd && blockingRead,
-    'A11 账外核对命令异步且注册表读进阻塞池（R3b-L04）',
-    !asyncCmd ? '命令声明不是 pub async fn' : !blockingRead ? '函数体内没有 spawn_blocking 包住 read_ext_dword' : '');
 }
 
 /** 从 `const NAME = {` 起按括号配平切出对象字面量（比按行猜 `};` 稳） */
